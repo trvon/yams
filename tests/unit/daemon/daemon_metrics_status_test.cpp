@@ -992,6 +992,11 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
             out << "not a valid plugin";
         }
 
+        auto externalDir = homeDir / ".local" / "lib" / "yams" / "external-plugins";
+        std::filesystem::create_directories(externalDir);
+        auto externalPluginDir =
+            createMockExternalPlugin(externalDir, "dispatcher_external_default");
+
         auto missingResp = dispatchRequest(
             dispatcher, Request{PluginLoadRequest{"missing_default_plugin.so", "", false}});
         REQUIRE(std::holds_alternative<ErrorResponse>(missingResp));
@@ -1004,17 +1009,27 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         const auto& scan = std::get<PluginScanResponse>(scanResp);
 
         bool foundDefaultPlugin = false;
+        bool foundDefaultExternalPlugin = false;
         for (const auto& record : scan.plugins) {
             if (record.path == fakePlugin.string()) {
                 foundDefaultPlugin = true;
                 CHECK(record.name == "yams_default_scan");
             }
+            if (record.path == externalPluginDir.string()) {
+                foundDefaultExternalPlugin = true;
+                CHECK(record.name == "dispatcher_external_plugin");
+            }
         }
         CHECK(foundDefaultPlugin);
+        CHECK(foundDefaultExternalPlugin);
 
         auto trustResp =
             dispatchRequest(dispatcher, Request{PluginTrustAddRequest{abiDir.string()}});
         REQUIRE(std::holds_alternative<SuccessResponse>(trustResp));
+
+        auto* external = svc->getExternalPluginHost();
+        REQUIRE(external != nullptr);
+        REQUIRE(external->trustAdd(externalDir).has_value());
 
         PluginLoadRequest req;
         req.pathOrName = fakePlugin.filename().string();
@@ -1025,6 +1040,21 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InternalError);
         CHECK(err.message == "Plugin load failed for: " + fakePlugin.string());
+
+        PluginLoadRequest externalReq;
+        externalReq.pathOrName = externalPluginDir.filename().string();
+
+        auto externalResp = dispatchRequest(dispatcher, Request{externalReq});
+
+        REQUIRE(std::holds_alternative<PluginLoadResponse>(externalResp));
+        const auto& externalLoad = std::get<PluginLoadResponse>(externalResp);
+        CHECK(externalLoad.loaded);
+        CHECK(externalLoad.record.name == "dispatcher_external_plugin");
+        CHECK(externalLoad.record.path == externalPluginDir.string());
+
+        auto externalUnloadResp =
+            dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
+        REQUIRE(std::holds_alternative<SuccessResponse>(externalUnloadResp));
     }
 
     SECTION("plugin handlers route external plugins when ABI host is absent") {

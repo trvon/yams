@@ -39,8 +39,10 @@ using nlohmann::json;
 #include <unistd.h>
 #endif
 #include <future>
+#include <regex>
 #include <signal.h>
 #include <sstream>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -206,6 +208,7 @@ private:
     using Severity = yams::cli::ui::Severity;
 
     struct ReadinessDisplay {
+        std::string key;
         std::string label;
         Severity severity{Severity::Good};
         std::string text;
@@ -263,6 +266,7 @@ private:
 
     static ReadinessDisplay classifyReadiness(const std::string& key, bool value) {
         ReadinessDisplay display;
+        display.key = key;
         display.label = humanizeToken(key);
 
         const std::string lowerKey = [&]() {
@@ -633,22 +637,109 @@ private:
         return output;
     }
 
-    static bool isDaemonProcessRunningForSocket(const std::string& socketPath) {
-        if (socketPath.empty()) {
-            return false;
+    static std::optional<std::string>
+    extractSocketPathFromProcessDescription(const std::string& desc) {
+        if (desc.empty()) {
+            return std::nullopt;
         }
-        std::string pattern = std::string("yams-daemon.*") + escapeRegexLiteral(socketPath);
-        std::string cmd = "pgrep -f " + shellEscapeArg(pattern) + " >/dev/null 2>&1";
-        int rc = std::system(cmd.c_str());
-        return rc == 0;
+
+        static const std::regex socketRegex(R"((?:^|\s)--socket(?:=|\s+)("?)([^\s"]+)\1)");
+        std::smatch match;
+        if (std::regex_search(desc, match, socketRegex) && match.size() >= 3) {
+            return match[2].str();
+        }
+
+        return std::nullopt;
     }
 
-    static std::vector<pid_t> collectDaemonPidsForSocket(const std::string& socketPath) {
-        std::vector<pid_t> pids;
-        if (socketPath.empty()) {
+    std::string resolveSocketPathForLiveDaemon(const std::string& preferredSocket,
+                                               const std::string& pidFilePath,
+                                               bool allowAnyDaemonFallback = true) {
+        const auto collectMatchingDaemonPids = [](const std::string& pattern) {
+            std::vector<pid_t> pids;
+            std::string cmd = "pgrep -f " + shellEscapeArg(pattern);
+            FILE* pipe = popen(cmd.c_str(), "r");
+            if (!pipe) {
+                return pids;
+            }
+            std::string output;
+            char buffer[64];
+            while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+                output.append(buffer);
+            }
+            pclose(pipe);
+            std::istringstream iss(output);
+            std::string line;
+            while (std::getline(iss, line)) {
+                if (line.empty()) {
+                    continue;
+                }
+                try {
+                    auto value = static_cast<pid_t>(std::stol(line));
+                    if (value > 0) {
+                        pids.push_back(value);
+                    }
+                } catch (...) {
+                }
+            }
             return pids;
+        };
+
+        std::vector<pid_t> candidatePids;
+        std::set<pid_t> seen;
+
+        const pid_t pidFromFile = readPidFromFile(pidFilePath);
+        if (pidFromFile > 0 && kill(pidFromFile, 0) == 0) {
+            candidatePids.push_back(pidFromFile);
+            seen.insert(pidFromFile);
+        } else if (pidFromFile > 0) {
+            spdlog::debug("Ignoring stale daemon PID {} from {}", pidFromFile, pidFilePath);
         }
-        std::string pattern = std::string("yams-daemon.*") + escapeRegexLiteral(socketPath);
+
+        if (!preferredSocket.empty()) {
+            for (auto pid : collectMatchingDaemonPids(std::string("yams-daemon.*") +
+                                                      escapeRegexLiteral(preferredSocket))) {
+                if (seen.insert(pid).second) {
+                    candidatePids.push_back(pid);
+                }
+            }
+        }
+
+        if (allowAnyDaemonFallback) {
+            for (auto pid : collectMatchingDaemonPids("yams-daemon")) {
+                if (seen.insert(pid).second) {
+                    candidatePids.push_back(pid);
+                }
+            }
+        }
+
+        std::optional<std::string> fallbackSocket;
+        pid_t fallbackPid = -1;
+        for (auto pid : candidatePids) {
+            const auto desc = describeProcess(pid);
+            if (auto parsed = extractSocketPathFromProcessDescription(desc);
+                parsed && !parsed->empty()) {
+                if (*parsed == preferredSocket) {
+                    return *parsed;
+                }
+                if (!fallbackSocket) {
+                    fallbackSocket = *parsed;
+                    fallbackPid = pid;
+                }
+            }
+        }
+
+        if (fallbackSocket) {
+            spdlog::info("Using live daemon socket '{}' from PID {} instead of configured '{}'",
+                         *fallbackSocket, fallbackPid, preferredSocket);
+            return *fallbackSocket;
+        }
+
+        return preferredSocket;
+    }
+
+    static std::vector<pid_t> collectDaemonPidsForPattern(const std::string& pattern) {
+        std::vector<pid_t> pids;
         std::string cmd = "pgrep -f " + shellEscapeArg(pattern);
         FILE* pipe = popen(cmd.c_str(), "r");
         if (!pipe) {
@@ -675,6 +766,22 @@ private:
             }
         }
         return pids;
+    }
+
+    static bool isDaemonProcessRunningForSocket(const std::string& socketPath) {
+        if (socketPath.empty()) {
+            return false;
+        }
+        std::string pattern = std::string("yams-daemon.*") + escapeRegexLiteral(socketPath);
+        return !collectDaemonPidsForPattern(pattern).empty();
+    }
+
+    static std::vector<pid_t> collectDaemonPidsForSocket(const std::string& socketPath) {
+        if (socketPath.empty()) {
+            return {};
+        }
+        std::string pattern = std::string("yams-daemon.*") + escapeRegexLiteral(socketPath);
+        return collectDaemonPidsForPattern(pattern);
     }
 
     static bool isAnyDaemonProcessRunning() {
@@ -771,12 +878,14 @@ private:
         // Resolve paths if not explicitly provided
         // For start: do NOT persist a resolved socket into socketPath_ unless user passed it.
         // Use a local effective path for pre-checks only; the daemon will resolve from config.
-        const std::string effectiveSocket =
-            daemon::DaemonClient::resolveSocketPathConfigFirst().string();
         if (pidFile_.empty()) {
             pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
                            .string();
         }
+        const std::string configuredSocket =
+            daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+        const std::string effectiveSocket =
+            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
 
         spdlog::debug("Using socket (effective): {}", effectiveSocket);
         spdlog::debug("Using PID file: {}", pidFile_);
@@ -976,7 +1085,7 @@ private:
             }
 
             // Best-effort cleanup if no daemon appears to be running
-            if (!daemon::DaemonClient::isDaemonRunning(config.socketPath)) {
+            if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
                 cleanupDaemonFiles(effectiveSocket, pidFile_);
             }
             std::optional<yams::cli::ui::SpinnerRunner> spinner;
@@ -1005,14 +1114,16 @@ private:
     }
 
     void stopDaemon() {
-        // Resolve paths if not explicitly provided (do not persist into socketPath_)
-        const std::string effectiveSocket =
-            socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
-                                : socketPath_;
         if (pidFile_.empty()) {
             pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
                            .string();
         }
+        // Resolve paths if not explicitly provided (do not persist into socketPath_)
+        const std::string configuredSocket =
+            socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
+                                : socketPath_;
+        const std::string effectiveSocket =
+            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
 
         std::optional<yams::cli::ui::SpinnerRunner> spinner;
         if (yams::cli::ui::stdout_is_tty()) {
@@ -1027,9 +1138,20 @@ private:
 
         // Capture PID early in case the PID file disappears during shutdown
         pid_t initialPid = readPidFromFile(pidFile_);
+        const auto liveSocketPids = collectDaemonPidsForSocket(effectiveSocket);
 
         // Check if daemon is running
-        bool daemonRunning = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
+        const bool ipcResponsive = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
+        bool daemonRunning = ipcResponsive;
+        if (!daemonRunning) {
+            if (!liveSocketPids.empty()) {
+                if (initialPid <= 0 || kill(initialPid, 0) != 0) {
+                    initialPid = liveSocketPids.front();
+                }
+                spdlog::warn("Found daemon process (PID {}) not responding on socket", initialPid);
+                daemonRunning = true;
+            }
+        }
         if (!daemonRunning) {
             // Check if there's a stale PID file
             pid_t pid = initialPid;
@@ -1096,6 +1218,7 @@ private:
         }
 
         bool stopped = false;
+        const bool shouldForceOrphanedStop = force_ || !ipcResponsive;
         auto isExpectedShutdownDisconnect = [](const std::string& message) {
             return message.find("Broken pipe") != std::string::npos ||
                    message.find("Connection reset") != std::string::npos ||
@@ -1162,9 +1285,8 @@ private:
                 if (killDaemonByPid(pid, false)) {
                     stopped = true;
                     spdlog::info("Daemon terminated with SIGTERM");
-                } else if (force_) {
-                    // If force flag is set and SIGTERM failed, use SIGKILL
-                    spdlog::warn("SIGTERM failed, using SIGKILL");
+                } else if (shouldForceOrphanedStop) {
+                    spdlog::warn("SIGTERM failed, using SIGKILL for unresponsive daemon");
                     if (killDaemonByPid(pid, true)) {
                         stopped = true;
                         spdlog::info("Daemon terminated with SIGKILL");
@@ -1197,7 +1319,7 @@ private:
                     bool killed = false;
                     if (killDaemonByPid(pid, false)) {
                         killed = true;
-                    } else if (force_) {
+                    } else if (shouldForceOrphanedStop) {
                         killed = killDaemonByPid(pid, true);
                     }
                     if (!killed) {
@@ -1213,8 +1335,8 @@ private:
 
 #ifndef _WIN32
             // Unix: use pkill to find and kill yams-daemon processes with our socket
-            // Use SIGKILL (-9) when --force is set, otherwise SIGTERM (default)
-            std::string signal = force_ ? "-9 " : "";
+            // Use SIGKILL (-9) when the daemon is unresponsive or --force is set.
+            std::string signal = shouldForceOrphanedStop ? "-9 " : "";
             std::string pkillCmd = "pkill " + signal + "-f 'yams-daemon.*" + effectiveSocket + "'";
             int pkillResult = std::system(pkillCmd.c_str());
 
@@ -1650,33 +1772,33 @@ private:
     }
 
     void showStatus() {
-        // Resolve socket path if not explicitly provided
-        if (socketPath_.empty()) {
-            socketPath_ = daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+        if (pidFile_.empty()) {
+            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
+                           .string();
         }
 
+        const std::string configuredSocket =
+            socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
+                                : socketPath_;
+        const std::string effectiveSocket =
+            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
+
         if (detailed_) {
-            if (pidFile_.empty()) {
-                pidFile_ =
-                    daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                        .string();
-            }
             // Enable client debug logging for ping/connect path
             setenv("YAMS_CLIENT_DEBUG", "1", 1);
         }
 
         // Check if daemon is running (prefer socket; fall back to PID)
-        if (!daemon::DaemonClient::isDaemonRunning(socketPath_)) {
+        if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
             // Try PID-based detection to distinguish "starting" vs "not running"
-            if (pidFile_.empty()) {
-                pidFile_ =
-                    daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                        .string();
-            }
             pid_t pid = readPidFromFile(pidFile_);
 #ifndef _WIN32
             if (pid > 0 && kill(pid, 0) == 0) {
                 std::cout << "YAMS daemon is starting/initializing (IPC not yet available)\n";
+                if (effectiveSocket != configuredSocket) {
+                    std::cout << "Configured socket: " << configuredSocket << "\n";
+                    std::cout << "Live daemon socket: " << effectiveSocket << "\n";
+                }
                 if (detailed_) {
                     try {
                         auto logPath = daemon::YamsDaemon::resolveSystemPath(
@@ -1758,6 +1880,10 @@ private:
             // running.
 #endif
             std::cout << "YAMS daemon is not running\n";
+            if (effectiveSocket != configuredSocket) {
+                std::cout << "Configured socket: " << configuredSocket << "\n";
+                std::cout << "Last live daemon socket: " << effectiveSocket << "\n";
+            }
             return;
         }
 
@@ -1768,8 +1894,10 @@ private:
                 spinner.emplace();
                 spinner->start("Checking daemon status...");
             }
+            yams::daemon::ClientConfig cfg;
+            cfg.socketPath = effectiveSocket;
             auto sres = runDaemonClient(
-                {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
+                cfg, [](yams::daemon::DaemonClient& client) { return client.status(); },
                 std::chrono::seconds(5));
             if (spinner) {
                 spinner->stop();
@@ -1883,12 +2011,30 @@ private:
                         lowerKey.ends_with("_degraded")) {
                         continue;
                     }
+                    if ((lowerKey == "vector_db" || lowerKey == "vector db") &&
+                        s.vectorDbInitAttempted) {
+                        continue;
+                    }
+                    if (lowerKey == "vector_db_ready" || lowerKey == "vector db ready" ||
+                        lowerKey == "vector_db_init_attempted" ||
+                        lowerKey == "vector db init attempted") {
+                        continue;
+                    }
                     auto rd = classifyReadiness(key, ready);
                     issues.push_back(rd.label);
                 }
             }
             std::sort(issues.begin(), issues.end());
             issues.erase(std::unique(issues.begin(), issues.end()), issues.end());
+
+            const auto daemonDataDir = daemonDataDirFromStatus(s);
+            const auto configuredDataDir = expectedDataDir();
+            const bool hasDaemonDataDir = daemonDataDir.has_value() && !daemonDataDir->empty();
+            const bool dataDirMismatch =
+                hasDaemonDataDir && !configuredDataDir.empty() &&
+                normalizePath(*daemonDataDir) != normalizePath(configuredDataDir);
+            const bool daemonUsesEphemeralData =
+                hasDaemonDataDir && isEphemeralDataDir(*daemonDataDir);
 
             std::cout << title_banner("YAMS Daemon") << "\n\n";
 
@@ -1964,6 +2110,25 @@ private:
 
             render_rows(std::cout, overview);
 
+            std::vector<std::string> dataDirWarnings;
+            if (daemonUsesEphemeralData) {
+                dataDirWarnings.push_back("Daemon is serving a temporary data directory");
+            }
+            if (dataDirMismatch) {
+                dataDirWarnings.push_back("Daemon data dir differs from current CLI/config");
+            }
+            if (!dataDirWarnings.empty()) {
+                std::string joined;
+                for (std::size_t i = 0; i < dataDirWarnings.size(); ++i) {
+                    if (i) {
+                        joined += " · ";
+                    }
+                    joined += dataDirWarnings[i];
+                }
+                std::cout << "\n"
+                          << colorize("• Data dir warning: " + joined, Ansi::YELLOW) << "\n";
+            }
+
             // Show issues if any
             if (!issues.empty()) {
                 std::string joined;
@@ -1999,8 +2164,10 @@ private:
         Error lastErr{};
         for (int attempt = 0; attempt < 5; ++attempt) {
             setenv("YAMS_CLIENT_DEBUG", detailed_ ? "1" : "0", 1);
+            yams::daemon::ClientConfig cfg;
+            cfg.socketPath = effectiveSocket;
             auto statusResult = runDaemonClient(
-                {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
+                cfg, [](yams::daemon::DaemonClient& client) { return client.status(); },
                 std::chrono::seconds(5));
             if (statusResult) {
                 if (spinner) {
@@ -2027,7 +2194,8 @@ private:
                         const bool skipReadinessLabel =
                             lowerLabel.find("build reason") != std::string::npos ||
                             lowerLabel == "vector db ready" ||
-                            lowerLabel == "vector db init attempted";
+                            lowerLabel == "vector db init attempted" ||
+                            (rd.key == "vector_db" && status.vectorDbInitAttempted);
                         if (!skipReadinessLabel)
                             waiting.push_back(rd.label);
                     }
@@ -2889,14 +3057,16 @@ private:
     }
 
     void restartDaemon() {
-        const std::string effectiveSocket =
-            socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
-                                : socketPath_;
-
         if (pidFile_.empty()) {
             pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
                            .string();
         }
+
+        const std::string configuredSocket =
+            socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
+                                : socketPath_;
+        const std::string effectiveSocket =
+            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
 
         pid_t pidBeforeStop = readPidFromFile(pidFile_);
         stopDaemon();
@@ -2910,8 +3080,7 @@ private:
         std::cout << "[INFO] Starting YAMS daemon...\n";
 
         daemon::ClientConfig config;
-        if (!socketPath_.empty())
-            config.socketPath = socketPath_;
+        config.socketPath = effectiveSocket;
         if (!dataDir_.empty())
             config.dataDir = dataDir_;
         else if (cli_)
