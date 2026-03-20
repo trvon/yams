@@ -69,7 +69,7 @@ public:
         lastReason_ = reason;
         setSubsystemDegradedCalls_++;
     }
-    void onDocumentRemoved(const std::string&) override {}
+    void onDocumentRemoved(const std::string& hash) override { removedHashes_.push_back(hash); }
     void requestShutdown(bool, bool) override {}
 
     const std::string& lastSubsystem() const { return lastSubsystem_; }
@@ -83,6 +83,7 @@ public:
         setSubsystemDegradedCalls_ = 0;
     }
     void setThrowOnSetSubsystemDegraded(bool enabled) { throwOnSetSubsystemDegraded_ = enabled; }
+    const std::vector<std::string>& removedHashes() const { return removedHashes_; }
 
 private:
     LifecycleSnapshot snapshot_{};
@@ -91,6 +92,7 @@ private:
     std::string lastReason_;
     int setSubsystemDegradedCalls_{0};
     bool throwOnSetSubsystemDegraded_{false};
+    std::vector<std::string> removedHashes_;
 };
 
 // Minimal stub provider for embedding tests
@@ -251,22 +253,34 @@ public:
         if (const char* current = std::getenv(name_)) {
             original_ = current;
         }
+        setValue(value);
+    }
+
+    ~EnvGuard() {
+        if (original_) {
+            setValue(original_->c_str());
+        } else {
+            setValue(nullptr);
+        }
+    }
+
+private:
+    void setValue(const char* value) {
+#ifdef _WIN32
+        if (value) {
+            _putenv_s(name_, value);
+        } else {
+            _putenv_s(name_, "");
+        }
+#else
         if (value) {
             ::setenv(name_, value, 1);
         } else {
             ::unsetenv(name_);
         }
+#endif
     }
 
-    ~EnvGuard() {
-        if (original_) {
-            ::setenv(name_, original_->c_str(), 1);
-        } else {
-            ::unsetenv(name_);
-        }
-    }
-
-private:
     const char* name_;
     std::optional<std::string> original_;
 };
@@ -476,6 +490,10 @@ public:
                                                   content.size());
     }
 
+    void setRemoveResult(const std::string& hash, Result<bool> result) {
+        removeResults_[hash] = std::move(result);
+    }
+
     Result<api::StoreResult> storeBytes(std::span<const std::byte> data,
                                         const api::ContentMetadata&) override {
         std::string hash = "stub-hash-" + std::to_string(blobs_.size() + 1);
@@ -526,7 +544,13 @@ public:
         return ErrorCode::NotImplemented;
     }
     Result<bool> exists(const std::string&) const override { return ErrorCode::NotImplemented; }
-    Result<bool> remove(const std::string&) override { return ErrorCode::NotImplemented; }
+    Result<bool> remove(const std::string& hash) override {
+        if (auto it = removeResults_.find(hash); it != removeResults_.end()) {
+            return it->second;
+        }
+        blobs_.erase(hash);
+        return true;
+    }
     Result<api::ContentMetadata> getMetadata(const std::string&) const override {
         return ErrorCode::NotImplemented;
     }
@@ -549,6 +573,7 @@ public:
 
 private:
     std::unordered_map<std::string, std::vector<std::byte>> blobs_;
+    std::unordered_map<std::string, Result<bool>> removeResults_;
 };
 
 std::filesystem::path makeTempDir(const std::string& prefix);
@@ -1805,6 +1830,34 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(err.message.find("content store unavailable") != std::string::npos);
     }
 
+    SECTION("get init reports name resolution failure") {
+        GetInitRequest req;
+        req.name = "missing-name";
+        req.byName = true;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message.find("Metadata repository not available") != std::string::npos);
+    }
+
+    SECTION("get init reports retrieve bytes failure") {
+        auto store = std::make_shared<StubContentStore>();
+        svc.__test_setContentStore(store);
+
+        GetInitRequest req;
+        req.hash = "missing-bytes";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("retrieveBytes failed") != std::string::npos);
+    }
+
     SECTION("get chunk reports missing retrieval session manager") {
         auto resp = dispatchRequest(dispatcher, Request{GetChunkRequest{9999, 0, 4}});
 
@@ -1812,6 +1865,24 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::NotInitialized);
         CHECK(err.message.find("retrieval session manager unavailable") != std::string::npos);
+    }
+
+    SECTION("get chunk reports invalid transfer id") {
+        svc.__test_setRetrievalSessionManager(std::make_unique<RetrievalSessionManager>());
+
+        auto resp = dispatchRequest(dispatcher, Request{GetChunkRequest{9999, 0, 4}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message.find("Invalid transferId") != std::string::npos);
+    }
+
+    SECTION("get end succeeds even without retrieval session manager") {
+        auto resp = dispatchRequest(dispatcher, Request{GetEndRequest{777}});
+
+        REQUIRE(std::holds_alternative<SuccessResponse>(resp));
+        CHECK(std::get<SuccessResponse>(resp).message == "OK");
     }
 
     SECTION("delete rejects directory removal without recursive flag") {
@@ -1824,6 +1895,53 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InvalidArgument);
         CHECK(err.message.find("recursive flag") != std::string::npos);
+    }
+
+    SECTION("delete recursive directory returns not found when no documents match") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto store = std::make_shared<StubContentStore>();
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        DeleteRequest req;
+        req.directory = "cache";
+        req.recursive = true;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message.find("No documents found matching criteria") != std::string::npos);
+    }
+
+    SECTION("delete reports mixed success and failure results") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto store = std::make_shared<StubContentStore>();
+        auto successDoc = makeDoc(21, "/tmp/delete/ok.txt", "delete-ok-hash");
+        auto failedDoc = makeDoc(22, "/tmp/delete/fail.txt", "delete-fail-hash");
+        repo->addDocument(successDoc);
+        repo->addDocument(failedDoc);
+        store->setBlob(successDoc.sha256Hash, "ok");
+        store->setBlob(failedDoc.sha256Hash, "fail");
+        store->setRemoveResult(failedDoc.sha256Hash,
+                               Error{ErrorCode::IOError, "store remove failed"});
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        DeleteRequest req;
+        req.pattern = "*.txt";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<DeleteResponse>(resp));
+        const auto& deleteResp = std::get<DeleteResponse>(resp);
+        CHECK_FALSE(deleteResp.dryRun);
+        CHECK(deleteResp.successCount == 1);
+        CHECK(deleteResp.failureCount == 1);
+        REQUIRE(deleteResp.results.size() == 2);
+        CHECK(lifecycle.removedHashes().size() == 1);
+        CHECK(lifecycle.removedHashes().front() == successDoc.sha256Hash);
     }
 
     SECTION("file history reports missing metadata repository") {
@@ -1856,6 +1974,103 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(history.versions.empty());
         CHECK(history.message == "File found in index but not in any snapshot");
         CHECK(history.filepath.find("report.txt") != std::string::npos);
+    }
+
+    SECTION("file history reports file not found in index") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        svc.__test_setMetadataRepo(repo);
+
+        FileHistoryRequest req;
+        req.filepath = "ghost.txt";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<FileHistoryResponse>(resp));
+        const auto& history = std::get<FileHistoryResponse>(resp);
+        CHECK_FALSE(history.found);
+        CHECK(history.totalVersions == 0);
+        CHECK(history.message == "File not found in index");
+    }
+
+    SECTION("file history returns sorted snapshot versions from exact path") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto doc = makeDoc(11, "/tmp/archive/sorted-report.txt", "sorted-history-hash");
+        repo->setExactPathDocument(doc);
+        repo->setAllMetadata(
+            doc.id, {{"snapshot_id", metadata::MetadataValue("snap-alpha")},
+                     {"snapshot_id:snap-beta", metadata::MetadataValue("")},
+                     {"snapshot_time:snap-alpha", metadata::MetadataValue("1710000000000000")}});
+        svc.__test_setMetadataRepo(repo);
+
+        FileHistoryRequest req;
+        req.filepath = doc.filePath;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<FileHistoryResponse>(resp));
+        const auto& history = std::get<FileHistoryResponse>(resp);
+        REQUIRE(history.found);
+        REQUIRE(history.totalVersions == 2);
+        REQUIRE(history.versions.size() == 2);
+        CHECK(history.message == "Found 2 version(s) across snapshots");
+        CHECK(history.versions[0].snapshotId == "snap-beta");
+        CHECK(history.versions[1].snapshotId == "snap-alpha");
+        CHECK(history.versions[0].indexedTimestamp > history.versions[1].indexedTimestamp);
+    }
+
+    SECTION(
+        "file history falls back to document indexed time when snapshot-specific time is missing") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto doc = makeDoc(42, "/tmp/archive/fallback-time.txt", "fallback-time-hash");
+        repo->setExactPathDocument(doc);
+        repo->setAllMetadata(doc.id, {{"snapshot_id", metadata::MetadataValue("snap-fallback")}});
+        svc.__test_setMetadataRepo(repo);
+
+        FileHistoryRequest req;
+        req.filepath = doc.filePath;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<FileHistoryResponse>(resp));
+        const auto& history = std::get<FileHistoryResponse>(resp);
+        REQUIRE(history.found);
+        REQUIRE(history.totalVersions == 1);
+        REQUIRE(history.versions.size() == 1);
+        CHECK(history.versions.front().snapshotId == "snap-fallback");
+        CHECK(history.versions.front().indexedTimestamp == 1710000042);
+    }
+
+    SECTION("list request paths-only mode trims snippets metadata and tags") {
+        auto repoPath = makeTempDir("yams_list_dispatcher_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto doc = makeDoc(55, "/tmp/list/paths-only.md", "list-paths-hash");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        svc.__test_setMetadataRepo(repo);
+
+        ListRequest req;
+        req.limit = 5;
+        req.pathsOnly = true;
+        req.showMetadata = true;
+        req.showTags = true;
+        req.showSnippets = true;
+        req.recent = false;
+        req.recentCount = 0;
+        req.namePattern = doc.filePath;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ListResponse>(resp));
+        const auto& listResp = std::get<ListResponse>(resp);
+        REQUIRE(listResp.items.size() == 1);
+        CHECK(listResp.totalCount == 1);
+        CHECK(listResp.items.front().path == doc.filePath);
+        CHECK(listResp.items.front().snippet.empty());
+        CHECK(listResp.items.front().metadata.empty());
+        CHECK(listResp.items.front().tags.empty());
     }
 }
 

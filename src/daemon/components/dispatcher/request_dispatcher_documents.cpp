@@ -1158,7 +1158,7 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                     if (key.rfind("snapshot_time:", 0) == 0 &&
                         value.type == metadata::MetadataValueType::String) {
                         try {
-                            snapshotTimes[key.substr(13)] = std::stoll(value.asString());
+                            snapshotTimes[key.substr(14)] = std::stoll(value.asString());
                         } catch (...) {
                         }
                         continue;

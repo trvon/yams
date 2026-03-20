@@ -931,6 +931,46 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend HNSW persists and re
     }
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend search falls back before initial HNSW seed build",
+                 "[vector][backend][hnsw][fallback][catch2]") {
+    skipIfNeeded();
+
+    std::string dbPath = createTempDbPath();
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    config.checkpoint_threshold = 1000;
+
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(dbPath).has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    std::vector<VectorRecord> records;
+    for (int i = 0; i < 32; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        records.push_back(createVectorRecord("fallback_" + std::to_string(i), emb));
+    }
+
+    REQUIRE(backend.insertVectorsBatch(records).has_value());
+    CHECK(backend.testingLastHnswMaintenanceMode() == SqliteVecBackend::HnswMaintenanceMode::None);
+
+    auto query = createEmbedding(64, 12.0f);
+    auto searchResult = backend.searchSimilar(query, 5, -2.0f, std::nullopt, {});
+    REQUIRE(searchResult.has_value());
+    CHECK(searchResult.value().size() == 5);
+    CHECK(backend.testingLastHnswMaintenanceMode() ==
+          SqliteVecBackend::HnswMaintenanceMode::BruteForceFallback);
+
+    REQUIRE(backend.buildIndex().has_value());
+    CHECK(backend.testingLastHnswMaintenanceMode() ==
+          SqliteVecBackend::HnswMaintenanceMode::FullRebuild);
+
+    auto hnswSearchResult = backend.searchSimilar(query, 5, -2.0f, std::nullopt, {});
+    REQUIRE(hnswSearchResult.has_value());
+    CHECK(hnswSearchResult.value().size() == 5);
+}
+
 // =============================================================================
 // Candidate Hashes Filtering Tests (Tiered search narrowing)
 // =============================================================================

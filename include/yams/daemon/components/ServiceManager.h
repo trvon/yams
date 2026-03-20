@@ -492,6 +492,9 @@ public:
     void __test_setContentStore(std::shared_ptr<api::IContentStore> store) {
         std::atomic_store_explicit(&contentStore_, std::move(store), std::memory_order_release);
     }
+    void __test_setRetrievalSessionManager(std::unique_ptr<RetrievalSessionManager> sessions) {
+        retrievalSessions_ = std::move(sessions);
+    }
     void __test_setAdoptedProviderPluginName(const std::string& name) {
         adoptedProviderPluginName_ = name;
     }

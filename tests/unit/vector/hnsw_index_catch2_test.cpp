@@ -7,11 +7,14 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
+#include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
 using namespace yams::vector;
@@ -497,6 +500,63 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex update vector", "[vector][hnsw][up
     auto results = db.search(emb2, params);
     REQUIRE(results.size() == 1);
     CHECK(results[0].chunk_id == "update_test");
+}
+
+TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex cold search falls back before first build",
+                 "[vector][hnsw][fallback][catch2]") {
+    skipIfNeeded();
+
+    namespace fs = std::filesystem;
+    auto db_path = (fs::temp_directory_path() / "vector_db_hnsw_cold_fallback_test.db").string();
+    std::error_code ec;
+    fs::remove(db_path, ec);
+
+    VectorDatabaseConfig config;
+    config.database_path = db_path;
+    config.embedding_dim = 64;
+    config.create_if_missing = true;
+    config.use_in_memory = false;
+
+    {
+        VectorDatabase db(config);
+        REQUIRE(db.initialize());
+
+        for (int i = 0; i < 320; ++i) {
+            auto emb = createEmbedding(64, 17000.0f + static_cast<float>(i));
+            REQUIRE(db.insertVector(createVectorRecord("cold_" + std::to_string(i),
+                                                       "cold_doc_" + std::to_string(i), emb)));
+        }
+
+        VectorSearchParams params;
+        params.k = 5;
+        params.similarity_threshold = -2.0f;
+        auto query = createEmbedding(64, 17012.0f);
+        auto results = db.search(query, params);
+        REQUIRE(results.size() == 5);
+    }
+
+    {
+        SqliteVecBackend backend;
+        REQUIRE(backend.initialize(db_path).has_value());
+
+        auto query = createEmbedding(64, 17012.0f);
+        auto results = backend.searchSimilar(query, 5, -2.0f, std::nullopt, {});
+        REQUIRE(results.has_value());
+        REQUIRE(results.value().size() == 5);
+        CHECK(backend.testingLastHnswMaintenanceMode() ==
+              SqliteVecBackend::HnswMaintenanceMode::BruteForceFallback);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(750));
+        auto secondResults = backend.searchSimilar(query, 5, -2.0f, std::nullopt, {});
+        REQUIRE(secondResults.has_value());
+        REQUIRE(secondResults.value().size() == 5);
+
+        REQUIRE(backend.buildIndex().has_value());
+        CHECK(backend.testingLastHnswMaintenanceMode() ==
+              SqliteVecBackend::HnswMaintenanceMode::FullRebuild);
+    }
+
+    fs::remove(db_path, ec);
 }
 
 // =============================================================================

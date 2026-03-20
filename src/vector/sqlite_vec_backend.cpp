@@ -93,6 +93,10 @@ inline size_t hnswCheckpointThreshold(size_t configuredThreshold) {
     return fallback;
 }
 
+inline size_t hnswBackgroundSeedThreshold() {
+    return 256;
+}
+
 // ============================================================================
 // Libsql-aware database helpers
 // ============================================================================
@@ -397,6 +401,7 @@ public:
         LoadPersisted,
         CatchUp,
         FullRebuild,
+        BruteForceFallback,
     };
 
     explicit Impl(const Config& config) : config_(config) {}
@@ -413,6 +418,10 @@ public:
         last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
         last_hnsw_added_count_ = 0;
         last_hnsw_removed_count_ = 0;
+        background_seed_running_ = false;
+        background_seed_scheduled_ = false;
+        background_seed_cancel_requested_ = false;
+        query_dim_counts_.clear();
 
         int rc = sqlite3_open(db_path.c_str(), &db_);
         if (rc != SQLITE_OK) {
@@ -477,6 +486,7 @@ public:
 
         db_path_ = db_path;
         initialized_ = true;
+        refreshQueryDimCountsUnlocked();
 
         // If tables already exist, prepare statements for immediate use
         // (inline check to avoid lock contention - we already hold the lock)
@@ -499,6 +509,8 @@ public:
     void close() {
         std::unique_lock lock(mutex_);
 
+        background_seed_cancel_requested_ = true;
+
         // Save all dirty HNSW indices
         if (db_) {
             saveAllHnswUnlocked();
@@ -516,6 +528,9 @@ public:
         hnsw_dirty_.clear();
         initialized_ = false;
         hnsw_loaded_ = false;
+        background_seed_running_ = false;
+        background_seed_scheduled_ = false;
+        query_dim_counts_.clear();
     }
 
     bool isInitialized() const {
@@ -594,6 +609,7 @@ public:
         }
 
         int64_t rowid = rowid_result.value();
+        query_dim_counts_[record.embedding.size()] += 1;
 
         // Skip HNSW insertion for zero-norm vectors (they become dead-ends in the graph)
         if (isZeroNormEmbedding(record.embedding)) {
@@ -608,7 +624,11 @@ public:
             return Result<void>{};
         }
 
-        // Insert into HNSW (dimension-specific index)
+        // Insert into HNSW (dimension-specific index) when an index already exists or can be
+        // resumed from persisted state. Avoid forcing a first full seed build on the write path.
+        if (!shouldMaintainHnswOnWriteUnlocked()) {
+            return Result<void>{};
+        }
         ensureHnswLoadedUnlocked();
         size_t dim = record.embedding.size();
         if (auto* hnsw = getOrCreateHnswForDim(dim)) {
@@ -711,6 +731,16 @@ public:
         // Commit transaction with retry
         if (!execWithRetry(db_, "COMMIT")) {
             return Error{ErrorCode::DatabaseError, "Failed to commit transaction"};
+        }
+
+        for (size_t idx : unique_indices) {
+            if (rowids[idx] >= 0) {
+                query_dim_counts_[records[idx].embedding.size()] += 1;
+            }
+        }
+
+        if (!shouldMaintainHnswOnWriteUnlocked()) {
+            return Result<void>{};
         }
 
         if (shouldDeferHnswBatchUpdatesUnlocked(records.size())) {
@@ -886,6 +916,8 @@ public:
             old_dim = old_record->embedding.size();
         }
 
+        const bool maintain_hnsw = shouldMaintainHnswOnWriteUnlocked();
+
         // Delete old record
         if (stmt_delete_by_chunk_id_) {
             sqlite3_reset(stmt_delete_by_chunk_id_);
@@ -894,10 +926,12 @@ public:
         }
 
         // Remove from HNSW (soft delete from old dimension's index)
-        ensureHnswLoadedUnlocked();
-        if (old_dim) {
-            if (auto* old_hnsw = getHnswForDim(*old_dim)) {
-                old_hnsw->remove(static_cast<size_t>(old_rowid));
+        if (maintain_hnsw) {
+            ensureHnswLoadedUnlocked();
+            if (old_dim) {
+                if (auto* old_hnsw = getHnswForDim(*old_dim)) {
+                    old_hnsw->remove(static_cast<size_t>(old_rowid));
+                }
             }
         }
 
@@ -910,6 +944,14 @@ public:
         int64_t new_rowid = rowid_result.value();
         size_t new_dim = record.embedding.size();
 
+        if (old_dim) {
+            auto oldIt = query_dim_counts_.find(*old_dim);
+            if (oldIt != query_dim_counts_.end() && oldIt->second > 0) {
+                --oldIt->second;
+            }
+        }
+        query_dim_counts_[new_dim] += 1;
+
         // Skip HNSW insertion for zero-norm vectors
         if (isZeroNormEmbedding(record.embedding)) {
             spdlog::warn("[HNSW] Skipping zero-norm vector update for chunk_id={}", chunk_id);
@@ -917,6 +959,10 @@ public:
         }
         if (!isFiniteEmbedding(record.embedding)) {
             spdlog::warn("[HNSW] Skipping non-finite vector update for chunk_id={}", chunk_id);
+            return Result<void>{};
+        }
+
+        if (!maintain_hnsw) {
             return Result<void>{};
         }
 
@@ -968,6 +1014,13 @@ public:
             dim = record->embedding.size();
         }
 
+        if (dim) {
+            auto dimIt = query_dim_counts_.find(*dim);
+            if (dimIt != query_dim_counts_.end() && dimIt->second > 0) {
+                --dimIt->second;
+            }
+        }
+
         // Delete from SQLite
         if (stmt_delete_by_chunk_id_) {
             sqlite3_reset(stmt_delete_by_chunk_id_);
@@ -976,6 +1029,9 @@ public:
         }
 
         // Soft delete from HNSW (dimension-specific index)
+        if (!shouldMaintainHnswOnWriteUnlocked()) {
+            return Result<void>{};
+        }
         ensureHnswLoadedUnlocked();
         if (dim) {
             if (auto* hnsw = getHnswForDim(*dim)) {
@@ -1015,6 +1071,13 @@ public:
             sqlite3_finalize(stmt);
         }
 
+        for (const auto& [_, dim] : rowid_dims) {
+            auto dimIt = query_dim_counts_.find(dim);
+            if (dimIt != query_dim_counts_.end() && dimIt->second > 0) {
+                --dimIt->second;
+            }
+        }
+
         // Delete from SQLite
         if (stmt_delete_by_doc_) {
             sqlite3_reset(stmt_delete_by_doc_);
@@ -1023,6 +1086,9 @@ public:
         }
 
         // Soft delete from HNSW (dimension-specific indices)
+        if (!shouldMaintainHnswOnWriteUnlocked()) {
+            return Result<void>{};
+        }
         ensureHnswLoadedUnlocked();
         if (!rowid_dims.empty()) {
             std::unordered_set<size_t> affected_dims;
@@ -1068,11 +1134,14 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        // Ensure HNSW is loaded (may upgrade to unique_lock)
+        // Ensure HNSW is loaded when an existing persisted/catch-up path is available.
+        // Otherwise stay on brute-force search until an explicit build or persisted index exists.
         {
             lock.unlock();
             std::unique_lock write_lock(mutex_);
-            ensureHnswLoadedUnlocked();
+            if (shouldAttemptHnswLoadOnReadUnlocked()) {
+                ensureHnswLoadedUnlocked();
+            }
             write_lock.unlock();
             lock.lock();
         }
@@ -1088,10 +1157,13 @@ public:
         }
 
         if (!hnsw || hnsw->empty()) {
-            spdlog::warn(
-                "[HNSW] searchSimilar: no index for dim={} (hnsw={}), returning empty results",
-                query_dim, hnsw ? "empty" : "null");
-            return std::vector<VectorRecord>{};
+            maybeScheduleBackgroundSeedUnlocked(query_dim);
+            last_hnsw_maintenance_mode_ = HnswMaintenanceMode::BruteForceFallback;
+            spdlog::info("[HNSW] searchSimilar: no index for dim={} (hnsw={}), falling back to "
+                         "brute-force scan",
+                         query_dim, hnsw ? "empty" : "null");
+            return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold, document_hash,
+                                            candidate_hashes, metadata_filters);
         }
 
         // Diagnostic: log HNSW size at search time (first 10 searches, then every 100)
@@ -1260,11 +1332,13 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        // Ensure HNSW is loaded (may upgrade to unique_lock)
+        // Ensure HNSW is loaded when an existing persisted/catch-up path is available.
         {
             lock.unlock();
             std::unique_lock write_lock(mutex_);
-            ensureHnswLoadedUnlocked();
+            if (shouldAttemptHnswLoadOnReadUnlocked()) {
+                ensureHnswLoadedUnlocked();
+            }
             write_lock.unlock();
             lock.lock();
         }
@@ -1272,8 +1346,12 @@ public:
         // Find index for this dimension
         auto it = hnsw_indices_.find(query_dim);
         if (it == hnsw_indices_.end() || it->second->empty()) {
-            spdlog::warn("[HNSW] searchSimilarBatch: no index for dim={}", query_dim);
-            return std::vector<std::vector<VectorRecord>>(query_embeddings.size());
+            maybeScheduleBackgroundSeedUnlocked(query_dim);
+            last_hnsw_maintenance_mode_ = HnswMaintenanceMode::BruteForceFallback;
+            spdlog::info("[HNSW] searchSimilarBatch: no index for dim={}, falling back to "
+                         "brute-force scan",
+                         query_dim);
+            return bruteForceSearchBatchUnlocked(query_embeddings, k, similarity_threshold);
         }
 
         HNSWIndex* hnsw = it->second.get();
@@ -2558,6 +2636,298 @@ private:
         return recordCount >= kMinDeferredBatchSize && hasCatchUpSourceUnlocked();
     }
 
+    bool shouldMaintainHnswOnWriteUnlocked() {
+        return hnsw_loaded_ || hnsw_needs_rebuild_ || hasCatchUpSourceUnlocked();
+    }
+
+    bool shouldAttemptHnswLoadOnReadUnlocked() {
+        return hnsw_loaded_ || hnsw_needs_rebuild_ || hasCatchUpSourceUnlocked();
+    }
+
+    struct BackgroundSeedSnapshot {
+        std::unordered_map<size_t, std::vector<size_t>> ids_by_dim;
+        std::unordered_map<size_t, std::vector<std::vector<float>>> embeddings_by_dim;
+    };
+
+    bool shouldScheduleBackgroundSeedUnlocked(size_t query_dim) const {
+        if (query_dim == 0 || db_path_ == ":memory:" || hnsw_loaded_ || hnsw_needs_rebuild_ ||
+            background_seed_running_ || background_seed_scheduled_) {
+            return false;
+        }
+        return query_dim_counts_.find(query_dim) != query_dim_counts_.end() &&
+               query_dim_counts_.at(query_dim) >= hnswBackgroundSeedThreshold();
+    }
+
+    void refreshQueryDimCountsUnlocked() {
+        query_dim_counts_.clear();
+
+        const char* count_sql =
+            "SELECT (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 THEN LENGTH(embedding) / "
+            "4 "
+            "ELSE embedding_dim END) AS dim, COUNT(*) FROM vectors GROUP BY dim";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, count_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return;
+        }
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
+            size_t count = static_cast<size_t>(sqlite3_column_int64(stmt, 1));
+            if (dim > 0 && count > 0) {
+                query_dim_counts_[dim] = count;
+            }
+        }
+
+        sqlite3_finalize(stmt);
+    }
+
+    Result<BackgroundSeedSnapshot> collectBackgroundSeedSnapshotUnlocked(size_t focus_dim) {
+        BackgroundSeedSnapshot snapshot;
+
+        const char* select_by_dim =
+            "SELECT rowid, embedding, embedding_dim FROM vectors ORDER BY embedding_dim, rowid";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, select_by_dim, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to prepare background seed snapshot query"};
+        }
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int64_t rowid = sqlite3_column_int64(stmt, 0);
+            const void* blob = sqlite3_column_blob(stmt, 1);
+            int blob_size = sqlite3_column_bytes(stmt, 1);
+            if (!blob || blob_size <= 0 || (blob_size % static_cast<int>(sizeof(float))) != 0) {
+                continue;
+            }
+
+            size_t num_floats = static_cast<size_t>(blob_size) / sizeof(float);
+            size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 2));
+            if (dim == 0 || dim != num_floats) {
+                dim = num_floats;
+            }
+            if (dim == 0) {
+                continue;
+            }
+
+            std::vector<float> embedding(num_floats);
+            std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
+            if (isZeroNormEmbedding(embedding) || !isFiniteEmbedding(embedding)) {
+                continue;
+            }
+
+            snapshot.ids_by_dim[dim].push_back(static_cast<size_t>(rowid));
+            snapshot.embeddings_by_dim[dim].push_back(std::move(embedding));
+        }
+        sqlite3_finalize(stmt);
+
+        if (snapshot.ids_by_dim.empty()) {
+            return snapshot;
+        }
+
+        if (focus_dim != 0) {
+            auto focusIt = snapshot.ids_by_dim.find(focus_dim);
+            if (focusIt == snapshot.ids_by_dim.end()) {
+                return Error{ErrorCode::NotFound,
+                             "No vectors found for requested background seed dimension"};
+            }
+
+            BackgroundSeedSnapshot focused;
+            focused.ids_by_dim.emplace(focus_dim, std::move(focusIt->second));
+            focused.embeddings_by_dim.emplace(focus_dim,
+                                              std::move(snapshot.embeddings_by_dim[focus_dim]));
+            return focused;
+        }
+
+        return snapshot;
+    }
+
+    void buildBackgroundSeedSnapshot(BackgroundSeedSnapshot snapshot) {
+        std::unordered_map<size_t, std::unique_ptr<HNSWIndex>> seeded_indices;
+        std::unordered_map<size_t, bool> seeded_dirty;
+
+        for (auto& [dim, ids] : snapshot.ids_by_dim) {
+            if (ids.empty()) {
+                continue;
+            }
+
+            size_t corpus_size = ids.size();
+
+            HNSWIndex::Config build_config = HNSWIndex::Config::for_corpus(corpus_size, dim);
+            build_config.ef_construction =
+                std::max(build_config.ef_construction, config_.hnsw_ef_construction);
+            build_config.normalize_vectors = true;
+
+            auto index = std::make_unique<HNSWIndex>(build_config);
+            auto& embeddings = snapshot.embeddings_by_dim[dim];
+            std::vector<std::span<const float>> spans;
+            spans.reserve(embeddings.size());
+            for (auto& embedding : embeddings) {
+                spans.emplace_back(embedding.data(), embedding.size());
+            }
+
+            const auto buildStart = std::chrono::steady_clock::now();
+            spdlog::info("[HNSW] Background seed start dim={} vectors={}", dim, ids.size());
+            index->build(std::span<const size_t>(ids.data(), ids.size()),
+                         std::span<const std::span<const float>>(spans.data(), spans.size()));
+            const auto buildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - buildStart)
+                                     .count();
+            spdlog::info("[HNSW] Background seed built dim={} with {} vectors in {} ms", dim,
+                         ids.size(), buildMs);
+
+            seeded_dirty[dim] = true;
+            seeded_indices.emplace(dim, std::move(index));
+        }
+
+        std::unique_lock lock(mutex_);
+        background_seed_scheduled_ = false;
+
+        if (background_seed_cancel_requested_) {
+            background_seed_running_ = false;
+            return;
+        }
+
+        if (!db_ || !hnsw_indices_.empty() || hnsw_loaded_ || hnsw_needs_rebuild_) {
+            background_seed_running_ = false;
+            return;
+        }
+
+        hnsw_indices_ = std::move(seeded_indices);
+        hnsw_dirty_ = std::move(seeded_dirty);
+        hnsw_loaded_ = !hnsw_indices_.empty();
+        if (hnsw_loaded_) {
+            saveAllHnswUnlocked();
+            last_hnsw_maintenance_mode_ = HnswMaintenanceMode::FullRebuild;
+            spdlog::info("[HNSW] Background seed published {} dimension-specific indices",
+                         hnsw_indices_.size());
+        }
+        background_seed_running_ = false;
+    }
+
+    void maybeScheduleBackgroundSeedUnlocked(size_t query_dim) {
+        if (!shouldScheduleBackgroundSeedUnlocked(query_dim)) {
+            return;
+        }
+
+        auto snapshot_result = collectBackgroundSeedSnapshotUnlocked(query_dim);
+        if (!snapshot_result) {
+            spdlog::warn("[HNSW] Failed to snapshot vectors for background seed (dim={}): {}",
+                         query_dim, snapshot_result.error().message);
+            return;
+        }
+
+        auto snapshot = std::move(snapshot_result.value());
+        if (snapshot.ids_by_dim.empty()) {
+            return;
+        }
+
+        background_seed_scheduled_ = true;
+        background_seed_running_ = true;
+        std::thread([this, snapshot = std::move(snapshot)]() mutable {
+            buildBackgroundSeedSnapshot(std::move(snapshot));
+        }).detach();
+    }
+
+    Result<std::vector<VectorRecord>>
+    bruteForceSearchUnlocked(const std::vector<float>& query_embedding, size_t k,
+                             float similarity_threshold,
+                             const std::optional<std::string>& document_hash,
+                             const std::unordered_set<std::string>& candidate_hashes,
+                             const std::map<std::string, std::string>& metadata_filters) {
+        if (!db_ || query_embedding.empty() || k == 0) {
+            return std::vector<VectorRecord>{};
+        }
+
+        const char* sql = R"sql(
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+       start_offset, end_offset, metadata,
+       model_id, model_version, embedding_version, content_hash,
+       created_at, embedded_at, is_stale, level,
+       source_chunk_ids, parent_document_hash, child_document_hashes
+FROM vectors
+WHERE (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 THEN LENGTH(embedding) / 4
+            ELSE embedding_dim END) = ?
+ORDER BY rowid
+)sql";
+
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError, "Failed to prepare brute-force vector search"};
+        }
+
+        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(query_embedding.size()));
+
+        std::vector<std::pair<float, VectorRecord>> scored_results;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto record = recordFromStatement(stmt);
+
+            if (!candidate_hashes.empty() &&
+                candidate_hashes.find(record.document_hash) == candidate_hashes.end()) {
+                continue;
+            }
+            if (document_hash && record.document_hash != *document_hash) {
+                continue;
+            }
+
+            bool metadata_match = true;
+            for (const auto& [key, value] : metadata_filters) {
+                auto it = record.metadata.find(key);
+                if (it == record.metadata.end() || it->second != value) {
+                    metadata_match = false;
+                    break;
+                }
+            }
+            if (!metadata_match) {
+                continue;
+            }
+
+            if (record.embedding.size() != query_embedding.size()) {
+                continue;
+            }
+            if (isZeroNormEmbedding(record.embedding) || !isFiniteEmbedding(record.embedding)) {
+                continue;
+            }
+
+            float similarity = static_cast<float>(
+                VectorDatabase::computeCosineSimilarity(query_embedding, record.embedding));
+            if (similarity < similarity_threshold) {
+                continue;
+            }
+
+            record.relevance_score = similarity;
+            scored_results.emplace_back(similarity, std::move(record));
+        }
+        sqlite3_finalize(stmt);
+
+        std::sort(scored_results.begin(), scored_results.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+
+        size_t count = std::min(k, scored_results.size());
+        std::vector<VectorRecord> records;
+        records.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            records.push_back(std::move(scored_results[i].second));
+        }
+
+        return records;
+    }
+
+    Result<std::vector<std::vector<VectorRecord>>>
+    bruteForceSearchBatchUnlocked(const std::vector<std::vector<float>>& query_embeddings, size_t k,
+                                  float similarity_threshold) {
+        std::vector<std::vector<VectorRecord>> results;
+        results.reserve(query_embeddings.size());
+        for (const auto& query_embedding : query_embeddings) {
+            auto result = bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
+                                                   std::nullopt, {}, {});
+            if (!result) {
+                return result.error();
+            }
+            results.push_back(std::move(result.value()));
+        }
+        return results;
+    }
+
     std::vector<size_t> queryOrphanedPersistedNodeIdsUnlocked(size_t dim) {
         std::vector<size_t> ids;
         std::string sql = "SELECT n.node_id FROM \"" + hnswTablePrefix(dim) +
@@ -3051,6 +3421,10 @@ private:
     bool hnsw_loaded_ = false;
     bool hnsw_needs_rebuild_ = false;
     size_t pending_inserts_ = 0;
+    std::unordered_map<size_t, size_t> query_dim_counts_;
+    bool background_seed_running_ = false;
+    bool background_seed_scheduled_ = false;
+    bool background_seed_cancel_requested_ = false;
     HnswMaintenanceMode last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
     std::size_t last_hnsw_added_count_ = 0;
     std::size_t last_hnsw_removed_count_ = 0;
@@ -3074,6 +3448,11 @@ private:
             if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
                 corpus_size = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
             }
+        }
+
+        auto countIt = query_dim_counts_.find(dim);
+        if (countIt != query_dim_counts_.end() && countIt->second > 0) {
+            corpus_size = std::max(corpus_size, countIt->second);
         }
 
         // Use corpus-aware config from sqlite-vec-cpp for optimal M values
@@ -3302,6 +3681,8 @@ SqliteVecBackend::HnswMaintenanceMode SqliteVecBackend::testingLastHnswMaintenan
             return HnswMaintenanceMode::CatchUp;
         case Impl::HnswMaintenanceMode::FullRebuild:
             return HnswMaintenanceMode::FullRebuild;
+        case Impl::HnswMaintenanceMode::BruteForceFallback:
+            return HnswMaintenanceMode::BruteForceFallback;
         case Impl::HnswMaintenanceMode::None:
         default:
             return HnswMaintenanceMode::None;

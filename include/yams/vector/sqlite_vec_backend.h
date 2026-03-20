@@ -145,6 +145,7 @@ public:
         LoadPersisted,
         CatchUp,
         FullRebuild,
+        BruteForceFallback,
     };
 
     HnswMaintenanceMode testingLastHnswMaintenanceMode() const;
