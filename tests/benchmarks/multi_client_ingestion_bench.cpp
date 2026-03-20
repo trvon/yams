@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -45,6 +46,7 @@
 #include <map>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
@@ -56,6 +58,11 @@
 #ifdef _WIN32
 #include <process.h>
 #define getpid _getpid
+#else
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include <nlohmann/json.hpp>
@@ -93,7 +100,10 @@ struct BenchConfig {
     int drainTimeoutSecs{120};
     int scalingMaxClients{32};
     int stressRounds{1};
+    int cliProbeOpsPerCommand{3};
+    int cliProbeTimeoutSecs{10};
     std::string tuningProfile;
+    std::optional<fs::path> cliBinary;
 
     // --- Storage / corpus overrides ---
     // Point at an existing YAMS data directory (e.g. /Volumes/picaso/yams)
@@ -136,7 +146,14 @@ struct BenchConfig {
             cfg.scalingMaxClients = std::max(1, std::atoi(v));
         if (auto* v = std::getenv("YAMS_BENCH_STRESS_ROUNDS"))
             cfg.stressRounds = std::max(1, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_CLI_PROBE_OPS"))
+            cfg.cliProbeOpsPerCommand = std::max(0, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_CLI_PROBE_TIMEOUT_S"))
+            cfg.cliProbeTimeoutSecs = std::max(1, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_CLI_BIN"))
+            cfg.cliBinary = fs::path(v);
         cfg.scalingMaxClients = std::max(cfg.scalingMaxClients, cfg.numClients * 2);
+        cfg.cliProbeOpsPerCommand = std::max(cfg.cliProbeOpsPerCommand, cfg.stressRounds);
         if (auto* v = std::getenv("YAMS_TUNING_PROFILE"))
             cfg.tuningProfile = v;
 
@@ -415,6 +432,165 @@ struct PercentileStats {
                     {"p95_us", p95},  {"p99_us", p99}, {"max_us", max}, {"mean_us", mean}};
     }
 };
+
+std::optional<fs::path> findExecutableInPath(const std::string& name) {
+    if (const char* pathEnv = std::getenv("PATH")) {
+        std::stringstream ss(pathEnv);
+        std::string entry;
+        while (std::getline(ss, entry, ':')) {
+            if (entry.empty()) {
+                continue;
+            }
+            fs::path candidate = fs::path(entry) / name;
+            std::error_code ec;
+            if (fs::exists(candidate, ec) && !ec) {
+                return candidate;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<fs::path> findYamsBinary(const BenchConfig& cfg) {
+    if (cfg.cliBinary && fs::exists(*cfg.cliBinary)) {
+        return cfg.cliBinary;
+    }
+
+    if (const char* buildRoot = std::getenv("MESON_BUILD_ROOT")) {
+#ifdef _WIN32
+        fs::path candidate = fs::path(buildRoot) / "src/cli/yams.exe";
+#else
+        fs::path candidate = fs::path(buildRoot) / "src/cli/yams";
+#endif
+        if (fs::exists(candidate)) {
+            return candidate;
+        }
+    }
+
+    for (const auto& relative :
+         {fs::path("builddir/src/cli/yams"), fs::path("build/src/cli/yams"),
+          fs::path("build/debug/src/cli/yams"), fs::path("build/release/src/cli/yams")}) {
+        if (fs::exists(relative)) {
+            return fs::absolute(relative);
+        }
+    }
+
+#ifdef _WIN32
+    return findExecutableInPath("yams.exe");
+#else
+    return findExecutableInPath("yams");
+#endif
+}
+
+struct CliProbeResult {
+    bool attempted{false};
+    bool success{false};
+    int exitCode{-1};
+    int64_t latencyUs{0};
+    std::string error;
+};
+
+#ifndef _WIN32
+namespace {
+
+void closeInheritedFdsExceptStd() {
+    long maxFd = ::sysconf(_SC_OPEN_MAX);
+    if (maxFd <= 0) {
+        maxFd = 1024;
+    }
+    for (int fd = 3; fd < maxFd; ++fd) {
+        ::close(fd);
+    }
+}
+
+} // namespace
+
+CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPath,
+                           const std::vector<std::string>& args,
+                           std::chrono::milliseconds timeout = 10s) {
+    CliProbeResult result;
+    result.attempted = true;
+
+    int sinkFd = ::open("/dev/null", O_WRONLY);
+    if (sinkFd < 0) {
+        result.error = "open(/dev/null) failed";
+        return result;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        ::close(sinkFd);
+        result.error = "fork() failed";
+        return result;
+    }
+
+    if (pid == 0) {
+        ::setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
+        ::setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
+        ::setenv("YAMS_CLI_ONE_SHOT", "1", 1);
+        ::dup2(sinkFd, STDOUT_FILENO);
+        ::dup2(sinkFd, STDERR_FILENO);
+        ::close(sinkFd);
+        closeInheritedFdsExceptStd();
+
+        std::vector<std::string> owned;
+        owned.reserve(args.size() + 1);
+        owned.push_back(yamsBinary.string());
+        owned.insert(owned.end(), args.begin(), args.end());
+
+        std::vector<char*> argv;
+        argv.reserve(owned.size() + 1);
+        for (auto& arg : owned) {
+            argv.push_back(arg.data());
+        }
+        argv.push_back(nullptr);
+        ::execv(yamsBinary.c_str(), argv.data());
+        _exit(127);
+    }
+
+    ::close(sinkFd);
+    int status = 0;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        pid_t waited = ::waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+            break;
+        }
+        if (waited < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            result.error = "waitpid() failed";
+            break;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            ::kill(pid, SIGKILL);
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            result.error = "cli probe timed out";
+            result.exitCode = 124;
+            result.latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count();
+            return result;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+
+    result.latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - start)
+                           .count();
+
+    if (WIFEXITED(status)) {
+        result.exitCode = WEXITSTATUS(status);
+        result.success = (result.exitCode == 0);
+    } else {
+        result.error = "child terminated abnormally";
+    }
+    return result;
+}
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Daemon status snapshot helper
@@ -1766,18 +1942,27 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     const int uxClients = std::max(4, cfg.numClients * 3);
     const int writerOpsPerClient = cfg.docsPerClient * cfg.stressRounds;
     const int uxOpsPerClient = std::max(24, cfg.docsPerClient) * cfg.stressRounds;
+    const int cliProbeOpsPerCommand = cfg.cliProbeOpsPerCommand;
     const size_t grownSlotTarget = std::min(kSlotMax, kInitialSlotLimit + kSlotStep);
+    const size_t controlLightLoadTarget =
+        std::max<size_t>(2, std::min<size_t>(4, static_cast<size_t>(cfg.stressRounds)));
+    const auto yamsBinary = findYamsBinary(cfg);
 
     std::atomic<int> addOps{0};
     std::atomic<int> addFails{0};
     std::atomic<int> uxOps{0};
     std::atomic<int> uxFails{0};
     std::atomic<int> retryAfterCount{0};
+    std::atomic<int> cliOps{0};
+    std::atomic<int> cliFails{0};
     std::mutex latMutex;
     std::vector<int64_t> addLatencies;
     std::vector<int64_t> searchLatencies;
     std::vector<int64_t> listLatencies;
     std::vector<int64_t> statusLatencies;
+    std::vector<int64_t> cliListLatencies;
+    std::vector<int64_t> cliSearchLatencies;
+    std::vector<int64_t> cliStatusLatencies;
     std::vector<TimedLatencySample> hotspotSamples;
 
     HeldSocketConnections heldConnections;
@@ -1950,6 +2135,62 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
         });
     }
 
+#ifndef _WIN32
+    if (yamsBinary && cliProbeOpsPerCommand > 0) {
+        threads.emplace_back([&, cliBin = *yamsBinary]() {
+            std::vector<int64_t> localCliList;
+            std::vector<int64_t> localCliSearch;
+            std::vector<int64_t> localCliStatus;
+            const auto cliProbeTimeout = std::chrono::seconds(cfg.cliProbeTimeoutSecs);
+
+            auto recordProbe = [&](const std::string& opType, const CliProbeResult& probe,
+                                   std::vector<int64_t>& storage) {
+                cliOps.fetch_add(1);
+                if (probe.success) {
+                    storage.push_back(probe.latencyUs);
+                } else {
+                    cliFails.fetch_add(1);
+                }
+
+                std::lock_guard<std::mutex> lock(latMutex);
+                hotspotSamples.push_back(TimedLatencySample{
+                    .opType = opType,
+                    .wallClockMs =
+                        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::steady_clock::now() - globalStart)
+                                                  .count()),
+                    .latencyUs = probe.latencyUs,
+                    .success = probe.success,
+                });
+            };
+
+            for (int i = 0; i < cliProbeOpsPerCommand; ++i) {
+                recordProbe("cli_list",
+                            runCliProbe(cliBin, harness.socketPath(), {"list", "--limit", "10"},
+                                        cliProbeTimeout),
+                            localCliList);
+                recordProbe("cli_status",
+                            runCliProbe(cliBin, harness.socketPath(), {"status"}, cliProbeTimeout),
+                            localCliStatus);
+                recordProbe("cli_search",
+                            runCliProbe(cliBin, harness.socketPath(),
+                                        {"search", "architecture performance tuning daemon",
+                                         "--limit", "5"},
+                                        cliProbeTimeout),
+                            localCliSearch);
+            }
+
+            std::lock_guard<std::mutex> lock(latMutex);
+            cliListLatencies.insert(cliListLatencies.end(), localCliList.begin(),
+                                    localCliList.end());
+            cliSearchLatencies.insert(cliSearchLatencies.end(), localCliSearch.begin(),
+                                      localCliSearch.end());
+            cliStatusLatencies.insert(cliStatusLatencies.end(), localCliStatus.begin(),
+                                      localCliStatus.end());
+        });
+    }
+#endif
+
     for (auto& thread : threads) {
         thread.join();
     }
@@ -1972,6 +2213,9 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     const auto searchStats = PercentileStats::compute(searchLatencies);
     const auto listStats = PercentileStats::compute(listLatencies);
     const auto statusStats = PercentileStats::compute(statusLatencies);
+    const auto cliListStats = PercentileStats::compute(cliListLatencies);
+    const auto cliSearchStats = PercentileStats::compute(cliSearchLatencies);
+    const auto cliStatusStats = PercentileStats::compute(cliStatusLatencies);
     const bool observedGrowth =
         slotSummary.peakLimit >= grownSlotTarget || slotSummary.growEvents > 0;
     const bool observedShrink =
@@ -1990,6 +2234,12 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
               << "  UX ops: " << uxOps.load() << " (fails=" << uxFails.load() << ")\n";
     std::cout << "  Throughput: add=" << std::fixed << std::setprecision(1) << addThroughput
               << " docs/s, ux=" << uxThroughput << " ops/s\n";
+    if (yamsBinary && cliProbeOpsPerCommand > 0) {
+        std::cout << "  CLI probes: " << cliOps.load() << " (fails=" << cliFails.load()
+                  << ") binary=" << yamsBinary->string() << "\n";
+    } else {
+        std::cout << "  CLI probes: skipped\n";
+    }
     std::cout << "  Slot scaling: initial=" << slotSummary.initialLimit
               << " peak=" << slotSummary.peakLimit << " final=" << slotSummary.finalLimit
               << " grow_events=" << slotSummary.growEvents
@@ -2004,6 +2254,11 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     printPercentiles("Search latency", searchStats);
     printPercentiles("List latency", listStats);
     printPercentiles("Status latency", statusStats);
+    if (cliListStats.count + cliSearchStats.count + cliStatusStats.count > 0) {
+        printPercentiles("CLI list latency", cliListStats);
+        printPercentiles("CLI search latency", cliSearchStats);
+        printPercentiles("CLI status latency", cliStatusStats);
+    }
     std::cout << "  Resource peaks: memory=" << std::fixed << std::setprecision(1)
               << resourcePeaks.peakMemoryMb << " MB cpu=" << resourcePeaks.peakCpuPercent
               << "% rss=" << resourcePeaks.peakRssBytes
@@ -2107,7 +2362,7 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     const bool controlGrew = waitForSlotLimit(controlMonitorClient, grownSlotTarget, 6s, true);
     controlHeldConnections.closeAll();
     const bool controlReachedLightLoad =
-        waitForActiveConnectionsAtMost(controlMonitorClient, 2, 12s);
+        waitForActiveConnectionsAtMost(controlMonitorClient, controlLightLoadTarget, 12s);
     const bool controlShrank =
         waitForSlotLimit(controlMonitorClient, kInitialSlotLimit, 10s, false);
     controlSampler.stop();
@@ -2159,6 +2414,14 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
         {"search", json{{"latency", searchStats.toJson()}}},
         {"list", json{{"latency", listStats.toJson()}}},
         {"status", json{{"latency", statusStats.toJson()}}},
+        {"cli", json{{"enabled", static_cast<bool>(yamsBinary && cliProbeOpsPerCommand > 0)},
+                     {"binary", yamsBinary ? yamsBinary->string() : std::string()},
+                     {"ops", cliOps.load()},
+                     {"fails", cliFails.load()},
+                     {"ops_per_command", cliProbeOpsPerCommand},
+                     {"list_latency", cliListStats.toJson()},
+                     {"search_latency", cliSearchStats.toJson()},
+                     {"status_latency", cliStatusStats.toJson()}}},
         {"ux", json{{"ops", uxOps.load()},
                     {"fails", uxFails.load()},
                     {"throughput_per_sec", uxThroughput},

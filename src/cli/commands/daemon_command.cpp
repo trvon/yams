@@ -40,9 +40,9 @@ using nlohmann::json;
 #endif
 #include <future>
 #include <regex>
+#include <set>
 #include <signal.h>
 #include <sstream>
-#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -1522,7 +1522,7 @@ private:
                 // Fetch detailed readiness and show a short Waiting on: summary
                 try {
                     auto sres = runDaemonClient(
-                        {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
+                        {}, [](yams::daemon::DaemonClient& client) { return client.status(true); },
                         std::chrono::seconds(2));
                     if (sres) {
                         const auto& s = sres.value();
@@ -2001,6 +2001,18 @@ private:
 
             // Collect issues for quick summary (skip informational flags)
             std::vector<std::string> issues;
+            auto suppressDerivedIssue = [&](const std::string& lowerKey) {
+                if ((lowerKey == "embedding_ready" || lowerKey == "embedding ready") &&
+                    (s.embeddingAvailable || (s.readinessStates.contains("model_provider") &&
+                                              s.readinessStates.at("model_provider")))) {
+                    return true;
+                }
+                if ((lowerKey == "plugins_ready" || lowerKey == "plugins ready") &&
+                    (s.readinessStates.contains("plugins") && s.readinessStates.at("plugins"))) {
+                    return true;
+                }
+                return false;
+            };
             for (const auto& [key, ready] : s.readinessStates) {
                 if (!ready) {
                     std::string lowerKey = key;
@@ -2018,6 +2030,9 @@ private:
                     if (lowerKey == "vector_db_ready" || lowerKey == "vector db ready" ||
                         lowerKey == "vector_db_init_attempted" ||
                         lowerKey == "vector db init attempted") {
+                        continue;
+                    }
+                    if (suppressDerivedIssue(lowerKey)) {
                         continue;
                     }
                     auto rd = classifyReadiness(key, ready);
@@ -2167,7 +2182,7 @@ private:
             yams::daemon::ClientConfig cfg;
             cfg.socketPath = effectiveSocket;
             auto statusResult = runDaemonClient(
-                cfg, [](yams::daemon::DaemonClient& client) { return client.status(); },
+                cfg, [](yams::daemon::DaemonClient& client) { return client.status(true); },
                 std::chrono::seconds(5));
             if (statusResult) {
                 if (spinner) {
@@ -2184,6 +2199,20 @@ private:
 
                 std::vector<std::string> waiting;
                 waiting.reserve(readinessList.size());
+                auto suppressDerivedWaiting = [&](const std::string& lowerKey) {
+                    if ((lowerKey == "embedding ready" || lowerKey == "embedding_ready") &&
+                        (status.embeddingAvailable ||
+                         (status.readinessStates.contains("model_provider") &&
+                          status.readinessStates.at("model_provider")))) {
+                        return true;
+                    }
+                    if ((lowerKey == "plugins ready" || lowerKey == "plugins_ready") &&
+                        (status.readinessStates.contains("plugins") &&
+                         status.readinessStates.at("plugins"))) {
+                        return true;
+                    }
+                    return false;
+                };
                 for (const auto& rd : readinessList) {
                     if (rd.issue) {
                         // Skip "build reason" keys - they're informational, not readiness
@@ -2195,7 +2224,8 @@ private:
                             lowerLabel.find("build reason") != std::string::npos ||
                             lowerLabel == "vector db ready" ||
                             lowerLabel == "vector db init attempted" ||
-                            (rd.key == "vector_db" && status.vectorDbInitAttempted);
+                            (rd.key == "vector_db" && status.vectorDbInitAttempted) ||
+                            suppressDerivedWaiting(lowerLabel);
                         if (!skipReadinessLabel)
                             waiting.push_back(rd.label);
                     }
@@ -2808,6 +2838,20 @@ private:
 
                 // Only show Readiness section if there are issues or non-ready components
                 std::vector<Row> issueRows;
+                auto suppressDetailedIssue = [&](const std::string& lowerLabel) {
+                    if ((lowerLabel == "embedding ready" || lowerLabel == "embedding_ready") &&
+                        (status.embeddingAvailable ||
+                         (status.readinessStates.contains("model_provider") &&
+                          status.readinessStates.at("model_provider")))) {
+                        return true;
+                    }
+                    if ((lowerLabel == "plugins ready" || lowerLabel == "plugins_ready") &&
+                        (status.readinessStates.contains("plugins") &&
+                         status.readinessStates.at("plugins"))) {
+                        return true;
+                    }
+                    return false;
+                };
                 for (const auto& rd : readinessList) {
                     // Skip "degraded" flags (inverses of ready flags) and items already shown
                     // elsewhere
@@ -2821,7 +2865,8 @@ private:
                     // The search_engine key itself indicates readiness.
                     bool isBuildReason = lowerLabel.find("build reason") != std::string::npos;
 
-                    if (!isDegraded && !isAlreadyShown && !isBuildReason && rd.issue) {
+                    if (!isDegraded && !isAlreadyShown && !isBuildReason && rd.issue &&
+                        !suppressDetailedIssue(lowerLabel)) {
                         issueRows.push_back({rd.label, paintStatus(rd.severity, rd.text), ""});
                     }
                 }

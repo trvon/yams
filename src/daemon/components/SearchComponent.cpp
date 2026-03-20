@@ -125,6 +125,16 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
         return false;
     }
 
+    // Rebuilds are also expensive for active interactive search traffic because the engine swap
+    // and build work contend with query execution. Defer until the UX search lane is quiet.
+    try {
+        const auto searchLoad = serviceManager_.getSearchLoadMetrics();
+        if (searchLoad.active > 0 || searchLoad.queued > 0) {
+            return false;
+        }
+    } catch (...) {
+    }
+
     // Check for concurrent rebuild
     bool expected = false;
     if (!rebuildInProgress_.compare_exchange_strong(expected, true)) {

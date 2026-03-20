@@ -155,7 +155,7 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
                 co_return makeErrorResponse(r.error().code, r.error().message);
             }
         }
-        BatchEmbeddingResponse resp;
+        BatchEmbeddingResponse resp{};
         auto rr = yams::daemon::dispatch::generate_batch(provider.get(), req.modelName, req.texts,
                                                          req.normalize);
         if (!rr) {
@@ -182,6 +182,9 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
                                     ? (req.texts.size() - resp.embeddings.size())
                                     : 0;
         }
+        resp.dimensions = resp.embeddings.empty() ? 0 : resp.embeddings.front().size();
+        resp.modelUsed = req.modelName;
+        resp.processingTimeMs = 0;
         (void)t0;
         co_return resp;
     } catch (const std::exception& e) {

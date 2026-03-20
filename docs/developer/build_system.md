@@ -186,10 +186,7 @@ meson test -C builddir --suite bench:isolated
 meson test -C builddir --suite bench:perf
 
 # Specific test by name
-meson test -C builddir repair_coordinator_lifecycle
-
-# Pattern matching
-meson test -C builddir --suite unit --gtest_filter="*RepairCoordinator*"
+meson test -C builddir repair_scheduling_adapter
 
 # Verbose output
 meson test -C builddir --suite unit:smoke -v
@@ -204,7 +201,7 @@ Tests follow the pattern: `<component>_<aspect>_<variant>`
 
 Examples:
 - `content_store_basic` - Basic content store operations
-- `repair_coordinator_lifecycle` - Full repair coordinator lifecycle
+- `repair_scheduling_adapter` - Repair scheduling adapter coverage
 - `metadata_repository_cache` - Metadata repository caching
 - `daemon_warm_latency` - Daemon warm start latency benchmark
 
@@ -289,7 +286,6 @@ meson test -C builddir --list
 # Example output shows current organization:
 # yams:unit / unit_shard0
 # yams:unit / unit_shard1
-# yams:bench+isolated / unit_isolated_repair_coordinator
 # yams:unit+smoke / unit_smoke
 # yams:integration+smoke / integration_smoke
 ```

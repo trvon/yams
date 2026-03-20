@@ -517,31 +517,42 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
     }
 
     if (pImpl->resolvedTransportMode_ == ClientTransportMode::Socket) {
+        const bool socketForcedByEnv = []() {
+            if (const char* raw = std::getenv("YAMS_DAEMON_SOCKET_PATH")) {
+                return *raw != '\0';
+            }
+            return false;
+        }();
+
         if (pImpl->config_.socketPath.empty()) {
             // Resolve daemon socket path, then prefer a healthy proxy socket derived from it.
             // IMPORTANT: do not select the proxy based on filesystem existence alone; stale socket
             // files are common when the daemon crashes.
             auto daemonSock = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
 
-            auto deriveProxySock = [](const std::filesystem::path& daemonSocket) {
-                if (daemonSocket.empty())
-                    return std::filesystem::path{};
-                auto base = daemonSocket.stem().string();
-                if (base.empty())
-                    base = daemonSocket.filename().string();
-                if (base.empty())
-                    base = "yams-daemon";
-                return daemonSocket.parent_path() / (base + ".proxy.sock");
-            };
-
-            const auto proxyCandidate = deriveProxySock(daemonSock);
-
-            // Prefer proxy only if it is connectable; otherwise fall back to the main daemon
-            // socket.
-            if (!proxyCandidate.empty() && pingDaemonSync(proxyCandidate)) {
-                pImpl->config_.socketPath = proxyCandidate;
-            } else {
+            if (socketForcedByEnv) {
                 pImpl->config_.socketPath = daemonSock;
+            } else {
+                auto deriveProxySock = [](const std::filesystem::path& daemonSocket) {
+                    if (daemonSocket.empty())
+                        return std::filesystem::path{};
+                    auto base = daemonSocket.stem().string();
+                    if (base.empty())
+                        base = daemonSocket.filename().string();
+                    if (base.empty())
+                        base = "yams-daemon";
+                    return daemonSocket.parent_path() / (base + ".proxy.sock");
+                };
+
+                const auto proxyCandidate = deriveProxySock(daemonSock);
+
+                // Prefer proxy only if it is connectable; otherwise fall back to the main daemon
+                // socket.
+                if (!proxyCandidate.empty() && pingDaemonSync(proxyCandidate)) {
+                    pImpl->config_.socketPath = proxyCandidate;
+                } else {
+                    pImpl->config_.socketPath = daemonSock;
+                }
             }
         }
     }
@@ -1057,9 +1068,9 @@ DaemonClient::fileHistory(const FileHistoryRequest& req) {
     co_return co_await call<FileHistoryRequest>(req);
 }
 
-boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status() {
+boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status(bool detailed) {
     StatusRequest req;
-    req.detailed = false; // avoid heavy daemon-side scans by default
+    req.detailed = detailed;
 
     // Transient-aware retry loop for early startup/socket closure races
     // Uses exponential backoff: 25ms, 50ms, 100ms (max 175ms total vs old 750ms)

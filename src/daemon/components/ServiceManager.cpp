@@ -2834,9 +2834,23 @@ bool ServiceManager::triggerSearchEngineRebuildIfNeeded() {
 }
 
 boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured() {
-    // FSM-based idempotence: skip if already loading or ready
+    // Skip if the active provider already reached an operational state. This prevents
+    // lazy/on-demand providers from being moved back into a synthetic loading state after plugin
+    // adoption.
+    try {
+        auto providerSnapshot = getEmbeddingProviderFsmSnapshot();
+        if (providerSnapshot.state == EmbeddingProviderState::ProviderAdopted ||
+            providerSnapshot.state == EmbeddingProviderState::ModelLoading ||
+            providerSnapshot.state == EmbeddingProviderState::ModelReady) {
+            spdlog::debug(
+                "preloadPreferredModelIfConfigured: provider already adopted/loading/ready");
+            co_return;
+        }
+    } catch (...) {
+    }
+
     if (embeddingFsm_.isLoadingOrReady()) {
-        spdlog::debug("preloadPreferredModelIfConfigured: already loading or ready (FSM)");
+        spdlog::debug("preloadPreferredModelIfConfigured: local FSM already loading or ready");
         co_return;
     }
 

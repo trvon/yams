@@ -594,7 +594,7 @@ public:
 
         int64_t rowid = rowid_result.value();
 
-        if (hnswDeferUpdatesEnabled()) {
+        if (canDeferHnswUpdatesUnlocked()) {
             hnsw_indices_.clear();
             hnsw_dirty_.clear();
             hnsw_loaded_ = false;
@@ -721,7 +721,7 @@ public:
             return Error{ErrorCode::DatabaseError, "Failed to commit transaction"};
         }
 
-        if (hnswDeferUpdatesEnabled()) {
+        if (canDeferHnswUpdatesUnlocked()) {
             hnsw_indices_.clear();
             hnsw_dirty_.clear();
             hnsw_loaded_ = false;
@@ -915,7 +915,7 @@ public:
             return rowid_result.error();
         }
 
-        if (hnswDeferUpdatesEnabled()) {
+        if (canDeferHnswUpdatesUnlocked()) {
             hnsw_indices_.clear();
             hnsw_dirty_.clear();
             hnsw_loaded_ = false;
@@ -2522,6 +2522,37 @@ private:
             sqlite3_finalize(stmt);
         }
         return dims;
+    }
+
+    bool hasPersistedHnswNodesUnlocked(size_t dim) {
+        std::string sql =
+            "SELECT EXISTS(SELECT 1 FROM \"" + hnswTablePrefix(dim) + "_hnsw_nodes\" LIMIT 1)";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            return false;
+        }
+        bool exists = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            exists = sqlite3_column_int(stmt, 0) != 0;
+        }
+        sqlite3_finalize(stmt);
+        return exists;
+    }
+
+    bool canDeferHnswUpdatesUnlocked() {
+        if (!hnswDeferUpdatesEnabled()) {
+            return false;
+        }
+        if (hnsw_loaded_ && !hnsw_indices_.empty()) {
+            return true;
+        }
+        auto persistedDims = discoverPersistedHnswDimsUnlocked();
+        for (size_t dim : persistedDims) {
+            if (hasPersistedHnswNodesUnlocked(dim)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     std::vector<size_t> queryOrphanedPersistedNodeIdsUnlocked(size_t dim) {

@@ -166,13 +166,20 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         }
                         try {
                             auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
+                            const bool providerReady =
+                                state_ && state_->readiness.modelProviderReady.load(
+                                              std::memory_order_relaxed);
+                            const bool embeddingOperational =
+                                (es.state == EmbeddingProviderState::ModelReady) ||
+                                ((snap->embeddingAvailable || providerReady) &&
+                                 es.state != EmbeddingProviderState::Failed);
                             setVal(metrics::kEmbeddingState, static_cast<size_t>(es.state));
-                            setReady(readiness::kEmbeddingReady,
-                                     es.state == EmbeddingProviderState::ModelReady);
+                            setReady(readiness::kEmbeddingReady, embeddingOperational);
                             // Provide an explicit degraded flag for clients/tools that
                             // distinguish readiness from degraded modes.
                             setReady(readiness::kEmbeddingDegraded,
-                                     es.state == EmbeddingProviderState::Degraded);
+                                     es.state == EmbeddingProviderState::Degraded ||
+                                         es.state == EmbeddingProviderState::Failed);
                         } catch (...) {
                         }
                         // EmbeddingService metrics (jobs currently being processed)
@@ -199,8 +206,14 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         }
                         try {
                             auto ps = serviceManager_->getPluginHostFsmSnapshot();
+                            const bool pluginsOperational =
+                                (ps.state == PluginHostState::Ready) ||
+                                (((ps.loadedCount > 0) ||
+                                  (state_ && state_->readiness.pluginsReady.load(
+                                                 std::memory_order_relaxed))) &&
+                                 ps.state != PluginHostState::Failed);
                             setVal(metrics::kPluginHostState, static_cast<size_t>(ps.state));
-                            setReady(readiness::kPluginsReady, ps.state == PluginHostState::Ready);
+                            setReady(readiness::kPluginsReady, pluginsOperational);
                             setReady(readiness::kPluginsDegraded,
                                      ps.state == PluginHostState::Failed);
                         } catch (...) {
@@ -711,8 +724,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             // Repair metrics should remain available in detailed status and fallback paths.
             try {
                 if (state_) {
-                    const auto repairRunning =
-                        state_->stats.repairRunning.load(std::memory_order_relaxed);
+                    const bool repairRunning =
+                        state_->stats.repairRunning.load(std::memory_order_relaxed) ||
+                        (serviceManager_ && serviceManager_->getRepairService() != nullptr);
                     res.requestCounts[std::string(metrics::kRepairQueueDepth)] =
                         state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
                     res.requestCounts[std::string(metrics::kRepairBatchesAttempted)] =

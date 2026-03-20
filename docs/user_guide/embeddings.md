@@ -43,7 +43,7 @@ yams doctor repair --graph
 yams repair --all
 ```
 
-The daemon RepairCoordinator also performs best-effort FTS5 reindex for documents it fixes embeddings for.
+The daemon repair service also performs best-effort FTS5 reindex for documents it fixes embeddings for.
 
 ## Model Management
 

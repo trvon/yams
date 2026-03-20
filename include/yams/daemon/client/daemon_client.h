@@ -235,7 +235,7 @@ public:
     }
     boost::asio::awaitable<Result<SuccessResponse>> remove(const DeleteRequest& req);
     // Returns a lightweight snapshot; does not request detailed (no heavy scans)
-    boost::asio::awaitable<Result<StatusResponse>> status();
+    boost::asio::awaitable<Result<StatusResponse>> status(bool detailed = false);
     boost::asio::awaitable<Result<void>> shutdown(bool graceful = true);
     boost::asio::awaitable<Result<void>> ping();
 

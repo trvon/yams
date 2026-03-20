@@ -752,12 +752,34 @@ inline bool is_socket_mode_forced_by_env() {
            mode == "daemon";
 }
 
+inline bool explicit_socket_without_autostart() {
+    const char* socketPath = std::getenv("YAMS_DAEMON_SOCKET_PATH");
+    if (socketPath == nullptr || *socketPath == '\0') {
+        return false;
+    }
+
+    const char* disableAutoStart = std::getenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART");
+    if (disableAutoStart == nullptr || *disableAutoStart == '\0') {
+        return false;
+    }
+
+    auto mode = to_lower_copy(trim_copy(disableAutoStart));
+    return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
+}
+
 inline Result<void> ensure_socket_daemon_ready(
     const yams::daemon::ClientConfig& cfg,
     std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
     auto effectiveSocket = cfg.socketPath.empty()
                                ? yams::daemon::DaemonClient::resolveSocketPathConfigFirst()
                                : cfg.socketPath;
+
+    // When the caller explicitly pins a daemon socket and disables auto-start, trust that target
+    // and let the actual request path surface any connect failure. This avoids an extra ping per
+    // CLI process on the hot path.
+    if (!cfg.autoStart && explicit_socket_without_autostart()) {
+        return Result<void>();
+    }
 
     if (!yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
         if (!cfg.autoStart) {

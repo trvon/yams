@@ -95,20 +95,45 @@ public:
     explicit StubModelProvider(size_t dim, std::string path)
         : dim_(dim), path_(std::move(path)), available_(true) {}
 
-    Result<std::vector<float>> generateEmbedding(const std::string&) override {
-        return ErrorCode::NotImplemented;
+    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        lastTextArg_ = text;
+        if (auto it = singleTextErrors_.find(text); it != singleTextErrors_.end()) {
+            return it->second;
+        }
+        if (generateEmbeddingError_) {
+            return *generateEmbeddingError_;
+        }
+        if (!singleEmbeddingResult_.empty()) {
+            return singleEmbeddingResult_;
+        }
+        return std::vector<float>(dim_, 0.25f);
     }
     Result<std::vector<std::vector<float>>>
-    generateBatchEmbeddings(const std::vector<std::string>&) override {
-        return ErrorCode::NotImplemented;
+    generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+        lastBatchSizeArg_ = texts.size();
+        if (!texts.empty()) {
+            lastTextArg_ = texts.front();
+        }
+        if (generateBatchError_) {
+            return *generateBatchError_;
+        }
+        if (!batchEmbeddingResult_.empty()) {
+            return batchEmbeddingResult_;
+        }
+        return std::vector<std::vector<float>>(lastBatchSizeArg_, std::vector<float>(dim_, 0.5f));
     }
     Result<std::vector<float>> generateEmbeddingFor(const std::string&,
-                                                    const std::string&) override {
-        return ErrorCode::NotImplemented;
+                                                    const std::string& text) override {
+        lastTextArg_ = text;
+        return generateEmbedding(text);
     }
     Result<std::vector<std::vector<float>>>
-    generateBatchEmbeddingsFor(const std::string&, const std::vector<std::string>&) override {
-        return ErrorCode::NotImplemented;
+    generateBatchEmbeddingsFor(const std::string&, const std::vector<std::string>& texts) override {
+        lastBatchSizeArg_ = texts.size();
+        if (!texts.empty()) {
+            lastTextArg_ = texts.front();
+        }
+        return generateBatchEmbeddings(texts);
     }
     Result<void> loadModel(const std::string& modelName) override {
         if (loadError_) {
@@ -183,6 +208,18 @@ public:
     void setFailModelInfo(bool enabled) { failModelInfo_ = enabled; }
     void setThrowOnIsModelLoaded(bool enabled) { throwOnIsModelLoadedCount_ = enabled ? 1 : 0; }
     void setThrowOnIsModelLoadedCount(int count) { throwOnIsModelLoadedCount_ = count; }
+    void setSingleEmbeddingResult(std::vector<float> embedding) {
+        singleEmbeddingResult_ = std::move(embedding);
+    }
+    void setBatchEmbeddingResult(std::vector<std::vector<float>> embeddings) {
+        batchEmbeddingResult_ = std::move(embeddings);
+    }
+    void setGenerateEmbeddingError(Error error) { generateEmbeddingError_ = std::move(error); }
+    void setGenerateBatchError(Error error) { generateBatchError_ = std::move(error); }
+    void setSingleTextError(const std::string& text, Error error) {
+        singleTextErrors_[text] = std::move(error);
+    }
+    void clearSingleTextErrors() { singleTextErrors_.clear(); }
 
 private:
     size_t dim_;
@@ -192,9 +229,16 @@ private:
     std::string lastOptionsModel_;
     std::string lastOptionsJson_;
     std::optional<Error> loadError_;
+    std::optional<Error> generateEmbeddingError_;
+    std::optional<Error> generateBatchError_;
     bool throwOnMemoryUsage_{false};
     bool failModelInfo_{false};
     mutable int throwOnIsModelLoadedCount_{0};
+    std::vector<float> singleEmbeddingResult_;
+    std::vector<std::vector<float>> batchEmbeddingResult_;
+    std::unordered_map<std::string, Error> singleTextErrors_;
+    mutable std::string lastTextArg_;
+    mutable std::size_t lastBatchSizeArg_{0};
 };
 
 class EnvGuard {
@@ -1506,6 +1550,367 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InternalError);
         CHECK(err.message.find("memory boom") != std::string::npos);
+    }
+}
+
+TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair branches",
+          "[daemon][embedding][dispatcher]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_embedding_dispatcher_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    SECTION("generate embedding marks provider unavailable as degraded") {
+        auto resp = dispatchRequest(
+            dispatcher, Request{GenerateEmbeddingRequest{"hello world", "embed-model", true}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message.find("Plugin system") != std::string::npos);
+        CHECK(lifecycle.setSubsystemDegradedCalls() == 1);
+        CHECK(lifecycle.lastSubsystem() == "embedding");
+        CHECK(lifecycle.lastDegraded());
+        CHECK(lifecycle.lastReason() == "provider_unavailable");
+    }
+
+    SECTION("generate embedding auto-loads unloaded model and returns vector") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-model.onnx");
+        provider->setSingleEmbeddingResult({0.1f, 0.2f, 0.3f});
+        svc.__test_setModelProvider(provider);
+
+        GenerateEmbeddingRequest req{"hello world", "embed-model", true};
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<EmbeddingResponse>(resp));
+        const auto& embedResp = std::get<EmbeddingResponse>(resp);
+        CHECK(embedResp.embedding == std::vector<float>{0.1f, 0.2f, 0.3f});
+        CHECK(embedResp.dimensions == 3);
+        CHECK(embedResp.modelUsed == "embed-model");
+        CHECK(provider->isModelLoaded("embed-model"));
+    }
+
+    SECTION("generate embedding forwards generator errors") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-error.onnx");
+        provider->setGenerateEmbeddingError(
+            Error{ErrorCode::InvalidState, "generator unavailable"});
+        svc.__test_setModelProvider(provider);
+
+        GenerateEmbeddingRequest req{"hello world", "", true};
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message == "generator unavailable");
+    }
+
+    SECTION("generate embedding sanitizes utf8 in load failures") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-utf8.onnx");
+        std::string invalidMessage = "prefix ";
+        invalidMessage.push_back(static_cast<char>(0xC2));
+        invalidMessage.push_back(static_cast<char>(0xA9));
+        invalidMessage.push_back(static_cast<char>(0xE2));
+        invalidMessage.push_back(static_cast<char>(0x82));
+        invalidMessage.push_back(static_cast<char>(0xAC));
+        invalidMessage.push_back(static_cast<char>(0xF0));
+        invalidMessage.push_back(static_cast<char>(0x9F));
+        invalidMessage.push_back(static_cast<char>(0x92));
+        invalidMessage.push_back(static_cast<char>(0xA9));
+        invalidMessage.push_back(static_cast<char>(0xC0));
+        invalidMessage.push_back(static_cast<char>(0xFF));
+        provider->setLoadError(Error{ErrorCode::InvalidState, invalidMessage});
+        svc.__test_setModelProvider(provider);
+
+        GenerateEmbeddingRequest req{"hello world", "embed-utf8", true};
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        std::string expected = "prefix ";
+        expected.push_back(static_cast<char>(0xC2));
+        expected.push_back(static_cast<char>(0xA9));
+        expected.push_back(static_cast<char>(0xE2));
+        expected.push_back(static_cast<char>(0x82));
+        expected.push_back(static_cast<char>(0xAC));
+        expected.push_back(static_cast<char>(0xF0));
+        expected.push_back(static_cast<char>(0x9F));
+        expected.push_back(static_cast<char>(0x92));
+        expected.push_back(static_cast<char>(0xA9));
+        expected += "\xEF\xBF\xBD\xEF\xBF\xBD";
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message == expected);
+    }
+
+    SECTION("generate embedding honors timeout env floor while auto-loading") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-timeout.onnx");
+        provider->setSingleEmbeddingResult({0.7f, 0.8f, 0.9f});
+        svc.__test_setModelProvider(provider);
+        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
+
+        GenerateEmbeddingRequest req{"hello world", "embed-timeout", true};
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<EmbeddingResponse>(resp));
+        const auto& embedResp = std::get<EmbeddingResponse>(resp);
+        CHECK(embedResp.embedding == std::vector<float>{0.7f, 0.8f, 0.9f});
+        CHECK(provider->isModelLoaded("embed-timeout"));
+    }
+
+    SECTION("generate embedding converts isModelLoaded exceptions into internal errors") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-throw.onnx");
+        provider->setThrowOnIsModelLoaded(true);
+        svc.__test_setModelProvider(provider);
+
+        GenerateEmbeddingRequest req{"hello world", "embed-throw", true};
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Embedding generation failed: isModelLoaded boom") !=
+              std::string::npos);
+    }
+
+    SECTION("batch embedding falls back to per-item generation") {
+        auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-fallback.onnx");
+        provider->setGenerateBatchError(Error{ErrorCode::NotImplemented, "batch unsupported"});
+        provider->setSingleEmbeddingResult({0.4f, 0.6f});
+        svc.__test_setModelProvider(provider);
+
+        BatchEmbeddingRequest req;
+        req.texts = {"one", "two"};
+        req.modelName = "";
+        req.normalize = false;
+        req.batchSize = 2;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<BatchEmbeddingResponse>(resp));
+        const auto& batchResp = std::get<BatchEmbeddingResponse>(resp);
+        REQUIRE(batchResp.embeddings.size() == 2);
+        CHECK(batchResp.embeddings[0] == std::vector<float>{0.4f, 0.6f});
+        CHECK(batchResp.embeddings[1] == std::vector<float>{0.4f, 0.6f});
+        CHECK(batchResp.successCount == 2);
+        CHECK(batchResp.failureCount == 0);
+        CHECK(batchResp.dimensions == 2);
+        CHECK(batchResp.modelUsed.empty());
+    }
+
+    SECTION("batch embedding counts per-item failures during fallback") {
+        auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-partial.onnx");
+        provider->setGenerateBatchError(Error{ErrorCode::NotImplemented, "batch unsupported"});
+        provider->setSingleEmbeddingResult({0.9f, 0.1f});
+        provider->setSingleTextError("bad", Error{ErrorCode::InternalError, "single failed"});
+        svc.__test_setModelProvider(provider);
+
+        BatchEmbeddingRequest req;
+        req.texts = {"good", "bad", "good-again"};
+        req.modelName = "";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<BatchEmbeddingResponse>(resp));
+        const auto& batchResp = std::get<BatchEmbeddingResponse>(resp);
+        REQUIRE(batchResp.embeddings.size() == 2);
+        CHECK(batchResp.successCount == 2);
+        CHECK(batchResp.failureCount == 1);
+        CHECK(batchResp.dimensions == 2);
+    }
+
+    SECTION("batch embedding forwards non-fallback errors") {
+        auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-error.onnx");
+        provider->setGenerateBatchError(Error{ErrorCode::InvalidState, "batch failed"});
+        svc.__test_setModelProvider(provider);
+
+        BatchEmbeddingRequest req;
+        req.texts = {"one", "two"};
+        req.modelName = "";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message == "batch failed");
+    }
+
+    SECTION("batch embedding auto-loads model and returns direct batch results") {
+        auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-direct.onnx");
+        provider->setBatchEmbeddingResult({{0.2f, 0.8f}});
+        svc.__test_setModelProvider(provider);
+        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
+
+        BatchEmbeddingRequest req;
+        req.texts = {"one", "two"};
+        req.modelName = "batch-direct";
+        req.normalize = true;
+        req.batchSize = 2;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<BatchEmbeddingResponse>(resp));
+        const auto& batchResp = std::get<BatchEmbeddingResponse>(resp);
+        REQUIRE(batchResp.embeddings.size() == 1);
+        CHECK(batchResp.embeddings[0] == std::vector<float>{0.2f, 0.8f});
+        CHECK(batchResp.successCount == 1);
+        CHECK(batchResp.failureCount == 1);
+        CHECK(batchResp.dimensions == 2);
+        CHECK(batchResp.modelUsed == "batch-direct");
+        CHECK(provider->isModelLoaded("batch-direct"));
+    }
+
+    SECTION("batch embedding returns load failures for unloaded models") {
+        auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-load-fail.onnx");
+        provider->setLoadError(Error{ErrorCode::InvalidState, "batch load refused"});
+        svc.__test_setModelProvider(provider);
+        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
+
+        BatchEmbeddingRequest req;
+        req.texts = {"one", "two"};
+        req.modelName = "batch-load-fail";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message == "batch load refused");
+    }
+
+    SECTION("batch embedding converts isModelLoaded exceptions into internal errors") {
+        auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-throw.onnx");
+        provider->setThrowOnIsModelLoaded(true);
+        svc.__test_setModelProvider(provider);
+
+        BatchEmbeddingRequest req;
+        req.texts = {"one"};
+        req.modelName = "batch-throw";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Batch embedding failed: isModelLoaded boom") != std::string::npos);
+    }
+
+    SECTION("embed documents rejects missing service manager") {
+        RequestDispatcher noServiceDispatcher(&lifecycle, nullptr, &state);
+
+        auto resp = dispatchRequest(noServiceDispatcher, Request{EmbedDocumentsRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message == "ServiceManager not available");
+    }
+
+    SECTION("embed documents reports unavailable model provider") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-provider.onnx");
+        provider->setAvailable(false);
+        svc.__test_setModelProvider(provider);
+
+        EmbedDocumentsRequest req;
+        req.modelName = "repair-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message == "Model provider not available");
+    }
+
+    SECTION("embed documents returns success when repair finds no work") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty.onnx");
+        svc.__test_setModelProvider(provider);
+        svc.__test_setContentStore(std::make_shared<StubContentStore>());
+        svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
+
+        EmbedDocumentsRequest req;
+        req.modelName = "repair-model";
+        req.batchSize = 4;
+        req.skipExisting = true;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<EmbedDocumentsResponse>(resp));
+        const auto& embedResp = std::get<EmbedDocumentsResponse>(resp);
+        CHECK(embedResp.requested == 0);
+        CHECK(embedResp.embedded == 0);
+        CHECK(embedResp.skipped == 0);
+        CHECK(embedResp.failed == 0);
+    }
+
+    SECTION("embed documents rejects degraded providers") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-degraded.onnx");
+        svc.__test_setModelProvider(provider);
+        svc.__test_setModelProviderDegraded(true, "simulated degraded state");
+
+        auto resp = dispatchRequest(dispatcher, Request{EmbedDocumentsRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message == "Embedding generation disabled: provider degraded");
+
+        svc.__test_setModelProviderDegraded(false);
+    }
+
+    SECTION("embed documents reports missing content store") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-content.onnx");
+        svc.__test_setModelProvider(provider);
+        svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
+
+        EmbedDocumentsRequest req;
+        req.modelName = "repair-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message == "Content store not available");
+    }
+
+    SECTION("embed documents reports missing metadata repo") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-meta.onnx");
+        svc.__test_setModelProvider(provider);
+        svc.__test_setContentStore(std::make_shared<StubContentStore>());
+
+        EmbedDocumentsRequest req;
+        req.modelName = "repair-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message == "Metadata repository not available");
+    }
+
+    SECTION("embed documents reports missing configured model name") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty-model.onnx");
+        svc.__test_setModelProvider(provider);
+        svc.__test_setContentStore(std::make_shared<StubContentStore>());
+        svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
+
+        EmbedDocumentsRequest req;
+        req.modelName = "";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message == "No embedding model configured");
     }
 }
 
