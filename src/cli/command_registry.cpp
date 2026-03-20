@@ -73,6 +73,22 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
 #endif
 }
 
+bool CommandRegistry::registerMinimalCommandSet(YamsCLI* cli, std::string_view commandName) {
+    if (commandName == "status") {
+        cli->registerCommand(CommandRegistry::createStatusCommand());
+        return true;
+    }
+    if (commandName == "list") {
+        cli->registerCommand(CommandRegistry::createListCommand());
+        return true;
+    }
+    if (commandName == "search") {
+        cli->registerCommand(CommandRegistry::createSearchCommand());
+        return true;
+    }
+    return false;
+}
+
 std::unique_ptr<ICommand> CommandRegistry::createInitCommand() {
     return ::yams::cli::createInitCommand();
 }

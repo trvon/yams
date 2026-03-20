@@ -20,6 +20,12 @@ public:
     static void registerAllCommands(YamsCLI* cli);
 
     /**
+     * Register a minimal built-in subset for fast one-shot commands.
+     * Returns true when the command name matched a supported fast path.
+     */
+    static bool registerMinimalCommandSet(YamsCLI* cli, std::string_view commandName);
+
+    /**
      * Create init command
      */
     static std::unique_ptr<ICommand> createInitCommand();

@@ -392,6 +392,13 @@ std::vector<std::string> deserializeStringVector(const std::string& json_str) {
 
 class SqliteVecBackend::Impl {
 public:
+    enum class HnswMaintenanceMode {
+        None,
+        LoadPersisted,
+        CatchUp,
+        FullRebuild,
+    };
+
     explicit Impl(const Config& config) : config_(config) {}
 
     ~Impl() { close(); }
@@ -402,6 +409,10 @@ public:
         if (db_) {
             return Error{ErrorCode::InvalidState, "Already initialized"};
         }
+
+        last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
+        last_hnsw_added_count_ = 0;
+        last_hnsw_removed_count_ = 0;
 
         int rc = sqlite3_open(db_path.c_str(), &db_);
         if (rc != SQLITE_OK) {
@@ -1503,6 +1514,21 @@ public:
         return Result<void>{};
     }
 
+    HnswMaintenanceMode testingLastHnswMaintenanceMode() const {
+        std::shared_lock lock(mutex_);
+        return last_hnsw_maintenance_mode_;
+    }
+
+    std::size_t testingLastHnswAddedCount() const {
+        std::shared_lock lock(mutex_);
+        return last_hnsw_added_count_;
+    }
+
+    std::size_t testingLastHnswRemovedCount() const {
+        std::shared_lock lock(mutex_);
+        return last_hnsw_removed_count_;
+    }
+
     Result<void> optimize() {
         std::unique_lock lock(mutex_);
 
@@ -2442,6 +2468,7 @@ private:
             }
             hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
             hnsw_dirty_[dim] = false;
+            last_hnsw_maintenance_mode_ = HnswMaintenanceMode::LoadPersisted;
             spdlog::info("[HNSW] Loaded index for dim={} with {} vectors", dim,
                          hnsw_indices_[dim]->size());
             return true;
@@ -2468,6 +2495,7 @@ private:
                                                               entryPointLayer, std::move(nodes));
                 hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
                 hnsw_dirty_[dim] = false;
+                last_hnsw_maintenance_mode_ = HnswMaintenanceMode::LoadPersisted;
                 spdlog::info("[HNSW] Loaded legacy checkpoint for dim={} with {} vectors", dim,
                              hnsw_indices_[dim]->size());
                 return true;
@@ -2599,6 +2627,9 @@ private:
 
     void catchUpDeferredHnswUnlocked() {
         spdlog::info("[HNSW] Catching up deferred updates from persisted indices");
+        last_hnsw_maintenance_mode_ = HnswMaintenanceMode::CatchUp;
+        last_hnsw_added_count_ = 0;
+        last_hnsw_removed_count_ = 0;
 
         hnsw_indices_.clear();
         hnsw_dirty_.clear();
@@ -2641,6 +2672,7 @@ private:
                         hnsw->remove(nodeId);
                     }
                     requireFullSave = true;
+                    last_hnsw_removed_count_ += orphanedIds.size();
                     spdlog::info(
                         "[HNSW] Deferred catch-up dim={} removed {} orphaned persisted nodes", dim,
                         orphanedIds.size());
@@ -2668,6 +2700,7 @@ private:
                             std::span<const std::span<const float>>(spans.data(), spans.size()));
                 requireFullSave = true;
                 hnsw_dirty_[dim] = true;
+                last_hnsw_added_count_ += ids.size();
                 spdlog::info("[HNSW] Deferred catch-up dim={} added {} new vectors", dim,
                              ids.size());
             }
@@ -2841,34 +2874,28 @@ private:
                 }
                 sqlite3_finalize(stmt);
 
-                const size_t parallelBuildThreshold = hnswParallelBuildThreshold();
-
                 for (auto& [dim, build] : dim_builds) {
                     auto* hnsw = getOrCreateHnswForDim(dim);
                     if (!hnsw || build.ids.empty()) {
                         continue;
                     }
 
-                    if (build.ids.size() >= parallelBuildThreshold) {
-                        std::vector<std::span<const float>> spans;
-                        spans.reserve(build.embeddings.size());
-                        for (auto& embedding : build.embeddings) {
-                            spans.emplace_back(embedding.data(), embedding.size());
-                        }
-                        hnsw->build_parallel(
-                            std::span<const size_t>(build.ids.data(), build.ids.size()),
-                            std::span<const std::span<const float>>(spans.data(), spans.size()), 0);
-                        spdlog::info("[HNSW] Parallel rebuilt index for dim={} with {} vectors",
-                                     dim, build.ids.size());
-                    } else {
-                        for (size_t i = 0; i < build.ids.size(); ++i) {
-                            std::span<const float> embedding_span(build.embeddings[i].data(),
-                                                                  build.embeddings[i].size());
-                            hnsw->insert(build.ids[i], embedding_span);
-                        }
-                        spdlog::info("[HNSW] Sequentially rebuilt index for dim={} with {} vectors",
-                                     dim, build.ids.size());
+                    std::vector<std::span<const float>> spans;
+                    spans.reserve(build.embeddings.size());
+                    for (auto& embedding : build.embeddings) {
+                        spans.emplace_back(embedding.data(), embedding.size());
                     }
+                    const auto buildStart = std::chrono::steady_clock::now();
+                    spdlog::info("[HNSW] Bulk rebuild start dim={} vectors={}", dim,
+                                 build.ids.size());
+                    hnsw->build(
+                        std::span<const size_t>(build.ids.data(), build.ids.size()),
+                        std::span<const std::span<const float>>(spans.data(), spans.size()));
+                    const auto buildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - buildStart)
+                                             .count();
+                    spdlog::info("[HNSW] Bulk rebuilt index for dim={} with {} vectors in {} ms",
+                                 dim, build.ids.size(), buildMs);
                 }
 
                 // Log what we built and save immediately
@@ -2896,6 +2923,8 @@ private:
 
             std::string table_prefix = hnswTablePrefix(dim);
             char* err = nullptr;
+            const auto saveStart = std::chrono::steady_clock::now();
+            spdlog::info("[HNSW] Saving full index for dim={} with {} vectors", dim, hnsw->size());
             int rc = sqlite_vec_cpp::index::save_hnsw_index<float, DistanceMetric>(
                 db_, "main", table_prefix.c_str(), *hnsw, &err);
             if (rc != SQLITE_OK) {
@@ -2905,7 +2934,11 @@ private:
                 }
             } else {
                 hnsw_dirty_[dim] = false;
-                spdlog::debug("[HNSW] Saved index for dim={} with {} vectors", dim, hnsw->size());
+                const auto saveMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - saveStart)
+                                        .count();
+                spdlog::info("[HNSW] Saved index for dim={} with {} vectors in {} ms", dim,
+                             hnsw->size(), saveMs);
             }
         }
         pending_inserts_ = 0;
@@ -2934,6 +2967,9 @@ private:
 
     // Rebuild all HNSW indices from scratch
     void rebuildHnswUnlocked() {
+        last_hnsw_maintenance_mode_ = HnswMaintenanceMode::FullRebuild;
+        last_hnsw_added_count_ = 0;
+        last_hnsw_removed_count_ = 0;
         hnsw_indices_.clear();
         hnsw_dirty_.clear();
         hnsw_loaded_ = false;
@@ -3015,6 +3051,9 @@ private:
     bool hnsw_loaded_ = false;
     bool hnsw_needs_rebuild_ = false;
     size_t pending_inserts_ = 0;
+    HnswMaintenanceMode last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
+    std::size_t last_hnsw_added_count_ = 0;
+    std::size_t last_hnsw_removed_count_ = 0;
 
     // Helper to get table prefix for dimension-specific HNSW tables
     std::string hnswTablePrefix(size_t dim) const { return "vectors_" + std::to_string(dim); }
@@ -3252,6 +3291,29 @@ Result<SqliteVecBackend::OrphanCleanupStats> SqliteVecBackend::cleanupOrphanRows
 Result<void> SqliteVecBackend::ensureVecLoaded() {
     // sqlite-vec-cpp doesn't require extension loading - it's statically linked
     return Result<void>{};
+}
+
+SqliteVecBackend::HnswMaintenanceMode SqliteVecBackend::testingLastHnswMaintenanceMode() const {
+    auto mode = impl_->testingLastHnswMaintenanceMode();
+    switch (mode) {
+        case Impl::HnswMaintenanceMode::LoadPersisted:
+            return HnswMaintenanceMode::LoadPersisted;
+        case Impl::HnswMaintenanceMode::CatchUp:
+            return HnswMaintenanceMode::CatchUp;
+        case Impl::HnswMaintenanceMode::FullRebuild:
+            return HnswMaintenanceMode::FullRebuild;
+        case Impl::HnswMaintenanceMode::None:
+        default:
+            return HnswMaintenanceMode::None;
+    }
+}
+
+std::size_t SqliteVecBackend::testingLastHnswAddedCount() const {
+    return impl_->testingLastHnswAddedCount();
+}
+
+std::size_t SqliteVecBackend::testingLastHnswRemovedCount() const {
+    return impl_->testingLastHnswRemovedCount();
 }
 
 // ============================================================================

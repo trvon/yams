@@ -166,6 +166,12 @@ private:
     void registerBuiltinCommands();
 
     /**
+     * Register a minimal built-in set when a one-shot command can use a fast path.
+     * Returns true if a reduced command set was registered.
+     */
+    bool registerBuiltinCommandsFor(std::string_view commandName);
+
+    /**
      * Load compression configuration from config file
      */
     CompressionConfig loadCompressionConfig() const;

@@ -123,6 +123,16 @@ void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
     }
 }
 
+bool env_truthy(const char* raw) {
+    if (raw == nullptr || *raw == '\0') {
+        return false;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value == "1" || value == "true" || value == "on" || value == "yes";
+}
+
 } // namespace
 
 void YamsCLI::setPendingCommand(ICommand* cmd) {
@@ -322,13 +332,20 @@ int YamsCLI::run(int argc, char* argv[]) {
             }
         }
 
-        // Register all commands
+        // Register a minimal command set for hot one-shot commands to reduce fixed startup cost.
         {
             const auto t0 = std::chrono::steady_clock::now();
-            registerBuiltinCommands();
+            bool fastPathRegistered = false;
+            if (env_truthy(std::getenv("YAMS_CLI_ONE_SHOT")) && !subcmd.empty()) {
+                fastPathRegistered = registerBuiltinCommandsFor(subcmd);
+            }
+            if (!fastPathRegistered) {
+                registerBuiltinCommands();
+            }
             cli_perf_trace("cli.register_commands",
                            std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - t0));
+                               std::chrono::steady_clock::now() - t0),
+                           fastPathRegistered ? "minimal" : "full");
         }
 
         // If 'daemon' is invoked without a subcommand, inject 'status' by default
@@ -1201,6 +1218,10 @@ YamsCLI::fastMetadataValueCounts(const std::vector<std::string>& keys, int limit
 
 void YamsCLI::registerBuiltinCommands() {
     CommandRegistry::registerAllCommands(this);
+}
+
+bool YamsCLI::registerBuiltinCommandsFor(std::string_view commandName) {
+    return CommandRegistry::registerMinimalCommandSet(this, commandName);
 }
 
 void YamsCLI::registerCommand(std::unique_ptr<ICommand> command) {

@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <yams/app/services/session_service.hpp>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
@@ -29,6 +30,8 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
+#include <yams/daemon/ipc/request_context.h>
+#include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
@@ -304,6 +307,23 @@ public:
         snapshotDocs_ = std::move(docs);
     }
     void setSnapshotDocumentsError(Error error) { snapshotDocsError_ = std::move(error); }
+    void setExactPathDocument(std::optional<metadata::DocumentInfo> doc) {
+        std::lock_guard<std::mutex> lk(mu_);
+        exactPathDocument_ = std::move(doc);
+    }
+    void setExactPathError(Error error) {
+        std::lock_guard<std::mutex> lk(mu_);
+        exactPathError_ = std::move(error);
+    }
+    void setAllMetadata(int64_t id,
+                        std::unordered_map<std::string, metadata::MetadataValue> values) {
+        std::lock_guard<std::mutex> lk(mu_);
+        metadataById_[id] = std::move(values);
+    }
+    void setPathTreeDocuments(std::vector<metadata::DocumentInfo> docs) {
+        std::lock_guard<std::mutex> lk(mu_);
+        pathTreeDocs_ = std::move(docs);
+    }
     void setMetadataValueCounts(
         std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>> counts) {
         metadataValueCounts_ = std::move(counts);
@@ -374,6 +394,37 @@ public:
         return std::optional<metadata::DocumentInfo>(std::nullopt);
     }
 
+    Result<std::unordered_map<std::string, metadata::MetadataValue>>
+    getAllMetadata(int64_t documentId) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (auto it = metadataById_.find(documentId); it != metadataById_.end()) {
+            return it->second;
+        }
+        return std::unordered_map<std::string, metadata::MetadataValue>{};
+    }
+
+    Result<std::optional<metadata::DocumentInfo>>
+    findDocumentByExactPath(const std::string&) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (exactPathError_) {
+            return *exactPathError_;
+        }
+        if (exactPathDocument_.has_value()) {
+            return exactPathDocument_;
+        }
+        return std::optional<metadata::DocumentInfo>(std::nullopt);
+    }
+
+    Result<std::vector<metadata::DocumentInfo>>
+    findDocumentsByPathTreePrefix(std::string_view, bool = true, int limit = 0) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (limit > 0 && static_cast<std::size_t>(limit) < pathTreeDocs_.size()) {
+            return std::vector<metadata::DocumentInfo>(pathTreeDocs_.begin(),
+                                                       pathTreeDocs_.begin() + limit);
+        }
+        return pathTreeDocs_;
+    }
+
     Result<void> deleteDocument(int64_t id) override {
         std::lock_guard<std::mutex> lk(mu_);
         deleteCallCount_++;
@@ -405,6 +456,11 @@ private:
     std::unordered_set<std::string> missingHashes_;
     std::unordered_map<std::string, std::string> throwOnLookup_;
     std::unordered_map<int64_t, Error> deleteErrors_;
+    std::optional<metadata::DocumentInfo> exactPathDocument_;
+    std::optional<Error> exactPathError_;
+    std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
+        metadataById_;
+    std::vector<metadata::DocumentInfo> pathTreeDocs_;
     std::vector<std::string> snapshots_;
     std::vector<metadata::DocumentInfo> snapshotDocs_;
     std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>> metadataValueCounts_;
@@ -414,6 +470,12 @@ private:
 
 class StubContentStore : public api::IContentStore {
 public:
+    void setBlob(const std::string& hash, const std::string& content) {
+        blobs_[hash] = std::vector<std::byte>(reinterpret_cast<const std::byte*>(content.data()),
+                                              reinterpret_cast<const std::byte*>(content.data()) +
+                                                  content.size());
+    }
+
     Result<api::StoreResult> storeBytes(std::span<const std::byte> data,
                                         const api::ContentMetadata&) override {
         std::string hash = "stub-hash-" + std::to_string(blobs_.size() + 1);
@@ -558,6 +620,13 @@ struct GraphDispatcherFixture {
             edge.properties = properties;
         }
         REQUIRE(kgStore->addEdge(edge).has_value());
+    }
+
+    void execSql(const std::string& sql) {
+        REQUIRE(pool);
+        auto result = pool->withConnection(
+            [&](metadata::Database& db) -> Result<void> { return db.execute(sql); });
+        REQUIRE(result.has_value());
     }
 
     std::filesystem::path testDir;
@@ -1637,6 +1706,159 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     }
 }
 
+TEST_CASE("RequestDispatcher: document handlers cover direct helper and error branches",
+          "[daemon][documents][dispatcher]") {
+    auto makeDoc = [](int64_t id, std::string filePath, std::string hash) {
+        metadata::DocumentInfo doc{};
+        doc.id = id;
+        doc.filePath = std::move(filePath);
+        doc.fileName = std::filesystem::path(doc.filePath).filename().string();
+        doc.fileExtension = std::filesystem::path(doc.filePath).extension().string();
+        doc.fileSize = 12;
+        doc.sha256Hash = std::move(hash);
+        doc.mimeType = "text/plain";
+        doc.setIndexedTime(1710000000 + id);
+        return doc;
+    };
+
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_documents_dispatcher_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    SECTION("prepareSession returns missing-session error for unknown session") {
+        EnvGuard stateHome("XDG_STATE_HOME",
+                           makeTempDir("yams_prepare_missing_session_").string().c_str());
+
+        RequestDispatcher::PrepareSessionOptions opts;
+        opts.sessionName = "missing";
+
+        CHECK(dispatcher.prepareSession(opts) == -2);
+    }
+
+    SECTION("prepareSession warms current session documents") {
+        auto stateRoot = makeTempDir("yams_prepare_session_");
+        EnvGuard stateHome("XDG_STATE_HOME", stateRoot.string().c_str());
+
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(7, "src/demo.cpp", "warm-hash");
+        repo->setPathTreeDocuments({doc});
+        store->setBlob("warm-hash", "hello snippet world");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        auto sessionSvc = app::services::makeSessionService(nullptr);
+        REQUIRE(sessionSvc != nullptr);
+        sessionSvc->init("warm-session", "coverage");
+        sessionSvc->addPathSelector("src/**/*.cpp", {}, {});
+
+        RequestDispatcher::PrepareSessionOptions opts;
+        opts.sessionName = "warm-session";
+        opts.limit = 5;
+        opts.snippetLen = 5;
+
+        CHECK(dispatcher.prepareSession(opts) == 1);
+
+        auto materialized = sessionSvc->listMaterialized("warm-session");
+        REQUIRE(materialized.size() == 1);
+        CHECK(materialized.front().hash == "warm-hash");
+        CHECK(materialized.front().snippet == "hello");
+    }
+
+    SECTION("cancel request succeeds when context is registered") {
+        auto ctx = std::make_shared<RequestContext>();
+        RequestContextRegistry::instance().register_context(4242, ctx);
+
+        auto resp = dispatchRequest(dispatcher, Request{CancelRequest{4242}});
+
+        RequestContextRegistry::instance().deregister_context(4242);
+        REQUIRE(std::holds_alternative<SuccessResponse>(resp));
+        CHECK(std::get<SuccessResponse>(resp).message == "Cancel accepted");
+        CHECK(ctx->canceled.load(std::memory_order_relaxed));
+    }
+
+    SECTION("get init rejects missing hash and name") {
+        auto resp = dispatchRequest(dispatcher, Request{GetInitRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message.find("hash or name required") != std::string::npos);
+    }
+
+    SECTION("get init reports missing content store") {
+        GetInitRequest req;
+        req.hash = "missing-store-hash";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message.find("content store unavailable") != std::string::npos);
+    }
+
+    SECTION("get chunk reports missing retrieval session manager") {
+        auto resp = dispatchRequest(dispatcher, Request{GetChunkRequest{9999, 0, 4}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message.find("retrieval session manager unavailable") != std::string::npos);
+    }
+
+    SECTION("delete rejects directory removal without recursive flag") {
+        DeleteRequest req;
+        req.directory = "cache";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message.find("recursive flag") != std::string::npos);
+    }
+
+    SECTION("file history reports missing metadata repository") {
+        FileHistoryRequest req;
+        req.filepath = "missing.txt";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message.find("Metadata repository not available") != std::string::npos);
+    }
+
+    SECTION("file history falls back to filename query and reports no snapshot versions") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto doc = makeDoc(9, "/tmp/archive/report.txt", "history-hash");
+        repo->addDocument(doc);
+        svc.__test_setMetadataRepo(repo);
+
+        FileHistoryRequest req;
+        req.filepath = "report.txt";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<FileHistoryResponse>(resp));
+        const auto& history = std::get<FileHistoryResponse>(resp);
+        CHECK_FALSE(history.found);
+        CHECK(history.totalVersions == 0);
+        CHECK(history.versions.empty());
+        CHECK(history.message == "File found in index but not in any snapshot");
+        CHECK(history.filepath.find("report.txt") != std::string::npos);
+    }
+}
+
 TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair branches",
           "[daemon][embedding][dispatcher]") {
     DaemonConfig cfg;
@@ -2057,6 +2279,29 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(graphResp.warning == "Knowledge graph not available");
     }
 
+    SECTION("graph path history reports unavailable metadata repository") {
+        GraphPathHistoryRequest req;
+        req.path = "/repo/file.cpp";
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "Metadata repository unavailable");
+    }
+
+    SECTION("graph query traversal requires an origin") {
+        fixture.initMetadata();
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{GraphQueryRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message.find("No valid origin specified") != std::string::npos);
+    }
+
     SECTION("graph query lists node types") {
         fixture.initMetadata();
         fixture.upsertNode("fn:list:1", "alpha", "function");
@@ -2075,6 +2320,21 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(graphResp.nodeTypeCounts.size() == 2);
         CHECK(graphResp.nodeTypeCounts[0] == std::pair<std::string, uint64_t>{"function", 2});
         CHECK(graphResp.nodeTypeCounts[1] == std::pair<std::string, uint64_t>{"file", 1});
+    }
+
+    SECTION("graph query list types reports store errors") {
+        fixture.initMetadata();
+        fixture.execSql("ALTER TABLE kg_nodes RENAME TO kg_nodes_broken");
+
+        GraphQueryRequest req;
+        req.listTypes = true;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code != ErrorCode::Success);
+        CHECK_FALSE(err.message.empty());
     }
 
     SECTION("graph query lists relation counts") {
@@ -2096,6 +2356,21 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(graphResp.relationTypeCounts.size() == 2);
         CHECK(graphResp.relationTypeCounts[0] == std::pair<std::string, uint64_t>{"calls", 1});
         CHECK(graphResp.relationTypeCounts[1] == std::pair<std::string, uint64_t>{"includes", 1});
+    }
+
+    SECTION("graph query list relations reports store errors") {
+        fixture.initMetadata();
+        fixture.execSql("ALTER TABLE kg_edges RENAME TO kg_edges_broken");
+
+        GraphQueryRequest req;
+        req.listRelations = true;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code != ErrorCode::Success);
+        CHECK_FALSE(err.message.empty());
     }
 
     SECTION("graph query search mode requires a pattern") {
@@ -2131,6 +2406,22 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(graphResp.connectedNodes.size() == 1);
         CHECK(graphResp.connectedNodes[0].nodeKey == "fn:search:alpha");
         CHECK(graphResp.connectedNodes[0].properties == R"({"rank":1})");
+    }
+
+    SECTION("graph query search mode reports store errors") {
+        fixture.initMetadata();
+        fixture.execSql("ALTER TABLE kg_nodes RENAME TO kg_nodes_broken");
+
+        GraphQueryRequest req;
+        req.searchMode = true;
+        req.searchPattern = "%Alpha%";
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code != ErrorCode::Success);
+        CHECK_FALSE(err.message.empty());
     }
 
     SECTION("graph query list by type requires node type") {
@@ -2172,6 +2463,22 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK_FALSE(graphResp.connectedNodes[0].properties.empty());
     }
 
+    SECTION("graph query list by type reports store errors") {
+        fixture.initMetadata();
+        fixture.execSql("ALTER TABLE kg_nodes RENAME TO kg_nodes_broken");
+
+        GraphQueryRequest req;
+        req.listByType = true;
+        req.nodeType = "function";
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code != ErrorCode::Success);
+        CHECK_FALSE(err.message.empty());
+    }
+
     SECTION("graph query isolated mode canonicalizes relation name") {
         fixture.initMetadata();
         auto calledId = fixture.upsertNode("fn:isolated:called", "called", "function");
@@ -2195,6 +2502,41 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         for (const auto& node : graphResp.connectedNodes) {
             CHECK(node.nodeKey != "fn:isolated:called");
         }
+    }
+
+    SECTION("graph query isolated mode uses default node type and relation") {
+        fixture.initMetadata();
+        auto calledId = fixture.upsertNode("fn:isolated:default:called", "called", "function");
+        fixture.upsertNode("fn:isolated:default:free", "free", "function");
+        auto callerId = fixture.upsertNode("fn:isolated:default:caller", "caller", "function");
+        fixture.addEdge(callerId, calledId, "calls");
+
+        GraphQueryRequest req;
+        req.isolatedMode = true;
+        req.limit = 10;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK(graphResp.originNode.label == "isolated:function:calls");
+        REQUIRE(graphResp.connectedNodes.size() == 2);
+    }
+
+    SECTION("graph query isolated mode reports store errors") {
+        fixture.initMetadata();
+        fixture.execSql("ALTER TABLE kg_nodes RENAME TO kg_nodes_broken");
+
+        GraphQueryRequest req;
+        req.isolatedMode = true;
+        req.limit = 10;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code != ErrorCode::Success);
+        CHECK_FALSE(err.message.empty());
     }
 
     SECTION("graph query node key lookup returns not found") {
@@ -2237,6 +2579,49 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(graphResp.edges.size() == 1);
         CHECK(graphResp.edges[0].relation == "calls");
         CHECK(graphResp.edges[0].properties == R"({"source":"unit"})");
+    }
+
+    SECTION("graph query canonicalizes relation aliases and skips blank filters") {
+        fixture.initMetadata();
+        auto originId = fixture.upsertNode("fn:key:origin", "origin", "function");
+        auto includeId = fixture.upsertNode("path:key:include", "header", "file");
+        auto inheritId = fixture.upsertNode("cls:key:inherit", "Base", "class");
+        auto implementId = fixture.upsertNode("iface:key:impl", "Iface", "interface");
+        auto referenceId = fixture.upsertNode("sym:key:ref", "Ref", "symbol");
+        auto renameToId = fixture.upsertNode("path:key:rename_to", "new.cpp", "file");
+        auto renameFromId = fixture.upsertNode("path:key:rename_from", "old.cpp", "file");
+        auto customId = fixture.upsertNode("sym:key:custom", "Custom", "symbol");
+        fixture.addEdge(originId, includeId, "includes");
+        fixture.addEdge(originId, inheritId, "inherits");
+        fixture.addEdge(originId, implementId, "implements");
+        fixture.addEdge(originId, referenceId, "references");
+        fixture.addEdge(originId, renameToId, "renamed_to");
+        fixture.addEdge(originId, renameFromId, "renamed_from");
+        fixture.addEdge(originId, customId, "custom_rel");
+
+        GraphQueryRequest req;
+        req.nodeKey = "fn:key:origin";
+        req.maxDepth = 1;
+        req.maxResults = 20;
+        req.relationFilters = {"   ",       " Include ", "inherit",     "implement",
+                               "reference", "rename_to", "rename_from", "custom-rel"};
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        REQUIRE(graphResp.edges.size() == 7);
+        std::unordered_set<std::string> relations;
+        for (const auto& edge : graphResp.edges) {
+            relations.insert(edge.relation);
+        }
+        CHECK(relations.count("includes") == 1);
+        CHECK(relations.count("inherits") == 1);
+        CHECK(relations.count("implements") == 1);
+        CHECK(relations.count("references") == 1);
+        CHECK(relations.count("renamed_to") == 1);
+        CHECK(relations.count("renamed_from") == 1);
+        CHECK(relations.count("custom_rel") == 1);
     }
 
     SECTION("graph path history requires path") {
@@ -2287,6 +2672,21 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(historyResp.history[0].changeType == "unknown");
         CHECK(historyResp.history[1].snapshotId == "snap1");
         CHECK_FALSE(historyResp.hasMore);
+    }
+
+    SECTION("graph path history reports store errors") {
+        fixture.initMetadata();
+        fixture.execSql("ALTER TABLE kg_nodes RENAME TO kg_nodes_broken");
+
+        GraphPathHistoryRequest req;
+        req.path = "/repo/file.cpp";
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code != ErrorCode::Success);
+        CHECK_FALSE(err.message.empty());
     }
 
     SECTION("kg ingest reports unavailable metadata repository") {
@@ -2363,6 +2763,126 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         auto aliases = fixture.kgStore->resolveAliasExact("sourceAlias", 10);
         REQUIRE(aliases.has_value());
         REQUIRE(aliases.value().size() == 1);
+    }
+
+    SECTION("kg ingest reports node upsert failures") {
+        fixture.initMetadata();
+        fixture.execSql("ALTER TABLE kg_nodes RENAME TO kg_nodes_broken");
+
+        KgIngestRequest req;
+        req.nodes.push_back(KgIngestNode{"fn:broken:node", "Broken", "function", ""});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK_FALSE(ingestResp.success);
+        CHECK(ingestResp.nodesInserted == 0);
+        REQUIRE(ingestResp.errors.size() == 1);
+        CHECK(ingestResp.errors[0].find("Node upsert failed:") == 0);
+    }
+
+    SECTION("kg ingest inserts edges without de-duplication when requested") {
+        fixture.initMetadata();
+        fixture.upsertNode("fn:addedges:src", "Source", "function");
+        fixture.upsertNode("fn:addedges:dst", "Dest", "function");
+
+        KgIngestRequest req;
+        req.skipExistingEdges = false;
+        req.edges.push_back(KgIngestEdge{"fn:addedges:src", "fn:addedges:dst", "calls", 1.0f, ""});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK(ingestResp.success);
+        CHECK(ingestResp.edgesInserted == 1);
+        CHECK(ingestResp.errors.empty());
+    }
+
+    SECTION("kg ingest reports edge insert failures") {
+        fixture.initMetadata();
+        fixture.upsertNode("fn:edgefail:src", "Source", "function");
+        fixture.upsertNode("fn:edgefail:dst", "Dest", "function");
+        fixture.execSql("ALTER TABLE kg_edges RENAME TO kg_edges_broken");
+
+        KgIngestRequest req;
+        req.skipExistingEdges = false;
+        req.edges.push_back(KgIngestEdge{"fn:edgefail:src", "fn:edgefail:dst", "calls", 1.0f, ""});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK_FALSE(ingestResp.success);
+        CHECK(ingestResp.edgesInserted == 0);
+        REQUIRE(ingestResp.errors.size() == 1);
+        CHECK(ingestResp.errors[0].find("Edge insert failed:") == 0);
+    }
+
+    SECTION("kg ingest reports alias insert failures") {
+        fixture.initMetadata();
+        fixture.upsertNode("fn:aliasfail:node", "Node", "function");
+        fixture.execSql("ALTER TABLE kg_aliases RENAME TO kg_aliases_broken");
+
+        KgIngestRequest req;
+        req.aliases.push_back(KgIngestAlias{"fn:aliasfail:node", "brokenAlias", "unit", 0.4f});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK(ingestResp.success);
+        CHECK(ingestResp.aliasesInserted == 0);
+        REQUIRE(ingestResp.errors.size() == 1);
+        CHECK(ingestResp.errors[0].find("Alias insert failed:") == 0);
+    }
+
+    SECTION("kg ingest resolves existing nodes for edges and aliases") {
+        fixture.initMetadata();
+        auto srcId = fixture.upsertNode("fn:existing:src", "Source", "function");
+        auto dstId = fixture.upsertNode("fn:existing:dst", "Dest", "function");
+        auto aliasNodeId = fixture.upsertNode("fn:existing:alias", "AliasTarget", "function");
+        (void)srcId;
+        (void)dstId;
+        (void)aliasNodeId;
+
+        KgIngestRequest req;
+        req.edges.push_back(KgIngestEdge{"fn:existing:src", "fn:existing:dst", "calls", 1.0f, ""});
+        req.aliases.push_back(KgIngestAlias{"fn:existing:alias", "existingAlias", "", 0.6f});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK(ingestResp.success);
+        CHECK(ingestResp.nodesInserted == 0);
+        CHECK(ingestResp.edgesInserted == 1);
+        CHECK(ingestResp.aliasesInserted == 1);
+        CHECK(ingestResp.errors.empty());
+
+        auto aliases = fixture.kgStore->resolveAliasExact("existingAlias", 10);
+        REQUIRE(aliases.has_value());
+        REQUIRE(aliases.value().size() == 1);
+    }
+
+    SECTION("kg ingest reports missing edge source nodes") {
+        fixture.initMetadata();
+        fixture.upsertNode("fn:existing:dst_only", "Dest", "function");
+
+        KgIngestRequest req;
+        req.edges.push_back(
+            KgIngestEdge{"fn:missing:src", "fn:existing:dst_only", "calls", 1.0f, ""});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK(ingestResp.success);
+        CHECK(ingestResp.edgesInserted == 0);
+        CHECK(ingestResp.edgesSkipped == 1);
+        REQUIRE(ingestResp.errors.size() == 1);
+        CHECK(ingestResp.errors[0] == "Edge source node not found: fn:missing:src");
     }
 }
 

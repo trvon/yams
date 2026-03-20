@@ -518,6 +518,170 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
         // Should return empty matches for unique non-existent pattern
         REQUIRE(grepResult.value().matches.empty());
     }
+
+    SECTION("prepare session request succeeds") {
+        PrepareSessionRequest req;
+        req.sessionName = "default";
+        req.limit = 16;
+        req.snippetLen = 48;
+
+        auto result = yams::cli::run_sync(client.prepareSession(req), 10s);
+
+        REQUIRE(result.has_value());
+        CHECK(result.value().warmedCount == 0);
+        CHECK(result.value().message == "OK");
+    }
+
+    SECTION("chunked get protocol succeeds by name") {
+        const std::string docName = "test_chunk_protocol.txt";
+        const std::string content = "chunked retrieval content for request execution";
+
+        AddDocumentRequest addReq;
+        addReq.name = docName;
+        addReq.content = content;
+
+        auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+        REQUIRE(addResult.has_value());
+
+        auto getResult = getWithRetry(client, addResult.value().hash);
+        REQUIRE(getResult.has_value());
+
+        GetInitRequest initReq;
+        initReq.name = docName;
+        initReq.byName = true;
+        initReq.chunkSize = 7;
+
+        auto initResult = yams::cli::run_sync(client.getInit(initReq), 10s);
+        REQUIRE(initResult.has_value());
+        REQUIRE(initResult.value().transferId != 0);
+        CHECK(initResult.value().totalSize == content.size());
+        CHECK(initResult.value().chunkSize == 7);
+        CHECK(initResult.value().metadata.contains("hash"));
+        CHECK(initResult.value().metadata.at("hash") == addResult.value().hash);
+
+        std::string assembled;
+        uint64_t offset = 0;
+        uint64_t remaining = initResult.value().totalSize;
+        while (remaining > 0) {
+            GetChunkRequest chunkReq{initResult.value().transferId, offset, 7};
+            auto chunkResult = yams::cli::run_sync(client.getChunk(chunkReq), 10s);
+            REQUIRE(chunkResult.has_value());
+            assembled += chunkResult.value().data;
+            offset += chunkResult.value().data.size();
+            remaining = chunkResult.value().bytesRemaining;
+        }
+
+        CHECK(assembled == content);
+
+        auto endResult =
+            yams::cli::run_sync(client.getEnd(GetEndRequest{initResult.value().transferId}), 10s);
+        REQUIRE(endResult.has_value());
+        CHECK(endResult.value().message == "OK");
+    }
+
+    SECTION("cat request returns stored content") {
+        AddDocumentRequest addReq;
+        addReq.name = "test_cat_request.txt";
+        addReq.content = "cat request body";
+
+        auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+        REQUIRE(addResult.has_value());
+        REQUIRE(getWithRetry(client, addResult.value().hash).has_value());
+
+        CatRequest catReq;
+        catReq.hash = addResult.value().hash;
+
+        auto catResult = yams::cli::run_sync(client.cat(catReq), 10s);
+
+        REQUIRE(catResult.has_value());
+        CHECK(catResult.value().hash == addResult.value().hash);
+        CHECK(catResult.value().name == "test_cat_request.txt");
+        CHECK(catResult.value().content.find("cat request body") != std::string::npos);
+    }
+
+    SECTION("update document request succeeds") {
+        AddDocumentRequest addReq;
+        addReq.name = "test_update_request.txt";
+        addReq.content = "update request body";
+
+        auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+        REQUIRE(addResult.has_value());
+        REQUIRE(getWithRetry(client, addResult.value().hash).has_value());
+
+        UpdateDocumentRequest updateReq;
+        updateReq.hash = addResult.value().hash;
+        updateReq.metadata["owner"] = "socket-test";
+        updateReq.addTags.push_back("request-execution");
+
+        auto updateResult = yams::cli::run_sync(client.updateDocument(updateReq), 10s);
+
+        REQUIRE(updateResult.has_value());
+        CHECK((updateResult.value().contentUpdated || !updateResult.value().hash.empty() ||
+               updateResult.value().metadataUpdated || updateResult.value().tagsUpdated));
+    }
+
+    SECTION("delete request succeeds") {
+        AddDocumentRequest addReq;
+        addReq.name = "test_delete_request.txt";
+        addReq.content = "delete request body";
+
+        auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+        REQUIRE(addResult.has_value());
+        REQUIRE(getWithRetry(client, addResult.value().hash).has_value());
+
+        DeleteRequest deleteReq;
+        deleteReq.hash = addResult.value().hash;
+
+        auto deleteResult = yams::cli::run_sync(client.call<DeleteRequest>(deleteReq), 10s);
+
+        REQUIRE(deleteResult.has_value());
+        CHECK_FALSE(deleteResult.value().dryRun);
+    }
+
+    SECTION("download request returns policy reminder") {
+        DownloadRequest downloadReq;
+        downloadReq.url = "https://example.com/archive.txt";
+
+        auto downloadResult = yams::cli::run_sync(client.call<DownloadRequest>(downloadReq), 10s);
+
+        REQUIRE(downloadResult.has_value());
+        CHECK(downloadResult.value().url == downloadReq.url);
+        CHECK_FALSE(downloadResult.value().success);
+        CHECK(downloadResult.value().error.find("Daemon download is disabled") !=
+              std::string::npos);
+    }
+
+    SECTION("cancel request reports missing request id") {
+        auto cancelResult =
+            yams::cli::run_sync(client.executeRequest(Request{CancelRequest{999999999ULL}}), 10s);
+
+        REQUIRE_FALSE(cancelResult.has_value());
+    }
+
+    SECTION("file history request reports document outside snapshots") {
+        const std::string docName = "test_file_history_request.txt";
+
+        AddDocumentRequest addReq;
+        addReq.name = docName;
+        addReq.content = "file history request body";
+
+        auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+        REQUIRE(addResult.has_value());
+        REQUIRE(getWithRetry(client, addResult.value().hash).has_value());
+
+        FileHistoryRequest historyReq;
+        historyReq.filepath = (std::filesystem::current_path() / docName).string();
+
+        auto historyResult = yams::cli::run_sync(client.fileHistory(historyReq), 10s);
+
+        REQUIRE(historyResult.has_value());
+        CHECK(historyResult.value().filepath ==
+              std::filesystem::absolute(std::filesystem::current_path() / docName)
+                  .lexically_normal()
+                  .string());
+        CHECK(historyResult.value().totalVersions >= 1);
+        CHECK_FALSE(historyResult.value().versions.empty());
+    }
 }
 
 TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][model]") {

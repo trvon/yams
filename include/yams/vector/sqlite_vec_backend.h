@@ -42,7 +42,7 @@ public:
     struct Config {
         size_t embedding_dim = 384;        ///< Embedding dimensions
         size_t hnsw_m = 16;                ///< HNSW connections per node
-        size_t hnsw_ef_construction = 200; ///< HNSW build exploration factor
+        size_t hnsw_ef_construction = 128; ///< HNSW build exploration factor
         size_t hnsw_ef_search = 100;       ///< HNSW search exploration factor
         size_t checkpoint_threshold = 100; ///< Inserts before HNSW checkpoint
         float compaction_threshold = 0.2f; ///< Compact when >20% deleted
@@ -139,6 +139,17 @@ public:
 
     /// Explicitly ensure sqlite-vec module is loaded (for doctor command)
     Result<void> ensureVecLoaded();
+
+    enum class HnswMaintenanceMode {
+        None,
+        LoadPersisted,
+        CatchUp,
+        FullRebuild,
+    };
+
+    HnswMaintenanceMode testingLastHnswMaintenanceMode() const;
+    std::size_t testingLastHnswAddedCount() const;
+    std::size_t testingLastHnswRemovedCount() const;
 
 private:
     class Impl;
