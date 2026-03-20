@@ -33,6 +33,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_database.h>
 
@@ -486,6 +487,89 @@ public:
 
 private:
     std::unordered_map<std::string, std::vector<std::byte>> blobs_;
+};
+
+std::filesystem::path makeTempDir(const std::string& prefix);
+
+struct GraphDispatcherFixture {
+    GraphDispatcherFixture() {
+        testDir = makeTempDir("yams_graph_dispatcher_");
+        cfg.dataDir = testDir;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        svc = std::make_unique<ServiceManager>(cfg, state, lifecycleFsm);
+        dispatcher = std::make_unique<RequestDispatcher>(&lifecycle, svc.get(), &state);
+    }
+
+    ~GraphDispatcherFixture() {
+        kgStore.reset();
+        repo.reset();
+        pool.reset();
+        std::error_code ec;
+        std::filesystem::remove_all(testDir, ec);
+    }
+
+    void initMetadata(bool withKg = true) {
+        metadata::ConnectionPoolConfig poolConfig{};
+        poolConfig.minConnections = 1;
+        poolConfig.maxConnections = 2;
+        pool = std::make_shared<metadata::ConnectionPool>(
+            (testDir / "graph_dispatcher.db").string(), poolConfig);
+        REQUIRE(pool->initialize().has_value());
+
+        repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        svc->__test_setMetadataRepo(repo);
+
+        if (withKg) {
+            metadata::KnowledgeGraphStoreConfig kgConfig{};
+            kgConfig.enable_alias_fts = true;
+            kgConfig.enable_wal = false;
+            auto kgResult = metadata::makeSqliteKnowledgeGraphStore(*pool, kgConfig);
+            REQUIRE(kgResult.has_value());
+            kgStore = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgResult).value());
+            repo->setKnowledgeGraphStore(kgStore);
+        }
+    }
+
+    int64_t upsertNode(const std::string& key, const std::string& label, const std::string& type,
+                       const std::string& properties = {}) {
+        REQUIRE(kgStore);
+        metadata::KGNode node;
+        node.nodeKey = key;
+        node.label = label;
+        node.type = type;
+        if (!properties.empty()) {
+            node.properties = properties;
+        }
+        auto result = kgStore->upsertNode(node);
+        REQUIRE(result.has_value());
+        return result.value();
+    }
+
+    void addEdge(int64_t srcNodeId, int64_t dstNodeId, const std::string& relation,
+                 float weight = 1.0f, const std::string& properties = {}) {
+        REQUIRE(kgStore);
+        metadata::KGEdge edge;
+        edge.srcNodeId = srcNodeId;
+        edge.dstNodeId = dstNodeId;
+        edge.relation = relation;
+        edge.weight = weight;
+        if (!properties.empty()) {
+            edge.properties = properties;
+        }
+        REQUIRE(kgStore->addEdge(edge).has_value());
+    }
+
+    std::filesystem::path testDir;
+    DaemonConfig cfg;
+    StubLifecycle lifecycle;
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    std::unique_ptr<ServiceManager> svc;
+    std::unique_ptr<RequestDispatcher> dispatcher;
+    std::shared_ptr<metadata::ConnectionPool> pool;
+    std::shared_ptr<metadata::MetadataRepository> repo;
+    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;
 };
 
 std::filesystem::path makeTempDir(const std::string& prefix) {
@@ -1946,6 +2030,339 @@ TEST_CASE("RequestDispatcher: graph maintenance handlers report missing graph co
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InternalError);
         CHECK(err.message.find("GraphComponent not available") != std::string::npos);
+    }
+}
+
+TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher branches",
+          "[daemon][graph][dispatcher][query]") {
+    GraphDispatcherFixture fixture;
+
+    SECTION("graph query reports unavailable metadata repository") {
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{GraphQueryRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "Metadata repository unavailable");
+    }
+
+    SECTION("graph query reports unavailable knowledge graph store") {
+        fixture.initMetadata(false);
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{GraphQueryRequest{}});
+
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK_FALSE(graphResp.kgAvailable);
+        CHECK(graphResp.warning == "Knowledge graph not available");
+    }
+
+    SECTION("graph query lists node types") {
+        fixture.initMetadata();
+        fixture.upsertNode("fn:list:1", "alpha", "function");
+        fixture.upsertNode("fn:list:2", "beta", "function");
+        fixture.upsertNode("path:list:1", "file.cpp", "file");
+
+        GraphQueryRequest req;
+        req.listTypes = true;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK(graphResp.kgAvailable);
+        CHECK(graphResp.originNode.label == "listTypes");
+        REQUIRE(graphResp.nodeTypeCounts.size() == 2);
+        CHECK(graphResp.nodeTypeCounts[0] == std::pair<std::string, uint64_t>{"function", 2});
+        CHECK(graphResp.nodeTypeCounts[1] == std::pair<std::string, uint64_t>{"file", 1});
+    }
+
+    SECTION("graph query lists relation counts") {
+        fixture.initMetadata();
+        auto callerId = fixture.upsertNode("fn:rel:caller", "caller", "function");
+        auto calleeId = fixture.upsertNode("fn:rel:callee", "callee", "function");
+        auto fileId = fixture.upsertNode("path:rel:file", "file.cpp", "file");
+        fixture.addEdge(callerId, calleeId, "calls");
+        fixture.addEdge(callerId, fileId, "includes");
+
+        GraphQueryRequest req;
+        req.listRelations = true;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK(graphResp.originNode.label == "listRelations");
+        REQUIRE(graphResp.relationTypeCounts.size() == 2);
+        CHECK(graphResp.relationTypeCounts[0] == std::pair<std::string, uint64_t>{"calls", 1});
+        CHECK(graphResp.relationTypeCounts[1] == std::pair<std::string, uint64_t>{"includes", 1});
+    }
+
+    SECTION("graph query search mode requires a pattern") {
+        fixture.initMetadata();
+
+        GraphQueryRequest req;
+        req.searchMode = true;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message == "searchPattern is required for search mode");
+    }
+
+    SECTION("graph query search mode returns matching nodes with properties") {
+        fixture.initMetadata();
+        fixture.upsertNode("fn:search:alpha", "AlphaNode", "function", R"({"rank":1})");
+        fixture.upsertNode("fn:search:beta", "BetaNode", "function");
+
+        GraphQueryRequest req;
+        req.searchMode = true;
+        req.searchPattern = "%Alpha%";
+        req.includeNodeProperties = true;
+        req.limit = 10;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK(graphResp.originNode.label == "search:%Alpha%");
+        REQUIRE(graphResp.connectedNodes.size() == 1);
+        CHECK(graphResp.connectedNodes[0].nodeKey == "fn:search:alpha");
+        CHECK(graphResp.connectedNodes[0].properties == R"({"rank":1})");
+    }
+
+    SECTION("graph query list by type requires node type") {
+        fixture.initMetadata();
+
+        GraphQueryRequest req;
+        req.listByType = true;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message == "nodeType is required for listByType mode");
+    }
+
+    SECTION("graph query list by type returns paginated nodes") {
+        fixture.initMetadata();
+        fixture.upsertNode("fn:type:1", "TypeOne", "function", R"({"kind":"a"})");
+        fixture.upsertNode("fn:type:2", "TypeTwo", "function", R"({"kind":"b"})");
+        fixture.upsertNode("path:type:1", "file", "file");
+
+        GraphQueryRequest req;
+        req.listByType = true;
+        req.nodeType = "function";
+        req.limit = 1;
+        req.offset = 0;
+        req.includeNodeProperties = true;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK(graphResp.originNode.label == "listByType:function");
+        CHECK(graphResp.totalNodesFound == 2);
+        CHECK(graphResp.truncated);
+        REQUIRE(graphResp.connectedNodes.size() == 1);
+        CHECK(graphResp.connectedNodes[0].type == "function");
+        CHECK_FALSE(graphResp.connectedNodes[0].properties.empty());
+    }
+
+    SECTION("graph query isolated mode canonicalizes relation name") {
+        fixture.initMetadata();
+        auto calledId = fixture.upsertNode("fn:isolated:called", "called", "function");
+        fixture.upsertNode("fn:isolated:one", "isolated1", "function");
+        fixture.upsertNode("fn:isolated:two", "isolated2", "function");
+        auto callerId = fixture.upsertNode("fn:isolated:caller", "caller", "function");
+        fixture.addEdge(callerId, calledId, "calls");
+
+        GraphQueryRequest req;
+        req.isolatedMode = true;
+        req.nodeType = "function";
+        req.isolatedRelation = " CALL ";
+        req.limit = 10;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK(graphResp.originNode.label == "isolated:function:calls");
+        CHECK(graphResp.totalNodesFound == 3);
+        for (const auto& node : graphResp.connectedNodes) {
+            CHECK(node.nodeKey != "fn:isolated:called");
+        }
+    }
+
+    SECTION("graph query node key lookup returns not found") {
+        fixture.initMetadata();
+
+        GraphQueryRequest req;
+        req.nodeKey = "missing-node";
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message == "Node not found: missing-node");
+    }
+
+    SECTION("graph query traverses from node key with canonical relation filters") {
+        fixture.initMetadata();
+        auto callerId = fixture.upsertNode("fn:key:caller", "caller", "function");
+        auto calleeId = fixture.upsertNode("fn:key:callee", "callee", "function");
+        auto fileId = fixture.upsertNode("path:key:file", "header", "file");
+        fixture.addEdge(callerId, calleeId, "calls", 0.8f, R"({"source":"unit"})");
+        fixture.addEdge(callerId, fileId, "includes");
+
+        GraphQueryRequest req;
+        req.nodeKey = "fn:key:caller";
+        req.maxDepth = 1;
+        req.maxResults = 10;
+        req.relationFilters = {" Call "};
+        req.includeEdgeProperties = true;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK(graphResp.kgAvailable);
+        CHECK(graphResp.originNode.nodeKey == "fn:key:caller");
+        REQUIRE(graphResp.connectedNodes.size() == 1);
+        CHECK(graphResp.connectedNodes[0].nodeKey == "fn:key:callee");
+        REQUIRE(graphResp.edges.size() == 1);
+        CHECK(graphResp.edges[0].relation == "calls");
+        CHECK(graphResp.edges[0].properties == R"({"source":"unit"})");
+    }
+
+    SECTION("graph path history requires path") {
+        fixture.initMetadata();
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{GraphPathHistoryRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message == "Path is required for path history query");
+    }
+
+    SECTION("graph path history returns empty response when kg store is unavailable") {
+        fixture.initMetadata(false);
+
+        GraphPathHistoryRequest req;
+        req.path = "/repo/file.cpp";
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphPathHistoryResponse>(resp));
+        const auto& historyResp = std::get<GraphPathHistoryResponse>(resp);
+        CHECK(historyResp.queryPath == "/repo/file.cpp");
+        CHECK(historyResp.history.empty());
+        CHECK_FALSE(historyResp.hasMore);
+    }
+
+    SECTION("graph path history returns snapshot entries") {
+        fixture.initMetadata();
+        fixture.upsertNode("path:snap1:/repo/file.cpp", "/repo/file.cpp", "path",
+                           R"({"snapshot_id":"snap1","path":"/repo/file.cpp"})");
+        fixture.upsertNode("path:snap2:/repo/file.cpp", "/repo/file.cpp", "path",
+                           R"({"snapshot_id":"snap2","path":"/repo/file.cpp"})");
+
+        GraphPathHistoryRequest req;
+        req.path = "/repo/file.cpp";
+        req.limit = 10;
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GraphPathHistoryResponse>(resp));
+        const auto& historyResp = std::get<GraphPathHistoryResponse>(resp);
+        CHECK(historyResp.queryPath == "/repo/file.cpp");
+        REQUIRE(historyResp.history.size() == 2);
+        CHECK(historyResp.history[0].snapshotId == "snap2");
+        CHECK(historyResp.history[0].blobHash.empty());
+        CHECK(historyResp.history[0].changeType == "unknown");
+        CHECK(historyResp.history[1].snapshotId == "snap1");
+        CHECK_FALSE(historyResp.hasMore);
+    }
+
+    SECTION("kg ingest reports unavailable metadata repository") {
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{KgIngestRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "Metadata repository unavailable");
+    }
+
+    SECTION("kg ingest reports unavailable knowledge graph store") {
+        fixture.initMetadata(false);
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{KgIngestRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "Knowledge graph store unavailable");
+    }
+
+    SECTION("kg ingest records node edge and alias resolution errors") {
+        fixture.initMetadata();
+        auto existingId = fixture.upsertNode("fn:existing", "existing", "function");
+        (void)existingId;
+
+        KgIngestRequest req;
+        req.nodes.push_back(KgIngestNode{"fn:existing", "existing updated", "function", ""});
+        req.edges.push_back(KgIngestEdge{"fn:existing", "fn:missing", "calls", 1.0f, ""});
+        req.aliases.push_back(KgIngestAlias{"fn:missing", "missing-alias", "unit", 0.5f});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK(ingestResp.success);
+        CHECK(ingestResp.nodesInserted == 1);
+        CHECK(ingestResp.edgesSkipped == 1);
+        CHECK(ingestResp.aliasesSkipped == 1);
+        REQUIRE(ingestResp.errors.size() == 2);
+        CHECK(ingestResp.errors[0] == "Edge destination node not found: fn:missing");
+        CHECK(ingestResp.errors[1] == "Alias node not found: fn:missing");
+    }
+
+    SECTION("kg ingest inserts nodes edges and aliases") {
+        fixture.initMetadata();
+
+        KgIngestRequest req;
+        req.nodes.push_back(
+            KgIngestNode{"fn:ingest:src", "Source", "function", R"({"role":"src"})"});
+        req.nodes.push_back(KgIngestNode{"fn:ingest:dst", "Dest", "function", ""});
+        req.edges.push_back(KgIngestEdge{"fn:ingest:src", "fn:ingest:dst", "calls", 0.7f,
+                                         R"({"origin":"dispatcher"})"});
+        req.aliases.push_back(KgIngestAlias{"fn:ingest:src", "sourceAlias", "unit", 0.9f});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK(ingestResp.success);
+        CHECK(ingestResp.nodesInserted == 2);
+        CHECK(ingestResp.edgesInserted == 1);
+        CHECK(ingestResp.aliasesInserted == 1);
+        CHECK(ingestResp.errors.empty());
+
+        auto sourceNode = fixture.kgStore->getNodeByKey("fn:ingest:src");
+        REQUIRE(sourceNode.has_value());
+        REQUIRE(sourceNode.value().has_value());
+        auto edges =
+            fixture.kgStore->getEdgesFrom(sourceNode.value()->id, std::string_view("calls"), 10, 0);
+        REQUIRE(edges.has_value());
+        REQUIRE(edges.value().size() == 1);
+        auto aliases = fixture.kgStore->resolveAliasExact("sourceAlias", 10);
+        REQUIRE(aliases.has_value());
+        REQUIRE(aliases.value().size() == 1);
     }
 }
 

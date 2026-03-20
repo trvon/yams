@@ -93,6 +93,38 @@ namespace fs = std::filesystem;
 namespace yams::cli {
 // NOTE: KG store is now managed as an instance member on YamsCLI (kgStore_)
 
+namespace {
+
+bool cli_perf_trace_enabled() {
+    const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
+    if (raw == nullptr || *raw == '\0') {
+        return false;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value == "1" || value == "true" || value == "on" || value == "yes";
+}
+
+void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
+                    std::string_view note = {}) {
+    if (!cli_perf_trace_enabled()) {
+        return;
+    }
+    if (note.empty()) {
+        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld\n",
+                     static_cast<int>(stage.size()), stage.data(),
+                     static_cast<long long>(elapsed.count()));
+    } else {
+        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld note=%.*s\n",
+                     static_cast<int>(stage.size()), stage.data(),
+                     static_cast<long long>(elapsed.count()), static_cast<int>(note.size()),
+                     note.data());
+    }
+}
+
+} // namespace
+
 void YamsCLI::setPendingCommand(ICommand* cmd) {
     pendingCommand_ = cmd;
 }
@@ -174,6 +206,7 @@ bool YamsCLI::hasExplicitDataDir() const {
 }
 
 int YamsCLI::run(int argc, char* argv[]) {
+    const auto runStart = std::chrono::steady_clock::now();
     try {
         // Pre-scan for verbose help flags before CLI11 handles --help
         auto isFlag = [](const char* s) -> bool { return s && s[0] == '-'; };
@@ -290,7 +323,13 @@ int YamsCLI::run(int argc, char* argv[]) {
         }
 
         // Register all commands
-        registerBuiltinCommands();
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            registerBuiltinCommands();
+            cli_perf_trace("cli.register_commands",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - t0));
+        }
 
         // If 'daemon' is invoked without a subcommand, inject 'status' by default
         // Detect: first non-flag token is 'daemon' and there is no subsequent non-flag token
@@ -364,14 +403,32 @@ int YamsCLI::run(int argc, char* argv[]) {
         }
 
         if (needsAliasRewrite) {
+            const auto t0 = std::chrono::steady_clock::now();
             app_->parse(static_cast<int>(argvVec.size() - 1), argvVec.data());
+            cli_perf_trace("cli.parse",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - t0),
+                           "alias_rewrite");
         } else if (injectDaemonStatus) {
+            const auto t0 = std::chrono::steady_clock::now();
             app_->parse(argc + 1, argvVec.data());
+            cli_perf_trace("cli.parse",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - t0),
+                           "daemon_status_injected");
         } else if (needsSearchQueryRewrite) {
+            const auto t0 = std::chrono::steady_clock::now();
             app_->parse(static_cast<int>(argvVec.size() - 1), argvVec.data());
+            cli_perf_trace("cli.parse",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - t0),
+                           "search_query_rewrite");
         } else {
             // Parse command line
+            const auto t0 = std::chrono::steady_clock::now();
             app_->parse(argc, argv);
+            cli_perf_trace("cli.parse", std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0));
         }
 
         // Disallow multiple top-level subcommands (e.g., "yams search graph"),
@@ -483,6 +540,7 @@ int YamsCLI::run(int argc, char* argv[]) {
         if (pendingCommand_) {
             std::promise<Result<void>> prom;
             auto fut = prom.get_future();
+            const auto execStart = std::chrono::steady_clock::now();
             boost::asio::co_spawn(
                 executor_,
                 [this, &prom]() -> boost::asio::awaitable<void> {
@@ -493,11 +551,17 @@ int YamsCLI::run(int argc, char* argv[]) {
                 boost::asio::detached);
             auto status = fut.wait_for(std::chrono::minutes(10));
             if (status != std::future_status::ready) {
+                cli_perf_trace("cli.command_wait.timeout",
+                               std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - execStart));
                 spdlog::error("Command timed out");
                 std::cerr << formatErrorWithHint(ErrorCode::Timeout, "Command timed out") << "\n";
                 return 1;
             }
             auto result = fut.get();
+            cli_perf_trace("cli.command_wait.complete",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - execStart));
             if (!result) {
                 // Use error hints for actionable feedback
                 std::cerr << formatErrorWithHint(result.error().code, result.error().message)
@@ -506,6 +570,8 @@ int YamsCLI::run(int argc, char* argv[]) {
             }
         }
 
+        cli_perf_trace("cli.total", std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - runStart));
         return 0;
     } catch (const CLI::ParseError& e) {
         return app_->exit(e);

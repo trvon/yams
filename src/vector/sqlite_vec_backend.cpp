@@ -93,16 +93,6 @@ inline size_t hnswCheckpointThreshold(size_t configuredThreshold) {
     return fallback;
 }
 
-inline bool hnswDeferUpdatesEnabled() {
-    if (const char* env = std::getenv("YAMS_HNSW_DEFER_UPDATES")) {
-        std::string value(env);
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return value == "1" || value == "true" || value == "yes" || value == "on";
-    }
-    return false;
-}
-
 // ============================================================================
 // Libsql-aware database helpers
 // ============================================================================
@@ -594,15 +584,6 @@ public:
 
         int64_t rowid = rowid_result.value();
 
-        if (canDeferHnswUpdatesUnlocked()) {
-            hnsw_indices_.clear();
-            hnsw_dirty_.clear();
-            hnsw_loaded_ = false;
-            hnsw_needs_rebuild_ = true;
-            pending_inserts_ = 0;
-            return Result<void>{};
-        }
-
         // Skip HNSW insertion for zero-norm vectors (they become dead-ends in the graph)
         if (isZeroNormEmbedding(record.embedding)) {
             spdlog::warn("[HNSW] Skipping zero-norm vector for chunk_id={} (stored in SQLite only)",
@@ -721,7 +702,7 @@ public:
             return Error{ErrorCode::DatabaseError, "Failed to commit transaction"};
         }
 
-        if (canDeferHnswUpdatesUnlocked()) {
+        if (shouldDeferHnswBatchUpdatesUnlocked(records.size())) {
             hnsw_indices_.clear();
             hnsw_dirty_.clear();
             hnsw_loaded_ = false;
@@ -913,15 +894,6 @@ public:
         auto rowid_result = insertVectorUnlocked(record);
         if (!rowid_result) {
             return rowid_result.error();
-        }
-
-        if (canDeferHnswUpdatesUnlocked()) {
-            hnsw_indices_.clear();
-            hnsw_dirty_.clear();
-            hnsw_loaded_ = false;
-            hnsw_needs_rebuild_ = true;
-            pending_inserts_ = 0;
-            return Result<void>{};
         }
 
         int64_t new_rowid = rowid_result.value();
@@ -2454,6 +2426,7 @@ private:
             }
             HNSWIndex::Config config = HNSWIndex::Config::for_corpus(corpus_size, dim);
             config.ef_construction = std::max(config.ef_construction, config_.hnsw_ef_construction);
+            config.normalize_vectors = true;
             return config;
         };
 
@@ -2539,10 +2512,7 @@ private:
         return exists;
     }
 
-    bool canDeferHnswUpdatesUnlocked() {
-        if (!hnswDeferUpdatesEnabled()) {
-            return false;
-        }
+    bool hasCatchUpSourceUnlocked() {
         if (hnsw_loaded_ && !hnsw_indices_.empty()) {
             return true;
         }
@@ -2553,6 +2523,11 @@ private:
             }
         }
         return false;
+    }
+
+    bool shouldDeferHnswBatchUpdatesUnlocked(size_t recordCount) {
+        constexpr size_t kMinDeferredBatchSize = 16;
+        return recordCount >= kMinDeferredBatchSize && hasCatchUpSourceUnlocked();
     }
 
     std::vector<size_t> queryOrphanedPersistedNodeIdsUnlocked(size_t dim) {
@@ -2818,6 +2793,12 @@ private:
         if (hnsw_indices_.empty()) {
             spdlog::info("[HNSW] No existing indices found, building from vectors table");
 
+            struct PendingDimBuild {
+                std::vector<size_t> ids;
+                std::vector<std::vector<float>> embeddings;
+            };
+            std::unordered_map<size_t, PendingDimBuild> dim_builds;
+
             // Query vectors grouped by dimension
             const char* select_by_dim =
                 "SELECT rowid, embedding, embedding_dim FROM vectors ORDER BY embedding_dim";
@@ -2854,15 +2835,41 @@ private:
                         continue;
                     }
 
-                    std::span<const float> embedding_span(embedding.data(), embedding.size());
-
-                    // Get or create index for this dimension
-                    auto* hnsw = getOrCreateHnswForDim(dim);
-                    if (hnsw) {
-                        hnsw->insert(static_cast<size_t>(rowid), embedding_span);
-                    }
+                    auto& build = dim_builds[dim];
+                    build.ids.push_back(static_cast<size_t>(rowid));
+                    build.embeddings.push_back(std::move(embedding));
                 }
                 sqlite3_finalize(stmt);
+
+                const size_t parallelBuildThreshold = hnswParallelBuildThreshold();
+
+                for (auto& [dim, build] : dim_builds) {
+                    auto* hnsw = getOrCreateHnswForDim(dim);
+                    if (!hnsw || build.ids.empty()) {
+                        continue;
+                    }
+
+                    if (build.ids.size() >= parallelBuildThreshold) {
+                        std::vector<std::span<const float>> spans;
+                        spans.reserve(build.embeddings.size());
+                        for (auto& embedding : build.embeddings) {
+                            spans.emplace_back(embedding.data(), embedding.size());
+                        }
+                        hnsw->build_parallel(
+                            std::span<const size_t>(build.ids.data(), build.ids.size()),
+                            std::span<const std::span<const float>>(spans.data(), spans.size()), 0);
+                        spdlog::info("[HNSW] Parallel rebuilt index for dim={} with {} vectors",
+                                     dim, build.ids.size());
+                    } else {
+                        for (size_t i = 0; i < build.ids.size(); ++i) {
+                            std::span<const float> embedding_span(build.embeddings[i].data(),
+                                                                  build.embeddings[i].size());
+                            hnsw->insert(build.ids[i], embedding_span);
+                        }
+                        spdlog::info("[HNSW] Sequentially rebuilt index for dim={} with {} vectors",
+                                     dim, build.ids.size());
+                    }
+                }
 
                 // Log what we built and save immediately
                 for (const auto& [dim, idx] : hnsw_indices_) {
@@ -3036,11 +3043,12 @@ private:
 
         // Preserve user-configured ef_construction if higher than library default
         config.ef_construction = std::max(config.ef_construction, config_.hnsw_ef_construction);
+        config.normalize_vectors = true;
 
         spdlog::info("[HNSW] Creating index for dim={} corpus_size={}: M={} M_max={} M_max_0={} "
-                     "ef_construction={}",
+                     "ef_construction={} normalize_vectors={}",
                      dim, corpus_size, config.M, config.M_max, config.M_max_0,
-                     config.ef_construction);
+                     config.ef_construction, config.normalize_vectors);
 
         auto idx = std::make_unique<HNSWIndex>(config);
         auto* ptr = idx.get();

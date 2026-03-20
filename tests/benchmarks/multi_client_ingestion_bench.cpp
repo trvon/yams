@@ -488,6 +488,7 @@ struct CliProbeResult {
     int exitCode{-1};
     int64_t latencyUs{0};
     std::string error;
+    std::unordered_map<std::string, int64_t> stageElapsedUs;
 };
 
 #ifndef _WIN32
@@ -516,11 +517,19 @@ CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPat
         result.error = "open(/dev/null) failed";
         return result;
     }
+    int tracePipe[2] = {-1, -1};
+    if (::pipe(tracePipe) != 0) {
+        ::close(sinkFd);
+        result.error = "pipe() failed";
+        return result;
+    }
 
     const auto start = std::chrono::steady_clock::now();
     pid_t pid = ::fork();
     if (pid < 0) {
         ::close(sinkFd);
+        ::close(tracePipe[0]);
+        ::close(tracePipe[1]);
         result.error = "fork() failed";
         return result;
     }
@@ -529,9 +538,12 @@ CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPat
         ::setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
         ::setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
         ::setenv("YAMS_CLI_ONE_SHOT", "1", 1);
+        ::setenv("YAMS_CLI_PERF_TRACE", "1", 1);
         ::dup2(sinkFd, STDOUT_FILENO);
-        ::dup2(sinkFd, STDERR_FILENO);
+        ::dup2(tracePipe[1], STDERR_FILENO);
         ::close(sinkFd);
+        ::close(tracePipe[0]);
+        ::close(tracePipe[1]);
         closeInheritedFdsExceptStd();
 
         std::vector<std::string> owned;
@@ -550,6 +562,7 @@ CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPat
     }
 
     ::close(sinkFd);
+    ::close(tracePipe[1]);
     int status = 0;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     for (;;) {
@@ -587,6 +600,42 @@ CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPat
         result.success = (result.exitCode == 0);
     } else {
         result.error = "child terminated abnormally";
+    }
+
+    std::string trace;
+    std::array<char, 1024> buffer{};
+    for (;;) {
+        ssize_t n = ::read(tracePipe[0], buffer.data(), buffer.size());
+        if (n > 0) {
+            trace.append(buffer.data(), static_cast<size_t>(n));
+            continue;
+        }
+        break;
+    }
+    ::close(tracePipe[0]);
+
+    std::stringstream traceStream(trace);
+    std::string line;
+    while (std::getline(traceStream, line)) {
+        constexpr std::string_view kPrefix = "[yams-cli-perf] stage=";
+        auto prefixPos = line.find(kPrefix);
+        if (prefixPos == std::string::npos) {
+            continue;
+        }
+        auto stageStart = prefixPos + kPrefix.size();
+        auto elapsedPos = line.find(" elapsed_us=", stageStart);
+        if (elapsedPos == std::string::npos) {
+            continue;
+        }
+        auto stage = line.substr(stageStart, elapsedPos - stageStart);
+        auto valueStart = elapsedPos + std::string_view(" elapsed_us=").size();
+        auto valueEnd = line.find(' ', valueStart);
+        auto valueText = line.substr(
+            valueStart, valueEnd == std::string::npos ? std::string::npos : valueEnd - valueStart);
+        try {
+            result.stageElapsedUs[stage] = std::stoll(valueText);
+        } catch (...) {
+        }
     }
     return result;
 }
@@ -1963,6 +2012,7 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     std::vector<int64_t> cliListLatencies;
     std::vector<int64_t> cliSearchLatencies;
     std::vector<int64_t> cliStatusLatencies;
+    std::map<std::string, std::vector<int64_t>> cliStageLatencies;
     std::vector<TimedLatencySample> hotspotSamples;
 
     HeldSocketConnections heldConnections;
@@ -2141,6 +2191,7 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
             std::vector<int64_t> localCliList;
             std::vector<int64_t> localCliSearch;
             std::vector<int64_t> localCliStatus;
+            std::map<std::string, std::vector<int64_t>> localCliStageLatencies;
             const auto cliProbeTimeout = std::chrono::seconds(cfg.cliProbeTimeoutSecs);
 
             auto recordProbe = [&](const std::string& opType, const CliProbeResult& probe,
@@ -2162,6 +2213,9 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                     .latencyUs = probe.latencyUs,
                     .success = probe.success,
                 });
+                for (const auto& [stage, elapsedUs] : probe.stageElapsedUs) {
+                    localCliStageLatencies[opType + ":" + stage].push_back(elapsedUs);
+                }
             };
 
             for (int i = 0; i < cliProbeOpsPerCommand; ++i) {
@@ -2187,6 +2241,10 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                                       localCliSearch.end());
             cliStatusLatencies.insert(cliStatusLatencies.end(), localCliStatus.begin(),
                                       localCliStatus.end());
+            for (auto& [stage, values] : localCliStageLatencies) {
+                auto& dest = cliStageLatencies[stage];
+                dest.insert(dest.end(), values.begin(), values.end());
+            }
         });
     }
 #endif
@@ -2258,6 +2316,10 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
         printPercentiles("CLI list latency", cliListStats);
         printPercentiles("CLI search latency", cliSearchStats);
         printPercentiles("CLI status latency", cliStatusStats);
+        for (auto& [stage, values] : cliStageLatencies) {
+            auto stageStats = PercentileStats::compute(values);
+            printPercentiles("CLI stage " + stage, stageStats);
+        }
     }
     std::cout << "  Resource peaks: memory=" << std::fixed << std::setprecision(1)
               << resourcePeaks.peakMemoryMb << " MB cpu=" << resourcePeaks.peakCpuPercent

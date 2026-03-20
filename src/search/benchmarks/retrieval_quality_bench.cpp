@@ -3448,13 +3448,6 @@ struct BenchFixture {
             spdlog::info("Configured ONNX plugin models: embedding=embeddinggemma-300m "
                          "reranker=bge-reranker-base");
 
-            if (!std::getenv("YAMS_HNSW_DEFER_UPDATES")) {
-                setenv("YAMS_HNSW_DEFER_UPDATES", "1", 1);
-                spdlog::info("Enabled deferred HNSW updates for benchmark warm-cache priming");
-            } else if (envTruthy(std::getenv("YAMS_HNSW_DEFER_UPDATES"))) {
-                spdlog::info("Deferred HNSW updates already enabled via environment");
-            }
-
             if (!std::getenv("YAMS_ONNX_RERANK_FORCE_CPU") &&
                 !std::getenv("YAMS_ONNX_RERANK_FORCE_GPU")) {
                 setenv("YAMS_ONNX_RERANK_FORCE_CPU", "1", 1);
@@ -4374,34 +4367,6 @@ struct BenchFixture {
                                                  lastObservedDocsEmbedded, reconciledHashes.size());
                                     lastObservedDocsEmbedded = reconciledHashes.size();
                                 }
-                            }
-                        }
-
-                        if (const char* deferHnsw = std::getenv("YAMS_HNSW_DEFER_UPDATES");
-                            deferHnsw && envTruthy(deferHnsw) && vectorDb) {
-                            const bool vectorsChanged =
-                                lastObservedVectorCount != initialVectorCount;
-                            if (vectorsChanged) {
-                                spdlog::info("Rebuilding deferred HNSW index before benchmark "
-                                             "queries...");
-                                const auto rebuildStart = std::chrono::steady_clock::now();
-                                if (!vectorDb->buildIndex()) {
-                                    throw std::runtime_error(
-                                        "Deferred HNSW rebuild failed before benchmark queries");
-                                }
-                                const auto rebuildMs =
-                                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::steady_clock::now() - rebuildStart)
-                                        .count();
-                                spdlog::info("Deferred HNSW rebuild completed in {} ms", rebuildMs);
-                                if (summaryLog) {
-                                    summaryLog << "Deferred HNSW rebuild: " << rebuildMs << "ms"
-                                               << std::endl;
-                                    summaryLog.flush();
-                                }
-                            } else {
-                                spdlog::info("Skipping deferred HNSW rebuild: vector/doc coverage "
-                                             "unchanged during this run");
                             }
                         }
                     }

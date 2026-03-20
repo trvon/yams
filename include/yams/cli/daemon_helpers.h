@@ -8,6 +8,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -724,6 +725,37 @@ struct CliDaemonClientLease {
 
 namespace detail {
 
+inline std::string to_lower_copy(std::string value);
+inline std::string trim_copy(std::string_view sv);
+
+inline bool cli_perf_trace_enabled() {
+    const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
+    if (raw == nullptr || *raw == '\0') {
+        return false;
+    }
+    std::string mode(raw);
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
+}
+
+inline void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
+                           std::string_view note = {}) {
+    if (!cli_perf_trace_enabled()) {
+        return;
+    }
+    if (note.empty()) {
+        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld\n",
+                     static_cast<int>(stage.size()), stage.data(),
+                     static_cast<long long>(elapsed.count()));
+    } else {
+        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld note=%.*s\n",
+                     static_cast<int>(stage.size()), stage.data(),
+                     static_cast<long long>(elapsed.count()), static_cast<int>(note.size()),
+                     note.data());
+    }
+}
+
 inline std::string to_lower_copy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -763,13 +795,16 @@ inline bool explicit_socket_without_autostart() {
         return false;
     }
 
-    auto mode = to_lower_copy(trim_copy(disableAutoStart));
+    std::string mode(disableAutoStart);
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
 }
 
 inline Result<void> ensure_socket_daemon_ready(
     const yams::daemon::ClientConfig& cfg,
     std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
+    const auto start = std::chrono::steady_clock::now();
     auto effectiveSocket = cfg.socketPath.empty()
                                ? yams::daemon::DaemonClient::resolveSocketPathConfigFirst()
                                : cfg.socketPath;
@@ -778,6 +813,9 @@ inline Result<void> ensure_socket_daemon_ready(
     // and let the actual request path surface any connect failure. This avoids an extra ping per
     // CLI process on the hot path.
     if (!cfg.autoStart && explicit_socket_without_autostart()) {
+        cli_perf_trace("daemon_ready.skip_explicit_socket",
+                       std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - start));
         return Result<void>();
     }
 
@@ -790,12 +828,19 @@ inline Result<void> ensure_socket_daemon_ready(
         startCfg.socketPath = effectiveSocket;
         startCfg.dataDir = cfg.dataDir;
         if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
+            cli_perf_trace("daemon_ready.start_failed",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - start),
+                           r.error().message);
             return Error{ErrorCode::InternalError,
                          std::string("Failed to start daemon: ") + r.error().message};
         }
     }
 
     if (readyTimeout.count() <= 0) {
+        cli_perf_trace("daemon_ready.no_wait",
+                       std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - start));
         return Result<void>();
     }
 
@@ -803,6 +848,9 @@ inline Result<void> ensure_socket_daemon_ready(
     auto sleepFor = std::chrono::milliseconds(50);
     while (std::chrono::steady_clock::now() < deadline) {
         if (yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+            cli_perf_trace("daemon_ready.success",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - start));
             return Result<void>();
         }
         auto now = std::chrono::steady_clock::now();
@@ -814,6 +862,8 @@ inline Result<void> ensure_socket_daemon_ready(
         sleepFor = std::min(sleepFor * 2, std::chrono::milliseconds(500));
     }
 
+    cli_perf_trace("daemon_ready.timeout", std::chrono::duration_cast<std::chrono::microseconds>(
+                                               std::chrono::steady_clock::now() - start));
     return Error{ErrorCode::Timeout, "Daemon did not become ready in time"};
 }
 
@@ -823,6 +873,7 @@ inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
     const yams::daemon::ClientConfig& requestedCfg,
     CliDaemonAccessPolicy policy = CliDaemonAccessPolicy::AllowInProcessFallback,
     std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{-1}) {
+    const auto start = std::chrono::steady_clock::now();
     CliDaemonClientPlan plan;
     plan.config = requestedCfg;
 
@@ -850,6 +901,9 @@ inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
     plan.config.transportMode = resolvedMode;
 
     if (resolvedMode == yams::daemon::ClientTransportMode::InProcess && requireSocket) {
+        detail::cli_perf_trace("daemon_plan.invalid_mode",
+                               std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - start));
         return Error{ErrorCode::InvalidState,
                      "Socket transport required by configuration (YAMS_EMBEDDED)"};
     }
@@ -867,6 +921,11 @@ inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
             plan.config.autoStart = false;
         }
     }
+
+    detail::cli_perf_trace("daemon_plan.ready",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - start),
+                           plan.usedInProcessFallback ? plan.fallbackReason : std::string_view{});
 
     return plan;
 }
@@ -972,20 +1031,32 @@ inline Result<CliDaemonClientLease> acquire_cli_daemon_client_shared_with_policy
     CliDaemonAccessPolicy policy = CliDaemonAccessPolicy::AllowInProcessFallback,
     size_t min_clients = 1, size_t max_clients = 12,
     std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{-1}) {
+    const auto start = std::chrono::steady_clock::now();
     auto planRes = prepare_cli_daemon_client_plan(requestedCfg, policy, readyTimeout);
     if (!planRes) {
+        detail::cli_perf_trace("daemon_client_plan.failed",
+                               std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - start),
+                               planRes.error().message);
         return planRes.error();
     }
 
     auto plan = std::move(planRes.value());
     auto leaseRes = acquire_cli_daemon_client_shared(plan.config, min_clients, max_clients);
     if (!leaseRes) {
+        detail::cli_perf_trace("daemon_client_acquire.failed",
+                               std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - start),
+                               leaseRes.error().message);
         return leaseRes.error();
     }
 
     CliDaemonClientLease out;
     out.plan = std::move(plan);
     out.lease = std::move(leaseRes.value());
+    detail::cli_perf_trace("daemon_client_acquire.success",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - start));
     return out;
 }
 
@@ -1012,6 +1083,7 @@ acquire_cli_daemon_client_shared_with_fallback(
 template <typename T>
 inline Result<T> run_result(boost::asio::awaitable<Result<T>> aw,
                             std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+    const auto start = std::chrono::steady_clock::now();
     auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
     // Use shared_ptr to ensure the promise outlives the coroutine even if we timeout and return
     // early. The coroutine captures a copy of the shared_ptr, preventing use-after-free.
@@ -1035,12 +1107,20 @@ inline Result<T> run_result(boost::asio::awaitable<Result<T>> aw,
         boost::asio::detached);
 
     if (timeout.count() > 0) {
-        if (fut.wait_for(timeout) != std::future_status::ready)
+        if (fut.wait_for(timeout) != std::future_status::ready) {
+            detail::cli_perf_trace("run_result.timeout",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - start));
             return Error{ErrorCode::Timeout, "Awaitable timed out"};
+        }
     } else {
         fut.wait();
     }
-    return fut.get();
+    auto result = fut.get();
+    detail::cli_perf_trace("run_result.complete",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - start));
+    return result;
 }
 
 } // namespace yams::cli
