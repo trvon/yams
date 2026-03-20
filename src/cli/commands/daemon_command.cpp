@@ -57,6 +57,7 @@ using nlohmann::json;
 #define SIGKILL 9
 #define SIGTERM 15
 #define execvp _execvp
+#define getpid _getpid
 
 inline int kill(pid_t pid, int sig) {
     if (sig == 0) {
@@ -787,6 +788,19 @@ private:
     static bool isAnyDaemonProcessRunning() {
         int rc = std::system("pgrep -f \"yams-daemon\" >/dev/null 2>&1");
         return rc == 0;
+    }
+#else
+    std::string resolveSocketPathForLiveDaemon(const std::string& preferredSocket,
+                                               const std::string& pidFilePath,
+                                               bool allowAnyDaemonFallback = true) {
+        (void)pidFilePath;
+        (void)allowAnyDaemonFallback;
+        return preferredSocket;
+    }
+
+    static std::vector<pid_t> collectDaemonPidsForSocket(const std::string& socketPath) {
+        (void)socketPath;
+        return {};
     }
 #endif
 
