@@ -241,8 +241,18 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
             auto extractedOpt = yams::extraction::util::extractDocumentText(
                 contentStore, doc.sha256Hash, doc.mimeType, ext, extractors);
             if (!extractedOpt || extractedOpt->empty()) {
-                stats.failedOperations++;
-                continue;
+                if (doc.id > 0) {
+                    auto cachedContent = metadataRepo->getContent(doc.id);
+                    if (cachedContent && cachedContent.value() &&
+                        !cachedContent.value()->contentText.empty()) {
+                        extractedOpt = cachedContent.value()->contentText;
+                        spdlog::info("[repair] Using cached metadata content for {}", doc.filePath);
+                    }
+                }
+                if (!extractedOpt || extractedOpt->empty()) {
+                    stats.failedOperations++;
+                    continue;
+                }
             }
 
             std::string text = std::move(*extractedOpt);

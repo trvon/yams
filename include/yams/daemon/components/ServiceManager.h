@@ -486,6 +486,12 @@ public:
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         storeModelProvider(std::move(provider));
     }
+    void __test_setMetadataRepo(std::shared_ptr<metadata::MetadataRepository> repo) {
+        metadataRepo_ = std::move(repo);
+    }
+    void __test_setContentStore(std::shared_ptr<api::IContentStore> store) {
+        std::atomic_store_explicit(&contentStore_, std::move(store), std::memory_order_release);
+    }
     void __test_setAdoptedProviderPluginName(const std::string& name) {
         adoptedProviderPluginName_ = name;
     }
@@ -502,6 +508,10 @@ public:
         if (pluginManager_) {
             pluginManager_->__test_setExternalPluginHost(std::move(host));
         }
+    }
+    void __test_setCachedSearchEngine(const std::shared_ptr<yams::search::SearchEngine>& engine,
+                                      bool vectorEnabled) {
+        searchEngineManager_.setEngine(engine, vectorEnabled);
     }
     AbiPluginHost* __test_getAbiHost() const { return abiHost_.get(); }
     AbiPluginLoader* __test_getAbiPluginLoader() const { return abiPluginLoader_.get(); }

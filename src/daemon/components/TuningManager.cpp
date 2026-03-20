@@ -70,6 +70,8 @@ void TuningManager::start() {
     lastOnnxMax_ = lastOnnxGliner_ = lastOnnxEmbed_ = lastOnnxReranker_ = 0;
     ipcHighTicks_ = ipcLowTicks_ = ioHighTicks_ = ioLowTicks_ = 0;
     slotHighTicks_ = slotLowTicks_ = 0;
+    previousAcceptCapacityDelays_ = 0;
+    previousForcedCloseCount_ = 0;
     previousPressureLevel_ = 0;
     previousEmbedDropped_ = 0;
     previousPostProcessed_ = 0;
@@ -1112,6 +1114,21 @@ bool TuningManager::tick_once() {
 
             const size_t activeConns = state_->stats.activeConnections.load();
             const size_t maxConns = state_->stats.maxConnections.load(std::memory_order_relaxed);
+            const size_t freeSlots =
+                state_->stats.connectionSlotsFree.load(std::memory_order_relaxed);
+            const uint64_t acceptCapacityDelays =
+                state_->stats.acceptCapacityDelays.load(std::memory_order_relaxed);
+            const uint64_t forcedCloseCount =
+                state_->stats.forcedCloseCount.load(std::memory_order_relaxed);
+            const uint64_t acceptCapacityDelayDelta =
+                (acceptCapacityDelays >= previousAcceptCapacityDelays_)
+                    ? (acceptCapacityDelays - previousAcceptCapacityDelays_)
+                    : acceptCapacityDelays;
+            const uint64_t forcedCloseDelta = (forcedCloseCount >= previousForcedCloseCount_)
+                                                  ? (forcedCloseCount - previousForcedCloseCount_)
+                                                  : forcedCloseCount;
+            previousAcceptCapacityDelays_ = acceptCapacityDelays;
+            previousForcedCloseCount_ = forcedCloseCount;
             if (maxConns > 0) {
                 double util = static_cast<double>(activeConns) / static_cast<double>(maxConns);
 
@@ -1121,8 +1138,10 @@ bool TuningManager::tick_once() {
                 const uint32_t scaleStep = TuneAdvisor::connectionSlotsScaleStep();
                 const uint32_t minSlots = TuneAdvisor::connectionSlotsMin();
                 const uint32_t maxSlots = TuneAdvisor::connectionSlotsMax();
+                const bool saturated = freeSlots == 0 && activeConns >= maxConns;
+                const bool shouldGrow = util > highThreshold || saturated;
 
-                if (util > highThreshold) {
+                if (shouldGrow) {
                     slotHighTicks_++;
                     slotLowTicks_ = 0;
                     if (slotHighTicks_ >= hysteresisTicks) {
@@ -1136,13 +1155,16 @@ bool TuningManager::tick_once() {
                         if (target > maxConns) {
                             setConnectionSlots_(target);
                             spdlog::debug("TuningManager: connection slots grown from {} to {} "
-                                          "(util={:.1f}%, active={})",
-                                          maxConns, target, util * 100.0, activeConns);
+                                          "(util={:.1f}%, active={}, free={}, "
+                                          "accept_delay_delta={}, forced_close_delta={})",
+                                          maxConns, target, util * 100.0, activeConns, freeSlots,
+                                          acceptCapacityDelayDelta, forcedCloseDelta);
                         }
                         slotHighTicks_ = 0;
                     }
-                } else if (util < lowThreshold && activeConns > 0) {
-                    // Only shrink if we have some connections (avoid shrinking at idle)
+                } else if (util < lowThreshold) {
+                    // Allow shrink at idle as well as under light load so temporary growth
+                    // converges back to the configured floor after contention subsides.
                     slotLowTicks_++;
                     slotHighTicks_ = 0;
                     if (slotLowTicks_ >= hysteresisTicks) {

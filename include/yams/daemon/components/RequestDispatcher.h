@@ -43,6 +43,7 @@ public:
     std::function<void(bool)> getWorkerJobSignal() const;
     // Optional accessor, used internally or by tests
     ServiceManager* getServiceManager() const;
+    static void __test_forceRestoreWriteFailureOnce();
 
     // PBI-008-11: Session prepare (warming) options and entrypoint
     struct PrepareSessionOptions {

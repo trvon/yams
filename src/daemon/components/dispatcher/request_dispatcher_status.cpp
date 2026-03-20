@@ -26,6 +26,7 @@ namespace yams::daemon {
 boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const StatusRequest& req) {
     // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
+    const bool includeExtendedStatus = req.detailed;
     try {
         // Status path returns cached snapshot - NO I/O on request path
         // DaemonMetrics background thread keeps cache hot
@@ -150,172 +151,189 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             setVal(metrics::kPostIngestRpcCapacity, snap->postIngestRpcCapacity);
             setVal(metrics::kPostIngestRpcMaxPerBatch, snap->postIngestRpcMaxPerBatch);
 
-            // Export selected tuning config values for clients (best-effort)
+            // Export selected tuning/config diagnostics only for detailed status to keep the
+            // default UX path lean. Benchmarks and clients still get the core cached metrics
+            // above without paying for extra live queries and payload bloat.
+            if (includeExtendedStatus) {
+                try {
+                    if (serviceManager_) {
+                        // Surface FSM states as numeric codes in requestCounts, and booleans in
+                        // readinessStates
+                        try {
+                            auto ss = serviceManager_->getServiceManagerFsmSnapshot();
+                            setVal(metrics::kServiceFsmState, static_cast<size_t>(ss.state));
+                        } catch (...) {
+                        }
+                        try {
+                            auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
+                            setVal(metrics::kEmbeddingState, static_cast<size_t>(es.state));
+                            setReady(readiness::kEmbeddingReady,
+                                     es.state == EmbeddingProviderState::ModelReady);
+                            // Provide an explicit degraded flag for clients/tools that
+                            // distinguish readiness from degraded modes.
+                            setReady(readiness::kEmbeddingDegraded,
+                                     es.state == EmbeddingProviderState::Degraded);
+                        } catch (...) {
+                        }
+                        // EmbeddingService metrics (jobs currently being processed)
+                        try {
+                            setVal(metrics::kEmbedInflight,
+                                   serviceManager_->getEmbeddingInFlightJobs());
+                            setVal(metrics::kEmbedQueued,
+                                   serviceManager_->getEmbeddingQueuedJobs());
+                            setVal(metrics::kEmbedInferActive,
+                                   serviceManager_->getEmbeddingActiveInferSubBatches());
+                            setVal(metrics::kEmbedInferOldestMs,
+                                   serviceManager_->getEmbeddingInferOldestMs());
+                            setVal(metrics::kEmbedInferStarted,
+                                   serviceManager_->getEmbeddingInferStartedCount());
+                            setVal(metrics::kEmbedInferCompleted,
+                                   serviceManager_->getEmbeddingInferCompletedCount());
+                            setVal(metrics::kEmbedInferLastMs,
+                                   serviceManager_->getEmbeddingInferLastMs());
+                            setVal(metrics::kEmbedInferMaxMs,
+                                   serviceManager_->getEmbeddingInferMaxMs());
+                            setVal(metrics::kEmbedInferWarnCount,
+                                   serviceManager_->getEmbeddingInferWarnCount());
+                        } catch (...) {
+                        }
+                        try {
+                            auto ps = serviceManager_->getPluginHostFsmSnapshot();
+                            setVal(metrics::kPluginHostState, static_cast<size_t>(ps.state));
+                            setReady(readiness::kPluginsReady, ps.state == PluginHostState::Ready);
+                            setReady(readiness::kPluginsDegraded,
+                                     ps.state == PluginHostState::Failed);
+                        } catch (...) {
+                        }
+                        const auto& tc = serviceManager_->getConfig().tuning;
+                        setVal(metrics::kTuningPostIngestCapacity, tc.postIngestCapacity);
+                        setVal(metrics::kTuningPostIngestThreadsMin, tc.postIngestThreadsMin);
+                        setVal(metrics::kTuningPostIngestThreadsMax, tc.postIngestThreadsMax);
+                        setVal(metrics::kTuningAdmitWarnThreshold, tc.admitWarnThreshold);
+                        setVal(metrics::kTuningAdmitStopThreshold, tc.admitStopThreshold);
+                    }
+                } catch (...) {
+                }
+            }
+
+            // WorkCoordinator metrics come from the cached snapshot and are cheap enough to
+            // preserve in the default status path.
             try {
                 if (serviceManager_) {
                     // Surface FSM states as numeric codes in requestCounts, and booleans in
-                    // readinessStates
-                    try {
-                        auto ss = serviceManager_->getServiceManagerFsmSnapshot();
-                        setVal(metrics::kServiceFsmState, static_cast<size_t>(ss.state));
-                    } catch (...) {
-                    }
-                    try {
-                        auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
-                        setVal(metrics::kEmbeddingState, static_cast<size_t>(es.state));
-                        setReady(readiness::kEmbeddingReady,
-                                 es.state == EmbeddingProviderState::ModelReady);
-                        // Provide an explicit degraded flag for clients/tools that
-                        // distinguish readiness from degraded modes.
-                        setReady(readiness::kEmbeddingDegraded,
-                                 es.state == EmbeddingProviderState::Degraded);
-                    } catch (...) {
-                    }
-                    // EmbeddingService metrics (jobs currently being processed)
-                    try {
-                        setVal(metrics::kEmbedInflight,
-                               serviceManager_->getEmbeddingInFlightJobs());
-                        setVal(metrics::kEmbedQueued, serviceManager_->getEmbeddingQueuedJobs());
-                        setVal(metrics::kEmbedInferActive,
-                               serviceManager_->getEmbeddingActiveInferSubBatches());
-                        setVal(metrics::kEmbedInferOldestMs,
-                               serviceManager_->getEmbeddingInferOldestMs());
-                        setVal(metrics::kEmbedInferStarted,
-                               serviceManager_->getEmbeddingInferStartedCount());
-                        setVal(metrics::kEmbedInferCompleted,
-                               serviceManager_->getEmbeddingInferCompletedCount());
-                        setVal(metrics::kEmbedInferLastMs,
-                               serviceManager_->getEmbeddingInferLastMs());
-                        setVal(metrics::kEmbedInferMaxMs,
-                               serviceManager_->getEmbeddingInferMaxMs());
-                        setVal(metrics::kEmbedInferWarnCount,
-                               serviceManager_->getEmbeddingInferWarnCount());
-                    } catch (...) {
-                    }
-                    try {
-                        auto ps = serviceManager_->getPluginHostFsmSnapshot();
-                        setVal(metrics::kPluginHostState, static_cast<size_t>(ps.state));
-                        setReady(readiness::kPluginsReady, ps.state == PluginHostState::Ready);
-                        setReady(readiness::kPluginsDegraded, ps.state == PluginHostState::Failed);
-                    } catch (...) {
-                    }
-                    const auto& tc = serviceManager_->getConfig().tuning;
-                    setVal(metrics::kTuningPostIngestCapacity, tc.postIngestCapacity);
-                    setVal(metrics::kTuningPostIngestThreadsMin, tc.postIngestThreadsMin);
-                    setVal(metrics::kTuningPostIngestThreadsMax, tc.postIngestThreadsMax);
-                    setVal(metrics::kTuningAdmitWarnThreshold, tc.admitWarnThreshold);
-                    setVal(metrics::kTuningAdmitStopThreshold, tc.admitStopThreshold);
-
-                    // WorkCoordinator metrics
                     setVal(metrics::kWorkCoordinatorActive, snap->workCoordinatorActiveWorkers);
                     setVal(metrics::kWorkCoordinatorRunning, snap->workCoordinatorRunning ? 1 : 0);
                 }
             } catch (...) {
             }
 
-            setVal(metrics::kPostIngestProcessed, snap->postIngestProcessed);
-            setVal(metrics::kPostIngestFailed, snap->postIngestFailed);
-            setVal(metrics::kPostIngestLatencyEma,
-                   static_cast<size_t>(snap->postIngestLatencyMsEma));
-            setVal(metrics::kPostIngestRateEma, static_cast<size_t>(snap->postIngestRateSecEma));
+            if (includeExtendedStatus) {
+                setVal(metrics::kPostIngestProcessed, snap->postIngestProcessed);
+                setVal(metrics::kPostIngestFailed, snap->postIngestFailed);
+                setVal(metrics::kPostIngestLatencyEma,
+                       static_cast<size_t>(snap->postIngestLatencyMsEma));
+                setVal(metrics::kPostIngestRateEma,
+                       static_cast<size_t>(snap->postIngestRateSecEma));
 
-            setVal(metrics::kExtractionInflight, snap->extractionInFlight);
+                setVal(metrics::kExtractionInflight, snap->extractionInFlight);
 
-            setVal(metrics::kKgQueued, snap->kgQueued);
-            setVal(metrics::kKgDropped, snap->kgDropped);
-            setVal(metrics::kKgConsumed, snap->kgConsumed);
-            setVal(metrics::kKgInflight, snap->kgInFlight);
-            setVal(metrics::kKgQueueDepth, snap->kgQueueDepth);
+                setVal(metrics::kKgQueued, snap->kgQueued);
+                setVal(metrics::kKgDropped, snap->kgDropped);
+                setVal(metrics::kKgConsumed, snap->kgConsumed);
+                setVal(metrics::kKgInflight, snap->kgInFlight);
+                setVal(metrics::kKgQueueDepth, snap->kgQueueDepth);
 
-            setVal(metrics::kSymbolInflight, snap->symbolInFlight);
-            setVal(metrics::kSymbolQueueDepth, snap->symbolQueueDepth);
+                setVal(metrics::kSymbolInflight, snap->symbolInFlight);
+                setVal(metrics::kSymbolQueueDepth, snap->symbolQueueDepth);
 
-            // Entity extraction metrics (external plugins like Ghidra)
-            setVal(metrics::kEntityQueued, snap->entityQueued);
-            setVal(metrics::kEntityDropped, snap->entityDropped);
-            setVal(metrics::kEntityConsumed, snap->entityConsumed);
-            setVal(metrics::kEntityInflight, snap->entityInFlight);
-            setVal(metrics::kEntityQueueDepth, snap->entityQueueDepth);
+                // Entity extraction metrics (external plugins like Ghidra)
+                setVal(metrics::kEntityQueued, snap->entityQueued);
+                setVal(metrics::kEntityDropped, snap->entityDropped);
+                setVal(metrics::kEntityConsumed, snap->entityConsumed);
+                setVal(metrics::kEntityInflight, snap->entityInFlight);
+                setVal(metrics::kEntityQueueDepth, snap->entityQueueDepth);
 
-            setVal(metrics::kTitleQueueDepth, snap->titleQueueDepth);
-            setVal(metrics::kTitleInflight, snap->titleInFlight);
-            setVal(metrics::kPostTitleLimit, snap->titleConcurrencyLimit);
-            setVal(metrics::kTitleQueued, snap->titleQueued);
-            setVal(metrics::kTitleDropped, snap->titleDropped);
-            setVal(metrics::kTitleConsumed, snap->titleConsumed);
+                setVal(metrics::kTitleQueueDepth, snap->titleQueueDepth);
+                setVal(metrics::kTitleInflight, snap->titleInFlight);
+                setVal(metrics::kPostTitleLimit, snap->titleConcurrencyLimit);
+                setVal(metrics::kTitleQueued, snap->titleQueued);
+                setVal(metrics::kTitleDropped, snap->titleDropped);
+                setVal(metrics::kTitleConsumed, snap->titleConsumed);
 
-            // FTS5 indexing metrics
-            setVal(metrics::kFts5Queued, snap->fts5Queued);
-            setVal(metrics::kFts5Dropped, snap->fts5Dropped);
-            setVal(metrics::kFts5Consumed, snap->fts5Consumed);
+                // FTS5 indexing metrics
+                setVal(metrics::kFts5Queued, snap->fts5Queued);
+                setVal(metrics::kFts5Dropped, snap->fts5Dropped);
+                setVal(metrics::kFts5Consumed, snap->fts5Consumed);
 
-            // Symbol extraction metrics
-            setVal(metrics::kSymbolQueued, snap->symbolQueued);
-            setVal(metrics::kSymbolDropped, snap->symbolDropped);
-            setVal(metrics::kSymbolConsumed, snap->symbolConsumed);
+                // Symbol extraction metrics
+                setVal(metrics::kSymbolQueued, snap->symbolQueued);
+                setVal(metrics::kSymbolDropped, snap->symbolDropped);
+                setVal(metrics::kSymbolConsumed, snap->symbolConsumed);
 
-            // Stream metrics
-            setVal(metrics::kStreamTotal, snap->streamTotal);
-            setVal(metrics::kStreamBatches, snap->streamBatches);
-            setVal(metrics::kStreamKeepalives, snap->streamKeepalives);
-            setVal(metrics::kStreamTtfbAvgMs, snap->streamTtfbAvgMs);
+                // Stream metrics
+                setVal(metrics::kStreamTotal, snap->streamTotal);
+                setVal(metrics::kStreamBatches, snap->streamBatches);
+                setVal(metrics::kStreamKeepalives, snap->streamKeepalives);
+                setVal(metrics::kStreamTtfbAvgMs, snap->streamTtfbAvgMs);
 
-            // Repair service metrics
-            setVal(metrics::kRepairQueueDepth, snap->repairQueueDepth);
-            setVal(metrics::kRepairBatchesAttempted, snap->repairBatchesAttempted);
-            setVal(metrics::kRepairEmbeddingsGenerated, snap->repairEmbeddingsGenerated);
-            setVal(metrics::kRepairEmbeddingsSkipped, snap->repairEmbeddingsSkipped);
-            setVal(metrics::kRepairFailedOperations, snap->repairFailedOperations);
-            setVal(metrics::kRepairIdleTicks, snap->repairIdleTicks);
-            setVal(metrics::kRepairBusyTicks, snap->repairBusyTicks);
-            setVal(metrics::kRepairTotalBacklog, snap->repairTotalBacklog);
-            setVal(metrics::kRepairProcessed, snap->repairProcessed);
-            setVal(metrics::kRepairRunning, snap->repairRunning ? 1 : 0);
-            setVal(metrics::kRepairInProgress, snap->repairInProgress ? 1 : 0);
+                // Repair service metrics
+                setVal(metrics::kRepairQueueDepth, snap->repairQueueDepth);
+                setVal(metrics::kRepairBatchesAttempted, snap->repairBatchesAttempted);
+                setVal(metrics::kRepairEmbeddingsGenerated, snap->repairEmbeddingsGenerated);
+                setVal(metrics::kRepairEmbeddingsSkipped, snap->repairEmbeddingsSkipped);
+                setVal(metrics::kRepairFailedOperations, snap->repairFailedOperations);
+                setVal(metrics::kRepairIdleTicks, snap->repairIdleTicks);
+                setVal(metrics::kRepairBusyTicks, snap->repairBusyTicks);
+                setVal(metrics::kRepairTotalBacklog, snap->repairTotalBacklog);
+                setVal(metrics::kRepairProcessed, snap->repairProcessed);
+                setVal(metrics::kRepairRunning, snap->repairRunning ? 1 : 0);
+                setVal(metrics::kRepairInProgress, snap->repairInProgress ? 1 : 0);
 
-            // File/directory add tracking
-            setVal(metrics::kFilesAdded, static_cast<size_t>(snap->filesAdded));
-            setVal(metrics::kDirectoriesAdded, static_cast<size_t>(snap->directoriesAdded));
-            setVal(metrics::kFilesProcessed, static_cast<size_t>(snap->filesProcessed));
-            setVal(metrics::kDirectoriesProcessed, static_cast<size_t>(snap->directoriesProcessed));
+                // File/directory add tracking
+                setVal(metrics::kFilesAdded, static_cast<size_t>(snap->filesAdded));
+                setVal(metrics::kDirectoriesAdded, static_cast<size_t>(snap->directoriesAdded));
+                setVal(metrics::kFilesProcessed, static_cast<size_t>(snap->filesProcessed));
+                setVal(metrics::kDirectoriesProcessed,
+                       static_cast<size_t>(snap->directoriesProcessed));
 
-            // Dynamic concurrency limits (PBI-05a)
-            setVal(metrics::kPostExtractionLimit, snap->postExtractionLimit);
-            setVal(metrics::kPostKgLimit, snap->postKgLimit);
-            setVal(metrics::kPostSymbolLimit, snap->postSymbolLimit);
-            setVal(metrics::kPostEntityLimit, snap->postEntityLimit);
-            // Combined enrich (symbol+entity+title) metrics
-            setVal(metrics::kPostEnrichLimit, snap->postEnrichLimit);
-            setVal(metrics::kEnrichInflight, snap->enrichInflight);
-            setVal(metrics::kEnrichQueueDepth, snap->enrichQueueDepth);
+                // Dynamic concurrency limits (PBI-05a)
+                setVal(metrics::kPostExtractionLimit, snap->postExtractionLimit);
+                setVal(metrics::kPostKgLimit, snap->postKgLimit);
+                setVal(metrics::kPostSymbolLimit, snap->postSymbolLimit);
+                setVal(metrics::kPostEntityLimit, snap->postEntityLimit);
+                // Combined enrich (symbol+entity+title) metrics
+                setVal(metrics::kPostEnrichLimit, snap->postEnrichLimit);
+                setVal(metrics::kEnrichInflight, snap->enrichInflight);
+                setVal(metrics::kEnrichQueueDepth, snap->enrichQueueDepth);
 
-            // Surface whether the InternalEventBus is being used for post-ingest
-            try {
-                setVal(metrics::kPostIngestUseBus,
-                       yams::daemon::TuneAdvisor::useInternalBusForPostIngest() ? 1 : 0);
-            } catch (...) {
-            }
-            setVal(metrics::kPostEmbedLimit, snap->postEmbedLimit);
+                // Surface whether the InternalEventBus is being used for post-ingest
+                try {
+                    setVal(metrics::kPostIngestUseBus,
+                           yams::daemon::TuneAdvisor::useInternalBusForPostIngest() ? 1 : 0);
+                } catch (...) {
+                }
+                setVal(metrics::kPostEmbedLimit, snap->postEmbedLimit);
 
-            // Internal bus metrics
-            try {
-                auto& bus = InternalEventBus::instance();
-                setVal(metrics::kBusEmbedQueued, bus.embedQueued());
-                setVal(metrics::kBusEmbedConsumed, bus.embedConsumed());
-                setVal(metrics::kBusEmbedDropped, bus.embedDropped());
-                setVal(metrics::kBusEmbedPreparedDocsQueued, bus.embedPreparedDocsQueued());
-                setVal(metrics::kBusEmbedPreparedChunksQueued, bus.embedPreparedChunksQueued());
-                setVal(metrics::kBusEmbedHashOnlyDocsQueued, bus.embedHashOnlyDocsQueued());
-                setVal(metrics::kBusPostQueued, bus.postQueued());
-                setVal(metrics::kBusPostConsumed, bus.postConsumed());
-                setVal(metrics::kBusPostDropped, bus.postDropped());
-            } catch (...) {
-            }
+                // Internal bus metrics
+                try {
+                    auto& bus = InternalEventBus::instance();
+                    setVal(metrics::kBusEmbedQueued, bus.embedQueued());
+                    setVal(metrics::kBusEmbedConsumed, bus.embedConsumed());
+                    setVal(metrics::kBusEmbedDropped, bus.embedDropped());
+                    setVal(metrics::kBusEmbedPreparedDocsQueued, bus.embedPreparedDocsQueued());
+                    setVal(metrics::kBusEmbedPreparedChunksQueued, bus.embedPreparedChunksQueued());
+                    setVal(metrics::kBusEmbedHashOnlyDocsQueued, bus.embedHashOnlyDocsQueued());
+                    setVal(metrics::kBusPostQueued, bus.postQueued());
+                    setVal(metrics::kBusPostConsumed, bus.postConsumed());
+                    setVal(metrics::kBusPostDropped, bus.postDropped());
+                } catch (...) {
+                }
 
-            // Session watch status
-            setVal(metrics::kWatchEnabled, snap->watchEnabled ? 1 : 0);
-            if (snap->watchIntervalMs > 0) {
-                setVal(metrics::kWatchIntervalMs, snap->watchIntervalMs);
+                // Session watch status
+                setVal(metrics::kWatchEnabled, snap->watchEnabled ? 1 : 0);
+                if (snap->watchIntervalMs > 0) {
+                    setVal(metrics::kWatchIntervalMs, snap->watchIntervalMs);
+                }
             }
             res.retryAfterMs = snap->retryAfterMs;
             for (const auto& [k, v] : snap->readinessStates)
@@ -323,13 +341,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             for (const auto& [k, v] : snap->initProgress)
                 res.initProgress[k] = v;
 
-            // Content store diagnostics
-            res.contentStoreRoot = snap->contentStoreRoot;
-            res.contentStoreError = snap->contentStoreError;
-            // Search tuning state (from SearchTuner FSM - epic yams-7ez4)
-            res.searchTuningState = snap->searchTuningState;
-            res.searchTuningReason = snap->searchTuningReason;
-            res.searchTuningParams = snap->searchTuningParams;
+            if (includeExtendedStatus) {
+                // Content store diagnostics
+                res.contentStoreRoot = snap->contentStoreRoot;
+                res.contentStoreError = snap->contentStoreError;
+                // Search tuning state (from SearchTuner FSM - epic yams-7ez4)
+                res.searchTuningState = snap->searchTuningState;
+                res.searchTuningReason = snap->searchTuningReason;
+                res.searchTuningParams = snap->searchTuningParams;
+            }
             // ResourceGovernor metrics (memory pressure management)
             res.governorRssBytes = snap->governorRssBytes;
             res.governorBudgetBytes = snap->governorBudgetBytes;
@@ -344,92 +364,108 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.onnxEmbedUsed = snap->onnxEmbedUsed;
             res.onnxRerankerUsed = snap->onnxRerankerUsed;
 
-            // Storage size summary (exposed via requestCounts for backwards compatible clients)
-            if (snap->logicalBytes > 0)
-                setVal(metrics::kStorageLogicalBytes, static_cast<size_t>(snap->logicalBytes));
-            if (snap->physicalBytes > 0)
-                setVal(metrics::kStoragePhysicalBytes, static_cast<size_t>(snap->physicalBytes));
-            if (snap->storeObjects > 0)
-                setVal(metrics::kStorageDocuments, static_cast<size_t>(snap->storeObjects));
+            if (includeExtendedStatus) {
+                // Storage size summary (exposed via requestCounts for backwards compatible clients)
+                if (snap->logicalBytes > 0)
+                    setVal(metrics::kStorageLogicalBytes, static_cast<size_t>(snap->logicalBytes));
+                if (snap->physicalBytes > 0)
+                    setVal(metrics::kStoragePhysicalBytes,
+                           static_cast<size_t>(snap->physicalBytes));
+                if (snap->storeObjects > 0)
+                    setVal(metrics::kStorageDocuments, static_cast<size_t>(snap->storeObjects));
 
-            if (snap->logicalBytes > 0 && snap->physicalBytes > 0) {
-                std::uint64_t saved = (snap->logicalBytes > snap->physicalBytes)
-                                          ? (snap->logicalBytes - snap->physicalBytes)
-                                          : 0ULL;
-                setVal(metrics::kStorageSavedBytes, static_cast<size_t>(saved));
-                std::uint64_t pct =
-                    snap->logicalBytes ? (saved * 100ULL) / snap->logicalBytes : 0ULL;
-                setVal(metrics::kStorageSavedPct, static_cast<size_t>(pct));
-            } else {
-                // Avoid signaling 100% savings when physical is unknown
-                res.requestCounts.erase(std::string(metrics::kStorageSavedBytes));
-                res.requestCounts.erase(std::string(metrics::kStorageSavedPct));
+                if (snap->logicalBytes > 0 && snap->physicalBytes > 0) {
+                    std::uint64_t saved = (snap->logicalBytes > snap->physicalBytes)
+                                              ? (snap->logicalBytes - snap->physicalBytes)
+                                              : 0ULL;
+                    setVal(metrics::kStorageSavedBytes, static_cast<size_t>(saved));
+                    std::uint64_t pct =
+                        snap->logicalBytes ? (saved * 100ULL) / snap->logicalBytes : 0ULL;
+                    setVal(metrics::kStorageSavedPct, static_cast<size_t>(pct));
+                } else {
+                    // Avoid signaling 100% savings when physical is unknown
+                    res.requestCounts.erase(std::string(metrics::kStorageSavedBytes));
+                    res.requestCounts.erase(std::string(metrics::kStorageSavedPct));
+                }
             }
 
             // New: detailed storage breakdown (when available)
-            if (snap->casPhysicalBytes > 0)
-                setVal(metrics::kCasPhysicalBytes, static_cast<size_t>(snap->casPhysicalBytes));
-            if (snap->casUniqueRawBytes > 0)
-                setVal(metrics::kCasUniqueRawBytes, static_cast<size_t>(snap->casUniqueRawBytes));
-            if (snap->casDedupSavedBytes > 0)
-                setVal(metrics::kCasDedupSavedBytes, static_cast<size_t>(snap->casDedupSavedBytes));
-            if (snap->casCompressSavedBytes > 0)
-                setVal(metrics::kCasCompressSavedBytes,
-                       static_cast<size_t>(snap->casCompressSavedBytes));
-            if (snap->metadataPhysicalBytes > 0)
-                setVal(metrics::kMetadataPhysicalBytes,
-                       static_cast<size_t>(snap->metadataPhysicalBytes));
-            if (snap->indexPhysicalBytes > 0)
-                setVal(metrics::kIndexPhysicalBytes, static_cast<size_t>(snap->indexPhysicalBytes));
-            if (snap->vectorPhysicalBytes > 0)
-                setVal(metrics::kVectorPhysicalBytes,
-                       static_cast<size_t>(snap->vectorPhysicalBytes));
-            if (snap->logsTmpPhysicalBytes > 0)
-                setVal(metrics::kLogsTmpPhysicalBytes,
-                       static_cast<size_t>(snap->logsTmpPhysicalBytes));
-            if (snap->physicalTotalBytes > 0)
-                setVal(metrics::kPhysicalTotalBytes, static_cast<size_t>(snap->physicalTotalBytes));
+            if (includeExtendedStatus) {
+                if (snap->casPhysicalBytes > 0)
+                    setVal(metrics::kCasPhysicalBytes, static_cast<size_t>(snap->casPhysicalBytes));
+                if (snap->casUniqueRawBytes > 0)
+                    setVal(metrics::kCasUniqueRawBytes,
+                           static_cast<size_t>(snap->casUniqueRawBytes));
+                if (snap->casDedupSavedBytes > 0)
+                    setVal(metrics::kCasDedupSavedBytes,
+                           static_cast<size_t>(snap->casDedupSavedBytes));
+                if (snap->casCompressSavedBytes > 0)
+                    setVal(metrics::kCasCompressSavedBytes,
+                           static_cast<size_t>(snap->casCompressSavedBytes));
+                if (snap->metadataPhysicalBytes > 0)
+                    setVal(metrics::kMetadataPhysicalBytes,
+                           static_cast<size_t>(snap->metadataPhysicalBytes));
+                if (snap->indexPhysicalBytes > 0)
+                    setVal(metrics::kIndexPhysicalBytes,
+                           static_cast<size_t>(snap->indexPhysicalBytes));
+                if (snap->vectorPhysicalBytes > 0)
+                    setVal(metrics::kVectorPhysicalBytes,
+                           static_cast<size_t>(snap->vectorPhysicalBytes));
+                if (snap->logsTmpPhysicalBytes > 0)
+                    setVal(metrics::kLogsTmpPhysicalBytes,
+                           static_cast<size_t>(snap->logsTmpPhysicalBytes));
+                if (snap->physicalTotalBytes > 0)
+                    setVal(metrics::kPhysicalTotalBytes,
+                           static_cast<size_t>(snap->physicalTotalBytes));
+            }
 
-            // Route-separated DB pool telemetry for contention attribution
-            setVal(metrics::kDbWritePoolAvailable, snap->dbWritePoolAvailable ? 1 : 0);
-            setVal(metrics::kDbWritePoolTotalConnections, snap->dbWritePoolTotalConnections);
-            setVal(metrics::kDbWritePoolAvailableConnections,
-                   snap->dbWritePoolAvailableConnections);
-            setVal(metrics::kDbWritePoolActiveConnections, snap->dbWritePoolActiveConnections);
             setVal(metrics::kDbWritePoolWaitingRequests, snap->dbWritePoolWaitingRequests);
-            setVal(metrics::kDbWritePoolMaxObservedWaiting, snap->dbWritePoolMaxObservedWaiting);
-            setVal(metrics::kDbWritePoolTotalWaitMicros,
-                   static_cast<size_t>(snap->dbWritePoolTotalWaitMicros));
-            setVal(metrics::kDbWritePoolTimeoutCount, snap->dbWritePoolTimeoutCount);
-            setVal(metrics::kDbWritePoolFailedAcquisitions, snap->dbWritePoolFailedAcquisitions);
-
-            setVal(metrics::kDbReadPoolAvailable, snap->dbReadPoolAvailable ? 1 : 0);
-            setVal(metrics::kDbReadPoolTotalConnections, snap->dbReadPoolTotalConnections);
-            setVal(metrics::kDbReadPoolAvailableConnections, snap->dbReadPoolAvailableConnections);
-            setVal(metrics::kDbReadPoolActiveConnections, snap->dbReadPoolActiveConnections);
             setVal(metrics::kDbReadPoolWaitingRequests, snap->dbReadPoolWaitingRequests);
-            setVal(metrics::kDbReadPoolMaxObservedWaiting, snap->dbReadPoolMaxObservedWaiting);
-            setVal(metrics::kDbReadPoolTotalWaitMicros,
-                   static_cast<size_t>(snap->dbReadPoolTotalWaitMicros));
-            setVal(metrics::kDbReadPoolTimeoutCount, snap->dbReadPoolTimeoutCount);
-            setVal(metrics::kDbReadPoolFailedAcquisitions, snap->dbReadPoolFailedAcquisitions);
+            if (includeExtendedStatus) {
+                // Route-separated DB pool telemetry for contention attribution
+                setVal(metrics::kDbWritePoolAvailable, snap->dbWritePoolAvailable ? 1 : 0);
+                setVal(metrics::kDbWritePoolTotalConnections, snap->dbWritePoolTotalConnections);
+                setVal(metrics::kDbWritePoolAvailableConnections,
+                       snap->dbWritePoolAvailableConnections);
+                setVal(metrics::kDbWritePoolActiveConnections, snap->dbWritePoolActiveConnections);
+                setVal(metrics::kDbWritePoolMaxObservedWaiting,
+                       snap->dbWritePoolMaxObservedWaiting);
+                setVal(metrics::kDbWritePoolTotalWaitMicros,
+                       static_cast<size_t>(snap->dbWritePoolTotalWaitMicros));
+                setVal(metrics::kDbWritePoolTimeoutCount, snap->dbWritePoolTimeoutCount);
+                setVal(metrics::kDbWritePoolFailedAcquisitions,
+                       snap->dbWritePoolFailedAcquisitions);
+
+                setVal(metrics::kDbReadPoolAvailable, snap->dbReadPoolAvailable ? 1 : 0);
+                setVal(metrics::kDbReadPoolTotalConnections, snap->dbReadPoolTotalConnections);
+                setVal(metrics::kDbReadPoolAvailableConnections,
+                       snap->dbReadPoolAvailableConnections);
+                setVal(metrics::kDbReadPoolActiveConnections, snap->dbReadPoolActiveConnections);
+                setVal(metrics::kDbReadPoolMaxObservedWaiting, snap->dbReadPoolMaxObservedWaiting);
+                setVal(metrics::kDbReadPoolTotalWaitMicros,
+                       static_cast<size_t>(snap->dbReadPoolTotalWaitMicros));
+                setVal(metrics::kDbReadPoolTimeoutCount, snap->dbReadPoolTimeoutCount);
+                setVal(metrics::kDbReadPoolFailedAcquisitions, snap->dbReadPoolFailedAcquisitions);
+            }
 
             // Document/vector counters from cached metrics (no live DB queries on hot path!).
             // Always include these keys, even when 0, so clients/benchmarks can distinguish
             // "zero" from "missing" and avoid fragile presence checks.
             setVal(metrics::kDocumentsTotal, static_cast<size_t>(snap->documentsTotal));
-            setVal(metrics::kDocumentsIndexed, static_cast<size_t>(snap->documentsIndexed));
-            setVal(metrics::kDocumentsContentExtracted,
-                   static_cast<size_t>(snap->documentsContentExtracted));
-            setVal(metrics::kDocumentsEmbedded, static_cast<size_t>(snap->documentsEmbedded));
+            if (includeExtendedStatus) {
+                setVal(metrics::kDocumentsIndexed, static_cast<size_t>(snap->documentsIndexed));
+                setVal(metrics::kDocumentsContentExtracted,
+                       static_cast<size_t>(snap->documentsContentExtracted));
+                setVal(metrics::kDocumentsEmbedded, static_cast<size_t>(snap->documentsEmbedded));
 
-            // Vector count from cached metrics (for benchmarks/tools waiting for embeddings)
-            setVal(metrics::kVectorCount, static_cast<size_t>(snap->vectorRowsExact));
-            setVal(metrics::kIndexVisible, (snap->documentsIndexed > 0) ? 1 : 0);
+                // Vector count from cached metrics (for benchmarks/tools waiting for embeddings)
+                setVal(metrics::kVectorCount, static_cast<size_t>(snap->vectorRowsExact));
+                setVal(metrics::kIndexVisible, (snap->documentsIndexed > 0) ? 1 : 0);
 
-            if (serviceManager_) {
-                setVal(metrics::kSnapshotPersisted,
-                       static_cast<size_t>(serviceManager_->getSnapshotsPersistedCount()));
+                if (serviceManager_) {
+                    setVal(metrics::kSnapshotPersisted,
+                           static_cast<size_t>(serviceManager_->getSnapshotsPersistedCount()));
+                }
             }
         } else {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
@@ -528,19 +564,21 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             } catch (...) {
             }
         }
-        spdlog::debug("[StatusRequest] About to check search engine degradation");
-        try {
-            bool searchDegraded = true;
-            if (serviceManager_) {
-                spdlog::debug("[StatusRequest] Calling getSearchEngineSnapshot()");
-                auto engine = serviceManager_->getSearchEngineSnapshot();
-                spdlog::debug("[StatusRequest] getSearchEngineSnapshot() returned, engine={}",
-                              static_cast<void*>(engine.get()));
-                searchDegraded = (engine == nullptr);
+        if (includeExtendedStatus) {
+            spdlog::debug("[StatusRequest] About to check search engine degradation");
+            try {
+                bool searchDegraded = true;
+                if (serviceManager_) {
+                    spdlog::debug("[StatusRequest] Calling getSearchEngineSnapshot()");
+                    auto engine = serviceManager_->getSearchEngineSnapshot();
+                    spdlog::debug("[StatusRequest] getSearchEngineSnapshot() returned, engine={}",
+                                  static_cast<void*>(engine.get()));
+                    searchDegraded = (engine == nullptr);
+                }
+                res.readinessStates[std::string(readiness::kSearchEngineDegraded)] = searchDegraded;
+            } catch (...) {
+                res.readinessStates[std::string(readiness::kSearchEngineDegraded)] = true;
             }
-            res.readinessStates[std::string(readiness::kSearchEngineDegraded)] = searchDegraded;
-        } catch (...) {
-            res.readinessStates[std::string(readiness::kSearchEngineDegraded)] = true;
         }
         // NOTE: Vector diagnostics are now collected via DaemonMetrics background thread
         // and read from the snapshot above (lines 81-92). This avoids blocking the status
@@ -582,33 +620,36 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 c = static_cast<char>(std::tolower(c));
             res.lifecycleState = res.overallStatus;
         }
-        // Populate typed provider details (always send, let UI filter if needed)
-        try {
-            res.providers = yams::daemon::dispatch::build_typed_providers(serviceManager_, state_);
-            spdlog::debug("[StatusRequest] built {} providers", res.providers.size());
-            for (const auto& p : res.providers) {
-                spdlog::debug(
-                    "[StatusRequest]   provider: name='{}' ready={} degraded={} isProvider={}",
-                    p.name, p.ready, p.degraded, p.isProvider);
+        if (includeExtendedStatus) {
+            // Populate typed provider details only for detailed status.
+            try {
+                res.providers =
+                    yams::daemon::dispatch::build_typed_providers(serviceManager_, state_);
+                spdlog::debug("[StatusRequest] built {} providers", res.providers.size());
+                for (const auto& p : res.providers) {
+                    spdlog::debug(
+                        "[StatusRequest]   provider: name='{}' ready={} degraded={} isProvider={}",
+                        p.name, p.ready, p.degraded, p.isProvider);
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("[StatusRequest] Exception building providers: {}", e.what());
+            } catch (...) {
+                spdlog::warn("[StatusRequest] Unknown exception building providers");
             }
-        } catch (const std::exception& e) {
-            spdlog::warn("[StatusRequest] Exception building providers: {}", e.what());
-        } catch (...) {
-            spdlog::warn("[StatusRequest] Unknown exception building providers");
-        }
-        // Populate skipped plugin diagnostics from last scan (if available)
-        try {
-            if (serviceManager_) {
-                if (auto* abi = serviceManager_->getAbiPluginHost()) {
-                    for (const auto& pr : abi->getLastScanSkips()) {
-                        StatusResponse::PluginSkipInfo s;
-                        s.path = pr.first.string();
-                        s.reason = pr.second;
-                        res.skippedPlugins.push_back(std::move(s));
+            // Populate skipped plugin diagnostics from last scan (if available)
+            try {
+                if (serviceManager_) {
+                    if (auto* abi = serviceManager_->getAbiPluginHost()) {
+                        for (const auto& pr : abi->getLastScanSkips()) {
+                            StatusResponse::PluginSkipInfo s;
+                            s.path = pr.first.string();
+                            s.reason = pr.second;
+                            res.skippedPlugins.push_back(std::move(s));
+                        }
                     }
                 }
+            } catch (...) {
             }
-        } catch (...) {
         }
         if (!metrics_) {
             try {
@@ -666,35 +707,37 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             }
         }
 
-        // Repair metrics should be visible even in fallback/non-metrics status path.
-        try {
-            if (state_) {
-                const auto repairRunning =
-                    state_->stats.repairRunning.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairQueueDepth)] =
-                    state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairBatchesAttempted)] =
-                    state_->stats.repairBatchesAttempted.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairEmbeddingsGenerated)] =
-                    state_->stats.repairEmbeddingsGenerated.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairEmbeddingsSkipped)] =
-                    state_->stats.repairEmbeddingsSkipped.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairFailedOperations)] =
-                    state_->stats.repairFailedOperations.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairIdleTicks)] =
-                    state_->stats.repairIdleTicks.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairBusyTicks)] =
-                    state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairTotalBacklog)] =
-                    state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairProcessed)] =
-                    state_->stats.repairProcessed.load(std::memory_order_relaxed);
-                res.requestCounts[std::string(metrics::kRepairRunning)] = repairRunning ? 1 : 0;
-                res.requestCounts[std::string(metrics::kRepairInProgress)] =
-                    state_->stats.repairInProgress.load(std::memory_order_relaxed) ? 1 : 0;
-                res.readinessStates[std::string(readiness::kRepairService)] = repairRunning;
+        if (includeExtendedStatus) {
+            // Repair metrics should remain available in detailed status and fallback paths.
+            try {
+                if (state_) {
+                    const auto repairRunning =
+                        state_->stats.repairRunning.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairQueueDepth)] =
+                        state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairBatchesAttempted)] =
+                        state_->stats.repairBatchesAttempted.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairEmbeddingsGenerated)] =
+                        state_->stats.repairEmbeddingsGenerated.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairEmbeddingsSkipped)] =
+                        state_->stats.repairEmbeddingsSkipped.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairFailedOperations)] =
+                        state_->stats.repairFailedOperations.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairIdleTicks)] =
+                        state_->stats.repairIdleTicks.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairBusyTicks)] =
+                        state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairTotalBacklog)] =
+                        state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairProcessed)] =
+                        state_->stats.repairProcessed.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairRunning)] = repairRunning ? 1 : 0;
+                    res.requestCounts[std::string(metrics::kRepairInProgress)] =
+                        state_->stats.repairInProgress.load(std::memory_order_relaxed) ? 1 : 0;
+                    res.readinessStates[std::string(readiness::kRepairService)] = repairRunning;
+                }
+            } catch (...) {
             }
-        } catch (...) {
         }
 
         // Keep canonical readiness keys stable for clients/tests even when
@@ -717,6 +760,22 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             if (it == res.readinessStates.end()) {
                 res.readinessStates.emplace(std::string(key), value);
             }
+        }
+
+        // Proto status transport still omits several newer structured fields.
+        // Mirror them into requestCounts so clients/benchmarks can recover the
+        // values until the proto schema is expanded.
+        res.requestCounts["status_max_connections"] = res.maxConnections;
+        res.requestCounts["status_connection_slots_free"] = res.connectionSlotsFree;
+        res.requestCounts["status_oldest_connection_age_s"] = res.oldestConnectionAge;
+        res.requestCounts["status_forced_close_count"] = res.forcedCloseCount;
+        res.requestCounts["status_mux_writer_budget_bytes"] = res.muxWriterBudgetBytes;
+        res.requestCounts["status_ipc_pool_size"] = res.ipcPoolSize;
+        res.requestCounts["status_io_pool_size"] = res.ioPoolSize;
+        res.requestCounts["status_retry_after_ms"] = res.retryAfterMs;
+        const auto rawRssBytes = res.governorRssBytes;
+        if (rawRssBytes > 0) {
+            res.requestCounts["status_rss_bytes"] = static_cast<size_t>(rawRssBytes);
         }
     } catch (...) {
         StatusResponse fallback;

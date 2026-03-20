@@ -128,6 +128,8 @@ private:
     // Connection slot resizing hysteresis (PBI-085)
     uint32_t slotHighTicks_{0};
     uint32_t slotLowTicks_{0};
+    std::uint64_t previousAcceptCapacityDelays_{0};
+    std::uint64_t previousForcedCloseCount_{0};
 
     // Issue 6 fix: track previous pressure level for de-escalation detection
     uint8_t previousPressureLevel_{0};

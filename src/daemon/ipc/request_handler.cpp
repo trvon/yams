@@ -304,6 +304,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
         }
         FrameReader reader(MAX_MESSAGE_SIZE);
         bool should_exit = false;
+        auto completed_requests = std::make_shared<std::atomic<size_t>>(0);
 
         uint64_t fsm_guard_fail_count = 0;
         std::uint32_t consecutive_idle_timeouts = 0;
@@ -385,6 +386,32 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 continue;
             }
 
+            auto active_work_snapshot = [&]() {
+                const auto inflight = inflight_.load(std::memory_order_acquire);
+                if (inflight > 0) {
+                    return std::pair<bool, size_t>{true, 0};
+                }
+                std::lock_guard<std::mutex> lk(ctx_mtx_);
+                return std::pair<bool, size_t>{!contexts_.empty(), contexts_.size()};
+            };
+            const auto [active_work_before_read, _active_ctx_count_before_read] =
+                active_work_snapshot();
+            const auto completed_request_count =
+                completed_requests->load(std::memory_order_acquire);
+            const bool new_session_probe = !active_work_before_read &&
+                                           completed_request_count == 0 &&
+                                           config_.new_session_probe_grace.count() > 0;
+            const bool single_use_reuse_probe = !active_work_before_read &&
+                                                completed_request_count == 1 &&
+                                                config_.post_response_reuse_grace.count() > 0;
+            const auto read_timeout =
+                new_session_probe ? config_.new_session_probe_grace
+                : single_use_reuse_probe
+                    ? config_.post_response_reuse_grace
+                    : std::chrono::duration_cast<std::chrono::milliseconds>(config_.read_timeout);
+            const std::uint32_t idle_timeout_budget =
+                (new_session_probe || single_use_reuse_probe) ? 1u : kMaxIdleTimeouts;
+
             auto executor = co_await boost::asio::this_coro::executor;
             using ReadResult = std::tuple<boost::system::error_code, std::size_t>;
             using RaceResult = std::variant<ReadResult, bool>; // ReadResult or timedOut
@@ -392,7 +419,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             auto read_or_timeout =
                 co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                      void(std::exception_ptr, RaceResult)>(
-                    [sock, &buf, executor, timeout = config_.read_timeout](auto handler) mutable {
+                    [sock, &buf, executor, timeout = read_timeout](auto handler) mutable {
                         auto completed = std::make_shared<std::atomic<bool>>(false);
                         auto timer = std::make_shared<boost::asio::steady_timer>(executor);
                         timer->expires_after(timeout);
@@ -440,23 +467,16 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
 
                 spdlog::debug(
                     "Read timeout (persistent) on socket {} after {} ms — keeping connection open",
-                    sock_fd,
-                    std::chrono::duration_cast<std::chrono::milliseconds>(config_.read_timeout)
-                        .count());
+                    sock_fd, read_timeout.count());
                 // Bound idle lifetime to avoid FD/backlog exhaustion if clients vanish silently
-                if (++consecutive_idle_timeouts >= kMaxIdleTimeouts) {
-                    const auto inflight = inflight_.load(std::memory_order_acquire);
-                    bool has_active = inflight > 0;
-                    if (!has_active) {
-                        std::lock_guard<std::mutex> lk(ctx_mtx_);
-                        has_active = !contexts_.empty();
-                    }
+                if (++consecutive_idle_timeouts >= idle_timeout_budget) {
+                    const auto [has_active, active_ctx_count] = active_work_snapshot();
 
                     if (has_active) {
                         spdlog::info("Idle timeout hit with active work (inflight={} ctxs={}) "
                                      "after {} timeouts (fd={}); keeping connection open",
-                                     inflight, contexts_.size(), consecutive_idle_timeouts,
-                                     sock_fd);
+                                     inflight_.load(std::memory_order_acquire), active_ctx_count,
+                                     consecutive_idle_timeouts, sock_fd);
                         consecutive_idle_timeouts = 0;
                         continue;
                     }
@@ -634,14 +654,25 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::debug("RequestHandler::handle_connection: Routing request_id={} with "
                                   "expectsStreamingResponse={}",
                                   message.requestId, message.expectsStreamingResponse);
+                    if (config_.admission_control) {
+                        auto decision = config_.admission_control(*request_ptr);
+                        if (decision.has_value()) {
+                            stats_.requests_failed++;
+                            completed_requests->fetch_add(1, std::memory_order_release);
+                            (void)co_await send_error_response(
+                                *sock, decision->code, decision->message, message.requestId, &fsm);
+                            continue;
+                        }
+                    }
                     if (config_.enable_multiplexing) {
                         auto cur = inflight_.load(std::memory_order_relaxed);
                         spdlog::debug("[MUX] req_id={} inflight={}/{}", message.requestId, cur,
                                       config_.max_inflight_per_connection);
                         if (cur >= config_.max_inflight_per_connection) {
-                            (void)co_await send_error(*sock, ErrorCode::ResourceExhausted,
-                                                      "Too many in-flight requests",
-                                                      message.requestId);
+                            completed_requests->fetch_add(1, std::memory_order_release);
+                            (void)co_await send_error_response(*sock, ErrorCode::ResourceExhausted,
+                                                               "Too many in-flight requests",
+                                                               message.requestId, &fsm);
                         } else {
                             inflight_.fetch_add(1, std::memory_order_relaxed);
                             // Create per-request context
@@ -668,11 +699,12 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             boost::asio::co_spawn(
                                 spawn_exec,
                                 [self = shared_from_this(), sock, req = std::move(routed_request),
-                                 req_id = request_id,
-                                 expects = expects_streaming]() -> boost::asio::awaitable<void> {
+                                 req_id = request_id, expects = expects_streaming,
+                                 completed_requests]() -> boost::asio::awaitable<void> {
                                     struct Cleanup {
                                         std::shared_ptr<RequestHandler> self;
                                         uint64_t req_id;
+                                        std::shared_ptr<std::atomic<size_t>> completed_requests;
                                         ~Cleanup() {
                                             if (!self) {
                                                 return;
@@ -691,8 +723,12 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                             }
                                             RequestContextRegistry::instance().deregister_context(
                                                 req_id);
+                                            if (completed_requests) {
+                                                completed_requests->fetch_add(
+                                                    1, std::memory_order_release);
+                                            }
                                         }
-                                    } cleanup{self, req_id};
+                                    } cleanup{self, req_id, completed_requests};
 
                                     try {
                                         spdlog::debug("[MUX_SPAWN] req_id={} type={} expects={}",
@@ -724,6 +760,14 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             }
                         }
                     } else {
+                        struct CompletionMark {
+                            std::shared_ptr<std::atomic<size_t>> completed_requests;
+                            ~CompletionMark() {
+                                if (completed_requests) {
+                                    completed_requests->fetch_add(1, std::memory_order_release);
+                                }
+                            }
+                        } completion_mark{completed_requests};
                         auto handle_result = co_await handle_streaming_request(
                             *sock, *request_ptr, message.requestId, &fsm,
                             message.expectsStreamingResponse);
@@ -2446,6 +2490,40 @@ RequestHandler::send_error(boost::asio::local::stream_protocol::socket& socket, 
     error_msg.payload = Response{error};
 
     co_return co_await write_message(socket, error_msg);
+}
+
+boost::asio::awaitable<Result<void>>
+RequestHandler::send_error_response(boost::asio::local::stream_protocol::socket& socket,
+                                    ErrorCode code, const std::string& message, uint64_t request_id,
+                                    ConnectionFsm* fsm) {
+    if (fsm) {
+        try {
+            fsm_helpers::require_can_write(*fsm, "send_error_response");
+        } catch (const std::exception& ex) {
+            co_return Error{ErrorCode::InternalError,
+                            std::string{"Invalid state before unary error write: "} + ex.what()};
+        }
+    }
+
+    auto write_result = co_await send_error(socket, code, message, request_id);
+    if (!write_result) {
+        co_return write_result.error();
+    }
+
+    if (fsm) {
+        fsm->on_response_complete(config_.close_after_response);
+    }
+
+    if (config_.close_after_response) {
+        connection_closing_.store(true, std::memory_order_release);
+        boost::system::error_code ignore_ec;
+        socket.close(ignore_ec);
+        if (fsm) {
+            fsm->on_close_request();
+        }
+    }
+
+    co_return Result<void>{};
 }
 
 } // namespace yams::daemon

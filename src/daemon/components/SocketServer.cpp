@@ -1,9 +1,11 @@
 #include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
@@ -24,6 +26,32 @@ bool stream_trace_enabled() {
         return 0;
     }();
     return enabled != 0;
+}
+
+bool isControlRequest(const yams::daemon::Request& request) {
+    return std::holds_alternative<yams::daemon::StatusRequest>(request) ||
+           std::holds_alternative<yams::daemon::PingRequest>(request) ||
+           std::holds_alternative<yams::daemon::ShutdownRequest>(request);
+}
+
+bool isUxPriorityRequest(const yams::daemon::Request& request) {
+    if (isControlRequest(request)) {
+        return true;
+    }
+    return std::holds_alternative<yams::daemon::SearchRequest>(request) ||
+           std::holds_alternative<yams::daemon::ListRequest>(request) ||
+           std::holds_alternative<yams::daemon::GetRequest>(request) ||
+           std::holds_alternative<yams::daemon::GetInitRequest>(request) ||
+           std::holds_alternative<yams::daemon::GetChunkRequest>(request) ||
+           std::holds_alternative<yams::daemon::GetEndRequest>(request) ||
+           std::holds_alternative<yams::daemon::CatRequest>(request);
+}
+
+size_t emergencySessionLimit(size_t softLimit) {
+    if (softLimit == 0) {
+        return 64;
+    }
+    return std::max<size_t>(32, std::max<size_t>(softLimit * 2, softLimit + 16));
 }
 
 // Diagnostic thread removed - simplified architecture with fixed worker pool
@@ -487,6 +515,8 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
         co_return;
     }
 
+    uint32_t noSlotRejectStreak = 0;
+
     while (running_ && !stopping_) {
         YAMS_ZONE_SCOPED_N("SocketServer::accept_loop");
 
@@ -614,15 +644,19 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
             }
 
             bool slotAcquired = true;
-            if (slots) {
+            if (isProxy && slots) {
                 slotAcquired = slots->try_acquire();
             }
 
-            if (!slotAcquired) {
+            if (isProxy && !slotAcquired) {
+                noSlotRejectStreak = std::min<uint32_t>(noSlotRejectStreak + 1, 7);
                 // Hard cap reached. Close immediately to apply backpressure without
                 // stalling the acceptor/backlog.
                 boost::system::error_code close_ec;
                 socket.close(close_ec);
+                if (state_) {
+                    state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+                }
 
                 if (trace) {
                     spdlog::debug("stream-trace: accept rejected (no slots)");
@@ -635,19 +669,51 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                     }
                 }
 
-                // Yield briefly to avoid a tight accept/close loop under sustained load.
+                // Back off adaptively to avoid an accept/close spin loop under sustained
+                // overload. This reduces connection churn for short UX requests while still
+                // letting the accept loop recover quickly once slots free up.
+                const auto maxBackoff = std::max<std::chrono::milliseconds>(
+                    config_.acceptBackoffMs, std::chrono::milliseconds(4));
+                const auto adaptiveBackoff = std::min<std::chrono::milliseconds>(
+                    maxBackoff, std::chrono::milliseconds(1u << noSlotRejectStreak));
                 boost::asio::steady_timer slot_timer(*ioCoordinator_->getIOContext());
-                slot_timer.expires_after(std::chrono::milliseconds(1));
+                slot_timer.expires_after(adaptiveBackoff);
                 co_await slot_timer.async_wait(use_awaitable);
 
                 continue;
+            }
+
+            noSlotRejectStreak = 0;
+
+            if (!isProxy) {
+                const size_t active = activeConnections_.load(std::memory_order_relaxed);
+                const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
+                const size_t hardLimit = emergencySessionLimit(softLimit);
+                if (active >= hardLimit) {
+                    boost::system::error_code close_ec;
+                    socket.close(close_ec);
+                    if (state_) {
+                        state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+                        state_->stats.forcedCloseCount.fetch_add(1, std::memory_order_relaxed);
+                    }
+
+                    spdlog::debug("SocketServer: {} accept rejected by emergency session guard "
+                                  "(active={} hard_limit={} soft_limit={})",
+                                  loopLabel, active, hardLimit, softLimit);
+
+                    boost::asio::steady_timer slot_timer(*ioCoordinator_->getIOContext());
+                    slot_timer.expires_after(std::max<std::chrono::milliseconds>(
+                        config_.acceptBackoffMs, std::chrono::milliseconds(4)));
+                    co_await slot_timer.async_wait(use_awaitable);
+                    continue;
+                }
             }
 
             // If shutdown begins after slot acquisition, do not spawn a handler.
             if (!running_ || stopping_) {
                 boost::system::error_code close_ec;
                 socket.close(close_ec);
-                if (slots) {
+                if (isProxy && slots) {
                     slots->release();
                 }
                 break;
@@ -682,6 +748,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 auto slotsFree = (current < maxConn) ? (maxConn - current) : 0;
                 state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
             }
+            TuningManager::notifyWakeup();
 
             auto connectionExecutor = boost::asio::make_strand(ioCoordinator_->getExecutor());
             auto sock = std::make_shared<local::socket>(std::move(socket));
@@ -711,15 +778,6 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                             sem->release();
                             return;
                         }
-                        // Main slot pool supports dynamic resizing via shrink debt.
-                        int32_t debt = server->shrinkDebt_.load(std::memory_order_relaxed);
-                        if (debt > 0) {
-                            if (server->shrinkDebt_.compare_exchange_weak(
-                                    debt, debt - 1, std::memory_order_relaxed)) {
-                                return;
-                            }
-                        }
-                        sem->release();
                     }
                 } guard{this, slots, isProxy};
 
@@ -869,6 +927,49 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         }
         handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
+        handlerConfig.admission_control = [this, isProxy](const Request& request)
+            -> std::optional<RequestHandler::Config::AdmissionDecision> {
+            if (isProxy || isControlRequest(request)) {
+                return std::nullopt;
+            }
+
+            const size_t active = activeConnections_.load(std::memory_order_relaxed);
+            const size_t limit = slotLimit_.load(std::memory_order_relaxed);
+            if (limit == 0 || active < limit) {
+                return std::nullopt;
+            }
+
+            // Allow a small amount of general overflow beyond the soft socket budget so a
+            // fully pinned set of persistent sessions does not completely starve meaningful
+            // work admission. UX traffic gets additional headroom on top of this band.
+            const size_t generalHeadroom = std::max<size_t>(1, limit / 6);
+            if (active < (limit + generalHeadroom)) {
+                return std::nullopt;
+            }
+
+            // Preserve a small amount of headroom for interactive UX traffic so heavy ingest does
+            // not force status/list/search clients into reconnect churn.
+            const size_t uxHeadroom = std::max<size_t>(1, limit / 4);
+            if (isUxPriorityRequest(request) && active < (limit + generalHeadroom + uxHeadroom)) {
+                return std::nullopt;
+            }
+
+            if (state_) {
+                state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
+                state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+            }
+            TuningManager::notifyWakeup();
+
+            const auto retryAfterMs = ResourceGovernor::instance().recommendRetryAfterMs(
+                0, 0, 0, 0, static_cast<std::uint64_t>(active), static_cast<std::uint64_t>(limit),
+                0, 0, 1000);
+            RequestHandler::Config::AdmissionDecision decision;
+            decision.code = ErrorCode::ResourceExhausted;
+            decision.message = retryAfterMs > 0
+                                   ? fmt::format("Server busy; retry in {}ms", retryAfterMs)
+                                   : std::string("Server busy; retry shortly");
+            return decision;
+        };
         // Wire health-check counter so RequestHandler can tag ping/status connections
         if (state_) {
             handlerConfig.health_check_counter = &state_->stats.healthCheckConnections;
@@ -1152,7 +1253,7 @@ uint64_t SocketServer::oldestConnectionAgeSeconds() const {
 // -------- Dynamic connection slot sizing (PBI-085) --------
 
 bool SocketServer::resizeConnectionSlots(size_t newSize) {
-    if (!connectionSlots_ || newSize == 0) {
+    if (newSize == 0) {
         return false;
     }
 
@@ -1161,50 +1262,26 @@ bool SocketServer::resizeConnectionSlots(size_t newSize) {
         return true; // No change needed
     }
 
-    // Growing: release additional permits
+    // With protocol-level request admission, slot resizing is now a soft budget change.
+    // Connections remain established; the new limit affects future request admission.
     if (newSize > currentLimit) {
-        size_t delta = newSize - currentLimit;
-        for (size_t i = 0; i < delta; ++i) {
-            connectionSlots_->release();
-        }
         slotLimit_.store(newSize, std::memory_order_relaxed);
-        // Clear any shrink debt when growing
-        shrinkDebt_.store(0, std::memory_order_relaxed);
 
         // Update state stats
         if (state_) {
             state_->stats.maxConnections.store(newSize, std::memory_order_relaxed);
+            const size_t active = activeConnections_.load(std::memory_order_relaxed);
+            const auto slotsFree = (active < newSize) ? (newSize - active) : 0;
+            state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
         }
 
-        spdlog::debug("SocketServer: connection slots grown from {} to {} (+{})", currentLimit,
-                      newSize, delta);
+        spdlog::debug("SocketServer: request admission slots grown from {} to {}", currentLimit,
+                      newSize);
         return true;
     }
 
-    // Shrinking: use debt tracking for graceful downsize
     size_t active = activeConnections_.load(std::memory_order_relaxed);
-
-    if (newSize >= active) {
-        // Safe to shrink immediately - no active connections would be affected
-        // Consume permits to reduce availability
-        size_t delta = currentLimit - newSize;
-        for (size_t i = 0; i < delta; ++i) {
-            // Try to acquire without blocking - if we can't, that's ok,
-            // the semaphore will naturally limit new connections
-            (void)connectionSlots_->try_acquire();
-        }
-        slotLimit_.store(newSize, std::memory_order_relaxed);
-        shrinkDebt_.store(0, std::memory_order_relaxed);
-    } else {
-        // Would affect active connections - set up shrink debt
-        int32_t debt = static_cast<int32_t>(active - newSize);
-        shrinkDebt_.store(debt, std::memory_order_relaxed);
-        slotLimit_.store(newSize, std::memory_order_relaxed);
-
-        spdlog::debug("SocketServer: connection slots shrinking from {} to {} "
-                      "(debt={} active connections will drain first)",
-                      currentLimit, newSize, debt);
-    }
+    slotLimit_.store(newSize, std::memory_order_relaxed);
 
     // Update state stats
     if (state_) {
@@ -1212,6 +1289,9 @@ bool SocketServer::resizeConnectionSlots(size_t newSize) {
         auto slotsFree = (active < newSize) ? (newSize - active) : 0;
         state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
     }
+
+    spdlog::debug("SocketServer: request admission slots shrunk from {} to {}", currentLimit,
+                  newSize);
 
     return true;
 }

@@ -4068,6 +4068,9 @@ struct BenchFixture {
                 uint64_t lastObservedEmbedQueued = 0;
                 uint64_t lastObservedEmbedInFlight = 0;
                 uint64_t lastObservedEmbedDropped = 0;
+                uint64_t initialObservedVectorCount = 0;
+                uint64_t initialObservedDocsEmbedded = 0;
+                bool capturedInitialEmbedSnapshot = false;
 
                 // Phase 1: Wait for embedding queue to drain and embedded documents to reach
                 // target. Uses progress-based stall detection (like ingestion wait) to avoid
@@ -4179,6 +4182,12 @@ struct BenchFixture {
                         lastObservedEmbedQueued = embedQueued;
                         lastObservedEmbedInFlight = embedInFlight;
                         lastObservedEmbedDropped = embedDropped;
+
+                        if (!capturedInitialEmbedSnapshot) {
+                            initialObservedVectorCount = vectorCount;
+                            initialObservedDocsEmbedded = docsEmbedded;
+                            capturedInitialEmbedSnapshot = true;
+                        }
 
                         const bool haveQueueMetrics =
                             (itQ != statusResult.value().requestCounts.end()) ||
@@ -4338,12 +4347,41 @@ struct BenchFixture {
                     std::this_thread::sleep_for(500ms);
                 }
 
-                if (const char* deferHnsw = std::getenv("YAMS_HNSW_DEFER_UPDATES");
-                    deferHnsw && envTruthy(deferHnsw)) {
-                    if (auto* daemon = harness->daemon()) {
-                        if (auto* serviceManager = daemon->getServiceManager()) {
-                            auto vectorDb = serviceManager->getVectorDatabase();
-                            if (vectorDb) {
+                if (auto* daemon = harness->daemon()) {
+                    if (auto* serviceManager = daemon->getServiceManager()) {
+                        auto vectorDb = serviceManager->getVectorDatabase();
+                        auto metadataRepo = serviceManager->getMetadataRepo();
+
+                        if (vectorDb && metadataRepo) {
+                            auto embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
+                            if (embeddedHashes.size() > lastObservedDocsEmbedded) {
+                                std::vector<std::string> reconciledHashes;
+                                reconciledHashes.reserve(embeddedHashes.size());
+                                for (const auto& hash : embeddedHashes) {
+                                    reconciledHashes.push_back(hash);
+                                }
+                                auto reconcileResult =
+                                    metadataRepo->batchUpdateDocumentEmbeddingStatusByHashes(
+                                        reconciledHashes, true,
+                                        serviceManager->getEmbeddingModelName());
+                                if (!reconcileResult) {
+                                    spdlog::warn("Failed to reconcile embedded-doc status from "
+                                                 "vector rows: {}",
+                                                 reconcileResult.error().message);
+                                } else {
+                                    spdlog::info("Reconciled embedded-doc status from vector rows: "
+                                                 "{} -> {}",
+                                                 lastObservedDocsEmbedded, reconciledHashes.size());
+                                    lastObservedDocsEmbedded = reconciledHashes.size();
+                                }
+                            }
+                        }
+
+                        if (const char* deferHnsw = std::getenv("YAMS_HNSW_DEFER_UPDATES");
+                            deferHnsw && envTruthy(deferHnsw) && vectorDb) {
+                            const bool vectorsChanged =
+                                lastObservedVectorCount != initialVectorCount;
+                            if (vectorsChanged) {
                                 spdlog::info("Rebuilding deferred HNSW index before benchmark "
                                              "queries...");
                                 const auto rebuildStart = std::chrono::steady_clock::now();
@@ -4361,6 +4399,9 @@ struct BenchFixture {
                                                << std::endl;
                                     summaryLog.flush();
                                 }
+                            } else {
+                                spdlog::info("Skipping deferred HNSW rebuild: vector/doc coverage "
+                                             "unchanged during this run");
                             }
                         }
                     }

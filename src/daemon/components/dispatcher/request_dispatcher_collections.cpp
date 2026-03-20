@@ -1,11 +1,20 @@
 // PBI-066: Snapshot request handlers (collections use generic metadata query)
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 
 namespace yams::daemon {
+
+namespace {
+std::atomic<bool> g_forceRestoreWriteFailureOnce{false};
+}
+
+void RequestDispatcher::__test_forceRestoreWriteFailureOnce() {
+    g_forceRestoreWriteFailureOnce.store(true, std::memory_order_release);
+}
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleListSnapshotsRequest([[maybe_unused]] const ListSnapshotsRequest& req) {
@@ -237,6 +246,9 @@ RequestDispatcher::handleRestoreCollectionRequest(const RestoreCollectionRequest
             out.write(reinterpret_cast<const char*>(content.value().data()),
                       static_cast<std::streamsize>(content.value().size()));
             out.close();
+            if (g_forceRestoreWriteFailureOnce.exchange(false, std::memory_order_acq_rel)) {
+                out.setstate(std::ios::badbit);
+            }
 
             if (!out.good()) {
                 RestoredFile fail;
@@ -459,6 +471,9 @@ RequestDispatcher::handleRestoreSnapshotRequest(const RestoreSnapshotRequest& re
             out.write(reinterpret_cast<const char*>(content.value().data()),
                       static_cast<std::streamsize>(content.value().size()));
             out.close();
+            if (g_forceRestoreWriteFailureOnce.exchange(false, std::memory_order_acq_rel)) {
+                out.setstate(std::ios::badbit);
+            }
 
             if (!out.good()) {
                 RestoredFile fail;

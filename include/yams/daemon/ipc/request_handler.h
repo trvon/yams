@@ -70,6 +70,11 @@ public:
     using ProcessorFunc = std::function<boost::asio::awaitable<Response>(const Request&)>;
 
     struct Config {
+        struct AdmissionDecision {
+            ErrorCode code{ErrorCode::ResourceExhausted};
+            std::string message;
+        };
+
         bool enable_streaming = true; // Use streaming response model
         bool enable_multiplexing =
             true; // Default: allow multiple concurrent requests per connection
@@ -77,7 +82,12 @@ public:
         std::chrono::seconds write_timeout{30}; // Timeout for write operations
         std::chrono::seconds read_timeout{30};  // Timeout for read operations
         std::chrono::milliseconds stream_chunk_timeout{
-            30000};                        // Timeout for next_chunk() (30s default)
+            30000}; // Timeout for next_chunk() (30s default)
+        std::chrono::milliseconds new_session_probe_grace{
+            0}; // Disabled by default: persistent idle sessions are valid and should not
+                // be reaped before the normal read timeout elapses
+        std::chrono::milliseconds post_response_reuse_grace{
+            250};                          // Short grace window to detect session reuse
         bool auto_detect_streaming = true; // Auto-detect requests that benefit from streaming
         bool force_streaming = false;      // Force streaming for all responses
         // Close strategy: with multiplexing enabled, prefer persistent connections to
@@ -115,6 +125,11 @@ public:
         // Optional counter for health-check/ping connections (excluded from idle detection).
         // Incremented when a PingRequest or StatusRequest is identified, decremented on completion.
         std::atomic<uint64_t>* health_check_counter = nullptr;
+
+        // Optional request-admission hook for protocol-level backpressure on persistent
+        // connections. When set, rejected requests receive an immediate unary ErrorResponse and
+        // the session stays open for later retries.
+        std::function<std::optional<AdmissionDecision>(const Request& request)> admission_control{};
 
         Config();
     };
@@ -213,6 +228,13 @@ private:
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     write_error_immediate(boost::asio::local::stream_protocol::socket& socket, uint64_t request_id,
                           ErrorCode code, const std::string& message, ConnectionFsm* fsm = nullptr);
+
+    // Send a unary error response and complete the FSM response lifecycle so persistent
+    // connections remain readable after protocol-level backpressure or validation failures.
+    [[nodiscard]] boost::asio::awaitable<Result<void>>
+    send_error_response(boost::asio::local::stream_protocol::socket& socket, ErrorCode code,
+                        const std::string& message, uint64_t request_id,
+                        ConnectionFsm* fsm = nullptr);
 
     // Stream chunks from a processor
     [[nodiscard]] boost::asio::awaitable<Result<void>>

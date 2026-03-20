@@ -1516,8 +1516,17 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
+        const auto start = std::chrono::steady_clock::now();
+        spdlog::info("[HNSW] buildIndex starting (loaded={} stale={} dims={})", hnsw_loaded_,
+                     hnsw_needs_rebuild_, hnsw_indices_.size());
+
         // Rebuild HNSW from scratch
         rebuildHnswUnlocked();
+
+        const auto durMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - start)
+                               .count();
+        spdlog::info("[HNSW] buildIndex completed in {} ms", durMs);
 
         return Result<void>{};
     }
@@ -2396,11 +2405,281 @@ private:
         stmt_filter_by_rowid_ = nullptr;
     }
 
+    std::vector<size_t> discoverPersistedHnswDimsUnlocked() {
+        std::vector<size_t> dims;
+        sqlite3_stmt* stmt = nullptr;
+        const char* find_dims =
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vectors_%_hnsw_meta'";
+        if (sqlite3_prepare_v2(db_, find_dims, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* table_name =
+                    reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                if (!table_name) {
+                    continue;
+                }
+                std::string name(table_name);
+                auto start = name.find('_');
+                if (start == std::string::npos) {
+                    continue;
+                }
+                start += 1;
+                auto end = name.find('_', start);
+                if (end == std::string::npos) {
+                    continue;
+                }
+                try {
+                    size_t dim = std::stoull(name.substr(start, end - start));
+                    if (dim > 0) {
+                        dims.push_back(dim);
+                    }
+                } catch (...) {
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+        std::sort(dims.begin(), dims.end());
+        dims.erase(std::unique(dims.begin(), dims.end()), dims.end());
+        return dims;
+    }
+
+    bool loadPersistedHnswDimUnlocked(size_t dim) {
+        auto defaultConfigForDim = [&]() {
+            size_t corpus_size = 0;
+            if (stmt_count_) {
+                sqlite3_reset(stmt_count_);
+                StmtResetGuard guard(stmt_count_);
+                if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
+                    corpus_size = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
+                }
+            }
+            HNSWIndex::Config config = HNSWIndex::Config::for_corpus(corpus_size, dim);
+            config.ef_construction = std::max(config.ef_construction, config_.hnsw_ef_construction);
+            return config;
+        };
+
+        try {
+            std::string table_prefix = hnswTablePrefix(dim);
+            char* err = nullptr;
+            auto loaded_hnsw = sqlite_vec_cpp::index::load_hnsw_index<float, DistanceMetric>(
+                db_, "main", table_prefix.c_str(), &err);
+            if (err) {
+                spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
+                sqlite3_free(err);
+                return false;
+            }
+            hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
+            hnsw_dirty_[dim] = false;
+            spdlog::info("[HNSW] Loaded index for dim={} with {} vectors", dim,
+                         hnsw_indices_[dim]->size());
+            return true;
+        } catch (const std::exception& e) {
+            spdlog::warn("[HNSW] Exception loading index for dim={}: {}", dim, e.what());
+            try {
+                std::string table_prefix = hnswTablePrefix(dim);
+                char* err = nullptr;
+                auto nodes = sqlite_vec_cpp::index::load_hnsw_nodes_incremental<float>(
+                    db_, "main", table_prefix.c_str(), 0, &err);
+                if (err) {
+                    spdlog::warn("[HNSW] Legacy checkpoint load failed for dim={}: {}", dim, err);
+                    sqlite3_free(err);
+                    return false;
+                }
+                if (nodes.empty()) {
+                    return false;
+                }
+                auto [entryPointId, entryPointLayer, _maxNodeId] =
+                    sqlite_vec_cpp::index::get_hnsw_checkpoint_info<float, DistanceMetric>(
+                        db_, "main", table_prefix.c_str());
+                auto fallbackConfig = defaultConfigForDim();
+                auto loaded_hnsw = HNSWIndex::from_serialized(fallbackConfig, entryPointId,
+                                                              entryPointLayer, std::move(nodes));
+                hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
+                hnsw_dirty_[dim] = false;
+                spdlog::info("[HNSW] Loaded legacy checkpoint for dim={} with {} vectors", dim,
+                             hnsw_indices_[dim]->size());
+                return true;
+            } catch (const std::exception& fallbackError) {
+                spdlog::warn("[HNSW] Legacy checkpoint fallback failed for dim={}: {}", dim,
+                             fallbackError.what());
+                return false;
+            }
+        }
+    }
+
+    std::vector<size_t> queryVectorDimsUnlocked() {
+        std::vector<size_t> dims;
+        sqlite3_stmt* stmt = nullptr;
+        const char* sql = "SELECT DISTINCT CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
+                          "THEN LENGTH(embedding) / 4 ELSE embedding_dim END AS dim "
+                          "FROM vectors WHERE embedding IS NOT NULL ORDER BY dim";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                int64_t dim = sqlite3_column_int64(stmt, 0);
+                if (dim > 0) {
+                    dims.push_back(static_cast<size_t>(dim));
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+        return dims;
+    }
+
+    std::vector<size_t> queryOrphanedPersistedNodeIdsUnlocked(size_t dim) {
+        std::vector<size_t> ids;
+        std::string sql = "SELECT n.node_id FROM \"" + hnswTablePrefix(dim) +
+                          "_hnsw_nodes\" n LEFT JOIN vectors v ON v.rowid = n.node_id "
+                          "WHERE v.rowid IS NULL ORDER BY n.node_id";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                ids.push_back(static_cast<size_t>(sqlite3_column_int64(stmt, 0)));
+            }
+            sqlite3_finalize(stmt);
+        }
+        return ids;
+    }
+
+    std::vector<std::pair<size_t, std::vector<float>>>
+    queryMissingVectorsForDimUnlocked(size_t dim) {
+        std::vector<std::pair<size_t, std::vector<float>>> rows;
+        std::string sql = "SELECT v.rowid, v.embedding FROM vectors v LEFT JOIN \"" +
+                          hnswTablePrefix(dim) +
+                          "_hnsw_nodes\" n ON n.node_id = v.rowid "
+                          "WHERE (CASE WHEN v.embedding_dim IS NULL OR v.embedding_dim = 0 "
+                          "THEN LENGTH(v.embedding) / 4 ELSE v.embedding_dim END) = ? "
+                          "AND n.node_id IS NULL ORDER BY v.rowid";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            return rows;
+        }
+        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            size_t rowid = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
+            const void* blob = sqlite3_column_blob(stmt, 1);
+            int blob_size = sqlite3_column_bytes(stmt, 1);
+            if (!blob || blob_size <= 0 || (blob_size % static_cast<int>(sizeof(float))) != 0) {
+                continue;
+            }
+            std::vector<float> embedding(static_cast<size_t>(blob_size) / sizeof(float));
+            std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
+            if (isZeroNormEmbedding(embedding) || !isFiniteEmbedding(embedding)) {
+                continue;
+            }
+            rows.emplace_back(rowid, std::move(embedding));
+        }
+        sqlite3_finalize(stmt);
+        return rows;
+    }
+
+    void saveHnswDimFullUnlocked(size_t dim) {
+        auto it = hnsw_indices_.find(dim);
+        if (it == hnsw_indices_.end() || !it->second) {
+            return;
+        }
+        std::string table_prefix = hnswTablePrefix(dim);
+        char* err = nullptr;
+        int rc = sqlite_vec_cpp::index::save_hnsw_index<float, DistanceMetric>(
+            db_, "main", table_prefix.c_str(), *it->second, &err);
+        if (rc != SQLITE_OK) {
+            if (err) {
+                spdlog::error("[HNSW] Failed to save full index for dim={}: {}", dim, err);
+                sqlite3_free(err);
+            }
+            return;
+        }
+        hnsw_dirty_[dim] = false;
+        spdlog::info("[HNSW] Saved full index for dim={} with {} vectors", dim, it->second->size());
+    }
+
+    void catchUpDeferredHnswUnlocked() {
+        spdlog::info("[HNSW] Catching up deferred updates from persisted indices");
+
+        hnsw_indices_.clear();
+        hnsw_dirty_.clear();
+        hnsw_loaded_ = false;
+
+        auto persistedDims = discoverPersistedHnswDimsUnlocked();
+        for (size_t dim : persistedDims) {
+            loadPersistedHnswDimUnlocked(dim);
+        }
+
+        auto vectorDims = queryVectorDimsUnlocked();
+        if (vectorDims.empty()) {
+            hnsw_loaded_ = true;
+            hnsw_needs_rebuild_ = false;
+            pending_inserts_ = 0;
+            return;
+        }
+
+        if (hnsw_indices_.empty()) {
+            spdlog::info("[HNSW] No persisted indices available for deferred catch-up; falling "
+                         "back to full rebuild");
+            rebuildHnswUnlocked();
+            return;
+        }
+
+        for (size_t dim : vectorDims) {
+            auto* hnsw = getOrCreateHnswForDim(dim);
+            if (!hnsw) {
+                continue;
+            }
+
+            const bool hadPersistedDim =
+                std::find(persistedDims.begin(), persistedDims.end(), dim) != persistedDims.end();
+            bool requireFullSave = !hadPersistedDim;
+
+            if (hadPersistedDim) {
+                auto orphanedIds = queryOrphanedPersistedNodeIdsUnlocked(dim);
+                if (!orphanedIds.empty()) {
+                    for (size_t nodeId : orphanedIds) {
+                        hnsw->remove(nodeId);
+                    }
+                    requireFullSave = true;
+                    spdlog::info(
+                        "[HNSW] Deferred catch-up dim={} removed {} orphaned persisted nodes", dim,
+                        orphanedIds.size());
+                }
+            }
+
+            auto deltaRows = queryMissingVectorsForDimUnlocked(dim);
+            if (!deltaRows.empty()) {
+                std::vector<size_t> ids;
+                std::vector<std::vector<float>> embeddings;
+                std::vector<std::span<const float>> spans;
+                ids.reserve(deltaRows.size());
+                embeddings.reserve(deltaRows.size());
+                spans.reserve(deltaRows.size());
+
+                for (auto& [rowid, embedding] : deltaRows) {
+                    ids.push_back(rowid);
+                    embeddings.push_back(std::move(embedding));
+                }
+                for (auto& embedding : embeddings) {
+                    spans.emplace_back(embedding.data(), embedding.size());
+                }
+
+                hnsw->build(std::span<const size_t>(ids.data(), ids.size()),
+                            std::span<const std::span<const float>>(spans.data(), spans.size()));
+                requireFullSave = true;
+                hnsw_dirty_[dim] = true;
+                spdlog::info("[HNSW] Deferred catch-up dim={} added {} new vectors", dim,
+                             ids.size());
+            }
+
+            if (requireFullSave) {
+                saveHnswDimFullUnlocked(dim);
+            }
+        }
+
+        hnsw_loaded_ = true;
+        hnsw_needs_rebuild_ = false;
+        pending_inserts_ = 0;
+    }
+
     // Ensure HNSW indices are loaded (lazy loading)
     // Discovers existing dimension-specific tables and loads each index
     // If force_rebuild is true, skips loading from persisted tables and rebuilds from vectors table
     void ensureHnswLoadedUnlocked(bool force_rebuild = false) {
-        force_rebuild = force_rebuild || hnsw_needs_rebuild_;
         if (hnsw_loaded_ && !force_rebuild) {
             // Already loaded - log occasionally for diagnostics
             static std::atomic<uint64_t> skip_counter{0};
@@ -2415,6 +2694,11 @@ private:
                               "num_indices={}, backend={:p} (skip #{})",
                               total_size, hnsw_indices_.size(), static_cast<void*>(this), skc);
             }
+            return;
+        }
+
+        if (hnsw_needs_rebuild_ && !force_rebuild) {
+            catchUpDeferredHnswUnlocked();
             return;
         }
 

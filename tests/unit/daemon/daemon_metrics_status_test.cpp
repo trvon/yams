@@ -9,9 +9,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <random>
 #include <span>
 #include <stdexcept>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -29,6 +33,8 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/vector/vector_database.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
@@ -51,6 +57,9 @@ public:
     LifecycleSnapshot getLifecycleSnapshot() const override { return snapshot_; }
     void setSubsystemDegraded(const std::string& subsystem, bool degraded,
                               const std::string& reason) override {
+        if (throwOnSetSubsystemDegraded_) {
+            throw std::runtime_error("setSubsystemDegraded boom");
+        }
         lastSubsystem_ = subsystem;
         lastDegraded_ = degraded;
         lastReason_ = reason;
@@ -69,6 +78,7 @@ public:
         lastReason_.clear();
         setSubsystemDegradedCalls_ = 0;
     }
+    void setThrowOnSetSubsystemDegraded(bool enabled) { throwOnSetSubsystemDegraded_ = enabled; }
 
 private:
     LifecycleSnapshot snapshot_{};
@@ -76,6 +86,7 @@ private:
     bool lastDegraded_{false};
     std::string lastReason_;
     int setSubsystemDegradedCalls_{0};
+    bool throwOnSetSubsystemDegraded_{false};
 };
 
 // Minimal stub provider for embedding tests
@@ -127,6 +138,10 @@ public:
         return Result<void>();
     }
     bool isModelLoaded(const std::string& modelName) const override {
+        if (throwOnIsModelLoadedCount_ > 0) {
+            --throwOnIsModelLoadedCount_;
+            throw std::runtime_error("isModelLoaded boom");
+        }
         return std::find(loaded_.begin(), loaded_.end(), modelName) != loaded_.end();
     }
     std::vector<std::string> getLoadedModels() const override { return loaded_; }
@@ -166,6 +181,8 @@ public:
     void clearLoadError() { loadError_.reset(); }
     void setThrowOnMemoryUsage(bool enabled) { throwOnMemoryUsage_ = enabled; }
     void setFailModelInfo(bool enabled) { failModelInfo_ = enabled; }
+    void setThrowOnIsModelLoaded(bool enabled) { throwOnIsModelLoadedCount_ = enabled ? 1 : 0; }
+    void setThrowOnIsModelLoadedCount(int count) { throwOnIsModelLoadedCount_ = count; }
 
 private:
     size_t dim_;
@@ -177,6 +194,7 @@ private:
     std::optional<Error> loadError_;
     bool throwOnMemoryUsage_{false};
     bool failModelInfo_{false};
+    mutable int throwOnIsModelLoadedCount_{0};
 };
 
 class EnvGuard {
@@ -203,6 +221,227 @@ public:
 private:
     const char* name_;
     std::optional<std::string> original_;
+};
+
+std::shared_ptr<metadata::ConnectionPool> getPruneTestPool() {
+    static std::shared_ptr<metadata::ConnectionPool> pool = [] {
+        metadata::ConnectionPoolConfig cfg{};
+        cfg.enableWAL = false;
+        cfg.enableForeignKeys = false;
+        auto p = std::make_shared<metadata::ConnectionPool>(":memory:", cfg);
+        (void)p->initialize();
+        return p;
+    }();
+    return pool;
+}
+
+class StubPruneMetadataRepository : public metadata::MetadataRepository {
+public:
+    StubPruneMetadataRepository() : metadata::MetadataRepository(*getPruneTestPool()) {}
+
+    void addDocument(metadata::DocumentInfo doc) {
+        std::lock_guard<std::mutex> lk(mu_);
+        docs_.push_back(doc);
+        docsByHash_[doc.sha256Hash] = doc;
+        docsById_[doc.id] = doc;
+    }
+
+    void setQueryError(Error error) { queryError_ = std::move(error); }
+    void setThrowOnQuery(std::string message) { throwOnQuery_ = std::move(message); }
+    void setMissingHash(const std::string& hash) { missingHashes_.insert(hash); }
+    void setThrowOnLookupHash(const std::string& hash, std::string message) {
+        throwOnLookup_[hash] = std::move(message);
+    }
+    void setDeleteError(int64_t id, Error error) { deleteErrors_[id] = std::move(error); }
+    void setSnapshots(std::vector<std::string> snapshots) { snapshots_ = std::move(snapshots); }
+    void setSnapshotError(Error error) { snapshotError_ = std::move(error); }
+    void setSnapshotDocuments(std::vector<metadata::DocumentInfo> docs) {
+        snapshotDocs_ = std::move(docs);
+    }
+    void setSnapshotDocumentsError(Error error) { snapshotDocsError_ = std::move(error); }
+    void setMetadataValueCounts(
+        std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>> counts) {
+        metadataValueCounts_ = std::move(counts);
+    }
+    void setMetadataValueCountsError(Error error) { metadataValueCountsError_ = std::move(error); }
+
+    std::size_t deleteCallCount() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return deleteCallCount_;
+    }
+
+    std::vector<int64_t> deletedIds() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return deletedIds_;
+    }
+
+    Result<std::vector<metadata::DocumentInfo>>
+    queryDocuments(const metadata::DocumentQueryOptions&) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (throwOnQuery_) {
+            throw std::runtime_error(*throwOnQuery_);
+        }
+        if (queryError_) {
+            return *queryError_;
+        }
+        return docs_;
+    }
+
+    Result<std::vector<metadata::DocumentInfo>>
+    findDocumentsBySnapshot(const std::string&) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (snapshotDocsError_) {
+            return *snapshotDocsError_;
+        }
+        return snapshotDocs_;
+    }
+
+    Result<std::vector<std::string>> getSnapshots() override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (snapshotError_) {
+            return *snapshotError_;
+        }
+        return snapshots_;
+    }
+
+    Result<std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>>>
+    getMetadataValueCounts(const std::vector<std::string>&,
+                           const metadata::DocumentQueryOptions&) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (metadataValueCountsError_) {
+            return *metadataValueCountsError_;
+        }
+        return metadataValueCounts_;
+    }
+
+    Result<std::optional<metadata::DocumentInfo>>
+    getDocumentByHash(const std::string& hash) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (auto it = throwOnLookup_.find(hash); it != throwOnLookup_.end()) {
+            throw std::runtime_error(it->second);
+        }
+        if (missingHashes_.count(hash) > 0) {
+            return std::optional<metadata::DocumentInfo>(std::nullopt);
+        }
+        if (auto it = docsByHash_.find(hash); it != docsByHash_.end()) {
+            return std::optional<metadata::DocumentInfo>(it->second);
+        }
+        return std::optional<metadata::DocumentInfo>(std::nullopt);
+    }
+
+    Result<void> deleteDocument(int64_t id) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        deleteCallCount_++;
+        if (auto it = deleteErrors_.find(id); it != deleteErrors_.end()) {
+            return it->second;
+        }
+        deletedIds_.push_back(id);
+        if (auto it = docsById_.find(id); it != docsById_.end()) {
+            docsByHash_.erase(it->second.sha256Hash);
+            docsById_.erase(it);
+        }
+        docs_.erase(
+            std::remove_if(docs_.begin(), docs_.end(),
+                           [id](const metadata::DocumentInfo& doc) { return doc.id == id; }),
+            docs_.end());
+        return Result<void>();
+    }
+
+private:
+    mutable std::mutex mu_;
+    std::vector<metadata::DocumentInfo> docs_;
+    std::unordered_map<std::string, metadata::DocumentInfo> docsByHash_;
+    std::unordered_map<int64_t, metadata::DocumentInfo> docsById_;
+    std::optional<Error> queryError_;
+    std::optional<Error> snapshotError_;
+    std::optional<Error> snapshotDocsError_;
+    std::optional<Error> metadataValueCountsError_;
+    std::optional<std::string> throwOnQuery_;
+    std::unordered_set<std::string> missingHashes_;
+    std::unordered_map<std::string, std::string> throwOnLookup_;
+    std::unordered_map<int64_t, Error> deleteErrors_;
+    std::vector<std::string> snapshots_;
+    std::vector<metadata::DocumentInfo> snapshotDocs_;
+    std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>> metadataValueCounts_;
+    std::size_t deleteCallCount_{0};
+    std::vector<int64_t> deletedIds_;
+};
+
+class StubContentStore : public api::IContentStore {
+public:
+    Result<api::StoreResult> storeBytes(std::span<const std::byte> data,
+                                        const api::ContentMetadata&) override {
+        std::string hash = "stub-hash-" + std::to_string(blobs_.size() + 1);
+        blobs_[hash] = std::vector<std::byte>(data.begin(), data.end());
+        api::StoreResult result;
+        result.contentHash = hash;
+        result.bytesStored = blobs_[hash].size();
+        return result;
+    }
+
+    Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
+        auto it = blobs_.find(hash);
+        if (it == blobs_.end()) {
+            return Error{ErrorCode::NotFound, "content not found"};
+        }
+        return it->second;
+    }
+
+    Result<api::IContentStore::RawContent> retrieveRaw(const std::string& hash) override {
+        auto bytes = retrieveBytes(hash);
+        if (!bytes) {
+            return bytes.error();
+        }
+        api::IContentStore::RawContent raw;
+        raw.data = std::move(bytes.value());
+        return raw;
+    }
+
+    std::future<Result<api::IContentStore::RawContent>>
+    retrieveRawAsync(const std::string& hash) override {
+        return std::async(std::launch::deferred, [this, hash]() { return retrieveRaw(hash); });
+    }
+
+    Result<api::StoreResult> store(const std::filesystem::path&, const api::ContentMetadata&,
+                                   api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<api::RetrieveResult> retrieve(const std::string&, const std::filesystem::path&,
+                                         api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<api::StoreResult> storeStream(std::istream&, const api::ContentMetadata&,
+                                         api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<api::RetrieveResult> retrieveStream(const std::string&, std::ostream&,
+                                               api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<bool> exists(const std::string&) const override { return ErrorCode::NotImplemented; }
+    Result<bool> remove(const std::string&) override { return ErrorCode::NotImplemented; }
+    Result<api::ContentMetadata> getMetadata(const std::string&) const override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<void> updateMetadata(const std::string&, const api::ContentMetadata&) override {
+        return ErrorCode::NotImplemented;
+    }
+    std::vector<Result<api::StoreResult>>
+    storeBatch(const std::vector<std::filesystem::path>&,
+               const std::vector<api::ContentMetadata>&) override {
+        return {};
+    }
+    std::vector<Result<bool>> removeBatch(const std::vector<std::string>&) override { return {}; }
+    api::ContentStoreStats getStats() const override { return {}; }
+    api::HealthStatus checkHealth() const override { return {}; }
+    Result<void> verify(api::ProgressCallback) override { return ErrorCode::NotImplemented; }
+    Result<void> compact(api::ProgressCallback) override { return ErrorCode::NotImplemented; }
+    Result<void> garbageCollect(api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+
+private:
+    std::unordered_map<std::string, std::vector<std::byte>> blobs_;
 };
 
 std::filesystem::path makeTempDir(const std::string& prefix) {
@@ -278,11 +517,43 @@ for line in sys.stdin:
     return pluginDir;
 }
 
+std::string makePythonShimPath() {
+    auto shimDir = makeTempDir("yams_python_shim_");
+    auto shim = shimDir / "python";
+
+    {
+        std::ofstream shimFile(shim);
+        shimFile << "#!/bin/sh\n"
+                    "exec /usr/bin/env python3 \"$@\"\n";
+    }
+
+    std::filesystem::permissions(shim,
+                                 std::filesystem::perms::owner_read |
+                                     std::filesystem::perms::owner_write |
+                                     std::filesystem::perms::owner_exec,
+                                 std::filesystem::perm_options::replace);
+
+    if (const char* currentPath = std::getenv("PATH"); currentPath && *currentPath) {
+        return shimDir.string() + ":" + currentPath;
+    }
+    return shimDir.string() + ":/usr/bin:/bin";
+}
+
 Response dispatchRequest(RequestDispatcher& dispatcher, const Request& req) {
     boost::asio::io_context ioc;
     auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(req), boost::asio::use_future);
     ioc.run();
     return fut.get();
+}
+
+template <typename Predicate> bool waitForCondition(Predicate&& predicate, int attempts = 100) {
+    for (int i = 0; i < attempts; ++i) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return predicate();
 }
 } // namespace
 
@@ -547,6 +818,35 @@ TEST_CASE("RequestDispatcher: repair handler surfaces missing service states",
 
         svc.stopRepairService();
     }
+
+    SECTION("converts RepairService exceptions into error responses") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        repo->setThrowOnQuery("repair query exception");
+        svc.__test_setMetadataRepo(repo);
+        svc.startRepairService([] { return size_t{0}; });
+        auto repairService = svc.getRepairServiceShared();
+        REQUIRE(repairService != nullptr);
+
+        RepairRequest throwingReq;
+        throwingReq.repairDownloads = true;
+        Request req = throwingReq;
+
+        auto resp = dispatchRequest(dispatcher, req);
+
+        REQUIRE(std::holds_alternative<RepairResponse>(resp));
+        const auto& repairResp = std::get<RepairResponse>(resp);
+        CHECK_FALSE(repairResp.success);
+        CHECK(repairResp.totalOperations == 0);
+        REQUIRE(repairResp.errors.size() == 1);
+        CHECK(repairResp.errors.front() == "Internal error: repair query exception");
+        CHECK(repairResp.operationResults.empty());
+        CHECK(svc.getWorkerPosted() == 1);
+        CHECK(svc.getWorkerCompleted() == 1);
+        CHECK(svc.getWorkerActive() == 0);
+        CHECK(state.stats.repairInProgress.load(std::memory_order_relaxed) == false);
+
+        svc.stopRepairService();
+    }
 }
 
 TEST_CASE("RequestDispatcher: tree diff handler validates inputs and missing metadata repo",
@@ -611,6 +911,250 @@ TEST_CASE("RequestDispatcher: prune handler reports missing metadata repo",
     const auto& err = std::get<ErrorResponse>(resp);
     CHECK(err.code == ErrorCode::InternalError);
     CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
+}
+
+TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branches",
+          "[daemon][prune][dispatcher]") {
+    auto makeDoc = [](int64_t id, std::string filePath, std::string ext, int64_t size,
+                      std::string hash, int64_t ageDays) {
+        metadata::DocumentInfo doc{};
+        doc.id = id;
+        doc.filePath = std::move(filePath);
+        doc.fileName = std::filesystem::path(doc.filePath).filename().string();
+        doc.fileExtension = std::move(ext);
+        doc.fileSize = size;
+        doc.sha256Hash = std::move(hash);
+        doc.mimeType = "text/plain";
+        const auto now =
+            std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+        doc.modifiedTime = now - std::chrono::hours(ageDays * 24);
+        doc.indexedTime = now;
+        return doc;
+    };
+
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_prune_dispatcher_live_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    auto repo = std::make_shared<StubPruneMetadataRepository>();
+    svc.__test_setMetadataRepo(repo);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    repo->addDocument(makeDoc(1, "build/output.log", "log", 2048, std::string(64, 'a'), 10));
+    repo->addDocument(
+        makeDoc(2, "logs/server.log", ".log", 3 * 1024 * 1024, std::string(64, 'b'), 14));
+    repo->addDocument(makeDoc(3, "notes/readme.txt", "txt", 64, std::string(64, 'c'), 2));
+    repo->addDocument(makeDoc(4, "cache/old.tmp", "tmp", 4096, std::string(64, 'd'), 500));
+
+    SECTION("dry run parses age and size filters across units") {
+        PruneRequest req;
+        req.dryRun = true;
+        req.olderThan = "1w";
+        req.largerThan = "1KB";
+        req.smallerThan = "5MB";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.filesDeleted == 0);
+        CHECK(pruneResp.filesFailed == 0);
+        CHECK(pruneResp.totalBytesFreed == (2048 + 3 * 1024 * 1024 + 4096));
+        REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
+        CHECK(pruneResp.categoryCounts.at("build-object") == 1);
+        CHECK(pruneResp.categoryCounts.at("none") == 1);
+        CHECK(pruneResp.categoryCounts.at("temp") == 1);
+    }
+
+    SECTION("dry run accepts month and year age units") {
+        PruneRequest monthReq;
+        monthReq.dryRun = true;
+        monthReq.olderThan = "1m";
+
+        auto monthResp = dispatchRequest(dispatcher, Request{monthReq});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(monthResp));
+        const auto& monthPruneResp = std::get<PruneResponse>(monthResp);
+        REQUIRE(monthPruneResp.categoryCounts.count("temp") == 1);
+        CHECK(monthPruneResp.categoryCounts.at("temp") == 1);
+        CHECK(monthPruneResp.categoryCounts.count("logs") == 0);
+
+        PruneRequest yearReq;
+        yearReq.dryRun = true;
+        yearReq.olderThan = "1y";
+
+        auto yearResp = dispatchRequest(dispatcher, Request{yearReq});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(yearResp));
+        const auto& yearPruneResp = std::get<PruneResponse>(yearResp);
+        CHECK(yearPruneResp.filesDeleted == 0);
+        CHECK(yearPruneResp.totalBytesFreed == 4096);
+        REQUIRE(yearPruneResp.categoryCounts.count("temp") == 1);
+        CHECK(yearPruneResp.categoryCounts.at("temp") == 1);
+    }
+
+    SECTION("dry run accepts gigabyte size units") {
+        PruneRequest req;
+        req.dryRun = true;
+        req.largerThan = "1GB";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.totalBytesFreed == 0);
+        CHECK(pruneResp.categoryCounts.empty());
+    }
+
+    SECTION("dry run falls back on unknown age unit and raw byte sizes") {
+        PruneRequest req;
+        req.dryRun = true;
+        req.olderThan = "3q";
+        req.largerThan = "2000";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.totalBytesFreed == (2048 + 3 * 1024 * 1024 + 4096));
+        REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
+        CHECK(pruneResp.categoryCounts.at("build-object") == 1);
+        CHECK(pruneResp.categoryCounts.at("none") == 1);
+        CHECK(pruneResp.categoryCounts.at("temp") == 1);
+    }
+
+    SECTION("dry run filters by extension and categories") {
+        PruneRequest req;
+        req.dryRun = true;
+        req.categories = {"build"};
+        req.extensions = {"log"};
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.totalBytesFreed == 2048);
+        CHECK(pruneResp.categoryCounts.size() == 1);
+        REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
+        CHECK(pruneResp.categoryCounts.at("build-object") == 1);
+    }
+
+    SECTION("dry run matches dotted extensions when category is none") {
+        PruneRequest req;
+        req.dryRun = true;
+        req.categories = {"none"};
+        req.extensions = {"log"};
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.totalBytesFreed == 3 * 1024 * 1024);
+        CHECK(pruneResp.categoryCounts.size() == 1);
+        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
+        CHECK(pruneResp.categoryCounts.at("none") == 1);
+    }
+
+    SECTION("dry run handles query failures from repository") {
+        repo->setQueryError(Error{ErrorCode::InternalError, "query boom"});
+
+        auto resp = dispatchRequest(dispatcher, Request{PruneRequest{}});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.errorMessage.empty());
+        CHECK(pruneResp.totalBytesFreed == 0);
+        CHECK(pruneResp.categoryCounts.empty());
+    }
+
+    SECTION("dry run handles repository exceptions") {
+        repo->setThrowOnQuery("query exception");
+
+        auto resp = dispatchRequest(dispatcher, Request{PruneRequest{}});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.errorMessage == "Failed to query candidates: query exception");
+    }
+
+    SECTION("apply mode counts deleted missing failed and exception cases") {
+        repo->setMissingHash(std::string(64, 'b'));
+        repo->setDeleteError(4, Error{ErrorCode::InternalError, "delete failed"});
+        repo->setThrowOnLookupHash(std::string(64, 'c'), "lookup boom");
+
+        PruneRequest req;
+        req.dryRun = false;
+        req.olderThan = "1d";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.filesDeleted == 2);
+        CHECK(pruneResp.filesFailed == 2);
+        CHECK(pruneResp.totalBytesFreed == 2048);
+        REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
+        CHECK(pruneResp.categoryCounts.at("build-object") == 1);
+        CHECK(pruneResp.categoryCounts.at("none") == 2);
+        CHECK(pruneResp.categoryCounts.at("temp") == 1);
+        CHECK(repo->deleteCallCount() == 2);
+        CHECK(repo->deletedIds() == std::vector<int64_t>{1});
+    }
+
+    SECTION("apply mode yields during large prune batches") {
+        for (int i = 0; i < 105; ++i) {
+            repo->addDocument(makeDoc(1000 + i, "cache/bulk_" + std::to_string(i) + ".tmp", "tmp",
+                                      2048, "bulk-hash-" + std::to_string(i), 30));
+        }
+
+        PruneRequest req;
+        req.dryRun = false;
+        req.categories = {"temp"};
+        req.extensions = {"tmp"};
+        req.olderThan = "1d";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.filesDeleted == 106);
+        CHECK(pruneResp.filesFailed == 0);
+        CHECK(pruneResp.totalBytesFreed == (4096 + 105 * 2048));
+        REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
+        CHECK(pruneResp.categoryCounts.at("temp") == 106);
+        CHECK(repo->deleteCallCount() == 106);
+        CHECK(repo->deletedIds().size() == 106);
+    }
+
+    SECTION("dry run leaves empty size filters as zero") {
+        PruneRequest req;
+        req.dryRun = true;
+        req.largerThan = "";
+        req.smallerThan = "";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.totalBytesFreed == (2048 + 3 * 1024 * 1024 + 64 + 4096));
+        REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
+        CHECK(pruneResp.categoryCounts.at("build-object") == 1);
+        CHECK(pruneResp.categoryCounts.at("none") == 2);
+        CHECK(pruneResp.categoryCounts.at("temp") == 1);
+    }
 }
 
 TEST_CASE("RequestDispatcher: model handlers cover validation and status branches",
@@ -779,6 +1323,91 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         REQUIRE(std::holds_alternative<ModelLoadResponse>(resp));
         CHECK(std::get<ModelLoadResponse>(resp).success);
         CHECK(provider->isModelLoaded("timeout-invalid-model"));
+    }
+
+    SECTION("load model rebuilds when cached search engine reports missing embedding generator") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/rebuild-health.onnx");
+        REQUIRE(provider->loadModel("already-loaded-health-model").has_value());
+        svc.__test_setModelProvider(provider);
+
+        metadata::ConnectionPoolConfig poolCfg{};
+        poolCfg.enableWAL = false;
+        poolCfg.enableForeignKeys = false;
+        auto pool = std::make_shared<metadata::ConnectionPool>(":memory:", poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        search::SearchEngineConfig config;
+        config.vectorWeight = 1.0f;
+        auto unhealthyEngine =
+            std::make_shared<search::SearchEngine>(repo, nullptr, nullptr, nullptr, config);
+        svc.__test_setCachedSearchEngine(unhealthyEngine, true);
+
+        LoadModelRequest req;
+        req.modelName = "already-loaded-health-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ModelLoadResponse>(resp));
+        CHECK(std::get<ModelLoadResponse>(resp).success);
+        CHECK(provider->getLoadedModelCount() == 1);
+    }
+
+    SECTION("load model ignores isModelLoaded exceptions before loading") {
+        auto provider = std::make_shared<StubModelProvider>(4, "/tmp/isloaded-throw.onnx");
+        svc.__test_setModelProvider(provider);
+
+        metadata::ConnectionPoolConfig poolCfg{};
+        poolCfg.enableWAL = false;
+        poolCfg.enableForeignKeys = false;
+        auto pool = std::make_shared<metadata::ConnectionPool>(":memory:", poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        yams::vector::VectorDatabaseConfig vectorCfg{};
+        vectorCfg.database_path = ":memory:";
+        vectorCfg.embedding_dim = 4;
+        vectorCfg.create_if_missing = true;
+        vectorCfg.use_in_memory = true;
+        auto vectorDb = std::make_shared<yams::vector::VectorDatabase>(vectorCfg);
+        REQUIRE(vectorDb->initialize());
+
+        search::SearchEngineConfig config;
+        config.vectorWeight = 1.0f;
+        auto healthyEngine = std::make_shared<search::SearchEngine>(
+            repo, vectorDb, provider->getEmbeddingGenerator(), nullptr, config);
+        svc.__test_setCachedSearchEngine(healthyEngine, true);
+        provider->setThrowOnIsModelLoadedCount(1);
+
+        LoadModelRequest req;
+        req.modelName = "isloaded-throw-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ModelLoadResponse>(resp));
+        const auto& loadResp = std::get<ModelLoadResponse>(resp);
+        CHECK(loadResp.success);
+        CHECK(loadResp.modelName == "isloaded-throw-model");
+        provider->setThrowOnIsModelLoaded(false);
+        CHECK(provider->isModelLoaded("isloaded-throw-model"));
+    }
+
+    SECTION("load model survives lifecycle degradation callback exceptions") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/lifecycle-throw.onnx");
+        svc.__test_setModelProvider(provider);
+        lifecycle.setThrowOnSetSubsystemDegraded(true);
+
+        LoadModelRequest req;
+        req.modelName = "lifecycle-throw-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ModelLoadResponse>(resp));
+        const auto& loadResp = std::get<ModelLoadResponse>(resp);
+        CHECK(loadResp.success);
+        CHECK(loadResp.modelName == "lifecycle-throw-model");
+        CHECK(provider->isModelLoaded("lifecycle-throw-model"));
+        lifecycle.setThrowOnSetSubsystemDegraded(false);
     }
 
     SECTION("unload model rejects missing name") {
@@ -983,6 +1612,8 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
             auto [readyState, lifecycleFsm, svc] = makeReadyService();
             RequestDispatcher dispatcher(&lifecycle, svc.get(), readyState.get());
 
+            svc->__test_pluginLoaded("mock-loaded-plugin");
+            svc->__test_pluginScanComplete(1);
             svc->__test_pluginLoaded("mock-loaded-plugin");
 
             auto resp = dispatchRequest(dispatcher, Request{PluginTrustListRequest{}});
@@ -1190,6 +1821,123 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         CHECK(std::get<SuccessResponse>(unloadResp).message == "unloaded");
         CHECK(external->listLoaded().empty());
     }
+
+    SECTION("plugin load routes direct external files before ABI fallback") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+        auto shimPath = makePythonShimPath();
+        EnvGuard pythonGuard("PATH", shimPath.c_str());
+
+        auto pluginDir =
+            createMockExternalPlugin(svc->getResolvedDataDir(), "dispatcher_external_py");
+        auto pluginFile = pluginDir / "plugin.py";
+
+        auto* external = svc->getExternalPluginHost();
+        REQUIRE(external != nullptr);
+        REQUIRE(external->trustAdd(pluginFile).has_value());
+
+        PluginLoadRequest req;
+        req.pathOrName = pluginFile.string();
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PluginLoadResponse>(resp));
+        const auto& load = std::get<PluginLoadResponse>(resp);
+        CHECK(load.loaded);
+        CHECK(load.record.name == "dispatcher_external_plugin");
+        CHECK(load.record.path == pluginFile.string());
+
+        auto unloadResp =
+            dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
+        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+    }
+
+    SECTION("plugin load recognizes manifest-adjacent executable files") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+
+        auto pluginDir =
+            createMockExternalPlugin(svc->getResolvedDataDir(), "dispatcher_external_exec");
+        auto executable = pluginDir / "plugin_runner";
+        std::filesystem::copy_file(pluginDir / "plugin.py", executable,
+                                   std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::permissions(executable,
+                                     std::filesystem::perms::owner_read |
+                                         std::filesystem::perms::owner_write |
+                                         std::filesystem::perms::owner_exec,
+                                     std::filesystem::perm_options::replace);
+
+        auto* external = svc->getExternalPluginHost();
+        REQUIRE(external != nullptr);
+        REQUIRE(external->trustAdd(executable).has_value());
+
+        PluginLoadRequest req;
+        req.pathOrName = executable.string();
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PluginLoadResponse>(resp));
+        const auto& load = std::get<PluginLoadResponse>(resp);
+        CHECK(load.loaded);
+        CHECK(load.record.name == "dispatcher_external_plugin");
+        CHECK(load.record.path == executable.string());
+
+        auto unloadResp =
+            dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
+        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+    }
+
+    SECTION("plugin load falls back after untrusted external file fails") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+
+        auto pluginDir =
+            createMockExternalPlugin(svc->getResolvedDataDir(), "dispatcher_external_untrusted");
+        auto pluginFile = pluginDir / "plugin.py";
+
+        PluginLoadRequest req;
+        req.pathOrName = pluginFile.string();
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "Plugin load failed for: " + pluginFile.string());
+    }
+
+    SECTION("plugin trust add loads regular files and reuses loaded path metadata") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+        auto shimPath = makePythonShimPath();
+        EnvGuard pythonGuard("PATH", shimPath.c_str());
+
+        auto pluginDir =
+            createMockExternalPlugin(svc->getResolvedDataDir(), "dispatcher_external_trust_file");
+        auto pluginFile = pluginDir / "plugin.py";
+
+        auto trustAddResp =
+            dispatchRequest(dispatcher, Request{PluginTrustAddRequest{pluginFile.string()}});
+        REQUIRE(std::holds_alternative<SuccessResponse>(trustAddResp));
+
+        auto* external = svc->getExternalPluginHost();
+        REQUIRE(external != nullptr);
+        REQUIRE(waitForCondition([&] { return external->listLoaded().size() == 1; }));
+        CHECK(external->listLoaded().front().path == pluginFile);
+
+        auto secondTrustResp =
+            dispatchRequest(dispatcher, Request{PluginTrustAddRequest{pluginDir.string()}});
+        REQUIRE(std::holds_alternative<SuccessResponse>(secondTrustResp));
+        CHECK(waitForCondition([&] { return external->listLoaded().size() == 1; }));
+
+        auto unloadResp =
+            dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
+        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+    }
 }
 
 TEST_CASE("RequestDispatcher: collection handlers report missing dependencies and batch defaults",
@@ -1285,6 +2033,19 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
     }
 
+    SECTION("list snapshots forwards repository errors") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        repo->setSnapshotError(Error{ErrorCode::DatabaseError, "snapshot lookup failed"});
+        svc.__test_setMetadataRepo(repo);
+
+        auto resp = dispatchRequest(dispatcher, Request{ListSnapshotsRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::DatabaseError);
+        CHECK(err.message == "snapshot lookup failed");
+    }
+
     SECTION("restore collection returns internal error before dependencies are initialized") {
         RestoreCollectionRequest req;
         req.collection = "dispatcher-collection";
@@ -1298,6 +2059,87 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
     }
 
+    SECTION("restore collection returns internal error when content store is unavailable") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        svc.__test_setMetadataRepo(repo);
+
+        RestoreCollectionRequest req;
+        req.collection = "dispatcher-collection";
+        req.outputDirectory = "out";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Content store unavailable") != std::string::npos);
+    }
+
+    SECTION("restore collection forwards repository query errors") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        repo->setQueryError(Error{ErrorCode::DatabaseError, "collection query failed"});
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(std::make_shared<StubContentStore>());
+
+        RestoreCollectionRequest req;
+        req.collection = "dispatcher-collection";
+        req.outputDirectory = "out";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::DatabaseError);
+        CHECK(err.message == "Failed to find collection documents: collection query failed");
+    }
+
+    SECTION("restore snapshot returns internal error when metadata repo is unavailable") {
+        RestoreSnapshotRequest req;
+        req.snapshotId = "dispatcher-snapshot";
+        req.outputDirectory = "out";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
+    }
+
+    SECTION("restore snapshot returns internal error when content store is unavailable") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        svc.__test_setMetadataRepo(repo);
+
+        RestoreSnapshotRequest req;
+        req.snapshotId = "dispatcher-snapshot";
+        req.outputDirectory = "out";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Content store unavailable") != std::string::npos);
+    }
+
+    SECTION("restore snapshot forwards repository query errors") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        repo->setSnapshotDocumentsError(Error{ErrorCode::DatabaseError, "snapshot query failed"});
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(std::make_shared<StubContentStore>());
+
+        RestoreSnapshotRequest req;
+        req.snapshotId = "dispatcher-snapshot";
+        req.outputDirectory = "out";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::DatabaseError);
+        CHECK(err.message == "Failed to find snapshot documents: snapshot query failed");
+    }
+
     SECTION("metadata value counts returns internal error when metadata repo is unavailable") {
         MetadataValueCountsRequest req;
         req.keys = {"collection"};
@@ -1308,6 +2150,22 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InternalError);
         CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
+    }
+
+    SECTION("metadata value counts forwards repository errors") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        repo->setMetadataValueCountsError(Error{ErrorCode::DatabaseError, "counts failed"});
+        svc.__test_setMetadataRepo(repo);
+
+        MetadataValueCountsRequest req;
+        req.keys = {"collection"};
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::DatabaseError);
+        CHECK(err.message == "counts failed");
     }
 
     SECTION("batch request returns not implemented items for each sequence") {
@@ -1470,6 +2328,24 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         CHECK(openFailed.files.front().skipped);
         CHECK(openFailed.files.front().skipReason == "Failed to open output file");
 
+        auto writeFailOut = makeTempDir("yams_collection_write_fail_");
+        RestoreCollectionRequest writeFailReq;
+        writeFailReq.collection = collectionName;
+        writeFailReq.outputDirectory = writeFailOut.string();
+        writeFailReq.layoutTemplate = "write-fail/{name}{ext}";
+        writeFailReq.overwrite = true;
+        writeFailReq.dryRun = false;
+
+        RequestDispatcher::__test_forceRestoreWriteFailureOnce();
+        auto writeFailResp = dispatchRequest(readyDispatcher, Request{writeFailReq});
+
+        REQUIRE(std::holds_alternative<RestoreCollectionResponse>(writeFailResp));
+        const auto& writeFailed = std::get<RestoreCollectionResponse>(writeFailResp);
+        REQUIRE(writeFailed.files.size() == 1);
+        CHECK(writeFailed.filesRestored == 0);
+        CHECK(writeFailed.files.front().skipped);
+        CHECK(writeFailed.files.front().skipReason == "Failed to write file content");
+
         readySvc->shutdown();
     }
 
@@ -1597,6 +2473,24 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         CHECK(openFailed.filesRestored == 0);
         CHECK(openFailed.files.front().skipped);
         CHECK(openFailed.files.front().skipReason == "Failed to open output file");
+
+        auto writeFailOut = makeTempDir("yams_snapshot_write_fail_");
+        RestoreSnapshotRequest writeFailReq;
+        writeFailReq.snapshotId = snapshotId;
+        writeFailReq.outputDirectory = writeFailOut.string();
+        writeFailReq.layoutTemplate = "write-fail/{hash}{ext}";
+        writeFailReq.overwrite = true;
+        writeFailReq.dryRun = false;
+
+        RequestDispatcher::__test_forceRestoreWriteFailureOnce();
+        auto writeFailResp = dispatchRequest(readyDispatcher, Request{writeFailReq});
+
+        REQUIRE(std::holds_alternative<RestoreSnapshotResponse>(writeFailResp));
+        const auto& writeFailed = std::get<RestoreSnapshotResponse>(writeFailResp);
+        REQUIRE(writeFailed.files.size() == 1);
+        CHECK(writeFailed.filesRestored == 0);
+        CHECK(writeFailed.files.front().skipped);
+        CHECK(writeFailed.files.front().skipReason == "Failed to write file content");
 
         readySvc->shutdown();
     }

@@ -736,8 +736,7 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
                 for (const auto& d : batchDocs.value()) {
                     if (!running_.load(std::memory_order_relaxed))
                         break;
-                    if (d.repairStatus == yams::metadata::RepairStatus::Completed ||
-                        d.repairStatus == yams::metadata::RepairStatus::Processing)
+                    if (d.repairStatus == yams::metadata::RepairStatus::Processing)
                         continue;
 
                     // NEW: recover stalled Processing on startup
@@ -2452,10 +2451,29 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     };
 
     std::vector<std::string> hashes;
+    size_t eligibleByMime = 0;
+    size_t eligibleByExtractedText = 0;
+    std::vector<std::string> excludedSamples;
     for (const auto& d : docs.value()) {
-        if (isEmbeddable(d.mimeType))
+        const bool hasExtractedText = d.contentExtracted;
+        if (isEmbeddable(d.mimeType)) {
+            ++eligibleByMime;
             hashes.push_back(d.sha256Hash);
+        } else if (hasExtractedText) {
+            ++eligibleByExtractedText;
+            hashes.push_back(d.sha256Hash);
+        } else if (excludedSamples.size() < 8) {
+            excludedSamples.push_back(
+                d.fileName + " mime=" + d.mimeType +
+                " extracted=" + (d.contentExtracted ? "1" : "0") +
+                " status=" + metadata::ExtractionStatusUtils::toString(d.extractionStatus));
+        }
     }
+
+    spdlog::info("RepairService::generateMissingEmbeddings candidates: total_docs={} eligible={} "
+                 "eligible_by_mime={} eligible_by_extracted_text={} excluded_samples=[{}]",
+                 docs.value().size(), hashes.size(), eligibleByMime, eligibleByExtractedText,
+                 fmt::join(excludedSamples, "; "));
 
     // Incremental mode: skip documents that already have embeddings.
     // Batch-fetch all embedded hashes in a single query for efficiency.

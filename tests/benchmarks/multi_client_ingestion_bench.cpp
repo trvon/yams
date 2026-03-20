@@ -49,6 +49,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -62,7 +63,11 @@
 #include "../common/test_helpers_catch2.h"
 #include "../integration/daemon/test_async_helpers.h"
 #include "../integration/daemon/test_daemon_harness.h"
+#include <boost/asio/connect.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/local/stream_protocol.hpp>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/mcp/mcp_server.h>
 
@@ -87,6 +92,7 @@ struct BenchConfig {
     fs::path outputPath{"bench_results/multi_client.jsonl"};
     int drainTimeoutSecs{120};
     int scalingMaxClients{32};
+    int stressRounds{1};
     std::string tuningProfile;
 
     // --- Storage / corpus overrides ---
@@ -128,6 +134,8 @@ struct BenchConfig {
             cfg.drainTimeoutSecs = std::max(10, std::atoi(v));
         if (auto* v = std::getenv("YAMS_BENCH_SCALING_MAX_CLIENTS"))
             cfg.scalingMaxClients = std::max(1, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_STRESS_ROUNDS"))
+            cfg.stressRounds = std::max(1, std::atoi(v));
         cfg.scalingMaxClients = std::max(cfg.scalingMaxClients, cfg.numClients * 2);
         if (auto* v = std::getenv("YAMS_TUNING_PROFILE"))
             cfg.tuningProfile = v;
@@ -415,9 +423,13 @@ struct PercentileStats {
 struct DaemonSnapshot {
     size_t activeConnections{0};
     size_t maxConnections{0};
+    size_t connectionSlotsFree{0};
+    uint64_t oldestConnectionAge{0};
+    uint64_t forcedCloseCount{0};
     uint64_t requestsProcessed{0};
     double memoryUsageMb{0.0};
     double cpuUsagePercent{0.0};
+    uint64_t rssBytes{0};
     uint64_t postIngestQueued{0};
     uint64_t postIngestInflight{0};
     int pressureLevel{0};
@@ -426,6 +438,9 @@ struct DaemonSnapshot {
     uint64_t searchQueued{0};
     uint64_t dbWritePoolWaiting{0};
     uint64_t dbReadPoolWaiting{0};
+    uint64_t muxWriterBudgetBytes{0};
+    uint32_t ipcPoolSize{0};
+    uint32_t ioPoolSize{0};
     uint32_t retryAfterMs{0};
 
     static DaemonSnapshot capture(DaemonClient& client) {
@@ -437,15 +452,48 @@ struct DaemonSnapshot {
         const auto& s = st.value();
         snap.activeConnections = s.activeConnections;
         snap.maxConnections = s.maxConnections;
+        snap.connectionSlotsFree = s.connectionSlotsFree;
+        snap.oldestConnectionAge = s.oldestConnectionAge;
+        snap.forcedCloseCount = s.forcedCloseCount;
         snap.requestsProcessed = s.requestsProcessed;
         snap.memoryUsageMb = s.memoryUsageMb;
         snap.cpuUsagePercent = s.cpuUsagePercent;
+        snap.muxWriterBudgetBytes = s.muxWriterBudgetBytes;
+        snap.ipcPoolSize = s.ipcPoolSize;
+        snap.ioPoolSize = s.ioPoolSize;
         snap.retryAfterMs = s.retryAfterMs;
 
         auto getCount = [&](std::string_view key) -> uint64_t {
             auto it = s.requestCounts.find(std::string(key));
             return (it != s.requestCounts.end()) ? it->second : 0;
         };
+
+        if (snap.maxConnections == 0) {
+            snap.maxConnections = static_cast<size_t>(getCount("status_max_connections"));
+        }
+        if (snap.connectionSlotsFree == 0) {
+            snap.connectionSlotsFree =
+                static_cast<size_t>(getCount("status_connection_slots_free"));
+        }
+        if (snap.oldestConnectionAge == 0) {
+            snap.oldestConnectionAge = getCount("status_oldest_connection_age_s");
+        }
+        if (snap.forcedCloseCount == 0) {
+            snap.forcedCloseCount = getCount("status_forced_close_count");
+        }
+        if (snap.muxWriterBudgetBytes == 0) {
+            snap.muxWriterBudgetBytes = getCount("status_mux_writer_budget_bytes");
+        }
+        if (snap.ipcPoolSize == 0) {
+            snap.ipcPoolSize = static_cast<uint32_t>(getCount("status_ipc_pool_size"));
+        }
+        if (snap.ioPoolSize == 0) {
+            snap.ioPoolSize = static_cast<uint32_t>(getCount("status_io_pool_size"));
+        }
+        if (snap.retryAfterMs == 0) {
+            snap.retryAfterMs = static_cast<uint32_t>(getCount("status_retry_after_ms"));
+        }
+        snap.rssBytes = getCount("status_rss_bytes");
 
         snap.postIngestQueued = getCount(metrics::kPostIngestQueued);
         snap.postIngestInflight = getCount(metrics::kPostIngestInflight);
@@ -461,9 +509,13 @@ struct DaemonSnapshot {
     json toJson() const {
         return json{{"active_connections", activeConnections},
                     {"max_connections", maxConnections},
+                    {"connection_slots_free", connectionSlotsFree},
+                    {"oldest_connection_age_s", oldestConnectionAge},
+                    {"forced_close_count", forcedCloseCount},
                     {"requests_processed", requestsProcessed},
                     {"memory_mb", memoryUsageMb},
                     {"cpu_pct", cpuUsagePercent},
+                    {"rss_bytes", rssBytes},
                     {"post_ingest_queued", postIngestQueued},
                     {"post_ingest_inflight", postIngestInflight},
                     {"pressure_level", pressureLevel},
@@ -472,6 +524,9 @@ struct DaemonSnapshot {
                     {"search_queued", searchQueued},
                     {"db_write_pool_waiting", dbWritePoolWaiting},
                     {"db_read_pool_waiting", dbReadPoolWaiting},
+                    {"mux_writer_budget_bytes", muxWriterBudgetBytes},
+                    {"ipc_pool_size", ipcPoolSize},
+                    {"io_pool_size", ioPoolSize},
                     {"retry_after_ms", retryAfterMs}};
     }
 };
@@ -487,9 +542,16 @@ public:
         DaemonSnapshot snap;
     };
 
+    ~TimeSeriesSampler() { stop(); }
+
     void start(DaemonClient& client, std::chrono::milliseconds interval = 500ms) {
+        stop();
         stop_ = false;
         startTime_ = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            samples_.clear();
+        }
         thread_ = std::thread([this, &client, interval]() {
             while (!stop_) {
                 Sample sample;
@@ -524,6 +586,291 @@ private:
     mutable std::mutex mutex_;
     std::vector<Sample> samples_;
 };
+
+struct SlotScalingSummary {
+    size_t initialLimit{0};
+    size_t peakLimit{0};
+    size_t finalLimit{0};
+    size_t minFreeSlots{0};
+    size_t peakActiveConnections{0};
+    double peakUtilization{0.0};
+    int growEvents{0};
+    int shrinkEvents{0};
+    int retryAfterSamples{0};
+};
+
+SlotScalingSummary summarizeSlotScaling(const std::vector<TimeSeriesSampler::Sample>& samples) {
+    SlotScalingSummary summary;
+    if (samples.empty()) {
+        return summary;
+    }
+
+    summary.initialLimit = samples.front().snap.maxConnections;
+    summary.peakLimit = samples.front().snap.maxConnections;
+    summary.finalLimit = samples.back().snap.maxConnections;
+    summary.minFreeSlots = samples.front().snap.connectionSlotsFree;
+
+    size_t previousLimit = samples.front().snap.maxConnections;
+    for (const auto& sample : samples) {
+        const auto& snap = sample.snap;
+        summary.peakLimit = std::max(summary.peakLimit, snap.maxConnections);
+        summary.minFreeSlots = std::min(summary.minFreeSlots, snap.connectionSlotsFree);
+        summary.peakActiveConnections =
+            std::max(summary.peakActiveConnections, snap.activeConnections);
+        if (snap.maxConnections > 0) {
+            summary.peakUtilization =
+                std::max(summary.peakUtilization, static_cast<double>(snap.activeConnections) /
+                                                      static_cast<double>(snap.maxConnections));
+        }
+        if (snap.retryAfterMs > 0) {
+            summary.retryAfterSamples++;
+        }
+        if (snap.maxConnections > previousLimit) {
+            summary.growEvents++;
+        } else if (snap.maxConnections < previousLimit) {
+            summary.shrinkEvents++;
+        }
+        previousLimit = snap.maxConnections;
+    }
+
+    return summary;
+}
+
+struct TimedLatencySample {
+    std::string opType;
+    uint64_t wallClockMs{0};
+    int64_t latencyUs{0};
+    bool success{false};
+};
+
+struct ResourcePeaks {
+    double peakMemoryMb{0.0};
+    double peakCpuPercent{0.0};
+    uint64_t peakRssBytes{0};
+    size_t peakActiveConnections{0};
+    size_t peakMaxConnections{0};
+    uint64_t peakPostIngestQueued{0};
+    uint64_t peakPostIngestInflight{0};
+    uint64_t peakSearchActive{0};
+    uint64_t peakSearchQueued{0};
+    uint64_t peakDbWritePoolWaiting{0};
+    uint64_t peakDbReadPoolWaiting{0};
+    uint64_t peakMuxWriterBudgetBytes{0};
+    uint32_t maxPressureLevel{0};
+
+    json toJson() const {
+        return json{{"peak_memory_mb", peakMemoryMb},
+                    {"peak_cpu_pct", peakCpuPercent},
+                    {"peak_rss_bytes", peakRssBytes},
+                    {"peak_active_connections", peakActiveConnections},
+                    {"peak_max_connections", peakMaxConnections},
+                    {"peak_post_ingest_queued", peakPostIngestQueued},
+                    {"peak_post_ingest_inflight", peakPostIngestInflight},
+                    {"peak_search_active", peakSearchActive},
+                    {"peak_search_queued", peakSearchQueued},
+                    {"peak_db_write_pool_waiting", peakDbWritePoolWaiting},
+                    {"peak_db_read_pool_waiting", peakDbReadPoolWaiting},
+                    {"peak_mux_writer_budget_bytes", peakMuxWriterBudgetBytes},
+                    {"max_pressure_level", maxPressureLevel}};
+    }
+};
+
+ResourcePeaks summarizeResourcePeaks(const std::vector<TimeSeriesSampler::Sample>& samples) {
+    ResourcePeaks peaks;
+    for (const auto& sample : samples) {
+        const auto& snap = sample.snap;
+        peaks.peakMemoryMb = std::max(peaks.peakMemoryMb, snap.memoryUsageMb);
+        peaks.peakCpuPercent = std::max(peaks.peakCpuPercent, snap.cpuUsagePercent);
+        peaks.peakRssBytes = std::max(peaks.peakRssBytes, snap.rssBytes);
+        peaks.peakActiveConnections = std::max(peaks.peakActiveConnections, snap.activeConnections);
+        peaks.peakMaxConnections = std::max(peaks.peakMaxConnections, snap.maxConnections);
+        peaks.peakPostIngestQueued = std::max(peaks.peakPostIngestQueued, snap.postIngestQueued);
+        peaks.peakPostIngestInflight =
+            std::max(peaks.peakPostIngestInflight, snap.postIngestInflight);
+        peaks.peakSearchActive = std::max(peaks.peakSearchActive, snap.searchActive);
+        peaks.peakSearchQueued = std::max(peaks.peakSearchQueued, snap.searchQueued);
+        peaks.peakDbWritePoolWaiting =
+            std::max(peaks.peakDbWritePoolWaiting, snap.dbWritePoolWaiting);
+        peaks.peakDbReadPoolWaiting = std::max(peaks.peakDbReadPoolWaiting, snap.dbReadPoolWaiting);
+        peaks.peakMuxWriterBudgetBytes =
+            std::max(peaks.peakMuxWriterBudgetBytes, snap.muxWriterBudgetBytes);
+        peaks.maxPressureLevel = std::max(peaks.maxPressureLevel,
+                                          static_cast<uint32_t>(std::max(0, snap.pressureLevel)));
+    }
+    return peaks;
+}
+
+json summarizeLatencyHotspots(const std::vector<TimedLatencySample>& samples,
+                              uint64_t windowMs = 500) {
+    json out = json{{"window_ms", windowMs},
+                    {"slowest_ops", json::array()},
+                    {"worst_window", json::object()},
+                    {"per_op_p95_rank", json::array()}};
+    if (samples.empty()) {
+        return out;
+    }
+
+    auto sorted = samples;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto& a, const auto& b) { return a.latencyUs > b.latencyUs; });
+    for (size_t i = 0; i < std::min<size_t>(5, sorted.size()); ++i) {
+        out["slowest_ops"].push_back(json{{"op_type", sorted[i].opType},
+                                          {"wall_clock_ms", sorted[i].wallClockMs},
+                                          {"latency_us", sorted[i].latencyUs},
+                                          {"success", sorted[i].success}});
+    }
+
+    std::unordered_map<std::string, std::vector<int64_t>> byOp;
+    for (const auto& sample : samples) {
+        if (sample.success) {
+            byOp[sample.opType].push_back(sample.latencyUs);
+        }
+    }
+    std::vector<std::pair<std::string, PercentileStats>> ranked;
+    ranked.reserve(byOp.size());
+    for (auto& [op, values] : byOp) {
+        ranked.emplace_back(op, PercentileStats::compute(values));
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.second.p95 > b.second.p95; });
+    for (const auto& [op, stats] : ranked) {
+        out["per_op_p95_rank"].push_back(json{{"op_type", op},
+                                              {"p95_us", stats.p95},
+                                              {"mean_us", stats.mean},
+                                              {"count", stats.count}});
+    }
+
+    size_t left = 0;
+    int64_t currentSumUs = 0;
+    size_t bestCount = 0;
+    int64_t bestSumUs = 0;
+    uint64_t bestStartMs = samples.front().wallClockMs;
+    uint64_t bestEndMs = samples.front().wallClockMs;
+    auto byTime = samples;
+    std::sort(byTime.begin(), byTime.end(),
+              [](const auto& a, const auto& b) { return a.wallClockMs < b.wallClockMs; });
+    for (size_t right = 0; right < byTime.size(); ++right) {
+        currentSumUs += byTime[right].latencyUs;
+        while (byTime[right].wallClockMs - byTime[left].wallClockMs > windowMs) {
+            currentSumUs -= byTime[left].latencyUs;
+            ++left;
+        }
+        const size_t count = right - left + 1;
+        if (count > 0 &&
+            (currentSumUs > bestSumUs || (currentSumUs == bestSumUs && count > bestCount))) {
+            bestSumUs = currentSumUs;
+            bestCount = count;
+            bestStartMs = byTime[left].wallClockMs;
+            bestEndMs = byTime[right].wallClockMs;
+        }
+    }
+    out["worst_window"] = json{
+        {"start_ms", bestStartMs},
+        {"end_ms", bestEndMs},
+        {"sample_count", bestCount},
+        {"latency_sum_us", bestSumUs},
+        {"avg_latency_us",
+         bestCount > 0 ? static_cast<double>(bestSumUs) / static_cast<double>(bestCount) : 0.0}};
+    return out;
+}
+
+class HeldSocketConnections {
+public:
+    bool open(const fs::path& socketPath, int count) {
+        sockets_.clear();
+        sockets_.reserve(static_cast<size_t>(std::max(0, count)));
+
+        boost::system::error_code ec;
+        for (int i = 0; i < count; ++i) {
+            auto sock = std::make_unique<boost::asio::local::stream_protocol::socket>(io_);
+            sock->connect(boost::asio::local::stream_protocol::endpoint(socketPath.string()), ec);
+            if (ec) {
+                closeAll();
+                return false;
+            }
+            sockets_.push_back(std::move(sock));
+        }
+        return true;
+    }
+
+    void closeAll() {
+        for (auto& sock : sockets_) {
+            if (!sock) {
+                continue;
+            }
+            boost::system::error_code ec;
+            sock->close(ec);
+        }
+        sockets_.clear();
+    }
+
+    ~HeldSocketConnections() { closeAll(); }
+
+private:
+    boost::asio::io_context io_;
+    std::vector<std::unique_ptr<boost::asio::local::stream_protocol::socket>> sockets_;
+};
+
+class ScopedConnectionSlotOverrides {
+public:
+    ScopedConnectionSlotOverrides(uint32_t minSlots, uint32_t maxSlots, uint32_t scaleStep) {
+        TuneAdvisor::setConnectionSlotsMin(minSlots);
+        TuneAdvisor::setConnectionSlotsMax(maxSlots);
+        TuneAdvisor::setConnectionSlotsScaleStep(scaleStep);
+    }
+
+    ~ScopedConnectionSlotOverrides() {
+        TuneAdvisor::setConnectionSlotsMin(0);
+        TuneAdvisor::setConnectionSlotsMax(0);
+        TuneAdvisor::setConnectionSlotsScaleStep(0);
+    }
+
+    ScopedConnectionSlotOverrides(const ScopedConnectionSlotOverrides&) = delete;
+    ScopedConnectionSlotOverrides& operator=(const ScopedConnectionSlotOverrides&) = delete;
+};
+
+bool waitForSlotLimit(DaemonClient& client, size_t targetLimit, std::chrono::milliseconds timeout,
+                      bool requireAtLeast) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto snap = DaemonSnapshot::capture(client);
+        if (requireAtLeast) {
+            if (snap.maxConnections >= targetLimit) {
+                return true;
+            }
+        } else if (snap.maxConnections <= targetLimit) {
+            return true;
+        }
+        std::this_thread::sleep_for(250ms);
+    }
+    return false;
+}
+
+bool waitForActiveConnectionsAtLeast(DaemonClient& client, size_t targetActive,
+                                     std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto snap = DaemonSnapshot::capture(client);
+        if (snap.activeConnections >= targetActive) {
+            return true;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    return false;
+}
+
+bool waitForActiveConnectionsAtMost(DaemonClient& client, size_t targetActive,
+                                    std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto snap = DaemonSnapshot::capture(client);
+        if (snap.activeConnections <= targetActive) {
+            return true;
+        }
+        std::this_thread::sleep_for(250ms);
+    }
+    return false;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Document generator
@@ -898,6 +1245,7 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
     monCfg.socketPath = harness.socketPath();
     monCfg.autoStart = false;
     monCfg.requestTimeout = 10s;
+    monCfg.singleUseConnections = true;
     DaemonClient monitorClient(monCfg);
 
     // Start time-series sampler
@@ -1133,6 +1481,7 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         warmCfg.socketPath = harness.socketPath();
         warmCfg.autoStart = false;
         warmCfg.requestTimeout = 30s;
+        warmCfg.singleUseConnections = true;
         DaemonClient warmClient(warmCfg);
 
         std::cout << "  Pre-seeding " << cfg.warmupDocs << " warmup docs...\n";
@@ -1171,6 +1520,7 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
             ccfg.socketPath = harness.socketPath();
             ccfg.autoStart = false;
             ccfg.requestTimeout = 30s;
+            ccfg.singleUseConnections = true;
             DaemonClient client(ccfg);
 
             ClientResult& result = clientResults[c];
@@ -1358,6 +1708,499 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         {"daemon_snapshot_final", finalSnap.toJson()},
         {"tuning_profile", cfg.tuningProfile},
         {"drained", drained},
+    };
+    emitJsonl(cfg.outputPath, record);
+}
+
+TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
+          "[!benchmark][multi-client][ux-scaling]") {
+    auto cfg = BenchConfig::fromEnv();
+
+    // Three phases:
+    // 1. Warmup: seed a small searchable corpus.
+    // 2. Realistic mixed load: measure ingest + UX latency under pressure.
+    // 3. Deterministic control: force slot growth, then force shrink, and assert only on
+    //    sampled slot metrics rather than transient active-connection counts.
+    constexpr size_t kInitialSlotLimit = 12;
+    constexpr size_t kSlotMax = 16;
+    constexpr size_t kSlotStep = 4;
+    ScopedConnectionSlotOverrides slotOverrides(static_cast<uint32_t>(kInitialSlotLimit),
+                                                static_cast<uint32_t>(kSlotMax),
+                                                static_cast<uint32_t>(kSlotStep));
+    yams::test::ScopedEnvVar maxActiveConn("YAMS_MAX_ACTIVE_CONN",
+                                           std::to_string(kInitialSlotLimit));
+
+    DaemonHarness harness(benchHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, kStartTimeout));
+
+    ClientConfig monCfg;
+    monCfg.socketPath = harness.socketPath();
+    monCfg.autoStart = false;
+    monCfg.requestTimeout = 10s;
+    DaemonClient monitorClient(monCfg);
+
+    // Pre-seed a small searchable corpus so UX requests hit real work.
+    {
+        ClientConfig warmCfg;
+        warmCfg.socketPath = harness.socketPath();
+        warmCfg.autoStart = false;
+        warmCfg.requestTimeout = 30s;
+        DaemonClient warmClient(warmCfg);
+
+        const int warmDocs = std::max(16, cfg.warmupDocs);
+        for (int i = 0; i < warmDocs; ++i) {
+            AddDocumentRequest req;
+            req.name = "ux_scale_warmup_" + std::to_string(i) + ".md";
+            req.content = generateDocument(77, i, cfg.docSizeBytes);
+            req.tags = {"warmup", "ux-scaling"};
+            auto res = yams::cli::run_sync(warmClient.streamingAddDocument(req), 30s);
+            REQUIRE(res);
+        }
+        REQUIRE(waitForDrain(warmClient, 30s));
+    }
+
+    TimeSeriesSampler sampler;
+    sampler.start(monitorClient, 100ms);
+
+    const int writerClients = std::max(2, cfg.numClients);
+    const int uxClients = std::max(4, cfg.numClients * 3);
+    const int writerOpsPerClient = cfg.docsPerClient * cfg.stressRounds;
+    const int uxOpsPerClient = std::max(24, cfg.docsPerClient) * cfg.stressRounds;
+    const size_t grownSlotTarget = std::min(kSlotMax, kInitialSlotLimit + kSlotStep);
+
+    std::atomic<int> addOps{0};
+    std::atomic<int> addFails{0};
+    std::atomic<int> uxOps{0};
+    std::atomic<int> uxFails{0};
+    std::atomic<int> retryAfterCount{0};
+    std::mutex latMutex;
+    std::vector<int64_t> addLatencies;
+    std::vector<int64_t> searchLatencies;
+    std::vector<int64_t> listLatencies;
+    std::vector<int64_t> statusLatencies;
+    std::vector<TimedLatencySample> hotspotSamples;
+
+    HeldSocketConnections heldConnections;
+    REQUIRE(heldConnections.open(harness.socketPath(), static_cast<int>(kInitialSlotLimit)));
+
+    auto globalStart = std::chrono::steady_clock::now();
+
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<size_t>(writerClients + uxClients));
+
+    for (int writer = 0; writer < writerClients; ++writer) {
+        threads.emplace_back([&, writer]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 30s;
+            DaemonClient client(ccfg);
+
+            std::vector<int64_t> localAdds;
+            for (int i = 0; i < writerOpsPerClient; ++i) {
+                AddDocumentRequest req;
+                req.name =
+                    "ux_scale_writer_" + std::to_string(writer) + "_" + std::to_string(i) + ".md";
+                req.content = generateDocument(writer, i, cfg.docSizeBytes);
+                req.tags = {"bench", "ux-scaling", "writer-" + std::to_string(writer)};
+                req.collection = "ux_scaling_writer_" + std::to_string(writer);
+
+                const auto t0 = std::chrono::steady_clock::now();
+                auto res = yams::cli::run_sync(client.streamingAddDocument(req), 30s);
+                const auto t1 = std::chrono::steady_clock::now();
+                const auto latUs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                if (res) {
+                    addOps.fetch_add(1);
+                    localAdds.push_back(latUs);
+                } else {
+                    addFails.fetch_add(1);
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(latMutex);
+                    hotspotSamples.push_back(TimedLatencySample{
+                        .opType = "add",
+                        .wallClockMs = static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart)
+                                .count()),
+                        .latencyUs = latUs,
+                        .success = static_cast<bool>(res),
+                    });
+                }
+            }
+
+            std::lock_guard<std::mutex> lock(latMutex);
+            addLatencies.insert(addLatencies.end(), localAdds.begin(), localAdds.end());
+        });
+    }
+
+    for (int ux = 0; ux < uxClients; ++ux) {
+        threads.emplace_back([&]() {
+            std::vector<int64_t> localSearch;
+            std::vector<int64_t> localList;
+            std::vector<int64_t> localStatus;
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 10s;
+            DaemonClient client(ccfg);
+
+            for (int i = 0; i < uxOpsPerClient; ++i) {
+                const auto t0 = std::chrono::steady_clock::now();
+                bool success = false;
+
+                switch (i % 3) {
+                    case 0: {
+                        auto res = yams::cli::run_sync(client.status(), 10s);
+                        success = static_cast<bool>(res);
+                        if (res && res.value().retryAfterMs > 0) {
+                            retryAfterCount.fetch_add(1);
+                        }
+                        const auto t1 = std::chrono::steady_clock::now();
+                        if (success) {
+                            localStatus.push_back(
+                                std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0)
+                                    .count());
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(latMutex);
+                            hotspotSamples.push_back(TimedLatencySample{
+                                .opType = "status",
+                                .wallClockMs = static_cast<uint64_t>(
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        t1 - globalStart)
+                                        .count()),
+                                .latencyUs =
+                                    std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0)
+                                        .count(),
+                                .success = success,
+                            });
+                        }
+                        break;
+                    }
+                    case 1: {
+                        ListRequest req;
+                        req.limit = 10;
+                        auto res = yams::cli::run_sync(client.list(req), 10s);
+                        success = static_cast<bool>(res);
+                        const auto t1 = std::chrono::steady_clock::now();
+                        if (success) {
+                            localList.push_back(
+                                std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0)
+                                    .count());
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(latMutex);
+                            hotspotSamples.push_back(TimedLatencySample{
+                                .opType = "list",
+                                .wallClockMs = static_cast<uint64_t>(
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        t1 - globalStart)
+                                        .count()),
+                                .latencyUs =
+                                    std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0)
+                                        .count(),
+                                .success = success,
+                            });
+                        }
+                        break;
+                    }
+                    default: {
+                        SearchRequest req;
+                        req.query = "architecture performance tuning daemon";
+                        req.limit = 5;
+                        auto res = yams::cli::run_sync(client.search(req), 10s);
+                        success = static_cast<bool>(res);
+                        const auto t1 = std::chrono::steady_clock::now();
+                        if (success) {
+                            localSearch.push_back(
+                                std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0)
+                                    .count());
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(latMutex);
+                            hotspotSamples.push_back(TimedLatencySample{
+                                .opType = "search",
+                                .wallClockMs = static_cast<uint64_t>(
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        t1 - globalStart)
+                                        .count()),
+                                .latencyUs =
+                                    std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0)
+                                        .count(),
+                                .success = success,
+                            });
+                        }
+                        break;
+                    }
+                }
+
+                uxOps.fetch_add(1);
+                if (!success) {
+                    uxFails.fetch_add(1);
+                }
+            }
+
+            std::lock_guard<std::mutex> lock(latMutex);
+            searchLatencies.insert(searchLatencies.end(), localSearch.begin(), localSearch.end());
+            listLatencies.insert(listLatencies.end(), localList.begin(), localList.end());
+            statusLatencies.insert(statusLatencies.end(), localStatus.begin(), localStatus.end());
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    sampler.stop();
+    heldConnections.closeAll();
+
+    std::this_thread::sleep_for(500ms);
+
+    const auto globalEnd = std::chrono::steady_clock::now();
+    const double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
+
+    const bool drained = waitForDrain(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+    const auto finalSnap = DaemonSnapshot::capture(monitorClient);
+    const auto samples = sampler.getSamples();
+    const auto slotSummary = summarizeSlotScaling(samples);
+    const auto resourcePeaks = summarizeResourcePeaks(samples);
+    const auto hotspotSummary = summarizeLatencyHotspots(hotspotSamples);
+    const auto addStats = PercentileStats::compute(addLatencies);
+    const auto searchStats = PercentileStats::compute(searchLatencies);
+    const auto listStats = PercentileStats::compute(listLatencies);
+    const auto statusStats = PercentileStats::compute(statusLatencies);
+    const bool observedGrowth =
+        slotSummary.peakLimit >= grownSlotTarget || slotSummary.growEvents > 0;
+    const bool observedShrink =
+        slotSummary.finalLimit <= kInitialSlotLimit || slotSummary.shrinkEvents > 0;
+
+    const double addThroughput =
+        (globalElapsed > 0.0) ? static_cast<double>(addOps.load()) / globalElapsed : 0.0;
+    const double uxThroughput =
+        (globalElapsed > 0.0) ? static_cast<double>(uxOps.load()) / globalElapsed : 0.0;
+    const double uxFailureRate =
+        (uxOps.load() > 0) ? static_cast<double>(uxFails.load()) / static_cast<double>(uxOps.load())
+                           : 0.0;
+
+    std::cout << "\n=== Socket Scaling vs UX Latency ===\n";
+    std::cout << "  Adds: " << addOps.load() << " (fails=" << addFails.load() << ")"
+              << "  UX ops: " << uxOps.load() << " (fails=" << uxFails.load() << ")\n";
+    std::cout << "  Throughput: add=" << std::fixed << std::setprecision(1) << addThroughput
+              << " docs/s, ux=" << uxThroughput << " ops/s\n";
+    std::cout << "  Slot scaling: initial=" << slotSummary.initialLimit
+              << " peak=" << slotSummary.peakLimit << " final=" << slotSummary.finalLimit
+              << " grow_events=" << slotSummary.growEvents
+              << " shrink_events=" << slotSummary.shrinkEvents
+              << " min_free=" << slotSummary.minFreeSlots
+              << " peak_active=" << slotSummary.peakActiveConnections
+              << " peak_util=" << std::setprecision(2) << (slotSummary.peakUtilization * 100.0)
+              << "% retry_after_samples=" << slotSummary.retryAfterSamples
+              << " observed_growth=" << (observedGrowth ? "yes" : "NO")
+              << " observed_shrink=" << (observedShrink ? "yes" : "NO") << "\n";
+    printPercentiles("Add latency", addStats);
+    printPercentiles("Search latency", searchStats);
+    printPercentiles("List latency", listStats);
+    printPercentiles("Status latency", statusStats);
+    std::cout << "  Resource peaks: memory=" << std::fixed << std::setprecision(1)
+              << resourcePeaks.peakMemoryMb << " MB cpu=" << resourcePeaks.peakCpuPercent
+              << "% rss=" << resourcePeaks.peakRssBytes
+              << "B post_q=" << resourcePeaks.peakPostIngestQueued
+              << " post_inflight=" << resourcePeaks.peakPostIngestInflight
+              << " search_active=" << resourcePeaks.peakSearchActive
+              << " search_q=" << resourcePeaks.peakSearchQueued
+              << " db_write_wait=" << resourcePeaks.peakDbWritePoolWaiting
+              << " db_read_wait=" << resourcePeaks.peakDbReadPoolWaiting << "\n";
+    if (hotspotSummary.contains("worst_window")) {
+        const auto& window = hotspotSummary["worst_window"];
+        std::cout << "  Worst latency window: start=" << window.value("start_ms", 0)
+                  << "ms end=" << window.value("end_ms", 0)
+                  << "ms avg=" << window.value("avg_latency_us", 0.0)
+                  << "us samples=" << window.value("sample_count", 0) << "\n";
+    }
+    std::cout << "  Queue drained: " << (drained ? "yes" : "NO")
+              << "  UX failure rate: " << std::setprecision(3) << uxFailureRate
+              << "  Final active/max: " << finalSnap.activeConnections << "/"
+              << finalSnap.maxConnections << "\n\n";
+
+    // Phase 3: deterministic control cycle for growth/shrink validation on a fresh daemon
+    // instance so realistic phase-2 idle sessions do not distort shrink behavior.
+    harness.stop();
+    DaemonHarness controlHarness(benchHarnessOptions());
+    REQUIRE(startHarnessWithRetry(controlHarness, kStartTimeout));
+
+    ClientConfig controlMonCfg;
+    controlMonCfg.socketPath = controlHarness.socketPath();
+    controlMonCfg.autoStart = false;
+    controlMonCfg.requestTimeout = 10s;
+    DaemonClient controlMonitorClient(controlMonCfg);
+
+    TimeSeriesSampler controlSampler;
+    controlSampler.start(controlMonitorClient, 100ms);
+
+    std::atomic<int> controlAddOps{0};
+    std::atomic<int> controlUxOps{0};
+    HeldSocketConnections controlHeldConnections;
+    const size_t controlHeldCount = kInitialSlotLimit - 2;
+    REQUIRE(controlHeldConnections.open(controlHarness.socketPath(),
+                                        static_cast<int>(controlHeldCount)));
+
+    const int controlAddsPerWriter = std::max(8, cfg.docsPerClient * 2) * cfg.stressRounds;
+    const int controlUxOpsPerClient = 12 * cfg.stressRounds;
+
+    std::thread controlWriter([&]() {
+        ClientConfig ccfg;
+        ccfg.socketPath = controlHarness.socketPath();
+        ccfg.autoStart = false;
+        ccfg.requestTimeout = 30s;
+        DaemonClient client(ccfg);
+
+        for (int i = 0; i < controlAddsPerWriter; ++i) {
+            AddDocumentRequest req;
+            req.name = "ux_scale_control_add_" + std::to_string(i) + ".md";
+            req.content = generateDocument(901, i, cfg.docSizeBytes);
+            req.tags = {"bench", "ux-scaling", "control"};
+            req.collection = "ux_scaling_control";
+            auto res = yams::cli::run_sync(client.streamingAddDocument(req), 30s);
+            if (res) {
+                controlAddOps.fetch_add(1);
+            }
+        }
+    });
+
+    std::thread controlUx([&]() {
+        ClientConfig ccfg;
+        ccfg.socketPath = controlHarness.socketPath();
+        ccfg.autoStart = false;
+        ccfg.requestTimeout = 10s;
+        DaemonClient client(ccfg);
+
+        for (int i = 0; i < controlUxOpsPerClient; ++i) {
+            switch (i % 3) {
+                case 0: {
+                    (void)yams::cli::run_sync(client.status(), 10s);
+                    break;
+                }
+                case 1: {
+                    ListRequest req;
+                    req.limit = 10;
+                    (void)yams::cli::run_sync(client.list(req), 10s);
+                    break;
+                }
+                default: {
+                    SearchRequest req;
+                    req.query = "architecture performance tuning daemon";
+                    req.limit = 5;
+                    (void)yams::cli::run_sync(client.search(req), 10s);
+                    break;
+                }
+            }
+            controlUxOps.fetch_add(1);
+        }
+    });
+
+    controlWriter.join();
+    controlUx.join();
+
+    const bool controlGrew = waitForSlotLimit(controlMonitorClient, grownSlotTarget, 6s, true);
+    controlHeldConnections.closeAll();
+    const bool controlReachedLightLoad =
+        waitForActiveConnectionsAtMost(controlMonitorClient, 2, 12s);
+    const bool controlShrank =
+        waitForSlotLimit(controlMonitorClient, kInitialSlotLimit, 10s, false);
+    controlSampler.stop();
+
+    const auto controlSamples = controlSampler.getSamples();
+    const auto controlSlotSummary = summarizeSlotScaling(controlSamples);
+    const auto controlFinalSnap = DaemonSnapshot::capture(controlMonitorClient);
+
+    std::cout << "=== Deterministic Control Phase ===\n";
+    std::cout << "  Adds: " << controlAddOps.load() << "  UX ops: " << controlUxOps.load() << "\n";
+    std::cout << "  Slot scaling: initial=" << controlSlotSummary.initialLimit
+              << " peak=" << controlSlotSummary.peakLimit
+              << " final=" << controlSlotSummary.finalLimit
+              << " grow_events=" << controlSlotSummary.growEvents
+              << " shrink_events=" << controlSlotSummary.shrinkEvents
+              << " peak_active=" << controlSlotSummary.peakActiveConnections
+              << " final_active=" << controlFinalSnap.activeConnections
+              << " grew=" << (controlGrew ? "yes" : "NO")
+              << " light_load=" << (controlReachedLightLoad ? "yes" : "NO")
+              << " shrank=" << (controlShrank ? "yes" : "NO") << "\n\n";
+
+    CHECK(addOps.load() > 0);
+    CHECK(uxOps.load() > 0);
+    CHECK((searchStats.count + listStats.count + statusStats.count) > 0);
+    CHECK(drained);
+    CHECK(controlAddOps.load() > 0);
+    CHECK(controlUxOps.load() > 0);
+    CHECK(controlGrew);
+    CHECK(controlReachedLightLoad);
+    CHECK(controlShrank);
+    CHECK(controlSlotSummary.peakLimit >= grownSlotTarget);
+    CHECK(controlSlotSummary.growEvents > 0);
+    CHECK(controlSlotSummary.finalLimit <= kInitialSlotLimit);
+    CHECK(controlSlotSummary.shrinkEvents > 0);
+
+    json record{
+        {"timestamp", isoTimestamp()},
+        {"test", "socket_scaling_vs_ux_latency"},
+        {"num_writer_clients", writerClients},
+        {"num_ux_clients", uxClients},
+        {"docs_per_writer", writerOpsPerClient},
+        {"ux_ops_per_client", uxOpsPerClient},
+        {"stress_rounds", cfg.stressRounds},
+        {"doc_size_bytes", cfg.docSizeBytes},
+        {"add", json{{"ops", addOps.load()},
+                     {"fails", addFails.load()},
+                     {"throughput_per_sec", addThroughput},
+                     {"latency", addStats.toJson()}}},
+        {"search", json{{"latency", searchStats.toJson()}}},
+        {"list", json{{"latency", listStats.toJson()}}},
+        {"status", json{{"latency", statusStats.toJson()}}},
+        {"ux", json{{"ops", uxOps.load()},
+                    {"fails", uxFails.load()},
+                    {"throughput_per_sec", uxThroughput},
+                    {"failure_rate", uxFailureRate},
+                    {"retry_after_count", retryAfterCount.load()}}},
+        {"slot_scaling", json{{"initial_limit", slotSummary.initialLimit},
+                              {"peak_limit", slotSummary.peakLimit},
+                              {"final_limit", slotSummary.finalLimit},
+                              {"observed_growth", observedGrowth},
+                              {"observed_shrink", observedShrink},
+                              {"growth_target", grownSlotTarget},
+                              {"final_floor_target", kInitialSlotLimit},
+                              {"min_free_slots", slotSummary.minFreeSlots},
+                              {"peak_active_connections", slotSummary.peakActiveConnections},
+                              {"peak_utilization", slotSummary.peakUtilization},
+                              {"grow_events", slotSummary.growEvents},
+                              {"shrink_events", slotSummary.shrinkEvents},
+                              {"retry_after_samples", slotSummary.retryAfterSamples}}},
+        {"deterministic_control",
+         json{{"add_ops", controlAddOps.load()},
+              {"ux_ops", controlUxOps.load()},
+              {"grew_to_target", controlGrew},
+              {"reached_light_load", controlReachedLightLoad},
+              {"shrank_to_floor", controlShrank},
+              {"slot_scaling",
+               json{{"initial_limit", controlSlotSummary.initialLimit},
+                    {"peak_limit", controlSlotSummary.peakLimit},
+                    {"final_limit", controlSlotSummary.finalLimit},
+                    {"min_free_slots", controlSlotSummary.minFreeSlots},
+                    {"peak_active_connections", controlSlotSummary.peakActiveConnections},
+                    {"peak_utilization", controlSlotSummary.peakUtilization},
+                    {"grow_events", controlSlotSummary.growEvents},
+                    {"shrink_events", controlSlotSummary.shrinkEvents},
+                    {"retry_after_samples", controlSlotSummary.retryAfterSamples},
+                    {"final_active_connections", controlFinalSnap.activeConnections}}}}},
+        {"resource_peaks", resourcePeaks.toJson()},
+        {"hotspots", hotspotSummary},
+        {"elapsed_seconds", globalElapsed},
+        {"drained", drained},
+        {"daemon_snapshot_final", finalSnap.toJson()},
+        {"time_series_samples", samples.size()},
+        {"tuning_profile", cfg.tuningProfile},
     };
     emitJsonl(cfg.outputPath, record);
 }
