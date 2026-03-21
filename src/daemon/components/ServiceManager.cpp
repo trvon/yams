@@ -2963,8 +2963,9 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     ctx.searchEngine = getSearchEngineSnapshot();
     ctx.vectorDatabase = getVectorDatabase();
     ctx.kgStore = this->kgStore_; // PBI-043: tree diff KG integration
-    ctx.graphQueryService = graphComponent_ ? graphComponent_->getQueryService()
-                                            : nullptr; // PBI-009: centralized graph queries
+    ctx.graphQueryService = graphQueryServiceOverride_
+                                ? graphQueryServiceOverride_
+                                : (graphComponent_ ? graphComponent_->getQueryService() : nullptr);
     ctx.contentExtractors = contentExtractors_;
 
     // Log vector capability status

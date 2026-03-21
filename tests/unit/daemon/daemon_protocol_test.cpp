@@ -150,6 +150,37 @@ TEST_CASE("MessageFramer: Large message handling", "[daemon][protocol][framing][
     }
 }
 
+TEST_CASE("MessageFramer: SearchRequest sanitizes invalid UTF-8 for protobuf",
+          "[daemon][protocol][framing][utf8]") {
+    auto framer = std::make_unique<MessageFramer>();
+
+    SearchRequest req;
+    req.query = std::string("task=performance owner=opencode");
+    req.query.push_back(static_cast<char>(0xFF));
+    req.query.append(" tail");
+    req.searchType = "keyword";
+    req.hashQuery = std::string("\xFEhash", 5);
+    req.pathPattern = std::string("\xFF*.md", 5);
+
+    Message msg;
+    msg.version = PROTOCOL_VERSION;
+    msg.requestId = 444;
+    msg.payload = req;
+
+    auto framedResult = framer->frame_message(msg);
+    REQUIRE(framedResult);
+
+    auto parsedResult = framer->parse_frame(framedResult.value());
+    REQUIRE(parsedResult);
+
+    auto* parsedReq = std::get_if<SearchRequest>(&std::get<Request>(parsedResult.value().payload));
+    REQUIRE(parsedReq != nullptr);
+    REQUIRE(parsedReq->query == yams::common::sanitizeUtf8(req.query));
+    REQUIRE(parsedReq->hashQuery == yams::common::sanitizeUtf8(req.hashQuery));
+    REQUIRE(parsedReq->pathPattern == yams::common::sanitizeUtf8(req.pathPattern));
+    REQUIRE(parsedReq->searchType == "keyword");
+}
+
 TEST_CASE("MessageFramer: Header validation", "[daemon][protocol][framing][validation]") {
     auto framer = std::make_unique<MessageFramer>();
 

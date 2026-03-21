@@ -195,13 +195,13 @@ template <> struct ProtoBinding<SearchRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kSearchRequest;
     static void set(Envelope& env, const SearchRequest& r) {
         auto* o = env.mutable_search_request();
-        o->set_query(r.query);
+        o->set_query(yams::common::sanitizeUtf8(r.query));
         o->set_limit(static_cast<uint32_t>(r.limit));
         o->set_fuzzy(r.fuzzy);
         o->set_literal_text(r.literalText);
         o->set_similarity(r.similarity);
         o->set_timeout_ms(static_cast<int64_t>(r.timeout.count()));
-        o->set_search_type(r.searchType);
+        o->set_search_type(yams::common::sanitizeUtf8(r.searchType));
         o->set_paths_only(r.pathsOnly);
         o->set_show_hash(r.showHash);
         o->set_verbose(r.verbose);
@@ -210,30 +210,30 @@ template <> struct ProtoBinding<SearchRequest> {
         o->set_after_context(r.afterContext);
         o->set_before_context(r.beforeContext);
         o->set_context(r.context);
-        o->set_hash_query(r.hashQuery);
-        o->set_path_pattern(r.pathPattern);
+        o->set_hash_query(yams::common::sanitizeUtf8(r.hashQuery));
+        o->set_path_pattern(yams::common::sanitizeUtf8(r.pathPattern));
         set_string_list(r.pathPatterns, o->mutable_path_patterns());
         set_string_list(r.tags, o->mutable_tags());
         o->set_match_all_tags(r.matchAllTags);
-        o->set_extension(r.extension);
-        o->set_mime_type(r.mimeType);
-        o->set_file_type(r.fileType);
+        o->set_extension(yams::common::sanitizeUtf8(r.extension));
+        o->set_mime_type(yams::common::sanitizeUtf8(r.mimeType));
+        o->set_file_type(yams::common::sanitizeUtf8(r.fileType));
         o->set_text_only(r.textOnly);
         o->set_binary_only(r.binaryOnly);
-        o->set_created_after(r.createdAfter);
-        o->set_created_before(r.createdBefore);
-        o->set_modified_after(r.modifiedAfter);
-        o->set_modified_before(r.modifiedBefore);
-        o->set_indexed_after(r.indexedAfter);
-        o->set_indexed_before(r.indexedBefore);
+        o->set_created_after(yams::common::sanitizeUtf8(r.createdAfter));
+        o->set_created_before(yams::common::sanitizeUtf8(r.createdBefore));
+        o->set_modified_after(yams::common::sanitizeUtf8(r.modifiedAfter));
+        o->set_modified_before(yams::common::sanitizeUtf8(r.modifiedBefore));
+        o->set_indexed_after(yams::common::sanitizeUtf8(r.indexedAfter));
+        o->set_indexed_before(yams::common::sanitizeUtf8(r.indexedBefore));
         o->set_vector_stage_timeout_ms(r.vectorStageTimeoutMs);
         o->set_keyword_stage_timeout_ms(r.keywordStageTimeoutMs);
         o->set_snippet_hydration_timeout_ms(r.snippetHydrationTimeoutMs);
         if (r.useSession && !r.sessionName.empty()) {
-            o->set_session_id(r.sessionName);
+            o->set_session_id(yams::common::sanitizeUtf8(r.sessionName));
         }
         if (!r.instanceId.empty()) {
-            o->set_instance_id(r.instanceId);
+            o->set_instance_id(yams::common::sanitizeUtf8(r.instanceId));
         }
     }
     static SearchRequest get(const Envelope& env) {

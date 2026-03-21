@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -610,6 +611,43 @@ public:
 private:
     std::unordered_map<std::string, std::vector<std::byte>> blobs_;
     std::unordered_map<std::string, Result<bool>> removeResults_;
+};
+
+class StubGraphQueryService : public app::services::IGraphQueryService {
+public:
+    void addConnectedDocument(std::string hash, std::string relation, int distance = 1,
+                              double relevance = 0.0) {
+        app::services::GraphConnectedNode node{};
+        node.nodeMetadata.documentHash = std::move(hash);
+        node.distance = distance;
+        node.relevanceScore = relevance;
+        app::services::GraphEdgeDescriptor edge{};
+        edge.relation = std::move(relation);
+        node.connectingEdges.push_back(std::move(edge));
+        response_.allConnectedNodes.push_back(std::move(node));
+    }
+
+    Result<app::services::GraphQueryResponse>
+    query(const app::services::GraphQueryRequest&) override {
+        return response_;
+    }
+
+    Result<app::services::ListSnapshotsResponse>
+    listSnapshots(const app::services::ListSnapshotsRequest&) override {
+        return app::services::ListSnapshotsResponse{};
+    }
+
+    Result<app::services::PathHistoryResponse>
+    getPathHistory(const app::services::PathHistoryRequest&) override {
+        return app::services::PathHistoryResponse{};
+    }
+
+    Result<std::optional<std::int64_t>> resolveToNodeId(const std::string&) override {
+        return std::optional<std::int64_t>(std::nullopt);
+    }
+
+private:
+    app::services::GraphQueryResponse response_{};
 };
 
 std::filesystem::path makeTempDir(const std::string& prefix);
@@ -2100,6 +2138,49 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(err.message.find("Content store not available") != std::string::npos);
     }
 
+    SECTION("get request maps related documents when graph view is enabled") {
+        auto repoPath = makeTempDir("yams_get_graph_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto graphQuery = std::make_shared<StubGraphQueryService>();
+        auto mainDoc = makeDoc(69, "/tmp/get-graph/main.txt",
+                               "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        auto relatedDoc =
+            makeDoc(70, "/tmp/get-graph/related.txt",
+                    "1111111111111111111111111111111111111111111111111111111111111111");
+        auto mainId = repo->insertDocument(mainDoc);
+        auto relatedId = repo->insertDocument(relatedDoc);
+        REQUIRE(mainId.has_value());
+        REQUIRE(relatedId.has_value());
+        REQUIRE(repo->upsertPathTreeForDocument(mainDoc, mainId.value(), true, {}).has_value());
+        REQUIRE(
+            repo->upsertPathTreeForDocument(relatedDoc, relatedId.value(), true, {}).has_value());
+        graphQuery->addConnectedDocument(relatedDoc.sha256Hash, "same_content", 1, 0.8);
+        store->setBlob(mainDoc.sha256Hash, "main content");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+        svc.__test_setGraphQueryService(graphQuery);
+
+        GetRequest req;
+        req.hash = mainDoc.sha256Hash;
+        req.showGraph = true;
+        req.graphDepth = 1;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GetResponse>(resp));
+        const auto& getResp = std::get<GetResponse>(resp);
+        CHECK(getResp.graphEnabled);
+        CHECK(getResp.hash == mainDoc.sha256Hash);
+        REQUIRE(getResp.related.size() == 1);
+        CHECK(getResp.related.front().hash == relatedDoc.sha256Hash);
+        CHECK(getResp.related.front().relationship == "same_content");
+    }
+
     SECTION("file history reports missing metadata repository") {
         FileHistoryRequest req;
         req.filepath = "missing.txt";
@@ -2305,6 +2386,35 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         REQUIRE(std::holds_alternative<ListResponse>(resp));
         const auto& listResp = std::get<ListResponse>(resp);
         CHECK(listResp.totalCount >= 0);
+    }
+
+    SECTION("list request works when inflight limit is disabled") {
+        TuneAdvisorListGuard tuneGuard(0, 1);
+
+        auto repoPath = makeTempDir("yams_list_no_inflight_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto doc = makeDoc(68, "/tmp/list/no-inflight.md", "list-no-inflight-hash");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        svc.__test_setMetadataRepo(repo);
+
+        ListRequest req;
+        req.limit = 5;
+        req.offset = 0;
+        req.recent = true;
+        req.showSnippets = true;
+        req.noSnippets = true;
+        req.namePattern = doc.filePath;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ListResponse>(resp));
+        const auto& listResp = std::get<ListResponse>(resp);
+        REQUIRE(listResp.items.size() == 1);
+        CHECK(listResp.items.front().snippet.empty());
     }
 
     SECTION("list request reports missing metadata repository") {

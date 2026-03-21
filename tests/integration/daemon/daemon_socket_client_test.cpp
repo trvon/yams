@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <set>
 #include <thread>
 
@@ -67,6 +68,7 @@ public:
     }
 
     yams::Result<void> loadModel(const std::string& modelName) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         lastLoadWithOptionsModel_.clear();
         lastLoadWithOptionsJson_.clear();
         if (!isAvailable()) {
@@ -80,6 +82,7 @@ public:
 
     yams::Result<void> loadModelWithOptions(const std::string& modelName,
                                             const std::string& optionsJson) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!isAvailable()) {
             return yams::Error{yams::ErrorCode::InvalidState, "Provider unavailable"};
         }
@@ -92,6 +95,7 @@ public:
     }
 
     yams::Result<void> unloadModel(const std::string& modelName) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         auto it = std::find(loadedModels_.begin(), loadedModels_.end(), modelName);
         if (it == loadedModels_.end()) {
             return yams::Error{yams::ErrorCode::NotFound, "Model not loaded: " + modelName};
@@ -101,16 +105,25 @@ public:
     }
 
     bool isModelLoaded(const std::string& modelName) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         return std::find(loadedModels_.begin(), loadedModels_.end(), modelName) !=
                loadedModels_.end();
     }
 
-    std::vector<std::string> getLoadedModels() const override { return loadedModels_; }
-    size_t getLoadedModelCount() const override { return loadedModels_.size(); }
+    std::vector<std::string> getLoadedModels() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return loadedModels_;
+    }
+    size_t getLoadedModelCount() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return loadedModels_.size();
+    }
 
     yams::Result<yams::daemon::ModelInfo>
     getModelInfo(const std::string& modelName) const override {
-        if (!isModelLoaded(modelName)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (std::find(loadedModels_.begin(), loadedModels_.end(), modelName) ==
+            loadedModels_.end()) {
             return yams::Error{yams::ErrorCode::NotFound, "Model not loaded: " + modelName};
         }
         yams::daemon::ModelInfo info;
@@ -130,15 +143,34 @@ public:
 
     std::string getProviderName() const override { return "StubModelProvider"; }
     std::string getProviderVersion() const override { return "1.0-test"; }
-    bool isAvailable() const override { return available_; }
-    size_t getMemoryUsage() const override { return loadedModels_.size() * 32 * 1024 * 1024; }
+    bool isAvailable() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return available_;
+    }
+    size_t getMemoryUsage() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return loadedModels_.size() * 32 * 1024 * 1024;
+    }
     void releaseUnusedResources() override {}
-    void shutdown() override { available_ = false; }
-    void setAvailable(bool available) { available_ = available; }
-    const std::string& lastLoadWithOptionsModel() const { return lastLoadWithOptionsModel_; }
-    const std::string& lastLoadWithOptionsJson() const { return lastLoadWithOptionsJson_; }
+    void shutdown() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        available_ = false;
+    }
+    void setAvailable(bool available) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        available_ = available;
+    }
+    std::string lastLoadWithOptionsModel() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastLoadWithOptionsModel_;
+    }
+    std::string lastLoadWithOptionsJson() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastLoadWithOptionsJson_;
+    }
 
 private:
+    mutable std::mutex mutex_;
     bool available_{true};
     std::vector<std::string> loadedModels_;
     std::string lastLoadWithOptionsModel_;

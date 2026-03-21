@@ -24,6 +24,12 @@
 //   YAMS_BENCH_PLUGIN_DIR         - Directory containing plugin .dylib/.so files
 //   YAMS_BENCH_TRUSTED_PLUGIN_PATHS - Colon-separated trusted plugin search paths
 //   YAMS_BENCH_REAL_MODEL_PROVIDER  - Use real ONNX model provider: 1/true/yes
+//   YAMS_BENCH_SEARCH_QUERY       - Daemon search query for mixed-load phases
+//   YAMS_BENCH_SEARCH_TYPE        - Daemon search type: keyword|semantic|hybrid
+//   YAMS_BENCH_SEARCH_LIMIT       - Daemon search result limit
+//   YAMS_BENCH_CLI_SEARCH_QUERY   - CLI search query for full subprocess probes
+//   YAMS_BENCH_CLI_SEARCH_TYPE    - CLI search type: keyword|semantic|hybrid
+//   YAMS_BENCH_CLI_SEARCH_LIMIT   - CLI search result limit
 //   YAMS_BENCH_MCP_SESSION_CHURN_EVERY_N - MCP only: every Nth request uses a fresh
 //                                          MCP session (default: 0; profile may override)
 
@@ -104,6 +110,12 @@ struct BenchConfig {
     int cliProbeTimeoutSecs{10};
     std::string tuningProfile;
     std::optional<fs::path> cliBinary;
+    std::string searchQuery{"architecture performance tuning daemon"};
+    std::string searchType{"hybrid"};
+    size_t searchLimit{5};
+    std::string cliSearchQuery{"architecture performance tuning daemon"};
+    std::string cliSearchType{"hybrid"};
+    size_t cliSearchLimit{5};
 
     // --- Storage / corpus overrides ---
     // Point at an existing YAMS data directory (e.g. /Volumes/picaso/yams)
@@ -152,8 +164,26 @@ struct BenchConfig {
             cfg.cliProbeTimeoutSecs = std::max(1, std::atoi(v));
         if (auto* v = std::getenv("YAMS_BENCH_CLI_BIN"))
             cfg.cliBinary = fs::path(v);
+        if (auto* v = std::getenv("YAMS_BENCH_SEARCH_QUERY"))
+            cfg.searchQuery = v;
+        if (auto* v = std::getenv("YAMS_BENCH_SEARCH_TYPE"))
+            cfg.searchType = v;
+        if (auto* v = std::getenv("YAMS_BENCH_SEARCH_LIMIT"))
+            cfg.searchLimit = std::max<size_t>(1, std::stoull(v));
+        if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_QUERY"))
+            cfg.cliSearchQuery = v;
+        if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_TYPE"))
+            cfg.cliSearchType = v;
+        if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_LIMIT"))
+            cfg.cliSearchLimit = std::max<size_t>(1, std::stoull(v));
         cfg.scalingMaxClients = std::max(cfg.scalingMaxClients, cfg.numClients * 2);
         cfg.cliProbeOpsPerCommand = std::max(cfg.cliProbeOpsPerCommand, cfg.stressRounds);
+        if (cfg.cliSearchQuery.empty())
+            cfg.cliSearchQuery = cfg.searchQuery;
+        if (cfg.cliSearchType.empty())
+            cfg.cliSearchType = cfg.searchType;
+        if (cfg.cliSearchLimit == 0)
+            cfg.cliSearchLimit = cfg.searchLimit;
         if (auto* v = std::getenv("YAMS_TUNING_PROFILE"))
             cfg.tuningProfile = v;
 
@@ -202,6 +232,20 @@ struct BenchConfig {
         return cfg;
     }
 };
+
+std::vector<std::string> buildCliSearchArgs(const BenchConfig& cfg) {
+    std::vector<std::string> args{
+        "search",
+        cfg.cliSearchQuery,
+        "--limit",
+        std::to_string(cfg.cliSearchLimit),
+    };
+    if (!cfg.cliSearchType.empty()) {
+        args.push_back("--type");
+        args.push_back(cfg.cliSearchType);
+    }
+    return args;
+}
 
 class NullTransport : public yams::mcp::ITransport {
 public:
@@ -1388,7 +1432,7 @@ TEST_CASE("Multi-client ingestion: baseline single client",
     auto cfg = BenchConfig::fromEnv();
     cfg.numClients = 1; // Force single client for baseline
 
-    DaemonHarness harness(benchHarnessOptions());
+    DaemonHarness harness(benchHarnessOptions(cfg));
     REQUIRE(harness.start(kStartTimeout));
 
     // Create client
@@ -1462,7 +1506,7 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
           "[!benchmark][multi-client][ingestion]") {
     auto cfg = BenchConfig::fromEnv();
 
-    DaemonHarness harness(benchHarnessOptions());
+    DaemonHarness harness(benchHarnessOptions(cfg));
     REQUIRE(harness.start(kStartTimeout));
 
     // Status-monitoring client (separate from worker clients)
@@ -1772,8 +1816,9 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
                 if (doSearch) {
                     // Search operation
                     SearchRequest req;
-                    req.query = "architecture performance tuning";
-                    req.limit = 5;
+                    req.query = cfg.searchQuery;
+                    req.searchType = cfg.searchType;
+                    req.limit = cfg.searchLimit;
 
                     auto t0 = std::chrono::steady_clock::now();
                     auto res = yams::cli::run_sync(client.search(req), 10s);
@@ -2144,8 +2189,9 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                     }
                     default: {
                         SearchRequest req;
-                        req.query = "architecture performance tuning daemon";
-                        req.limit = 5;
+                        req.query = cfg.searchQuery;
+                        req.searchType = cfg.searchType;
+                        req.limit = cfg.searchLimit;
                         auto res = yams::cli::run_sync(client.search(req), 10s);
                         success = static_cast<bool>(res);
                         const auto t1 = std::chrono::steady_clock::now();
@@ -2227,9 +2273,7 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                             runCliProbe(cliBin, harness.socketPath(), {"status"}, cliProbeTimeout),
                             localCliStatus);
                 recordProbe("cli_search",
-                            runCliProbe(cliBin, harness.socketPath(),
-                                        {"search", "architecture performance tuning daemon",
-                                         "--limit", "5"},
+                            runCliProbe(cliBin, harness.socketPath(), buildCliSearchArgs(cfg),
                                         cliProbeTimeout),
                             localCliSearch);
             }
@@ -2292,6 +2336,10 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
               << "  UX ops: " << uxOps.load() << " (fails=" << uxFails.load() << ")\n";
     std::cout << "  Throughput: add=" << std::fixed << std::setprecision(1) << addThroughput
               << " docs/s, ux=" << uxThroughput << " ops/s\n";
+    std::cout << "  Search config: daemon(type=" << cfg.searchType << ", limit=" << cfg.searchLimit
+              << ", query=\"" << cfg.searchQuery << "\")"
+              << " cli(type=" << cfg.cliSearchType << ", limit=" << cfg.cliSearchLimit
+              << ", query=\"" << cfg.cliSearchQuery << "\")\n";
     if (yamsBinary && cliProbeOpsPerCommand > 0) {
         std::cout << "  CLI probes: " << cliOps.load() << " (fails=" << cliFails.load()
                   << ") binary=" << yamsBinary->string() << "\n";
@@ -2345,7 +2393,7 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     // Phase 3: deterministic control cycle for growth/shrink validation on a fresh daemon
     // instance so realistic phase-2 idle sessions do not distort shrink behavior.
     harness.stop();
-    DaemonHarness controlHarness(benchHarnessOptions());
+    DaemonHarness controlHarness(benchHarnessOptions(cfg));
     REQUIRE(startHarnessWithRetry(controlHarness, kStartTimeout));
 
     ClientConfig controlMonCfg;
@@ -2408,8 +2456,9 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                 }
                 default: {
                     SearchRequest req;
-                    req.query = "architecture performance tuning daemon";
-                    req.limit = 5;
+                    req.query = cfg.searchQuery;
+                    req.searchType = cfg.searchType;
+                    req.limit = cfg.searchLimit;
                     (void)yams::cli::run_sync(client.search(req), 10s);
                     break;
                 }
@@ -2469,6 +2518,12 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
         {"ux_ops_per_client", uxOpsPerClient},
         {"stress_rounds", cfg.stressRounds},
         {"doc_size_bytes", cfg.docSizeBytes},
+        {"search_config", json{{"daemon", json{{"query", cfg.searchQuery},
+                                               {"type", cfg.searchType},
+                                               {"limit", cfg.searchLimit}}},
+                               {"cli", json{{"query", cfg.cliSearchQuery},
+                                            {"type", cfg.cliSearchType},
+                                            {"limit", cfg.cliSearchLimit}}}}},
         {"add", json{{"ops", addOps.load()},
                      {"fails", addFails.load()},
                      {"throughput_per_sec", addThroughput},

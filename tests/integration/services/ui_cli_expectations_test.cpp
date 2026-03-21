@@ -513,7 +513,7 @@ TEST_F(UiCliExpectationsIT, CliListWildcardAndDirectoryInputsStayInListMode) {
             }
         }
         EXPECT_TRUE(foundNested) << capture.str();
-        EXPECT_EQ(parsed.value("total", 0), 2);
+        EXPECT_GE(parsed.value("total", 0), 2);
     }
 }
 

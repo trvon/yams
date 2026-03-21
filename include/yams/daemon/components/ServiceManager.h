@@ -495,6 +495,10 @@ public:
     void __test_setRetrievalSessionManager(std::unique_ptr<RetrievalSessionManager> sessions) {
         retrievalSessions_ = std::move(sessions);
     }
+    void __test_setGraphQueryService(
+        std::shared_ptr<app::services::IGraphQueryService> graphQueryService) {
+        graphQueryServiceOverride_ = std::move(graphQueryService);
+    }
     void __test_setAdoptedProviderPluginName(const std::string& name) {
         adoptedProviderPluginName_ = name;
     }
@@ -580,6 +584,7 @@ private:
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<GraphComponent> graphComponent_;
+    std::shared_ptr<app::services::IGraphQueryService> graphQueryServiceOverride_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<IModelProvider> modelProvider_;
 

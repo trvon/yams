@@ -212,6 +212,9 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto nestedStore = fixture.documentService_->store(nestedReq);
         REQUIRE(nestedStore);
 
+        const auto expectedPath =
+            fs::weakly_canonical(fixture.testDir_ / "nested" / "deep" / "descendant.txt").string();
+
         ListDocumentsRequest request;
         request.pattern = (fixture.testDir_ / "nested").string();
         request.limit = 100;
@@ -221,7 +224,7 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         REQUIRE(result);
         bool foundDescendant = false;
         for (const auto& doc : result.value().documents) {
-            if (doc.path == (fixture.testDir_ / "nested" / "deep" / "descendant.txt").string()) {
+            if (doc.path == expectedPath) {
                 foundDescendant = true;
                 break;
             }
