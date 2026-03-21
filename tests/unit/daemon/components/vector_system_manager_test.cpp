@@ -9,7 +9,9 @@
 
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorSystemManager.h>
+#include <yams/vector/vector_database.h>
 
+#include <sqlite3.h>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -121,6 +123,51 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
 
         mgr.resetInitAttempt();
         CHECK_FALSE(mgr.wasInitAttempted());
+    }
+
+    SECTION("initializeOnce prepares persisted search index for warm vectors") {
+        auto warmDeps = makeDeps();
+        warmDeps.getEmbeddingDimension = []() { return static_cast<size_t>(64); };
+        VectorSystemManager warmMgr(warmDeps);
+
+        yams::vector::VectorDatabaseConfig cfg;
+        cfg.database_path = (tempDir / "vectors.db").string();
+        cfg.embedding_dim = 64;
+
+        {
+            yams::vector::VectorDatabase db(cfg);
+            REQUIRE(db.initialize());
+
+            std::vector<float> embedding(64, 0.0f);
+            embedding[0] = 1.0f;
+
+            for (int i = 0; i < 260; ++i) {
+                yams::vector::VectorRecord record;
+                record.chunk_id = "chunk_" + std::to_string(i);
+                record.document_hash = "doc_" + std::to_string(i);
+                record.embedding = embedding;
+                record.content = "content";
+                REQUIRE(db.insertVector(record));
+            }
+        }
+
+        auto result = warmMgr.initializeOnce(tempDir);
+        REQUIRE(result.has_value());
+        REQUIRE(warmMgr.getVectorDatabase() != nullptr);
+        CHECK(stateComponent->readiness.vectorDbReady.load());
+        CHECK(stateComponent->readiness.vectorIndexReady.load());
+        CHECK(stateComponent->readiness.vectorIndexProgress.load() == 100);
+
+        sqlite3* rawDb = nullptr;
+        REQUIRE(sqlite3_open((tempDir / "vectors.db").string().c_str(), &rawDb) == SQLITE_OK);
+
+        sqlite3_stmt* stmt = nullptr;
+        REQUIRE(sqlite3_prepare_v2(rawDb, "SELECT COUNT(*) FROM vectors_64_hnsw_nodes", -1, &stmt,
+                                   nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+        CHECK(sqlite3_column_int64(stmt, 0) > 0);
+        sqlite3_finalize(stmt);
+        sqlite3_close(rawDb);
     }
 }
 

@@ -24,6 +24,8 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/compression/compression_header.h>
+#include <yams/daemon/client/asio_connection_pool.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -90,13 +92,19 @@ private:
 };
 
 int runCliCommand(const std::vector<std::string>& args) {
-    yams::cli::YamsCLI cli;
-    std::vector<char*> argv;
-    argv.reserve(args.size());
-    for (const auto& arg : args) {
-        argv.push_back(const_cast<char*>(arg.c_str()));
+    int rc = 0;
+    {
+        yams::cli::YamsCLI cli;
+        std::vector<char*> argv;
+        argv.reserve(args.size());
+        for (const auto& arg : args) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        rc = cli.run(static_cast<int>(argv.size()), argv.data());
     }
-    return cli.run(static_cast<int>(argv.size()), argv.data());
+    yams::daemon::GlobalIOContext::reset();
+    yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+    return rc;
 }
 
 } // namespace
@@ -159,6 +167,8 @@ protected:
 
     void TearDown() override {
         harness_.reset();
+        yams::daemon::GlobalIOContext::reset();
+        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
         sessionEnvOverride_.reset();
     }
 

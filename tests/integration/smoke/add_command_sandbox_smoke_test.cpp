@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -12,6 +13,7 @@
 #include "common/test_helpers.h"
 
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/global_io_context.h>
 
 namespace fs = std::filesystem;
 
@@ -31,29 +33,55 @@ private:
 
 int run_cli(const std::vector<std::string>& args, std::string* output = nullptr,
             std::optional<std::string> stdinData = std::nullopt) {
-    yams::cli::YamsCLI cli;
-    std::vector<char*> argv;
-    argv.reserve(args.size());
-    for (const auto& arg : args) {
-        argv.push_back(const_cast<char*>(arg.c_str()));
+    std::vector<std::string> effectiveArgs = args;
+    const bool hasDataDirFlag =
+        std::find(effectiveArgs.begin(), effectiveArgs.end(), "--data-dir") !=
+            effectiveArgs.end() ||
+        std::find(effectiveArgs.begin(), effectiveArgs.end(), "--storage") != effectiveArgs.end();
+    if (!hasDataDirFlag) {
+        if (const char* dataDir = std::getenv("YAMS_DATA_DIR"); dataDir && *dataDir) {
+            effectiveArgs.insert(effectiveArgs.begin() + 1, std::string(dataDir));
+            effectiveArgs.insert(effectiveArgs.begin() + 1, "--data-dir");
+        }
     }
+    int rc = 0;
+    std::string captured;
+    try {
+        yams::cli::YamsCLI cli;
+        std::vector<char*> argv;
+        argv.reserve(effectiveArgs.size());
+        for (const auto& arg : effectiveArgs) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
 
-    CaptureStdout capture;
+        CaptureStdout capture;
 
-    std::istringstream in;
-    std::streambuf* oldIn = nullptr;
-    if (stdinData.has_value()) {
-        in.str(*stdinData);
-        oldIn = std::cin.rdbuf(in.rdbuf());
-    }
+        std::istringstream in;
+        std::streambuf* oldIn = nullptr;
+        if (stdinData.has_value()) {
+            in.str(*stdinData);
+            oldIn = std::cin.rdbuf(in.rdbuf());
+        }
 
-    const int rc = cli.run(static_cast<int>(argv.size()), argv.data());
+        {
+            rc = cli.run(static_cast<int>(argv.size()), argv.data());
+        }
 
-    if (oldIn) {
-        std::cin.rdbuf(oldIn);
+        if (oldIn) {
+            std::cin.rdbuf(oldIn);
+        }
+        if (captured.empty()) {
+            captured = capture.str();
+        }
+    } catch (const std::exception& e) {
+        rc = -1;
+        captured = std::string("EXCEPTION: ") + e.what();
+    } catch (...) {
+        rc = -1;
+        captured = "EXCEPTION: unknown";
     }
     if (output) {
-        *output = capture.str();
+        *output = std::move(captured);
     }
     return rc;
 }

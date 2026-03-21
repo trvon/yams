@@ -122,3 +122,44 @@ TEST_CASE_METHOD(HnswPersistenceFixture,
               SqliteVecBackend::HnswMaintenanceMode::FullRebuild);
     }
 }
+
+TEST_CASE_METHOD(HnswPersistenceFixture,
+                 "SqliteVecBackend prepareSearchIndex builds warm index from vectors table",
+                 "[vector][hnsw][persistence][prepare][catch2]") {
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+
+    const std::string dbPath = createTempDbPath();
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(64).has_value());
+
+        std::vector<VectorRecord> seedRecords;
+        for (int i = 0; i < 300; ++i) {
+            seedRecords.push_back(
+                createRecord("seed_prepare_" + std::to_string(i), createEmbedding(64, 10.0f + i)));
+        }
+        REQUIRE(backend.insertVectorsBatch(seedRecords).has_value());
+    }
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.prepareSearchIndex().has_value());
+
+        auto query = createEmbedding(64, 25.0f);
+        auto search = backend.searchSimilar(query, 10, -2.0f, std::nullopt, {});
+        REQUIRE(search.has_value());
+        CHECK(search.value().size() == 10);
+        CHECK(backend.testingLastHnswMaintenanceMode() !=
+              SqliteVecBackend::HnswMaintenanceMode::BruteForceFallback);
+    }
+
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(dbPath.c_str(), &db) == SQLITE_OK);
+    CHECK(countRows(db, "SELECT COUNT(*) FROM vectors_64_hnsw_meta") > 0);
+    CHECK(countRows(db, "SELECT COUNT(*) FROM vectors_64_hnsw_nodes") > 0);
+    sqlite3_close(db);
+}

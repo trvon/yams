@@ -25,7 +25,9 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/cli_sync.h>
+#include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/detection/file_type_detector.h>
 
 // Redefine SKIP_DAEMON_TEST_ON_WINDOWS for gtest (harness header uses Catch2's SKIP)
@@ -71,6 +73,8 @@ protected:
     void TearDown() override {
         client_.reset();
         harness_.reset();
+        yams::daemon::GlobalIOContext::reset();
+        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
         // Cleanup test files
         if (fs::exists(testFilesDir_)) {
             std::error_code ec;

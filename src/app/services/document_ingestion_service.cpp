@@ -244,48 +244,17 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
 
 BatchAddResult DocumentIngestionService::addBatch(const std::vector<AddOptions>& batch,
                                                   int maxConcurrent) const {
+    (void)maxConcurrent;
     BatchAddResult out;
     out.results.resize(batch.size(), Error{ErrorCode::Unknown, "not started"});
 
     if (batch.empty())
         return out;
-
-    // Use a mutex + counter as a simple semaphore for concurrency control
-    std::mutex mu;
-    std::condition_variable cv;
-    int inFlight = 0;
-    std::atomic<size_t> completed{0};
-
-    // Spawn all coroutines; each one acquires a semaphore slot
+    // Keep the CLI batch path bounded and teardown-safe. The earlier coroutine fan-out used
+    // detached tasks referencing stack-owned state and could block forever if one request never
+    // completed. The CLI add path is correctness-sensitive, not throughput-sensitive.
     for (size_t i = 0; i < batch.size(); ++i) {
-        // Wait for a slot (blocking the calling thread is fine — this is the CLI sync path)
-        {
-            std::unique_lock lk(mu);
-            cv.wait(lk, [&] { return inFlight < maxConcurrent; });
-            ++inFlight;
-        }
-
-        boost::asio::co_spawn(
-            yams::daemon::GlobalIOContext::global_executor(),
-            [this, &batch, &out, &mu, &cv, &inFlight, &completed,
-             i]() mutable -> boost::asio::awaitable<void> {
-                auto r = co_await addViaDaemonAsync(batch[i]);
-                {
-                    std::lock_guard lk(mu);
-                    out.results[i] = std::move(r);
-                    --inFlight;
-                }
-                completed.fetch_add(1, std::memory_order_release);
-                cv.notify_one();
-                co_return;
-            },
-            boost::asio::detached);
-    }
-
-    // Wait for all to complete
-    {
-        std::unique_lock lk(mu);
-        cv.wait(lk, [&] { return completed.load(std::memory_order_acquire) == batch.size(); });
+        out.results[i] = addViaDaemon(batch[i]);
     }
 
     for (const auto& r : out.results) {

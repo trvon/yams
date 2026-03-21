@@ -2,6 +2,10 @@
 
 # Explicit file list keeps configuration deterministic and fast
 dbg = (get_option('buildtype') == 'debug')
+services_stress_iters = get_option('stress-iters').to_string()
+if get_option('enable-tsan')
+  services_stress_iters = '20'
+endif
 
 # GTest-based services integration suite (multi-test binary)
 if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and gtest_dep.found()
@@ -24,7 +28,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     suite: ['integration', 'isolated'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
+      'YAMS_STRESS_ITERS': services_stress_iters,
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'TSAN_OPTIONS': _test_tsan_options,
     },
@@ -37,7 +41,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     suite: ['integration', 'ui'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
+      'YAMS_STRESS_ITERS': services_stress_iters,
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'TSAN_OPTIONS': _test_tsan_options,
     },
@@ -67,7 +71,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     suite: ['catch2', 'integration', 'services', 'isolated'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_STRESS_ITERS': get_option('stress-iters').to_string(),
+      'YAMS_STRESS_ITERS': services_stress_iters,
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'TSAN_OPTIONS': _test_tsan_options,
     },

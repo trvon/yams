@@ -7,6 +7,7 @@
 
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/global_io_context.h>
 
 #include <filesystem>
 #include <iostream>
@@ -46,6 +47,8 @@ struct CliTestHelper {
     }
 
     ~CliTestHelper() {
+        yams::daemon::GlobalIOContext::reset();
+
         configEnv.reset();
         dataEnv.reset();
         nonInteractiveEnv.reset();

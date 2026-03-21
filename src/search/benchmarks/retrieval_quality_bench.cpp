@@ -4026,7 +4026,12 @@ struct BenchFixture {
         }
 
         harness = std::make_unique<DaemonHarness>(harnessOptions);
-        if (!harness->start(std::chrono::seconds(30)))
+        std::chrono::milliseconds daemonReadyTimeout{30000};
+        if (const char* env = std::getenv("YAMS_BENCH_DAEMON_READY_TIMEOUT_MS")) {
+            daemonReadyTimeout = std::chrono::milliseconds{
+                static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
+        }
+        if (!harness->start(daemonReadyTimeout))
             throw std::runtime_error("Failed to start daemon");
 
         if (useBEIR) {

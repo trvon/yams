@@ -28,6 +28,7 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
+#include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -244,6 +245,9 @@ public:
             harness_->stop();
             harness_.reset();
         }
+
+        yams::daemon::GlobalIOContext::reset();
+        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
 
         fixtures_.reset();
 

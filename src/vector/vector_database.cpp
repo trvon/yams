@@ -739,6 +739,29 @@ public:
         }
     }
 
+    bool prepareSearchIndex() {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            setError("Database not initialized");
+            return false;
+        }
+
+        try {
+            auto result = backend_->prepareSearchIndex();
+            if (!result) {
+                setError("Backend prepareSearchIndex failed: " + result.error().message);
+                return false;
+            }
+            has_error_ = false;
+            return true;
+
+        } catch (const std::exception& e) {
+            setError("Index prepare failed: " + std::string(e.what()));
+            return false;
+        }
+    }
+
     bool optimizeIndex() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
@@ -1011,6 +1034,11 @@ Result<VectorDatabase::OrphanCleanupStats> VectorDatabase::cleanupOrphanRows() {
 bool VectorDatabase::buildIndex() {
     YAMS_ZONE_SCOPED_N("VectorDB::buildIndex");
     return pImpl->buildIndex();
+}
+
+bool VectorDatabase::prepareSearchIndex() {
+    YAMS_ZONE_SCOPED_N("VectorDB::prepareSearchIndex");
+    return pImpl->prepareSearchIndex();
 }
 
 bool VectorDatabase::optimizeIndex() {

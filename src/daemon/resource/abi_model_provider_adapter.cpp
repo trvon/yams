@@ -351,7 +351,18 @@ AbiModelProviderAdapter::getEmbeddingGenerator(const std::string& modelName) {
     // Use our custom ModelProviderBackend that wraps IModelProvider directly.
     // This bypasses the broken ml::createEmbeddingProvider() factory that returns MockProvider.
 
-    std::string model = modelName.empty() ? "all-MiniLM-L6-v2" : modelName;
+    std::string model = modelName;
+    if (model.empty()) {
+        auto loadedModels = getLoadedModels();
+        if (!loadedModels.empty()) {
+            model = loadedModels.front();
+        }
+    }
+    if (model.empty()) {
+        spdlog::warn("[AbiModelProviderAdapter] Cannot create EmbeddingGenerator without an active "
+                     "model - no model name provided and no loaded models available");
+        return nullptr;
+    }
 
     // Get dimension from our provider - DO NOT use hardcoded fallback
     // to avoid dimension mismatch when user switches models

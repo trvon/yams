@@ -1501,7 +1501,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     auto modelProvider = loadModelProvider();
                     if (includeVector && modelProvider) {
                         try {
-                            embGen = modelProvider->getEmbeddingGenerator();
+                            embGen =
+                                embeddingModelName_.empty()
+                                    ? modelProvider->getEmbeddingGenerator()
+                                    : modelProvider->getEmbeddingGenerator(embeddingModelName_);
                         } catch (...) {
                         }
                     }
@@ -2052,10 +2055,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Defer Vector DB initialization until after plugin adoption (provider dim)
     spdlog::info("[ServiceManager] Phase: Vector DB Init (deferred until after plugins).");
 
-    // VectorIndexManager removed - using VectorDatabase directly for vector search
-    // Mark vector index as ready since VectorDatabase handles all vector operations
+    // VectorIndexManager removed - using VectorDatabase directly for vector search.
+    // Do not mark the vector index ready here; VectorSystemManager determines that after
+    // preparing any persisted or rebuilt HNSW structures.
     if (loadVectorDatabase()) {
-        state_.readiness.vectorIndexReady = true;
         writeBootstrapStatusFile(config_, state_);
     }
     spdlog::info("[ServiceManager] Phase: Vector search uses VectorDatabase directly.");
@@ -2252,9 +2255,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                      "modelName='{}'",
                      modelProvider != nullptr, modelProvider ? modelProvider->isAvailable() : false,
                      embeddingModelName_);
-        if (modelProvider && modelProvider->isAvailable() && !embeddingModelName_.empty()) {
+        if (modelProvider && modelProvider->isAvailable()) {
             try {
-                embGen = modelProvider->getEmbeddingGenerator(embeddingModelName_);
+                embGen = embeddingModelName_.empty()
+                             ? modelProvider->getEmbeddingGenerator()
+                             : modelProvider->getEmbeddingGenerator(embeddingModelName_);
                 spdlog::info("[SearchBuild] Got embedding generator: {}", embGen != nullptr);
             } catch (const std::exception& e) {
                 spdlog::warn("[SearchBuild] Failed to get embedding generator: {}", e.what());
@@ -2275,8 +2280,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
-            state_.readiness.vectorIndexReady = (loadVectorDatabase() != nullptr);
-
             // Track doc count at build time for re-tuning decisions
             if (auto metadataRepo = loadMetadataRepo()) {
                 auto countRes = metadataRepo->getDocumentCount();
@@ -2786,9 +2789,11 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
         // Get embedding generator from model provider if available
         std::shared_ptr<vector::EmbeddingGenerator> embGen;
         auto modelProvider = loadModelProvider();
-        if (modelProvider && modelProvider->isAvailable() && !embeddingModelName_.empty()) {
+        if (modelProvider && modelProvider->isAvailable()) {
             try {
-                embGen = modelProvider->getEmbeddingGenerator(embeddingModelName_);
+                embGen = embeddingModelName_.empty()
+                             ? modelProvider->getEmbeddingGenerator()
+                             : modelProvider->getEmbeddingGenerator(embeddingModelName_);
             } catch (...) {
             }
         }
@@ -2808,8 +2813,6 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
-            state_.readiness.vectorIndexReady = (loadVectorDatabase() != nullptr);
-
             // Track doc count at build time for re-tuning decisions
             if (auto metadataRepo = loadMetadataRepo()) {
                 auto countRes = metadataRepo->getDocumentCount();
@@ -2887,9 +2890,11 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
             // Get embedding generator from model provider if available
             std::shared_ptr<vector::EmbeddingGenerator> embGen;
             auto modelProvider = loadModelProvider();
-            if (modelProvider && modelProvider->isAvailable() && !embeddingModelName_.empty()) {
+            if (modelProvider && modelProvider->isAvailable()) {
                 try {
-                    embGen = modelProvider->getEmbeddingGenerator(embeddingModelName_);
+                    embGen = embeddingModelName_.empty()
+                                 ? modelProvider->getEmbeddingGenerator()
+                                 : modelProvider->getEmbeddingGenerator(embeddingModelName_);
                 } catch (...) {
                 }
             }
@@ -2910,8 +2915,6 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 // Update readiness indicators after successful rebuild
                 state_.readiness.searchEngineReady = true;
                 state_.readiness.searchProgress = 100;
-                state_.readiness.vectorIndexReady = (loadVectorDatabase() != nullptr);
-
                 // Track doc count at build time for re-tuning decisions
                 if (auto metadataRepo = loadMetadataRepo()) {
                     auto countRes = metadataRepo->getDocumentCount();
@@ -3204,10 +3207,11 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
     auto exec = getWorkerExecutor();
     std::shared_ptr<vector::EmbeddingGenerator> gen;
     auto modelProvider = loadModelProvider();
-    if (includeEmbeddingGenerator && modelProvider && modelProvider->isAvailable() &&
-        !embeddingModelName_.empty()) {
+    if (includeEmbeddingGenerator && modelProvider && modelProvider->isAvailable()) {
         try {
-            gen = modelProvider->getEmbeddingGenerator(embeddingModelName_);
+            gen = embeddingModelName_.empty()
+                      ? modelProvider->getEmbeddingGenerator()
+                      : modelProvider->getEmbeddingGenerator(embeddingModelName_);
         } catch (...) {
         }
     }

@@ -206,6 +206,7 @@ public:
 
     // Index management
     bool buildIndex();
+    bool prepareSearchIndex();
     bool optimizeIndex();
     void compactDatabase();
     bool rebuildIndex();

@@ -99,6 +99,7 @@ public:
     Result<VectorDatabase::DatabaseStats> getStats() override;
 
     Result<void> buildIndex() override;
+    Result<void> prepareSearchIndex() override;
     Result<void> optimize() override;
 
     Result<void> beginTransaction() override;

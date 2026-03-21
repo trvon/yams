@@ -149,6 +149,11 @@ public:
     virtual Result<void> buildIndex() = 0;
 
     /**
+     * @brief Ensure a persisted or in-memory search index is ready for queries.
+     */
+    virtual Result<void> prepareSearchIndex() = 0;
+
+    /**
      * @brief Optimize storage and indices
      */
     virtual Result<void> optimize() = 0;

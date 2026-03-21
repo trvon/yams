@@ -451,6 +451,11 @@ public:
                     }
                 }
 
+                if (daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
+                    daemonSpinner.pause();
+                    return executeWithServices();
+                }
+
                 auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
                 if (!sanitizedTagsRes)
                     return sanitizedTagsRes.error();
@@ -842,9 +847,92 @@ private:
             paths.push_back(std::filesystem::path("-"));
         }
 
-        // If stdin only
-        if (paths.size() == 1 && paths[0].string() == "-") {
-            return storeFromStdinWithServices(*appContext);
+        if (cli_->getJsonOutput()) {
+            json jsonResults = json::array();
+            std::size_t added = 0;
+            std::size_t skipped = 0;
+            std::size_t failed = 0;
+
+            for (const auto& p : paths) {
+                if (p.string() == "-") {
+                    auto r = storeFromStdinWithServicesRaw(*appContext);
+                    if (r) {
+                        ++added;
+                        jsonResults.push_back(json{{"path", "-"},
+                                                   {"success", true},
+                                                   {"documentsAdded", 1},
+                                                   {"documentsUpdated", 0},
+                                                   {"documentsSkipped", 0},
+                                                   {"hash", r.value().hash}});
+                    } else {
+                        ++failed;
+                        jsonResults.push_back(json{{"path", "-"},
+                                                   {"success", false},
+                                                   {"error", r.error().message},
+                                                   {"code", static_cast<int>(r.error().code)}});
+                    }
+                    continue;
+                }
+
+                if (!std::filesystem::exists(p)) {
+                    ++failed;
+                    jsonResults.push_back(json{{"path", p.string()},
+                                               {"success", false},
+                                               {"error", "Path not found"},
+                                               {"code", static_cast<int>(ErrorCode::NotFound)}});
+                    continue;
+                }
+
+                if (std::filesystem::is_directory(p)) {
+                    auto r = storeDirectoryWithServicesRaw(*appContext, p);
+                    if (r) {
+                        added += r.value().filesIndexed;
+                        skipped += r.value().filesSkipped;
+                        failed += r.value().filesFailed;
+                        jsonResults.push_back(json{{"path", p.string()},
+                                                   {"success", r.value().filesFailed == 0},
+                                                   {"documentsAdded", r.value().filesIndexed},
+                                                   {"documentsUpdated", 0},
+                                                   {"documentsSkipped", r.value().filesSkipped},
+                                                   {"filesProcessed", r.value().filesProcessed},
+                                                   {"filesFailed", r.value().filesFailed}});
+                    } else {
+                        ++failed;
+                        jsonResults.push_back(json{{"path", p.string()},
+                                                   {"success", false},
+                                                   {"error", r.error().message},
+                                                   {"code", static_cast<int>(r.error().code)}});
+                    }
+                    continue;
+                }
+
+                auto r = storeFileWithServicesRaw(*appContext, p);
+                if (r) {
+                    ++added;
+                    jsonResults.push_back(json{{"path", p.string()},
+                                               {"success", true},
+                                               {"documentsAdded", 1},
+                                               {"documentsUpdated", 0},
+                                               {"documentsSkipped", 0},
+                                               {"hash", r.value().hash}});
+                } else {
+                    ++failed;
+                    jsonResults.push_back(json{{"path", p.string()},
+                                               {"success", false},
+                                               {"error", r.error().message},
+                                               {"code", static_cast<int>(r.error().code)}});
+                }
+            }
+
+            json output;
+            output["results"] = std::move(jsonResults);
+            output["summary"] = json{{"added", added},
+                                     {"updated", 0},
+                                     {"skipped", skipped},
+                                     {"queued", 0},
+                                     {"failed", failed}};
+            std::cout << output.dump(2) << std::endl;
+            return Result<void>();
         }
 
         // Iterate and process each path
@@ -881,13 +969,28 @@ private:
             }
         }
 
-        if (!cli_->getJsonOutput()) {
-            std::cout << "Completed add: " << ok << " ok, " << failed << " failed" << std::endl;
-        }
+        std::cout << "Completed add: " << ok << " ok, " << failed << " failed" << std::endl;
         return Result<void>();
     }
 
     Result<void> storeFromStdinWithServices(const app::services::AppContext& appContext) {
+        auto result = storeFromStdinWithServicesRaw(appContext);
+        if (!result) {
+            return result.error();
+        }
+
+        outputServiceResult(result.value());
+        if (auto appContext2 = cli_->getAppContext()) {
+            auto searchService = app::services::makeSearchService(*appContext2);
+            if (searchService) {
+                (void)searchService->lightIndexForHash(result.value().hash);
+            }
+        }
+        return Result<void>();
+    }
+
+    Result<app::services::StoreDocumentResponse>
+    storeFromStdinWithServicesRaw(const app::services::AppContext& appContext) {
         auto documentService = app::services::makeDocumentService(appContext);
         if (!documentService) {
             return Error{ErrorCode::NotInitialized, "Failed to create document service"};
@@ -927,14 +1030,17 @@ private:
         }
         req.disableAutoMime = disableAutoMime_;
 
-        auto result = documentService->store(req);
+        return documentService->store(req);
+    }
+
+    Result<void> storeFileWithServices(const app::services::AppContext& appContext,
+                                       const std::filesystem::path& filePath) {
+        auto result = storeFileWithServicesRaw(appContext, filePath);
         if (!result) {
             return result.error();
         }
 
-        // Output result
         outputServiceResult(result.value());
-        // Immediate light index so search can find it
         if (auto appContext2 = cli_->getAppContext()) {
             auto searchService = app::services::makeSearchService(*appContext2);
             if (searchService) {
@@ -944,8 +1050,9 @@ private:
         return Result<void>();
     }
 
-    Result<void> storeFileWithServices(const app::services::AppContext& appContext,
-                                       const std::filesystem::path& filePath) {
+    Result<app::services::StoreDocumentResponse>
+    storeFileWithServicesRaw(const app::services::AppContext& appContext,
+                             const std::filesystem::path& filePath) {
         auto documentService = app::services::makeDocumentService(appContext);
         if (!documentService) {
             return Error{ErrorCode::NotInitialized, "Failed to create document service"};
@@ -976,64 +1083,16 @@ private:
         }
         req.disableAutoMime = disableAutoMime_;
 
-        auto result = documentService->store(req);
-        if (!result) {
-            return result.error();
-        }
-
-        // Output result
-        outputServiceResult(result.value());
-        // Immediate light index so search can find it
-        if (auto appContext2 = cli_->getAppContext()) {
-            auto searchService = app::services::makeSearchService(*appContext2);
-            if (searchService) {
-                (void)searchService->lightIndexForHash(result.value().hash);
-            }
-        }
-        return Result<void>();
+        return documentService->store(req);
     }
 
     Result<void> storeDirectoryWithServices(const app::services::AppContext& appContext,
                                             const std::filesystem::path& dirPath) {
-        if (!recursive_) {
-            return Error{ErrorCode::InvalidArgument, "Directory specified but --recursive not set"};
-        }
-
-        // Use IndexingService for directory operations
-        auto indexingService = app::services::makeIndexingService(appContext);
-        if (!indexingService) {
-            return Error{ErrorCode::NotInitialized, "Failed to create indexing service"};
-        }
-
-        // Build IndexingService request
-        app::services::AddDirectoryRequest req;
-        req.directoryPath = dirPath.string();
-        req.collection = collection_;
-        req.includePatterns = includePatterns_;
-        req.excludePatterns = excludePatterns_;
-        req.recursive = recursive_;
-        req.verify = verify_;
-        req.noEmbeddings = noEmbeddings_;
-
-        // Session-isolated memory (PBI-082): tag documents with active session
-        req.sessionId = getActiveSessionId(cli_, bypassSession_);
-
-        // Parse metadata key=value pairs
-        for (const auto& kv : metadata_) {
-            auto pos = kv.find('=');
-            if (pos != std::string::npos) {
-                std::string key = kv.substr(0, pos);
-                std::string value = kv.substr(pos + 1);
-                req.metadata[key] = value;
-            }
-        }
-
-        auto result = indexingService->addDirectory(req);
+        auto result = storeDirectoryWithServicesRaw(appContext, dirPath);
         if (!result) {
             return result.error();
         }
 
-        // Output summary
         const auto& resp = result.value();
         if (cli_->getJsonOutput() || cli_->getVerbose()) {
             json output;
@@ -1067,7 +1126,6 @@ private:
                       << " skipped, " << resp.filesFailed << " failed)" << std::endl;
         }
 
-        // Perform light indexing for each successfully added file
         if (auto appContext2 = cli_->getAppContext()) {
             auto searchService = app::services::makeSearchService(*appContext2);
             if (searchService) {
@@ -1080,6 +1138,45 @@ private:
         }
 
         return Result<void>();
+    }
+
+    Result<app::services::AddDirectoryResponse>
+    storeDirectoryWithServicesRaw(const app::services::AppContext& appContext,
+                                  const std::filesystem::path& dirPath) {
+        if (!recursive_) {
+            return Error{ErrorCode::InvalidArgument, "Directory specified but --recursive not set"};
+        }
+
+        // Use IndexingService for directory operations
+        auto indexingService = app::services::makeIndexingService(appContext);
+        if (!indexingService) {
+            return Error{ErrorCode::NotInitialized, "Failed to create indexing service"};
+        }
+
+        // Build IndexingService request
+        app::services::AddDirectoryRequest req;
+        req.directoryPath = dirPath.string();
+        req.collection = collection_;
+        req.includePatterns = includePatterns_;
+        req.excludePatterns = excludePatterns_;
+        req.recursive = recursive_;
+        req.verify = verify_;
+        req.noEmbeddings = noEmbeddings_;
+
+        // Session-isolated memory (PBI-082): tag documents with active session
+        req.sessionId = getActiveSessionId(cli_, bypassSession_);
+
+        // Parse metadata key=value pairs
+        for (const auto& kv : metadata_) {
+            auto pos = kv.find('=');
+            if (pos != std::string::npos) {
+                std::string key = kv.substr(0, pos);
+                std::string value = kv.substr(pos + 1);
+                req.metadata[key] = value;
+            }
+        }
+
+        return indexingService->addDirectory(req);
     }
 
     void outputServiceResult(const app::services::StoreDocumentResponse& result) {

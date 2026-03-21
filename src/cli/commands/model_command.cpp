@@ -22,6 +22,7 @@
 #include <boost/asio/detached.hpp>
 #include <sys/stat.h>
 #include <yams/cli/command.h>
+#include <yams/cli/cli_sync.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
@@ -470,27 +471,8 @@ public:
                 // Query model status (lists loaded models if any)
                 ModelStatusRequest msr;
                 msr.detailed = true;
-                std::promise<Result<ModelStatusResponse>> prom;
-                auto fut = prom.get_future();
-                boost::asio::co_spawn(
-                    getExecutor(),
-                    [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
-                        try {
-                            auto& client = **leaseHandle;
-                            auto r = co_await client.call(msr);
-                            prom.set_value(std::move(r));
-                        } catch (const std::exception& e) {
-                            prom.set_value(Error{ErrorCode::InternalError, e.what()});
-                        } catch (...) {
-                            prom.set_value(Error{ErrorCode::InternalError, "unknown daemon error"});
-                        }
-                        co_return;
-                    },
-                    boost::asio::detached);
-                auto s =
-                    (fut.wait_for(std::chrono::seconds(3)) == std::future_status::ready)
-                        ? fut.get()
-                        : Result<ModelStatusResponse>(Error{ErrorCode::Timeout, "status timeout"});
+                auto& client = **leaseHandle;
+                auto s = yams::cli::run_result(client.call(msr), std::chrono::milliseconds(3000));
                 std::cout << "Model Provider\n==============\n";
                 if (!s) {
                     std::cout << "Status: unavailable - " << s.error().message << "\n";
@@ -607,29 +589,9 @@ private:
                     auto leaseHandle = std::move(leaseRes.value());
                     yams::daemon::ModelStatusRequest msr;
                     msr.detailed = true;
-                    std::promise<Result<yams::daemon::ModelStatusResponse>> prom;
-                    auto fut = prom.get_future();
-                    boost::asio::co_spawn(
-                        getExecutor(),
-                        [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
-                            try {
-                                auto& client = **leaseHandle;
-                                auto r = co_await client.getModelStatus(msr);
-                                prom.set_value(std::move(r));
-                            } catch (const std::exception& e) {
-                                prom.set_value(Error{ErrorCode::InternalError, e.what()});
-                            } catch (...) {
-                                prom.set_value(
-                                    Error{ErrorCode::InternalError, "unknown daemon error"});
-                            }
-                            co_return;
-                        },
-                        boost::asio::detached);
-                    auto s =
-                        (fut.wait_for(std::chrono::milliseconds(800)) == std::future_status::ready)
-                            ? fut.get()
-                            : Result<yams::daemon::ModelStatusResponse>(
-                                  Error{ErrorCode::Timeout, "model status timeout"});
+                    auto& client = **leaseHandle;
+                    auto s = yams::cli::run_result(client.getModelStatus(msr),
+                                                   std::chrono::milliseconds(800));
                     if (s) {
                         for (const auto& m : s.value().models) {
                             std::ostringstream ln;

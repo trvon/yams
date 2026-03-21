@@ -10,7 +10,9 @@
 #include "daemon_preflight.h"
 #include "fixture_manager.h"
 #include "integration/daemon/test_async_helpers.h"
+#include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
 
 namespace yams::test {
@@ -91,6 +93,10 @@ protected:
         // Clear socket path from environment
         ::unsetenv("YAMS_SOCKET_PATH");
         ::unsetenv("YAMS_DAEMON_SOCKET");
+
+        // Drain shared daemon-client state between tests to avoid cross-test fd/socket buildup.
+        yams::daemon::GlobalIOContext::reset();
+        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
     }
 
     /// Start daemon with default configuration.

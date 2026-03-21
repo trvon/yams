@@ -1592,6 +1592,17 @@ public:
         return Result<void>{};
     }
 
+    Result<void> prepareSearchIndex() {
+        std::unique_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        ensureHnswLoadedUnlocked();
+        return Result<void>{};
+    }
+
     HnswMaintenanceMode testingLastHnswMaintenanceMode() const {
         std::shared_lock lock(mutex_);
         return last_hnsw_maintenance_mode_;
@@ -3623,6 +3634,10 @@ Result<VectorDatabase::DatabaseStats> SqliteVecBackend::getStats() {
 
 Result<void> SqliteVecBackend::buildIndex() {
     return impl_->buildIndex();
+}
+
+Result<void> SqliteVecBackend::prepareSearchIndex() {
+    return impl_->prepareSearchIndex();
 }
 
 Result<void> SqliteVecBackend::optimize() {
