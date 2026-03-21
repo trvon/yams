@@ -2144,6 +2144,10 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
         // the top-10.  Tier-1 diagnostics showed 7 of 14 both-miss
         // queries have relevant docs at ranks 11-49 — reranking should
         // recover these.
+        // Current benchmark evidence: blend-60 beats blend-70 on both q20 and q300,
+        // while graph rerank / semantic rescue stay effectively inactive on SciFact.
+        // That makes pre-fusion recall (wider fusion windows, stronger lexical floor)
+        // the main tunable frontier after reranker blending.
 
         {"rerank_3x_replace_top50",
          "3x pool + cross-encoder rerank top-50, replace scores (max reranker impact)",
@@ -2170,7 +2174,8 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
          }},
         {"rerank_3x_blend60_top50",
-         "3x pool + cross-encoder rerank top-50, blend 60/40 with fusion scores",
+         "Current q300 winner: 3x pool + cross-encoder rerank top-50, blend 60/40 with fusion "
+         "scores",
          {
              {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
              {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
@@ -2187,6 +2192,55 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
              {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
              // Cross-encoder reranking: rerank the top-50, blend scores
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+        {"rerank_3x_blend60_top50_fuse200",
+         "Winner + wider pre-fusion window (fusion limit 200), rerank window stays at top-50",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "200"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+        {"rerank_3x_blend60_top50_lexical20",
+         "Winner + stronger lexical floor (top-20 / +0.30) to push pre-fusion recall",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "20"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.30"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
              {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
              {"YAMS_SEARCH_RERANK_TOPK", "50"},
              {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
@@ -3363,15 +3417,6 @@ struct BenchFixture {
         if (!vectorsDisabled) {
             bool resetPluginTrustFile = false;
             bool useIsolatedBenchmarkConfig = false;
-            auto envTruthy = [](const char* value) {
-                if (!value || !*value) {
-                    return false;
-                }
-                std::string v(value);
-                std::transform(v.begin(), v.end(), v.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                return v == "1" || v == "true" || v == "yes" || v == "on";
-            };
             const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");
             if (envPluginDir) {
                 harnessOptions.pluginDir = fs::path(envPluginDir);
@@ -5123,6 +5168,31 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
 static int runOptimizationLoop() {
     std::vector<OptimizationCandidate> candidates = defaultOptimizationCandidates();
 
+    if (!(std::getenv("YAMS_BENCH_OPT_CANDIDATE") &&
+          std::strlen(std::getenv("YAMS_BENCH_OPT_CANDIDATE")) > 0)) {
+        static const std::vector<std::string> kRecommendedCandidates = {
+            "rerank_3x_blend60_top50",
+            "rerank_3x_blend60_top50_fuse200",
+            "rerank_3x_blend60_top50_lexical20",
+        };
+        std::vector<OptimizationCandidate> recommended;
+        recommended.reserve(kRecommendedCandidates.size());
+        for (const auto& name : kRecommendedCandidates) {
+            auto it = std::find_if(
+                candidates.begin(), candidates.end(),
+                [&](const OptimizationCandidate& candidate) { return candidate.name == name; });
+            if (it != candidates.end()) {
+                recommended.push_back(*it);
+            }
+        }
+        if (!recommended.empty()) {
+            spdlog::info(
+                "[OptLoop] No candidate filter set; using recommended benchmark set rooted in {}",
+                recommended.front().name);
+            candidates = std::move(recommended);
+        }
+    }
+
     const auto selectedCandidates = parseCandidateFilter(std::getenv("YAMS_BENCH_OPT_CANDIDATE"));
     if (!selectedCandidates.empty()) {
         std::vector<OptimizationCandidate> filtered;
@@ -5234,7 +5304,10 @@ static int runOptimizationLoop() {
                   << "  vec_only_below_mean="
                   << hybridDiag["vector_only_below_threshold"]["mean"].get<double>()
                   << "  no_relevant_hit_rate="
-                  << hybridDiag["query_without_relevant_hit_rate"].get<double>() << "\n";
+                  << hybridDiag["query_without_relevant_hit_rate"].get<double>()
+                  << "  graph_apply_rate=" << hybridDiag["graph_rerank_apply_rate"].get<double>()
+                  << "  miss_pre_fusion_rate="
+                  << hybridDiag["miss_missing_pre_fusion_rate"].get<double>() << "\n";
         if (result.traceTopN > 0 || result.traceComponentTopN > 0) {
             std::cout << "    trace_top_n=" << result.traceTopN
                       << "  trace_component_top_n=" << result.traceComponentTopN << "\n";

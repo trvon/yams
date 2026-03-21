@@ -667,14 +667,14 @@ public:
                     try {
                         (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
                         auto& det = yams::detection::FileTypeDetector::instance();
-                        auto bytes = std::as_bytes(std::span(req.content.data(), req.content.size()));
+                        auto bytes =
+                            std::as_bytes(std::span(req.content.data(), req.content.size()));
                         if (auto sig = det.detectFromBuffer(bytes)) {
                             info.mimeType = sig.value().mimeType;
                         }
                     } catch (...) {
                     }
-                }
-                else if (info.mimeType.empty())
+                } else if (info.mimeType.empty())
                     info.mimeType = "application/octet-stream";
             }
 
@@ -1403,7 +1403,16 @@ public:
             bool hasWildcard = wildcardPos != std::string::npos;
 
             if (!hasWildcard) {
-                queryOpts.exactPath = pattern;
+                std::error_code ec;
+                std::filesystem::path candidate{pattern};
+                if (std::filesystem::exists(candidate, ec) &&
+                    std::filesystem::is_directory(candidate, ec)) {
+                    queryOpts.pathPrefix = pattern;
+                    queryOpts.prefixIsDirectory = true;
+                    queryOpts.includeSubdirectories = true;
+                } else {
+                    queryOpts.exactPath = pattern;
+                }
             } else if (pattern.back() == '*') {
                 // Handle patterns ending with wildcards: /path/* or /path/**
                 // Strip trailing wildcards to get the prefix

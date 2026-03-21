@@ -285,6 +285,34 @@ private:
     std::optional<std::string> original_;
 };
 
+class TuneAdvisorListGuard {
+public:
+    TuneAdvisorListGuard(uint32_t inflightLimit, uint32_t admissionWaitMs)
+        : originalInflightLimit_(TuneAdvisor::listInflightLimit()),
+          originalAdmissionWaitMs_(TuneAdvisor::listAdmissionWaitMs()) {
+        TuneAdvisor::setListInflightLimit(inflightLimit);
+        TuneAdvisor::setListAdmissionWaitMs(admissionWaitMs);
+    }
+
+    ~TuneAdvisorListGuard() {
+        TuneAdvisor::setListInflightLimit(originalInflightLimit_);
+        TuneAdvisor::setListAdmissionWaitMs(originalAdmissionWaitMs_);
+    }
+
+private:
+    uint32_t originalInflightLimit_;
+    uint32_t originalAdmissionWaitMs_;
+};
+
+template <typename Fn> class ScopeExit {
+public:
+    explicit ScopeExit(Fn fn) : fn_(std::move(fn)) {}
+    ~ScopeExit() { fn_(); }
+
+private:
+    Fn fn_;
+};
+
 std::shared_ptr<metadata::ConnectionPool> getPruneTestPool() {
     static std::shared_ptr<metadata::ConnectionPool> pool = [] {
         metadata::ConnectionPoolConfig cfg{};
@@ -333,6 +361,10 @@ public:
                         std::unordered_map<std::string, metadata::MetadataValue> values) {
         std::lock_guard<std::mutex> lk(mu_);
         metadataById_[id] = std::move(values);
+    }
+    void setAllMetadataError(int64_t id, Error error) {
+        std::lock_guard<std::mutex> lk(mu_);
+        metadataByIdErrors_[id] = std::move(error);
     }
     void setPathTreeDocuments(std::vector<metadata::DocumentInfo> docs) {
         std::lock_guard<std::mutex> lk(mu_);
@@ -411,6 +443,9 @@ public:
     Result<std::unordered_map<std::string, metadata::MetadataValue>>
     getAllMetadata(int64_t documentId) override {
         std::lock_guard<std::mutex> lk(mu_);
+        if (auto it = metadataByIdErrors_.find(documentId); it != metadataByIdErrors_.end()) {
+            return it->second;
+        }
         if (auto it = metadataById_.find(documentId); it != metadataById_.end()) {
             return it->second;
         }
@@ -474,6 +509,7 @@ private:
     std::optional<Error> exactPathError_;
     std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
         metadataById_;
+    std::unordered_map<int64_t, Error> metadataByIdErrors_;
     std::vector<metadata::DocumentInfo> pathTreeDocs_;
     std::vector<std::string> snapshots_;
     std::vector<metadata::DocumentInfo> snapshotDocs_;
@@ -1858,6 +1894,111 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(err.message.find("retrieveBytes failed") != std::string::npos);
     }
 
+    SECTION("get init reports missing retrieval session manager") {
+        auto store = std::make_shared<StubContentStore>();
+        store->setBlob("needs-session-hash", "hello retrieval session");
+        svc.__test_setContentStore(store);
+
+        GetInitRequest req;
+        req.hash = "needs-session-hash";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message.find("retrieval session manager unavailable") != std::string::npos);
+    }
+
+    SECTION("get init chunk and end succeed across retrieval session lifecycle") {
+        auto store = std::make_shared<StubContentStore>();
+        store->setBlob("session-flow-hash", "hello retrieval flow");
+        svc.__test_setContentStore(store);
+        svc.__test_setRetrievalSessionManager(std::make_unique<RetrievalSessionManager>());
+
+        GetInitRequest initReq;
+        initReq.hash = "session-flow-hash";
+        initReq.chunkSize = 5;
+
+        auto initResp = dispatchRequest(dispatcher, Request{initReq});
+
+        REQUIRE(std::holds_alternative<GetInitResponse>(initResp));
+        const auto& init = std::get<GetInitResponse>(initResp);
+        CHECK(init.transferId > 0);
+        CHECK(init.totalSize == 20);
+        CHECK(init.chunkSize == 5);
+        CHECK(init.metadata.at("hash") == "session-flow-hash");
+
+        auto chunkResp =
+            dispatchRequest(dispatcher, Request{GetChunkRequest{init.transferId, 0, 5}});
+
+        REQUIRE(std::holds_alternative<GetChunkResponse>(chunkResp));
+        const auto& chunk = std::get<GetChunkResponse>(chunkResp);
+        CHECK(chunk.data == "hello");
+        CHECK(chunk.bytesRemaining == 15);
+
+        auto endResp = dispatchRequest(dispatcher, Request{GetEndRequest{init.transferId}});
+
+        REQUIRE(std::holds_alternative<SuccessResponse>(endResp));
+        CHECK(std::get<SuccessResponse>(endResp).message == "OK");
+
+        auto postEndChunk =
+            dispatchRequest(dispatcher, Request{GetChunkRequest{init.transferId, 0, 5}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(postEndChunk));
+        const auto& postEndErr = std::get<ErrorResponse>(postEndChunk);
+        CHECK(postEndErr.code == ErrorCode::NotFound);
+        CHECK(postEndErr.message.find("Invalid transferId") != std::string::npos);
+    }
+
+    SECTION("get chunk rejects offsets beyond total size") {
+        auto store = std::make_shared<StubContentStore>();
+        store->setBlob("offset-error-hash", "hello retrieval flow");
+        svc.__test_setContentStore(store);
+        svc.__test_setRetrievalSessionManager(std::make_unique<RetrievalSessionManager>());
+
+        GetInitRequest initReq;
+        initReq.hash = "offset-error-hash";
+
+        auto initResp = dispatchRequest(dispatcher, Request{initReq});
+
+        REQUIRE(std::holds_alternative<GetInitResponse>(initResp));
+        const auto& init = std::get<GetInitResponse>(initResp);
+
+        auto chunkResp =
+            dispatchRequest(dispatcher, Request{GetChunkRequest{init.transferId, 99, 5}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(chunkResp));
+        const auto& err = std::get<ErrorResponse>(chunkResp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message.find("Offset beyond total size") != std::string::npos);
+    }
+
+    SECTION("get chunk respects max bytes cap and can return empty chunk") {
+        auto store = std::make_shared<StubContentStore>();
+        store->setBlob("cap-flow-hash", "hello retrieval flow");
+        svc.__test_setContentStore(store);
+        svc.__test_setRetrievalSessionManager(std::make_unique<RetrievalSessionManager>());
+
+        GetInitRequest initReq;
+        initReq.hash = "cap-flow-hash";
+        initReq.chunkSize = 10;
+        initReq.maxBytes = 7;
+
+        auto initResp = dispatchRequest(dispatcher, Request{initReq});
+
+        REQUIRE(std::holds_alternative<GetInitResponse>(initResp));
+        const auto& init = std::get<GetInitResponse>(initResp);
+
+        auto chunkResp =
+            dispatchRequest(dispatcher, Request{GetChunkRequest{init.transferId, 7, 5}});
+
+        REQUIRE(std::holds_alternative<GetChunkResponse>(chunkResp));
+        const auto& chunk = std::get<GetChunkResponse>(chunkResp);
+        CHECK(chunk.data.empty());
+        CHECK(chunk.bytesRemaining == 0);
+    }
+
     SECTION("get chunk reports missing retrieval session manager") {
         auto resp = dispatchRequest(dispatcher, Request{GetChunkRequest{9999, 0, 4}});
 
@@ -1942,6 +2083,21 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         REQUIRE(deleteResp.results.size() == 2);
         CHECK(lifecycle.removedHashes().size() == 1);
         CHECK(lifecycle.removedHashes().front() == successDoc.sha256Hash);
+    }
+
+    SECTION("delete reports missing content store") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        svc.__test_setMetadataRepo(repo);
+
+        DeleteRequest req;
+        req.hash = "no-store-hash";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message.find("Content store not available") != std::string::npos);
     }
 
     SECTION("file history reports missing metadata repository") {
@@ -2040,6 +2196,30 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(history.versions.front().indexedTimestamp == 1710000042);
     }
 
+    SECTION("file history ignores malformed snapshot timestamps and falls back to indexed time") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto doc = makeDoc(64, "/tmp/archive/bad-snapshot-time.txt", "bad-snapshot-time-hash");
+        repo->setExactPathDocument(doc);
+        repo->setAllMetadata(doc.id, {{"snapshot_id", metadata::MetadataValue("snap-bad-time")},
+                                      {"snapshot_time", metadata::MetadataValue("not-a-number")},
+                                      {"snapshot_time:snap-bad-time",
+                                       metadata::MetadataValue("still-not-a-number")}});
+        svc.__test_setMetadataRepo(repo);
+
+        FileHistoryRequest req;
+        req.filepath = doc.filePath;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<FileHistoryResponse>(resp));
+        const auto& history = std::get<FileHistoryResponse>(resp);
+        REQUIRE(history.found);
+        REQUIRE(history.totalVersions == 1);
+        REQUIRE(history.versions.size() == 1);
+        CHECK(history.versions.front().snapshotId == "snap-bad-time");
+        CHECK(history.versions.front().indexedTimestamp == 1710000064);
+    }
+
     SECTION("list request paths-only mode trims snippets metadata and tags") {
         auto repoPath = makeTempDir("yams_list_dispatcher_repo_") / "metadata.db";
         metadata::ConnectionPoolConfig poolCfg{};
@@ -2071,6 +2251,386 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(listResp.items.front().snippet.empty());
         CHECK(listResp.items.front().metadata.empty());
         CHECK(listResp.items.front().tags.empty());
+    }
+
+    SECTION("list request emits query trace stats when enabled") {
+        auto repoPath = makeTempDir("yams_list_query_trace_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto doc = makeDoc(56, "/tmp/list/query-trace.md", "list-query-trace-hash");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        svc.__test_setMetadataRepo(repo);
+
+        EnvGuard traceGuard("YAMS_QUERY_TRACE", "1");
+
+        ListRequest req;
+        req.limit = 3;
+        req.recent = false;
+        req.recentCount = 0;
+        req.namePattern = doc.filePath;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ListResponse>(resp));
+        const auto& listResp = std::get<ListResponse>(resp);
+        REQUIRE(listResp.items.size() == 1);
+        CHECK(listResp.listStats.contains("phase_dispatch_total_ms"));
+        CHECK(listResp.listStats.contains("phase_dispatch_map_us"));
+    }
+
+    SECTION("list request parses filter tags and recent count") {
+        auto repoPath = makeTempDir("yams_list_filter_tags_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto doc = makeDoc(67, "/tmp/list/filter-tags.md", "list-filter-tags-hash");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        svc.__test_setMetadataRepo(repo);
+
+        ListRequest req;
+        req.limit = 5;
+        req.offset = 0;
+        req.recent = false;
+        req.recentCount = 3;
+        req.filterTags = " alpha, beta ";
+        req.namePattern = doc.filePath;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ListResponse>(resp));
+        const auto& listResp = std::get<ListResponse>(resp);
+        CHECK(listResp.totalCount >= 0);
+    }
+
+    SECTION("list request reports missing metadata repository") {
+        ListRequest req;
+        req.limit = 2;
+        req.recent = false;
+        req.recentCount = 0;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message.find("Metadata repository not available") != std::string::npos);
+    }
+
+    SECTION("list request reports resource exhaustion when inflight limit is saturated") {
+        TuneAdvisorListGuard tuneGuard(1, 1);
+
+        auto repoPath = makeTempDir("yams_list_exhaustion_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto doc = makeDoc(60, "/tmp/list/exhausted.md", "list-exhausted-hash");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        svc.__test_setMetadataRepo(repo);
+
+        RequestDispatcher::__test_setListInflightRequests(1);
+        auto resetGuard = ScopeExit([] { RequestDispatcher::__test_setListInflightRequests(0); });
+
+        ListRequest req;
+        req.limit = 1;
+        req.recent = false;
+        req.recentCount = 0;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::ResourceExhausted);
+        CHECK(err.message.find("List concurrency limit reached") != std::string::npos);
+    }
+
+    SECTION("list request catches std exceptions") {
+        RequestDispatcher::__test_forceListExceptionOnce("forced list exception");
+
+        ListRequest req;
+        req.limit = 2;
+        req.recent = false;
+        req.recentCount = 0;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "List failed: forced list exception");
+    }
+
+    SECTION("list request catches unknown exceptions") {
+        RequestDispatcher::__test_forceListUnknownExceptionOnce();
+
+        ListRequest req;
+        req.limit = 2;
+        req.recent = false;
+        req.recentCount = 0;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "List failed: unknown error");
+    }
+
+    SECTION("file history skips documents when metadata lookup fails") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto failingDoc = makeDoc(57, "/tmp/archive/history-mixed.txt", "metadata-fail-hash");
+        auto okDoc = makeDoc(58, "/var/tmp/archive/history-mixed.txt", "metadata-ok-hash");
+        repo->addDocument(failingDoc);
+        repo->addDocument(okDoc);
+        repo->setAllMetadataError(failingDoc.id,
+                                  Error{ErrorCode::DatabaseError, "metadata lookup failed"});
+        repo->setAllMetadata(okDoc.id,
+                             {{"snapshot_id", metadata::MetadataValue("snap-ok")},
+                              {"snapshot_time", metadata::MetadataValue("1710000000000000")}});
+        svc.__test_setMetadataRepo(repo);
+
+        FileHistoryRequest req;
+        req.filepath = "history-mixed.txt";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<FileHistoryResponse>(resp));
+        const auto& history = std::get<FileHistoryResponse>(resp);
+        REQUIRE(history.found);
+        CHECK(history.totalVersions == 1);
+        REQUIRE(history.versions.size() == 1);
+        CHECK(history.versions.front().snapshotId == "snap-ok");
+    }
+
+    SECTION("file history falls back when exact path lookup errors") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto doc =
+            makeDoc(63, "/tmp/archive/fallback-exact-error.txt", "fallback-exact-error-hash");
+        repo->addDocument(doc);
+        repo->setExactPathError(Error{ErrorCode::DatabaseError, "exact lookup failed"});
+        repo->setAllMetadata(doc.id,
+                             {{"snapshot_id", metadata::MetadataValue("snap-fallback-error")}});
+        svc.__test_setMetadataRepo(repo);
+
+        FileHistoryRequest req;
+        req.filepath = doc.filePath;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<FileHistoryResponse>(resp));
+        const auto& history = std::get<FileHistoryResponse>(resp);
+        REQUIRE(history.found);
+        CHECK(history.totalVersions == 1);
+        REQUIRE(history.versions.size() == 1);
+        CHECK(history.versions.front().snapshotId == "snap-fallback-error");
+    }
+
+    SECTION("file history caps oversized filename matches to first hundred documents") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        for (int i = 0; i < 101; ++i) {
+            auto doc = makeDoc(1000 + i,
+                               "/tmp/archive/subdir_" + std::to_string(i) + "/history-overflow.txt",
+                               "history-overflow-hash-" + std::to_string(i));
+            doc.fileName = "history-overflow.txt";
+            repo->addDocument(doc);
+            repo->setAllMetadata(
+                doc.id, {{"snapshot_id", metadata::MetadataValue("snap-" + std::to_string(i))}});
+        }
+        svc.__test_setMetadataRepo(repo);
+
+        FileHistoryRequest req;
+        req.filepath = "history-overflow.txt";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<FileHistoryResponse>(resp));
+        const auto& history = std::get<FileHistoryResponse>(resp);
+        REQUIRE(history.found);
+        CHECK(history.totalVersions == 100);
+        CHECK(history.versions.size() == 100);
+    }
+
+    SECTION("file history reports invalid filepath when current directory is missing") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        svc.__test_setMetadataRepo(repo);
+
+        auto originalCwd = std::filesystem::current_path();
+        auto doomedDir = makeTempDir("yams_missing_cwd_");
+        std::filesystem::current_path(doomedDir);
+        std::filesystem::remove_all(doomedDir);
+
+        FileHistoryRequest req;
+        req.filepath = "history-from-missing-cwd.txt";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        std::filesystem::current_path(originalCwd);
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message.find("Invalid filepath") != std::string::npos);
+    }
+
+    SECTION("cat request reports missing content") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(58, "/tmp/cat/missing.txt", "cat-missing-hash");
+        repo->addDocument(doc);
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        CatRequest req;
+        req.hash = doc.sha256Hash;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message.find("Document not found") != std::string::npos);
+    }
+
+    SECTION("cat request reports missing content payload for indexed document") {
+        auto repoPath = makeTempDir("yams_cat_missing_content_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(59, "/tmp/cat/metadata-only.txt",
+                           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        CatRequest req;
+        req.hash = doc.sha256Hash;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message.find("Document content not found") != std::string::npos);
+    }
+
+    SECTION("cat request hits missing document branch after successful retrieval") {
+        auto repoPath = makeTempDir("yams_cat_force_missing_doc_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(61, "/tmp/cat/force-missing-doc.txt",
+                           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        store->setBlob(doc.sha256Hash, "payload");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        RequestDispatcher::__test_forceCatMissingDocumentOnce();
+
+        CatRequest req;
+        req.hash = doc.sha256Hash;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message == "Document not found");
+    }
+
+    SECTION("cat request hits content unavailable branch after successful retrieval") {
+        auto repoPath = makeTempDir("yams_cat_force_missing_content_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(62, "/tmp/cat/force-missing-content.txt",
+                           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        store->setBlob(doc.sha256Hash, "payload");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        RequestDispatcher::__test_forceCatMissingContentOnce();
+
+        CatRequest req;
+        req.hash = doc.sha256Hash;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "Content unavailable");
+    }
+
+    SECTION("cat request hits native missing document branch") {
+        auto repoPath = makeTempDir("yams_cat_native_missing_doc_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(65, "/tmp/cat/native-missing-doc.txt",
+                           "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        store->setBlob(doc.sha256Hash, "payload");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        RequestDispatcher::__test_forceCatNativeMissingDocumentOnce();
+
+        CatRequest req;
+        req.hash = doc.sha256Hash;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message == "Document not found");
+    }
+
+    SECTION("cat request hits native missing content branch") {
+        auto repoPath = makeTempDir("yams_cat_native_missing_content_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(66, "/tmp/cat/native-missing-content.txt",
+                           "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        store->setBlob(doc.sha256Hash, "payload");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        RequestDispatcher::__test_forceCatNativeMissingContentOnce();
+
+        CatRequest req;
+        req.hash = doc.sha256Hash;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "Content unavailable");
     }
 }
 

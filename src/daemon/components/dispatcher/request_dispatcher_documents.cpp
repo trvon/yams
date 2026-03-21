@@ -57,6 +57,13 @@ bool query_trace_enabled() {
 
 std::atomic<uint32_t> g_inflightListRequests{0};
 std::atomic<uint32_t> g_inflightGrepRequests{0};
+std::atomic<bool> g_forceListUnknownExceptionOnce{false};
+std::atomic<bool> g_forceCatMissingDocumentOnce{false};
+std::atomic<bool> g_forceCatMissingContentOnce{false};
+std::atomic<bool> g_forceCatNativeMissingDocumentOnce{false};
+std::atomic<bool> g_forceCatNativeMissingContentOnce{false};
+std::string g_forceListExceptionMessage;
+std::mutex g_forceListExceptionMutex;
 
 struct ListInflightGuard {
     ~ListInflightGuard() { g_inflightListRequests.fetch_sub(1, std::memory_order_acq_rel); }
@@ -146,6 +153,35 @@ boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDoc
 }
 
 } // namespace
+
+void RequestDispatcher::__test_setListInflightRequests(uint32_t value) {
+    g_inflightListRequests.store(value, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceListExceptionOnce(const std::string& message) {
+    std::lock_guard<std::mutex> lock(g_forceListExceptionMutex);
+    g_forceListExceptionMessage = message;
+}
+
+void RequestDispatcher::__test_forceListUnknownExceptionOnce() {
+    g_forceListUnknownExceptionOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceCatMissingDocumentOnce() {
+    g_forceCatMissingDocumentOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceCatMissingContentOnce() {
+    g_forceCatMissingContentOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceCatNativeMissingDocumentOnce() {
+    g_forceCatNativeMissingDocumentOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceCatNativeMissingContentOnce() {
+    g_forceCatNativeMissingContentOnce.store(true, std::memory_order_release);
+}
 
 // PBI-008-11 scaffold: prepare session using app services (no IPC exposure yet)
 int RequestDispatcher::prepareSession(const PrepareSessionOptions& opts) {
@@ -363,6 +399,17 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetEndRequest(const Ge
 boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const ListRequest& req) {
     spdlog::debug("[handleListRequest] START limit={}", req.limit);
     try {
+        {
+            std::lock_guard<std::mutex> lock(g_forceListExceptionMutex);
+            if (!g_forceListExceptionMessage.empty()) {
+                auto message = std::move(g_forceListExceptionMessage);
+                g_forceListExceptionMessage.clear();
+                throw std::runtime_error(message);
+            }
+        }
+        if (g_forceListUnknownExceptionOnce.exchange(false, std::memory_order_acq_rel)) {
+            throw 42;
+        }
         const int listInflightLimit = static_cast<int>(TuneAdvisor::listInflightLimit());
         const int listAdmissionWaitMs = static_cast<int>(TuneAdvisor::listAdmissionWaitMs());
         std::optional<ListInflightGuard> inflightGuard;
@@ -542,12 +589,24 @@ boost::asio::awaitable<Response> RequestDispatcher::handleCatRequest(const CatRe
                 co_return ErrorResponse{result.error().code, result.error().message};
             }
 
-            const auto& r = result.value();
+            auto r = result.value();
+            if (g_forceCatMissingDocumentOnce.exchange(false, std::memory_order_acq_rel)) {
+                co_return ErrorResponse{ErrorCode::NotFound, "Document not found"};
+            }
+            if (g_forceCatNativeMissingDocumentOnce.exchange(false, std::memory_order_acq_rel)) {
+                r.document.reset();
+            }
             if (!r.document.has_value()) {
                 co_return ErrorResponse{ErrorCode::NotFound, "Document not found"};
             }
 
-            const auto& doc = r.document.value();
+            auto doc = r.document.value();
+            if (g_forceCatMissingContentOnce.exchange(false, std::memory_order_acq_rel)) {
+                co_return ErrorResponse{ErrorCode::InternalError, "Content unavailable"};
+            }
+            if (g_forceCatNativeMissingContentOnce.exchange(false, std::memory_order_acq_rel)) {
+                doc.content.reset();
+            }
             if (!doc.content.has_value()) {
                 co_return ErrorResponse{ErrorCode::InternalError, "Content unavailable"};
             }

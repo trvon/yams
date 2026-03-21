@@ -5,6 +5,7 @@
 #include <string>
 #include "../../../common/env_compat.h"
 #include <catch2/catch_test_macros.hpp>
+#include <yams/app/services/list_input_resolver.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/unistd.h>
@@ -151,6 +152,39 @@ TEST_CASE("Service Utils - Path Normalization", "[utils][service][paths]") {
         CHECK_FALSE(result.changed);
         CHECK_FALSE(result.hasWildcards);
         CHECK(result.normalized == "-");
+    }
+}
+
+TEST_CASE("List input resolver classifies wildcards and directories", "[utils][service][list]") {
+    using yams::app::services::ResolvedListInputKind;
+    using yams::app::services::resolveNameToPatternIfLocalFile;
+
+    SECTION("Absolute wildcard path stays a pattern") {
+        auto result = resolveNameToPatternIfLocalFile("/tmp/project/**/*");
+
+        CHECK(result.kind == ResolvedListInputKind::Pattern);
+        CHECK_FALSE(result.isLocalFile);
+        CHECK_FALSE(result.isLocalDirectory);
+        CHECK(result.pattern.find("**") != std::string::npos);
+    }
+
+    SECTION("Existing directory resolves as local directory") {
+        namespace fs = std::filesystem;
+        const auto uniqueSuffix =
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        fs::path tempRoot = fs::temp_directory_path() / ("yams_list_resolver_" + uniqueSuffix);
+        fs::create_directories(tempRoot / "nested");
+
+        auto result = resolveNameToPatternIfLocalFile((tempRoot / "nested").string());
+
+        CHECK(result.kind == ResolvedListInputKind::LocalDirectory);
+        CHECK_FALSE(result.isLocalFile);
+        CHECK(result.isLocalDirectory);
+        REQUIRE(result.absPath.has_value());
+        CHECK(*result.absPath == fs::weakly_canonical(tempRoot / "nested").string());
+
+        std::error_code ec;
+        fs::remove_all(tempRoot, ec);
     }
 }
 

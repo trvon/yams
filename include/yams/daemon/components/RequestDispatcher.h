@@ -44,6 +44,13 @@ public:
     // Optional accessor, used internally or by tests
     ServiceManager* getServiceManager() const;
     static void __test_forceRestoreWriteFailureOnce();
+    static void __test_setListInflightRequests(uint32_t value);
+    static void __test_forceListExceptionOnce(const std::string& message);
+    static void __test_forceListUnknownExceptionOnce();
+    static void __test_forceCatMissingDocumentOnce();
+    static void __test_forceCatMissingContentOnce();
+    static void __test_forceCatNativeMissingDocumentOnce();
+    static void __test_forceCatNativeMissingContentOnce();
 
     // PBI-008-11: Session prepare (warming) options and entrypoint
     struct PrepareSessionOptions {

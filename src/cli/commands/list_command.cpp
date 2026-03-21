@@ -38,8 +38,6 @@ namespace yams::cli {
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
-using yams::app::services::utils::normalizeLookupPath;
-
 class ListCommand : public ICommand {
 public:
     std::string getName() const override { return "list"; }
@@ -177,13 +175,6 @@ public:
             if (namePattern_.empty() && !positionalName_.empty()) {
                 namePattern_ = positionalName_;
             }
-            if (!namePattern_.empty()) {
-                auto normalized = normalizeLookupPath(namePattern_);
-                if (normalized.changed && !normalized.hasWildcards) {
-                    namePattern_ = normalized.normalized;
-                    namePatternWasNormalized_ = true;
-                }
-            }
 
             auto result = execute();
             if (!result) {
@@ -205,34 +196,31 @@ public:
                 return listAllSnapshots();
             }
 
-            // Detect if pattern looks like a file path
-            bool isFilePath = isFilePathPattern(namePattern_);
+            resolvedLocalFilePath_.reset();
 
-            if (isFilePath && !snapshotId_.empty() && !compareTo_.empty()) {
+            yams::app::services::ResolvedListInput resolvedInput;
+            if (!namePattern_.empty()) {
+                resolvedInput = yams::app::services::resolveNameToPatternIfLocalFile(namePattern_);
+                namePattern_ = resolvedInput.pattern;
+                if (resolvedInput.kind == yams::app::services::ResolvedListInputKind::LocalFile) {
+                    resolvedLocalFilePath_ = resolvedInput.absPath;
+                }
+            }
+
+            const bool useFileHistory =
+                resolvedInput.kind == yams::app::services::ResolvedListInputKind::LocalFile ||
+                resolvedInput.kind == yams::app::services::ResolvedListInputKind::HistoricalPath;
+
+            if (useFileHistory && !snapshotId_.empty() && !compareTo_.empty()) {
                 return showFileDiff(namePattern_, snapshotId_, compareTo_);
             }
 
-            if (isFilePath && !snapshotId_.empty()) {
+            if (useFileHistory && !snapshotId_.empty()) {
                 return showFileAtSnapshot(namePattern_, snapshotId_);
             }
 
-            if (isFilePath) {
-                // Check if the path is a directory
-                std::filesystem::path p(namePattern_);
-                std::error_code ec;
-                if (std::filesystem::exists(p, ec) && std::filesystem::is_directory(p, ec)) {
-                    // It's a directory - use it as a path prefix pattern for listing
-                    // Don't call showFileHistory for directories
-                    isFilePath = false;
-                    // Convert directory path to a pattern for filtering
-                    std::filesystem::path absPath = std::filesystem::absolute(p, ec);
-                    if (!ec) {
-                        namePattern_ = absPath.string() + "/";
-                    }
-                } else {
-                    // It's a file path - show history
-                    return showFileHistory(namePattern_);
-                }
+            if (useFileHistory) {
+                return showFileHistory(namePattern_);
             }
 
             if (!snapshotId_.empty()) {
@@ -483,36 +471,6 @@ public:
 private:
     // Track normalized local file path if user passed a concrete file via --name
     std::optional<std::string> resolvedLocalFilePath_;
-
-    /**
-     * Check if pattern looks like a file path (contains / or . or known prefixes)
-     * Excludes glob patterns that start with wildcards like *.md
-     */
-    bool isFilePathPattern(const std::string& pattern) {
-        if (pattern.empty())
-            return false;
-
-        if (pattern.starts_with("*") || pattern.starts_with("?")) {
-            return false;
-        }
-
-        bool hasPathSeparator =
-            pattern.find('/') != std::string::npos || pattern.find('\\') != std::string::npos;
-        bool hasExtension = pattern.find('.') != std::string::npos;
-        bool hasKnownPrefix = pattern.starts_with("src/") || pattern.starts_with("include/") ||
-                              pattern.starts_with("docs/") || pattern.starts_with("tests/");
-
-        if (hasPathSeparator || hasKnownPrefix) {
-            return true;
-        }
-
-        if (hasExtension && !pattern.starts_with(".") && pattern.find('*') == std::string::npos &&
-            pattern.find('?') == std::string::npos) {
-            return true;
-        }
-
-        return false;
-    }
 
     /**
      * List all available snapshots from both tree_snapshots and document metadata tables.
@@ -2127,7 +2085,6 @@ private:
     YamsCLI* cli_ = nullptr;
     std::string namePattern_; // Filter by name pattern
     std::string positionalName_;
-    bool namePatternWasNormalized_ = false;
     std::string format_;
     bool jsonFlag_ = false; // --json shorthand for --format json
     std::string sortBy_;

@@ -200,6 +200,35 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         CHECK(result.value().documents.size() >= 1);
     }
 
+    SECTION("List bare directory returns descendants") {
+        namespace fs = std::filesystem;
+        fs::create_directories(fixture.testDir_ / "nested" / "deep");
+        std::ofstream(fixture.testDir_ / "nested" / "deep" / "descendant.txt")
+            << "descendant content";
+
+        StoreDocumentRequest nestedReq;
+        nestedReq.path = (fixture.testDir_ / "nested" / "deep" / "descendant.txt").string();
+        nestedReq.tags = {"nested"};
+        auto nestedStore = fixture.documentService_->store(nestedReq);
+        REQUIRE(nestedStore);
+
+        ListDocumentsRequest request;
+        request.pattern = (fixture.testDir_ / "nested").string();
+        request.limit = 100;
+
+        auto result = fixture.documentService_->list(request);
+
+        REQUIRE(result);
+        bool foundDescendant = false;
+        for (const auto& doc : result.value().documents) {
+            if (doc.path == (fixture.testDir_ / "nested" / "deep" / "descendant.txt").string()) {
+                foundDescendant = true;
+                break;
+            }
+        }
+        CHECK(foundDescendant);
+    }
+
     SECTION("List with tag filter") {
         ListDocumentsRequest request;
         request.limit = 100;

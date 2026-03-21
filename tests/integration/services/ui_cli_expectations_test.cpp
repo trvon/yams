@@ -431,6 +431,92 @@ TEST_F(UiCliExpectationsIT, ListLimitAndNamePattern) {
     ASSERT_TRUE(ok) << "List filter with namePattern should return only .md files with limit 2";
 }
 
+TEST_F(UiCliExpectationsIT, CliListWildcardAndDirectoryInputsStayInListMode) {
+    fs::create_directories(root_ / "ingest" / "listmode" / "nested");
+    std::ofstream(root_ / "ingest" / "listmode" / "nested" / "alpha.md") << "alpha";
+    std::ofstream(root_ / "ingest" / "listmode" / "nested" / "beta.txt") << "beta";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath_;
+    opts.explicitDataDir = storageDir_;
+    opts.path = (root_ / "ingest" / "listmode").string();
+    opts.recursive = true;
+    opts.noEmbeddings = true;
+    auto addRes = ing.addViaDaemon(opts);
+    ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
+
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
+    auto ctx = sm->getAppContext();
+
+    bool visible = false;
+    for (int i = 0; i < 60 && !visible; ++i) {
+        yams::metadata::DocumentQueryOptions queryOpts;
+        queryOpts.pathPrefix = (root_ / "ingest" / "listmode").string();
+        queryOpts.prefixIsDirectory = true;
+        queryOpts.includeSubdirectories = true;
+        queryOpts.limit = 10;
+        auto docsRes = ctx.metadataRepo->queryDocuments(queryOpts);
+        ASSERT_TRUE(docsRes) << docsRes.error().message;
+        visible = !docsRes.value().empty();
+        if (!visible)
+            std::this_thread::sleep_for(50ms);
+    }
+    ASSERT_TRUE(visible) << "List-mode fixture not visible in metadata";
+
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath_.string());
+    ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
+
+    {
+        CaptureStdout capture;
+        int rc =
+            runCliCommand({"yams", "--data-dir", storageDir_.string(), "list", "--json", "--limit",
+                           "5", "--name", (root_ / "ingest" / "listmode" / "*").string()});
+        EXPECT_EQ(rc, 0);
+
+        auto parsed = nlohmann::json::parse(capture.str(), nullptr, false);
+        ASSERT_FALSE(parsed.is_discarded()) << capture.str();
+        ASSERT_TRUE(parsed.contains("documents"));
+        ASSERT_TRUE(parsed["documents"].is_array());
+        EXPECT_EQ(capture.str().find("File History:"), std::string::npos);
+
+        bool foundAlpha = false;
+        for (const auto& doc : parsed["documents"]) {
+            const std::string path = doc.value("path", "");
+            if (path.find("alpha.md") != std::string::npos) {
+                foundAlpha = true;
+                break;
+            }
+        }
+        EXPECT_TRUE(foundAlpha) << capture.str();
+    }
+
+    {
+        CaptureStdout capture;
+        int rc =
+            runCliCommand({"yams", "--data-dir", storageDir_.string(), "list", "--json", "--limit",
+                           "5", "--name", (root_ / "ingest" / "listmode").string()});
+        EXPECT_EQ(rc, 0);
+
+        auto parsed = nlohmann::json::parse(capture.str(), nullptr, false);
+        ASSERT_FALSE(parsed.is_discarded()) << capture.str();
+        ASSERT_TRUE(parsed.contains("documents"));
+        ASSERT_TRUE(parsed["documents"].is_array());
+
+        bool foundNested = false;
+        for (const auto& doc : parsed["documents"]) {
+            const std::string path = doc.value("path", "");
+            if (path.find("beta.txt") != std::string::npos) {
+                foundNested = true;
+                break;
+            }
+        }
+        EXPECT_TRUE(foundNested) << capture.str();
+        EXPECT_EQ(parsed.value("total", 0), 2);
+    }
+}
+
 // 4) Retrieve by name — success shape (no crash) and minimal fields present (tolerant)
 TEST_F(UiCliExpectationsIT, RetrieveByNameSuccessShape) {
     fs::create_directories(root_ / "ingest");
