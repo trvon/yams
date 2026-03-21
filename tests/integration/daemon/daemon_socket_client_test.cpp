@@ -15,9 +15,11 @@
 
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
+#include "../../common/test_helpers_catch2.h"
 #include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/model_provider.h>
@@ -222,6 +224,29 @@ yams::Result<GetResponse> getWithRetry(Client& client, const std::string& hash, 
     }
     // Return last attempt's result
     return yams::cli::run_sync(client.get(getReq), 5s);
+}
+
+DownloadResponse waitForDownloadJobStatus(DaemonClient& client, const std::string& jobId,
+                                          std::chrono::milliseconds timeout = 5s,
+                                          std::chrono::milliseconds pollInterval = 25ms) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    DownloadResponse latest;
+    latest.jobId = jobId;
+    latest.state = "unknown";
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto statusResult =
+            yams::cli::run_sync(client.downloadStatus(DownloadStatusRequest{jobId}), 5s);
+        if (statusResult.has_value()) {
+            latest = statusResult.value();
+            if (latest.state != "queued" && latest.state != "running") {
+                return latest;
+            }
+        }
+        std::this_thread::sleep_for(pollInterval);
+    }
+
+    return latest;
 }
 
 std::filesystem::path createMockExternalPlugin(const std::filesystem::path& baseDir) {
@@ -715,6 +740,94 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
                   .string());
         CHECK(historyResult.value().totalVersions >= 1);
         CHECK_FALSE(historyResult.value().versions.empty());
+    }
+}
+
+TEST_CASE("Daemon client download job request execution", "[daemon][socket][download-jobs]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    ScopedEnvVar daemonDownloadEnabled("YAMS_ENABLE_DAEMON_DOWNLOAD", std::string("1"));
+    DaemonHarness harness;
+    startHarnessWithRetry(harness);
+    std::this_thread::sleep_for(200ms);
+
+    auto client = createClient(harness.socketPath());
+
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value()) {
+            break;
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+    REQUIRE(connectResult.has_value());
+
+    SECTION("download request creates tracked job and reaches completed status") {
+        RequestDispatcher::__test_resetDownloadJobs();
+        RequestDispatcher::__test_forceDownloadServiceSuccessOnce();
+
+        DownloadRequest downloadReq;
+        downloadReq.url = "https://example.com/archive.txt";
+        downloadReq.checksum = "sha256:abcd1234";
+
+        auto startResult = yams::cli::run_sync(client.call<DownloadRequest>(downloadReq), 10s);
+
+        REQUIRE(startResult.has_value());
+        CHECK(startResult.value().url == downloadReq.url);
+        CHECK_FALSE(startResult.value().jobId.empty());
+        CHECK(startResult.value().state == "queued");
+        CHECK_FALSE(startResult.value().success);
+
+        const auto finalStatus = waitForDownloadJobStatus(client, startResult.value().jobId);
+        CHECK(finalStatus.jobId == startResult.value().jobId);
+        CHECK(finalStatus.state == "completed");
+        CHECK(finalStatus.success);
+        CHECK(finalStatus.hash == "sha256:forced-download-success");
+        CHECK(finalStatus.error.empty());
+
+        auto listResult =
+            yams::cli::run_sync(client.listDownloadJobs(ListDownloadJobsRequest{10}), 10s);
+        REQUIRE(listResult.has_value());
+        REQUIRE_FALSE(listResult.value().jobs.empty());
+        CHECK(std::any_of(
+            listResult.value().jobs.begin(), listResult.value().jobs.end(), [&](const auto& job) {
+                return job.jobId == startResult.value().jobId && job.state == "completed";
+            }));
+    }
+
+    SECTION("cancel download job transitions seeded running job to canceled") {
+        RequestDispatcher::__test_resetDownloadJobs();
+
+        DownloadResponse seeded;
+        seeded.url = "https://example.com/seeded-archive.txt";
+        seeded.jobId = "download-seeded-running";
+        seeded.state = "running";
+        seeded.success = false;
+        seeded.createdAtMs = 111;
+        seeded.updatedAtMs = 222;
+        RequestDispatcher::__test_seedDownloadJob(seeded);
+
+        auto cancelResult = yams::cli::run_sync(
+            client.cancelDownloadJob(CancelDownloadJobRequest{seeded.jobId}), 10s);
+
+        REQUIRE(cancelResult.has_value());
+        CHECK(cancelResult.value().jobId == seeded.jobId);
+        CHECK(cancelResult.value().state == "canceled");
+        CHECK_FALSE(cancelResult.value().success);
+
+        auto statusResult =
+            yams::cli::run_sync(client.downloadStatus(DownloadStatusRequest{seeded.jobId}), 10s);
+        REQUIRE(statusResult.has_value());
+        CHECK(statusResult.value().jobId == seeded.jobId);
+        CHECK(statusResult.value().state == "canceled");
+
+        auto listResult =
+            yams::cli::run_sync(client.listDownloadJobs(ListDownloadJobsRequest{10}), 10s);
+        REQUIRE(listResult.has_value());
+        CHECK(std::any_of(
+            listResult.value().jobs.begin(), listResult.value().jobs.end(),
+            [&](const auto& job) { return job.jobId == seeded.jobId && job.state == "canceled"; }));
     }
 }
 

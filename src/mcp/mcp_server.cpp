@@ -66,7 +66,6 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <random>
 #include <regex>
@@ -82,10 +81,9 @@
 #include <windows.h>
 // Windows implementation of setenv
 inline int setenv(const char* name, const char* value, int overwrite) {
-    int errcode = 0;
     if (!overwrite) {
         size_t envsize = 0;
-        errcode = getenv_s(&envsize, NULL, 0, name);
+        const int errcode = getenv_s(&envsize, NULL, 0, name);
         if (errcode || envsize)
             return errcode;
     }
@@ -2067,8 +2065,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 auto lastSlash = req.url.find_last_of('/');
                 fname = (lastSlash == std::string::npos) ? req.url : req.url.substr(lastSlash + 1);
                 auto q = fname.find('?');
-                if (q != std::string::npos)
-                    fname = fname.substr(0, q);
+                if (q != std::string::npos) {
+                    fname.resize(q);
+                }
             }
             if (fname.empty())
                 fname = "downloaded_file";
@@ -2195,6 +2194,108 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
 }
 
 #endif
+
+        boost::asio::awaitable<Result<MCPDownloadJobResponse>> MCPServer::handleDownloadStatus(
+            const MCPDownloadJobRequest& req) {
+#if defined(YAMS_WASI)
+            (void)req;
+            co_return Error{ErrorCode::NotSupported,
+                            "download_status is not supported on WASI build"};
+#else
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    auto dres =
+        co_await daemon_client_->downloadStatus(yams::daemon::DownloadStatusRequest{req.jobId});
+    if (!dres) {
+        co_return dres.error();
+    }
+
+    MCPDownloadJobResponse out;
+    const auto& resp = dres.value();
+    out.jobId = resp.jobId;
+    out.state = resp.state;
+    out.success = resp.success;
+    out.url = resp.url;
+    out.hash = resp.hash;
+    out.storedPath = resp.localPath;
+    out.sizeBytes = resp.size;
+    out.createdAtMs = resp.createdAtMs;
+    out.updatedAtMs = resp.updatedAtMs;
+    out.error = resp.error;
+    co_return out;
+#endif
+        }
+
+        boost::asio::awaitable<Result<MCPListDownloadJobsResponse>>
+        MCPServer::handleListDownloadJobs(const MCPListDownloadJobsRequest& req) {
+#if defined(YAMS_WASI)
+            (void)req;
+            co_return Error{ErrorCode::NotSupported,
+                            "download_list_jobs is not supported on WASI build"};
+#else
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    auto dres = co_await daemon_client_->listDownloadJobs(yams::daemon::ListDownloadJobsRequest{});
+    if (!dres) {
+        co_return dres.error();
+    }
+
+    MCPListDownloadJobsResponse out;
+    out.jobs.reserve(dres.value().jobs.size());
+    for (const auto& job : dres.value().jobs) {
+        MCPDownloadJobResponse item;
+        item.jobId = job.jobId;
+        item.state = job.state;
+        item.success = job.success;
+        item.url = job.url;
+        item.hash = job.hash;
+        item.storedPath = job.localPath;
+        item.sizeBytes = job.size;
+        item.createdAtMs = job.createdAtMs;
+        item.updatedAtMs = job.updatedAtMs;
+        item.error = job.error;
+        out.jobs.push_back(std::move(item));
+    }
+    co_return out;
+#endif
+        }
+
+        boost::asio::awaitable<Result<MCPDownloadJobResponse>> MCPServer::handleCancelDownload(
+            const MCPDownloadJobRequest& req) {
+#if defined(YAMS_WASI)
+            (void)req;
+            co_return Error{ErrorCode::NotSupported,
+                            "download_cancel is not supported on WASI build"};
+#else
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    auto dres = co_await daemon_client_->cancelDownloadJob(
+        yams::daemon::CancelDownloadJobRequest{req.jobId});
+    if (!dres) {
+        co_return dres.error();
+    }
+
+    MCPDownloadJobResponse out;
+    const auto& resp = dres.value();
+    out.jobId = resp.jobId;
+    out.state = resp.state;
+    out.success = resp.success;
+    out.url = resp.url;
+    out.hash = resp.hash;
+    out.storedPath = resp.localPath;
+    out.sizeBytes = resp.size;
+    out.createdAtMs = resp.createdAtMs;
+    out.updatedAtMs = resp.updatedAtMs;
+    out.error = resp.error;
+    co_return out;
+#endif
+        }
 
         boost::asio::awaitable<Result<MCPStoreDocumentResponse>> MCPServer::handleStoreDocument(
             const MCPStoreDocumentRequest& req) {
@@ -4184,6 +4285,31 @@ void MCPServer::initializeToolRegistry() {
         "Download files from URLs and store them in YAMS content-addressed storage; optionally "
         "post-index the artifact.",
         "Download Files", addAnnotation);
+
+    toolRegistry_->registerTool<MCPDownloadJobRequest, MCPDownloadJobResponse>(
+        "download_status",
+        [this](const MCPDownloadJobRequest& req) { return handleDownloadStatus(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"job_id", {{"type", "string"}, {"description", "Daemon download job id"}}}}},
+             {"required", json::array({"job_id"})}},
+        "Get the current state of a daemon-managed download job", "Download Job Status",
+        readOnlyAnnotation);
+
+    toolRegistry_->registerTool<MCPListDownloadJobsRequest, MCPListDownloadJobsResponse>(
+        "download_list_jobs",
+        [this](const MCPListDownloadJobsRequest& req) { return handleListDownloadJobs(req); },
+        json{{"type", "object"}, {"properties", json::object()}},
+        "List daemon-managed download jobs", "List Download Jobs", readOnlyAnnotation);
+
+    toolRegistry_->registerTool<MCPDownloadJobRequest, MCPDownloadJobResponse>(
+        "download_cancel",
+        [this](const MCPDownloadJobRequest& req) { return handleCancelDownload(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"job_id", {{"type", "string"}, {"description", "Daemon download job id"}}}}},
+             {"required", json::array({"job_id"})}},
+        "Cancel a daemon-managed download job", "Cancel Download Job", addAnnotation);
 
     toolRegistry_->registerTool<MCPStoreDocumentRequest, MCPStoreDocumentResponse>(
         "add", [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },

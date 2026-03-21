@@ -151,6 +151,7 @@ struct SearchResultMapper {
         SearchResult resultItem;
         resultItem.path = path;
         resultItem.title = path;
+        resultItem.score = 0.0;
         resultItem.metadata["path"] = path;
         resultItem.metadata["title"] = path;
         return resultItem;

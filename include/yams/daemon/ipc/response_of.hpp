@@ -74,6 +74,15 @@ template <> struct ResponseOf<PrepareSessionRequest> {
 template <> struct ResponseOf<DownloadRequest> {
     using type = DownloadResponse;
 };
+template <> struct ResponseOf<DownloadStatusRequest> {
+    using type = DownloadResponse;
+};
+template <> struct ResponseOf<CancelDownloadJobRequest> {
+    using type = DownloadResponse;
+};
+template <> struct ResponseOf<ListDownloadJobsRequest> {
+    using type = ListDownloadJobsResponse;
+};
 // Embedding documents (persist)
 template <> struct ResponseOf<EmbedDocumentsRequest> {
     using type = EmbedDocumentsResponse;

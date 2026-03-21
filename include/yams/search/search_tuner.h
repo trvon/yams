@@ -4,6 +4,9 @@
 #include <yams/storage/corpus_stats.h>
 
 #include <nlohmann/json.hpp>
+#include <map>
+#include <mutex>
+#include <optional>
 #include <string>
 
 namespace yams::search {
@@ -110,6 +113,8 @@ struct TunedParams {
     float graphRerankWeight = 0.15f;
     float graphRerankMaxBoost = 0.20f;
     float graphRerankMinSignal = 0.01f;
+    size_t kgMaxResults = 100;
+    int graphScoringBudgetMs = 10;
 
     /**
      * @brief Apply tuned parameters to a SearchEngineConfig.
@@ -131,6 +136,8 @@ struct TunedParams {
         config.graphRerankWeight = graphRerankWeight;
         config.graphRerankMaxBoost = graphRerankMaxBoost;
         config.graphRerankMinSignal = graphRerankMinSignal;
+        config.kgMaxResults = kgMaxResults;
+        config.graphScoringBudgetMs = graphScoringBudgetMs;
         config.vectorOnlyThreshold = vectorOnlyThreshold;
         config.vectorOnlyPenalty = vectorOnlyPenalty;
         config.vectorOnlyNearMissReserve = vectorOnlyNearMissReserve;
@@ -170,6 +177,8 @@ struct TunedParams {
             {"graph_rerank_weight", graphRerankWeight},
             {"graph_rerank_max_boost", graphRerankMaxBoost},
             {"graph_rerank_min_signal", graphRerankMinSignal},
+            {"kg_max_results", kgMaxResults},
+            {"graph_scoring_budget_ms", graphScoringBudgetMs},
             {"vector_only_threshold", vectorOnlyThreshold},
             {"vector_only_penalty", vectorOnlyPenalty},
             {"vector_only_near_miss_reserve", vectorOnlyNearMissReserve},
@@ -341,6 +350,34 @@ struct TunedParams {
  */
 class SearchTuner {
 public:
+    struct RuntimeStageSignal {
+        bool enabled = false;
+        bool attempted = false;
+        bool contributed = false;
+        bool skipped = false;
+        double durationMs = 0.0;
+        std::size_t rawHitCount = 0;
+        std::size_t uniqueDocCount = 0;
+    };
+
+    struct RuntimeFusionSignal {
+        bool enabled = false;
+        bool contributedToFinal = false;
+        double configuredWeight = 0.0;
+        double finalScoreMass = 0.0;
+        std::size_t finalTopDocCount = 0;
+        std::size_t rawHitCount = 0;
+        std::size_t uniqueDocCount = 0;
+    };
+
+    struct RuntimeTelemetry {
+        double latencyMs = 0.0;
+        std::size_t finalResultCount = 0;
+        std::size_t topWindow = 0;
+        std::map<std::string, RuntimeStageSignal> stages;
+        std::map<std::string, RuntimeFusionSignal> fusionSources;
+    };
+
     /**
      * @brief Construct a tuner from corpus statistics.
      *
@@ -350,6 +387,7 @@ public:
      * @param stats Corpus statistics (from MetadataRepository::getCorpusStats)
      */
     explicit SearchTuner(const storage::CorpusStats& stats);
+    SearchTuner(const storage::CorpusStats& stats, std::optional<TuningState> forcedState);
 
     /**
      * @brief Get the current tuning state.
@@ -369,12 +407,31 @@ public:
     [[nodiscard]] const TunedParams& getParams() const noexcept { return params_; }
 
     /**
+     * @brief Reset adaptive baseline from an externally finalized config.
+     *
+     * Used when environment overrides or runtime setConfig() mutate the tuned config after
+     * SearchTuner selected its baseline. This keeps runtime adaptation anchored to the final
+     * effective configuration.
+     */
+    void seedRuntimeConfig(const SearchEngineConfig& config);
+
+    /**
      * @brief Get a SearchEngineConfig with tuned parameters applied.
      *
      * Returns a config with weights and thresholds optimized for the corpus.
      * This is the main entry point for integrating the tuner with SearchEngine.
      */
     [[nodiscard]] SearchEngineConfig getConfig() const;
+
+    /**
+     * @brief Observe one query worth of runtime telemetry.
+     */
+    void observe(const RuntimeTelemetry& telemetry);
+
+    /**
+     * @brief Export current adaptive runtime state for diagnostics.
+     */
+    [[nodiscard]] nlohmann::json adaptiveStateToJson() const;
 
     /**
      * @brief Get the RRF k constant for this tuning state.
@@ -410,10 +467,33 @@ public:
                                                   std::string& outReason);
 
 private:
+    struct AdaptiveRuntimeState {
+        std::uint64_t observations = 0;
+        std::uint64_t lastAdjustmentObservation = 0;
+        double ewmaLatencyMs = 0.0;
+        double ewmaKgLatencyShare = 0.0;
+        double ewmaKgUtility = 0.0;
+        double ewmaKgScoreMassShare = 0.0;
+        double ewmaKgFinalDocShare = 0.0;
+        double ewmaKgContributionRate = 0.0;
+        double ewmaGraphRerankLatencyMs = 0.0;
+        double ewmaGraphRerankSkipRate = 0.0;
+        double ewmaGraphRerankContributionRate = 0.0;
+        bool lastObservationChanged = false;
+        std::string lastDecision;
+    };
+
+    [[nodiscard]] SearchEngineConfig buildConfigFromParamsLocked() const;
+    [[nodiscard]] nlohmann::json adaptiveStateToJsonLocked() const;
+
     TuningState state_;
+    TunedParams baseParams_;
     TunedParams params_;
     std::string stateReason_;
     storage::CorpusStats stats_; // Keep a copy for toJson()
+    SearchEngineConfig baseConfig_{};
+    mutable std::mutex mutex_;
+    AdaptiveRuntimeState adaptive_;
 };
 
 } // namespace yams::search

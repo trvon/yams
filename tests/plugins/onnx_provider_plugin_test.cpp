@@ -64,6 +64,26 @@ TEST(OnnxProviderPluginTest, RuntimeInfoIncludesHints) {
     EXPECT_TRUE(j.contains("execution_provider"));
 }
 
+TEST(OnnxProviderPluginTest, MissingRuntimeReportedViaHealth) {
+    setenv("YAMS_ONNX_RUNTIME_LIB", "/nonexistent/libonnxruntime.dylib", 1);
+    setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
+
+    void* h = nullptr;
+    auto* prov = load_provider(&h);
+    if (!prov)
+        GTEST_SKIP() << "onnx plugin not available";
+
+    std::string health;
+    ASSERT_EQ(0, get_health_json(h, health));
+    auto j = nlohmann::json::parse(health, nullptr, false);
+    ASSERT_FALSE(j.is_discarded());
+    EXPECT_EQ(j.value("status", "unknown"), "unavailable");
+    EXPECT_TRUE(j.value("reason", "") == "runtime_load_failed" ||
+                j.value("reason", "") == "runtime_not_found");
+    EXPECT_FALSE(j.value("runtime_status", "").empty());
+    EXPECT_FALSE(j.value("runtime_error", "").empty());
+}
+
 TEST(OnnxProviderPluginTest, ConfigPreloadParsingAndReady) {
     // Create temp XDG config with preload sections
     namespace fs = std::filesystem;

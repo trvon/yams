@@ -416,6 +416,49 @@ struct MCPDownloadResponse {
     json toJson() const;
 };
 
+struct MCPDownloadJobRequest {
+    using RequestType = MCPDownloadJobRequest;
+
+    std::string jobId;
+
+    static MCPDownloadJobRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPDownloadJobResponse {
+    using ResponseType = MCPDownloadJobResponse;
+
+    std::string jobId;
+    std::string state;
+    bool success = false;
+    std::string url;
+    std::string hash;
+    std::string storedPath;
+    uint64_t sizeBytes = 0;
+    uint64_t createdAtMs = 0;
+    uint64_t updatedAtMs = 0;
+    std::string error;
+
+    static MCPDownloadJobResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPListDownloadJobsRequest {
+    using RequestType = MCPListDownloadJobsRequest;
+
+    static MCPListDownloadJobsRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPListDownloadJobsResponse {
+    using ResponseType = MCPListDownloadJobsResponse;
+
+    std::vector<MCPDownloadJobResponse> jobs;
+
+    static MCPListDownloadJobsResponse fromJson(const json& j);
+    json toJson() const;
+};
+
 // Store document DTOs
 struct MCPStoreDocumentRequest {
     using RequestType = MCPStoreDocumentRequest;

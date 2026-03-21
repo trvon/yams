@@ -1,11 +1,19 @@
 // Split from RequestDispatcher.cpp: document/search/grep/download/cancel handlers
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <deque>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <sstream>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -40,8 +48,543 @@ std::atomic<bool> g_forceCatMissingContentOnce{false};
 std::atomic<bool> g_forceCatNativeMissingDocumentOnce{false};
 std::atomic<bool> g_forceCatNativeMissingContentOnce{false};
 std::atomic<bool> g_forceDocumentsHashFailureOnce{false};
+std::atomic<bool> g_forceGetDocumentsVectorOnce{false};
+std::atomic<bool> g_forceGetEmptyResultOnce{false};
+std::atomic<bool> g_forceDownloadServiceUnavailableOnce{false};
+std::atomic<bool> g_forceDownloadServiceSuccessOnce{false};
+std::atomic<int> g_documentsEnqueueFailuresBeforeSuccess{0};
 std::string g_forceListExceptionMessage;
 std::mutex g_forceListExceptionMutex;
+
+std::string lowercaseCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
+struct ParsedDownloadUrl {
+    std::string scheme;
+    std::string host;
+};
+
+std::optional<ParsedDownloadUrl> parseDownloadUrl(const std::string& url) {
+    const auto schemePos = url.find("://");
+    if (schemePos == std::string::npos || schemePos == 0) {
+        return std::nullopt;
+    }
+
+    ParsedDownloadUrl parsed;
+    parsed.scheme = lowercaseCopy(url.substr(0, schemePos));
+
+    std::string authorityAndPath = url.substr(schemePos + 3);
+    if (authorityAndPath.empty()) {
+        return std::nullopt;
+    }
+
+    const auto pathPos = authorityAndPath.find_first_of("/?#");
+    std::string authority = authorityAndPath.substr(0, pathPos);
+    if (authority.empty()) {
+        return std::nullopt;
+    }
+
+    const auto atPos = authority.rfind('@');
+    if (atPos != std::string::npos) {
+        authority = authority.substr(atPos + 1);
+    }
+
+    if (authority.empty()) {
+        return std::nullopt;
+    }
+
+    if (authority.front() == '[') {
+        const auto closePos = authority.find(']');
+        if (closePos == std::string::npos || closePos == 1) {
+            return std::nullopt;
+        }
+        parsed.host = lowercaseCopy(authority.substr(1, closePos - 1));
+    } else {
+        const auto portPos = authority.find(':');
+        parsed.host = lowercaseCopy(authority.substr(0, portPos));
+    }
+
+    if (parsed.host.empty()) {
+        return std::nullopt;
+    }
+
+    return parsed;
+}
+
+bool downloadHostMatchesPolicy(const std::string& host,
+                               const std::vector<std::string>& allowedHosts) {
+    if (allowedHosts.empty()) {
+        return true;
+    }
+
+    for (const auto& rawPattern : allowedHosts) {
+        const auto pattern = lowercaseCopy(rawPattern);
+        if (pattern == "*" || pattern == host) {
+            return true;
+        }
+        if (pattern.size() > 2 && pattern[0] == '*' && pattern[1] == '.') {
+            const auto suffix = pattern.substr(1); // ".example.com"
+            if (host.size() > suffix.size() &&
+                host.compare(host.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool isLowerHexString(const std::string& value) {
+    return !value.empty() && std::all_of(value.begin(), value.end(),
+                                         [](unsigned char ch) { return std::isxdigit(ch); });
+}
+
+Result<std::optional<downloader::Checksum>>
+parseDaemonDownloadChecksum(const std::string& checksumValue) {
+    if (checksumValue.empty()) {
+        return std::optional<downloader::Checksum>{std::nullopt};
+    }
+
+    const auto colon = checksumValue.find(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= checksumValue.size()) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Daemon download rejected by policy: invalid checksum format "
+                     "(expected '<algo>:<hex>')"};
+    }
+
+    const auto algo = lowercaseCopy(checksumValue.substr(0, colon));
+    const auto hex = checksumValue.substr(colon + 1);
+    if (!isLowerHexString(hex)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Daemon download rejected by policy: invalid checksum format "
+                     "(expected '<algo>:<hex>')"};
+    }
+
+    downloader::Checksum parsed;
+    if (algo == "sha256") {
+        parsed.algo = downloader::HashAlgo::Sha256;
+    } else if (algo == "sha512") {
+        parsed.algo = downloader::HashAlgo::Sha512;
+    } else if (algo == "md5") {
+        parsed.algo = downloader::HashAlgo::Md5;
+    } else {
+        return Error{ErrorCode::InvalidArgument,
+                     "Daemon download rejected by policy: invalid checksum format "
+                     "(expected '<algo>:<hex>')"};
+    }
+    parsed.hex = hex;
+    return std::optional<downloader::Checksum>{std::move(parsed)};
+}
+
+std::optional<std::string> validateDownloadPolicy(const DaemonConfig::DownloadPolicy& policy,
+                                                  const DownloadRequest& req) {
+    if (!policy.enable) {
+        return std::string(
+            "Daemon download is disabled. Perform download locally (MCP/CLI) and index, or "
+            "enable daemon.download policy (enable=true, allowed_hosts, allowed_schemes, "
+            "require_checksum, store_only, sandbox).");
+    }
+
+    const auto parsed = parseDownloadUrl(req.url);
+    if (!parsed) {
+        return std::string("Invalid download URL");
+    }
+
+    const bool schemeAllowed =
+        std::any_of(policy.allowedSchemes.begin(), policy.allowedSchemes.end(),
+                    [&](const std::string& allowedScheme) {
+                        return lowercaseCopy(allowedScheme) == parsed->scheme;
+                    });
+    if (!schemeAllowed) {
+        return std::string("Daemon download rejected by policy: scheme '") + parsed->scheme +
+               "' is not allowed";
+    }
+
+    if (!downloadHostMatchesPolicy(parsed->host, policy.allowedHosts)) {
+        return std::string("Daemon download rejected by policy: host '") + parsed->host +
+               "' is not allowed";
+    }
+
+    if (policy.storeOnly && !req.outputPath.empty()) {
+        return std::string("Daemon download rejected by policy: output_path/export is disabled "
+                           "when store_only=true");
+    }
+
+    if (auto checksum = parseDaemonDownloadChecksum(req.checksum); !checksum) {
+        return checksum.error().message;
+    }
+
+    if (policy.requireChecksum && req.checksum.empty()) {
+        return std::string("Daemon download rejected by policy: checksum is required");
+    }
+
+    return std::nullopt;
+}
+
+uint64_t unixTimeMsNow() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count());
+}
+
+bool isTerminalDownloadState(const std::string& state) {
+    return state == "completed" || state == "failed" || state == "canceled" || state == "rejected";
+}
+
+struct DownloadJobRecord {
+    std::string jobId;
+    std::string url;
+    std::string checksum;
+    std::string state;
+    std::string hash;
+    std::string localPath;
+    std::string error;
+    uint64_t createdAtMs{0};
+    uint64_t updatedAtMs{0};
+    uint64_t size{0};
+    bool success{false};
+};
+
+class DownloadJobRegistry {
+public:
+    DownloadJobRecord begin(const std::filesystem::path& dataDir, const DownloadRequest& req) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureLoadedLocked(dataDir);
+        DownloadJobRecord record;
+        record.jobId = "download-" + std::to_string(nextId_++);
+        record.url = req.url;
+        record.checksum = req.checksum;
+        record.state = "queued";
+        record.createdAtMs = unixTimeMsNow();
+        record.updatedAtMs = record.createdAtMs;
+        jobs_[record.jobId] = record;
+        cancelFlags_[record.jobId] = std::make_shared<std::atomic<bool>>(false);
+        order_.push_back(record.jobId);
+        trimLocked();
+        saveLocked();
+        return record;
+    }
+
+    std::optional<DownloadJobRecord> markRunning(const std::filesystem::path& dataDir,
+                                                 const std::string& jobId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureLoadedLocked(dataDir);
+        auto it = jobs_.find(jobId);
+        if (it == jobs_.end()) {
+            return std::nullopt;
+        }
+        auto& record = it->second;
+        if (isTerminalDownloadState(record.state)) {
+            return record;
+        }
+        record.state = "running";
+        record.updatedAtMs = unixTimeMsNow();
+        saveLocked();
+        return record;
+    }
+
+    std::shared_ptr<std::atomic<bool>> cancelFlag(const std::filesystem::path& dataDir,
+                                                  const std::string& jobId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureLoadedLocked(dataDir);
+        auto it = cancelFlags_.find(jobId);
+        if (it != cancelFlags_.end()) {
+            return it->second;
+        }
+        auto flag = std::make_shared<std::atomic<bool>>(false);
+        cancelFlags_[jobId] = flag;
+        return flag;
+    }
+
+    DownloadJobRecord complete(const std::filesystem::path& dataDir, const std::string& jobId,
+                               const app::services::DownloadServiceResponse& src) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureLoadedLocked(dataDir);
+        auto it = jobs_.find(jobId);
+        if (it == jobs_.end()) {
+            return {};
+        }
+        auto& record = it->second;
+        if (record.state == "canceled") {
+            return record;
+        }
+        record.hash = src.hash;
+        record.localPath = src.storedPath.string();
+        record.size = src.sizeBytes;
+        record.success = src.success;
+        record.error.clear();
+        record.state = src.success ? "completed" : "failed";
+        record.updatedAtMs = unixTimeMsNow();
+        cancelFlags_.erase(jobId);
+        saveLocked();
+        return record;
+    }
+
+    DownloadJobRecord fail(const std::filesystem::path& dataDir, const std::string& jobId,
+                           std::string error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureLoadedLocked(dataDir);
+        auto it = jobs_.find(jobId);
+        if (it == jobs_.end()) {
+            return {};
+        }
+        auto& record = it->second;
+        if (record.state == "canceled") {
+            return record;
+        }
+        record.success = false;
+        record.error = std::move(error);
+        record.state = "failed";
+        record.updatedAtMs = unixTimeMsNow();
+        cancelFlags_.erase(jobId);
+        saveLocked();
+        return record;
+    }
+
+    std::optional<DownloadJobRecord> get(const std::filesystem::path& dataDir,
+                                         const std::string& jobId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureLoadedLocked(dataDir);
+        auto it = jobs_.find(jobId);
+        if (it == jobs_.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
+    std::optional<DownloadJobRecord> cancel(const std::filesystem::path& dataDir,
+                                            const std::string& jobId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureLoadedLocked(dataDir);
+        auto it = jobs_.find(jobId);
+        if (it == jobs_.end()) {
+            return std::nullopt;
+        }
+
+        auto& record = it->second;
+        if (record.state != "completed" && record.state != "failed" && record.state != "canceled") {
+            record.success = false;
+            record.state = "canceled";
+            record.updatedAtMs = unixTimeMsNow();
+            if (record.error.empty()) {
+                record.error = "Canceled by client";
+            }
+            if (auto flagIt = cancelFlags_.find(jobId); flagIt != cancelFlags_.end()) {
+                flagIt->second->store(true, std::memory_order_release);
+            }
+            saveLocked();
+        }
+        return record;
+    }
+
+    std::vector<DownloadJobRecord> list(const std::filesystem::path& dataDir, std::size_t limit) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureLoadedLocked(dataDir);
+        std::vector<DownloadJobRecord> out;
+        if (limit == 0) {
+            return out;
+        }
+        out.reserve(std::min(limit, order_.size()));
+        for (auto it = order_.rbegin(); it != order_.rend() && out.size() < limit; ++it) {
+            auto found = jobs_.find(*it);
+            if (found != jobs_.end()) {
+                out.push_back(found->second);
+            }
+        }
+        return out;
+    }
+
+    void reset() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        nextId_ = 1;
+        loaded_ = false;
+        currentStorePath_.clear();
+        jobs_.clear();
+        order_.clear();
+        cancelFlags_.clear();
+    }
+
+    void seed(const DownloadResponse& response) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        loaded_ = true;
+        currentStorePath_.clear();
+        DownloadJobRecord record;
+        record.jobId = response.jobId;
+        record.url = response.url;
+        record.state = response.state;
+        record.hash = response.hash;
+        record.localPath = response.localPath;
+        record.error = response.error;
+        record.createdAtMs = response.createdAtMs;
+        record.updatedAtMs = response.updatedAtMs;
+        record.size = response.size;
+        record.success = response.success;
+        jobs_[record.jobId] = record;
+        cancelFlags_[record.jobId] = std::make_shared<std::atomic<bool>>(false);
+        order_.push_back(record.jobId);
+        trimLocked();
+    }
+
+    void forgetCache() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        loaded_ = false;
+        jobs_.clear();
+        order_.clear();
+        cancelFlags_.clear();
+    }
+
+private:
+    static nlohmann::json toJson(const DownloadJobRecord& record) {
+        return nlohmann::json{{"job_id", record.jobId},
+                              {"url", record.url},
+                              {"checksum", record.checksum},
+                              {"state", record.state},
+                              {"hash", record.hash},
+                              {"local_path", record.localPath},
+                              {"error", record.error},
+                              {"created_at_ms", record.createdAtMs},
+                              {"updated_at_ms", record.updatedAtMs},
+                              {"size", record.size},
+                              {"success", record.success}};
+    }
+
+    static DownloadJobRecord fromJson(const nlohmann::json& json) {
+        DownloadJobRecord record;
+        record.jobId = json.value("job_id", "");
+        record.url = json.value("url", "");
+        record.checksum = json.value("checksum", "");
+        record.state = json.value("state", "");
+        record.hash = json.value("hash", "");
+        record.localPath = json.value("local_path", "");
+        record.error = json.value("error", "");
+        record.createdAtMs = json.value("created_at_ms", uint64_t{0});
+        record.updatedAtMs = json.value("updated_at_ms", uint64_t{0});
+        record.size = json.value("size", uint64_t{0});
+        record.success = json.value("success", false);
+        return record;
+    }
+
+    static std::filesystem::path persistencePathFor(const std::filesystem::path& dataDir) {
+        return dataDir / "daemon" / "download_jobs.json";
+    }
+
+    void ensureLoadedLocked(const std::filesystem::path& dataDir) {
+        const auto targetPath = persistencePathFor(dataDir);
+        if (loaded_ && (currentStorePath_.empty() || currentStorePath_ == targetPath)) {
+            return;
+        }
+
+        nextId_ = 1;
+        jobs_.clear();
+        order_.clear();
+        cancelFlags_.clear();
+        currentStorePath_ = targetPath;
+        loaded_ = true;
+
+        if (!std::filesystem::exists(currentStorePath_)) {
+            return;
+        }
+
+        try {
+            std::ifstream input(currentStorePath_);
+            if (!input.is_open()) {
+                spdlog::warn("Failed to open download job registry {}", currentStorePath_.string());
+                return;
+            }
+
+            auto root = nlohmann::json::parse(input, nullptr, true, true);
+            nextId_ = root.value("next_id", uint64_t{1});
+            const auto jobs = root.value("jobs", nlohmann::json::array());
+            if (!jobs.is_array()) {
+                return;
+            }
+            for (const auto& entry : jobs) {
+                const auto record = fromJson(entry);
+                if (record.jobId.empty()) {
+                    continue;
+                }
+                jobs_[record.jobId] = record;
+                order_.push_back(record.jobId);
+            }
+            trimLocked();
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to load download job registry {}: {}", currentStorePath_.string(),
+                         e.what());
+            nextId_ = 1;
+            jobs_.clear();
+            order_.clear();
+            cancelFlags_.clear();
+        }
+    }
+
+    void saveLocked() {
+        if (!loaded_ || currentStorePath_.empty()) {
+            return;
+        }
+
+        try {
+            std::filesystem::create_directories(currentStorePath_.parent_path());
+            nlohmann::json root;
+            root["next_id"] = nextId_;
+            root["jobs"] = nlohmann::json::array();
+            for (const auto& jobId : order_) {
+                const auto it = jobs_.find(jobId);
+                if (it != jobs_.end()) {
+                    root["jobs"].push_back(toJson(it->second));
+                }
+            }
+
+            const auto tempPath = currentStorePath_.string() + ".tmp";
+            {
+                std::ofstream output(tempPath, std::ios::trunc);
+                output << root.dump(2);
+            }
+            std::filesystem::rename(tempPath, currentStorePath_);
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to save download job registry {}: {}", currentStorePath_.string(),
+                         e.what());
+        }
+    }
+
+    void trimLocked() {
+        constexpr std::size_t kMaxRetainedJobs = 256;
+        while (order_.size() > kMaxRetainedJobs) {
+            jobs_.erase(order_.front());
+            order_.pop_front();
+        }
+    }
+
+    std::mutex mutex_;
+    uint64_t nextId_{1};
+    bool loaded_{false};
+    std::filesystem::path currentStorePath_;
+    std::unordered_map<std::string, DownloadJobRecord> jobs_;
+    std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelFlags_;
+    std::deque<std::string> order_;
+};
+
+DownloadJobRegistry& downloadJobRegistry() {
+    static DownloadJobRegistry registry;
+    return registry;
+}
+
+DownloadResponse toDownloadResponse(const DownloadJobRecord& record) {
+    DownloadResponse response;
+    response.url = record.url;
+    response.hash = record.hash;
+    response.localPath = record.localPath;
+    response.jobId = record.jobId;
+    response.state = record.state;
+    response.createdAtMs = record.createdAtMs;
+    response.updatedAtMs = record.updatedAtMs;
+    response.size = static_cast<size_t>(record.size);
+    response.success = record.success;
+    response.error = record.error;
+    return response;
+}
 
 void maybeThrowForcedDocumentsHashFailure() {
     if (g_forceDocumentsHashFailureOnce.exchange(false, std::memory_order_acq_rel)) {
@@ -139,7 +682,13 @@ boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDoc
 
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
         InternalEventBus::StoreDocumentTask task{req};
-        if (channel->try_push(std::move(task))) {
+        bool pushed = false;
+        if (g_documentsEnqueueFailuresBeforeSuccess.load(std::memory_order_acquire) > 0) {
+            g_documentsEnqueueFailuresBeforeSuccess.fetch_sub(1, std::memory_order_acq_rel);
+        } else {
+            pushed = channel->try_push(std::move(task));
+        }
+        if (pushed) {
             if (attempt > 0) {
                 spdlog::debug("[RequestDispatcher] AddDocument enqueue succeeded after {} retries",
                               attempt);
@@ -196,6 +745,38 @@ void RequestDispatcher::__test_resetDocumentsQueryTraceCache() {
 
 void RequestDispatcher::__test_forceDocumentsHashFailureOnce() {
     g_forceDocumentsHashFailureOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_setDocumentsEnqueueFailuresBeforeSuccess(int count) {
+    g_documentsEnqueueFailuresBeforeSuccess.store(std::max(0, count), std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceGetResponseDocumentsVectorOnce() {
+    g_forceGetDocumentsVectorOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceGetEmptyResultOnce() {
+    g_forceGetEmptyResultOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_resetDownloadJobs() {
+    downloadJobRegistry().reset();
+}
+
+void RequestDispatcher::__test_forgetDownloadJobsCache() {
+    downloadJobRegistry().forgetCache();
+}
+
+void RequestDispatcher::__test_seedDownloadJob(const DownloadResponse& response) {
+    downloadJobRegistry().seed(response);
+}
+
+void RequestDispatcher::__test_forceDownloadServiceUnavailableOnce() {
+    g_forceDownloadServiceUnavailableOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceDownloadServiceSuccessOnce() {
+    g_forceDownloadServiceSuccessOnce.store(true, std::memory_order_release);
 }
 
 // PBI-008-11 scaffold: prepare session using app services (no IPC exposure yet)
@@ -279,7 +860,16 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                              result.error().message);
                 co_return ErrorResponse{result.error().code, result.error().message};
             }
-            const auto& serviceResp = result.value();
+            auto serviceResp = result.value();
+            if (g_forceGetDocumentsVectorOnce.exchange(false, std::memory_order_acq_rel) &&
+                serviceResp.document.has_value()) {
+                serviceResp.documents.push_back(*serviceResp.document);
+                serviceResp.document.reset();
+            }
+            if (g_forceGetEmptyResultOnce.exchange(false, std::memory_order_acq_rel)) {
+                serviceResp.document.reset();
+                serviceResp.documents.clear();
+            }
 
             const auto mapStart = std::chrono::steady_clock::now();
             GetResponse response;
@@ -657,7 +1247,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                         "Directory deletion requires recursive flag for safety"};
                 }
                 serviceReq.pattern = req.directory;
-                if (!serviceReq.pattern.empty() && serviceReq.pattern.back() != '/') {
+                if (serviceReq.pattern.back() != '/') {
                     serviceReq.pattern += '/';
                 }
                 serviceReq.pattern += "*";
@@ -1057,53 +1647,143 @@ boost::asio::awaitable<Response>
 RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
         "download", [this, req]() -> boost::asio::awaitable<Response> {
-            const bool envEnabled = []() {
-                if (const char* v = std::getenv("YAMS_ENABLE_DAEMON_DOWNLOAD")) {
-                    return std::string(v) == "1" || std::string(v) == "true";
+            auto policy = serviceManager_->getConfig().downloadPolicy;
+            const auto dataDir = serviceManager_->getConfig().dataDir;
+            if (const char* v = std::getenv("YAMS_ENABLE_DAEMON_DOWNLOAD")) {
+                const auto enabled = lowercaseCopy(v);
+                if (enabled == "1" || enabled == "true") {
+                    policy.enable = true;
                 }
-                return false;
-            }();
-            const bool policyEnabled = envEnabled;
-            if (!policyEnabled) {
+            }
+
+            if (auto policyError = validateDownloadPolicy(policy, req); policyError) {
                 DownloadResponse response;
                 response.url = req.url;
                 response.success = false;
-                response.error =
-                    "Daemon download is disabled. Perform download locally (MCP/CLI) and index, or "
-                    "enable daemon.download policy (enable=true, allowed_hosts, allowed_schemes, "
-                    "require_checksum, store_only, sandbox).";
+                response.state = "rejected";
+                response.updatedAtMs = unixTimeMsNow();
+                response.error = std::move(*policyError);
                 if (!req.quiet) {
-                    spdlog::info("Download request received; responding with policy reminder "
-                                 "(daemon downloads disabled by default).");
+                    spdlog::info("Download request rejected by policy: {}", response.error);
                 }
                 co_return response;
             }
+            auto checksum = parseDaemonDownloadChecksum(req.checksum);
+            if (!checksum) {
+                co_return ErrorResponse{checksum.error().code, checksum.error().message};
+            }
+            auto job = downloadJobRegistry().begin(dataDir, req);
             auto appContext = serviceManager_->getAppContext();
             auto downloadService = app::services::makeDownloadService(appContext);
-            if (!downloadService) {
-                co_return ErrorResponse{ErrorCode::NotInitialized,
-                                        "Download service not available in daemon"};
+            if (g_forceDownloadServiceUnavailableOnce.exchange(false, std::memory_order_acq_rel)) {
+                downloadService.reset();
             }
-            app::services::DownloadServiceRequest sreq;
-            sreq.url = req.url;
-            sreq.followRedirects = true;
-            sreq.storeOnly = true;
-            sreq.concurrency = 4;
-            sreq.chunkSizeBytes = 8388608;
-            sreq.timeout = std::chrono::milliseconds(60000);
-            sreq.resume = true;
-            auto sres = downloadService->download(sreq);
-            if (!sres) {
-                co_return ErrorResponse{sres.error().code, sres.error().message};
-            }
-            const auto& v = sres.value();
+
+            auto workerExecutor = getWorkerExecutor();
+            auto jobId = job.jobId;
+            auto requestUrl = req.url;
+            auto quiet = req.quiet;
+            auto checksumOpt = std::move(checksum.value());
+            boost::asio::post(workerExecutor, [dataDir, jobId, requestUrl, quiet, policy,
+                                               downloadService = std::move(downloadService),
+                                               checksumOpt = std::move(checksumOpt)]() mutable {
+                auto cancelFlag = downloadJobRegistry().cancelFlag(dataDir, jobId);
+                auto maybeStarted = downloadJobRegistry().markRunning(dataDir, jobId);
+                if (!maybeStarted || maybeStarted->state == "canceled") {
+                    return;
+                }
+
+                if (g_forceDownloadServiceSuccessOnce.exchange(false, std::memory_order_acq_rel)) {
+                    app::services::DownloadServiceResponse forced;
+                    forced.url = requestUrl;
+                    forced.hash = "sha256:forced-download-success";
+                    forced.storedPath = dataDir / "forced-download-success.bin";
+                    forced.sizeBytes = 64;
+                    forced.success = true;
+                    downloadJobRegistry().complete(dataDir, jobId, forced);
+                    return;
+                }
+
+                if (!downloadService) {
+                    downloadJobRegistry().fail(dataDir, jobId,
+                                               "Download service not available in daemon");
+                    return;
+                }
+
+                app::services::DownloadServiceRequest sreq;
+                sreq.url = requestUrl;
+                sreq.followRedirects = true;
+                sreq.storeOnly = policy.storeOnly;
+                sreq.concurrency = 4;
+                sreq.chunkSizeBytes = 8388608;
+                sreq.timeout = policy.timeout;
+                sreq.resume = true;
+                sreq.checksum = checksumOpt;
+                sreq.shouldCancel = [cancelFlag]() {
+                    return cancelFlag && cancelFlag->load(std::memory_order_acquire);
+                };
+
+                auto sres = downloadService->download(sreq);
+                if (!sres) {
+                    if (!quiet) {
+                        spdlog::warn("Daemon download job {} failed: {}", jobId,
+                                     sres.error().message);
+                    }
+                    downloadJobRegistry().fail(dataDir, jobId, sres.error().message);
+                    return;
+                }
+
+                downloadJobRegistry().complete(dataDir, jobId, sres.value());
+            });
+
             DownloadResponse response;
-            response.url = v.url;
-            response.success = v.success;
-            response.hash = v.hash;
-            response.localPath = v.storedPath.string();
-            response.size = static_cast<size_t>(v.sizeBytes);
+            response.url = job.url;
+            response.success = false;
+            response.jobId = job.jobId;
+            response.state = job.state;
+            response.createdAtMs = job.createdAtMs;
+            response.updatedAtMs = job.updatedAtMs;
             response.error = "";
+            co_return response;
+        });
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleDownloadStatusRequest(const DownloadStatusRequest& req) {
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "downloadStatus", [this, req]() -> boost::asio::awaitable<Response> {
+            auto job = downloadJobRegistry().get(serviceManager_->getConfig().dataDir, req.jobId);
+            if (!job) {
+                co_return ErrorResponse{ErrorCode::NotFound, "Download job not found"};
+            }
+            co_return toDownloadResponse(*job);
+        });
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleCancelDownloadJobRequest(const CancelDownloadJobRequest& req) {
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "cancelDownloadJob", [this, req]() -> boost::asio::awaitable<Response> {
+            auto job =
+                downloadJobRegistry().cancel(serviceManager_->getConfig().dataDir, req.jobId);
+            if (!job) {
+                co_return ErrorResponse{ErrorCode::NotFound, "Download job not found"};
+            }
+            co_return toDownloadResponse(*job);
+        });
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleListDownloadJobsRequest(const ListDownloadJobsRequest& req) {
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "listDownloadJobs", [this, req]() -> boost::asio::awaitable<Response> {
+            ListDownloadJobsResponse response;
+            const auto jobs = downloadJobRegistry().list(serviceManager_->getConfig().dataDir,
+                                                         std::max<std::size_t>(1, req.limit));
+            response.jobs.reserve(jobs.size());
+            for (const auto& job : jobs) {
+                response.jobs.push_back(toDownloadResponse(job));
+            }
             co_return response;
         });
 }

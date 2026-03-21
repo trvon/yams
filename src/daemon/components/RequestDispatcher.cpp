@@ -12,6 +12,7 @@
 #include <sstream>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN 1
@@ -114,6 +115,9 @@ DEFINE_REQUEST_HANDLER(ModelStatusRequest, handleModelStatusRequest);
 DEFINE_REQUEST_HANDLER(UpdateDocumentRequest, handleUpdateDocumentRequest);
 DEFINE_REQUEST_HANDLER(GrepRequest, handleGrepRequest);
 DEFINE_REQUEST_HANDLER(DownloadRequest, handleDownloadRequest);
+DEFINE_REQUEST_HANDLER(DownloadStatusRequest, handleDownloadStatusRequest);
+DEFINE_REQUEST_HANDLER(CancelDownloadJobRequest, handleCancelDownloadJobRequest);
+DEFINE_REQUEST_HANDLER(ListDownloadJobsRequest, handleListDownloadJobsRequest);
 DEFINE_REQUEST_HANDLER(PrepareSessionRequest, handlePrepareSessionRequest);
 DEFINE_REQUEST_HANDLER(PluginScanRequest, handlePluginScanRequest);
 DEFINE_REQUEST_HANDLER(PluginLoadRequest, handlePluginLoadRequest);
@@ -231,6 +235,9 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
         out = co_await std::visit(
             [this](auto&& arg) -> boost::asio::awaitable<Response> {
                 using T = std::decay_t<decltype(arg)>;
+                if constexpr (std::is_same_v<T, CancelDownloadJobRequest>) {
+                    return handleCancelDownloadJobRequest(arg);
+                }
                 return RequestHandlerTraits<T>::handle(this, arg);
             },
             req);

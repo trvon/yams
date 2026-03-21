@@ -541,3 +541,129 @@ TEST_CASE("SearchEngineBuilder: default options align with MIXED_PRECISION fallb
     CHECK(opts.config.lexicalTieBreakEpsilon == Approx(expectedConfig.lexicalTieBreakEpsilon));
     CHECK(opts.config.semanticRescueSlots == expectedConfig.semanticRescueSlots);
 }
+
+TEST_CASE("SearchTuner: adaptive observation trims KG under latency pressure",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 5000;
+    stats.codeRatio = 0.4f;
+    stats.proseRatio = 0.4f;
+    stats.embeddingCoverage = 0.8f;
+    stats.symbolDensity = 2.0f;
+
+    SearchTuner tuner(stats);
+    const auto before = tuner.getParams();
+
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 120.0;
+    telemetry.topWindow = 25;
+    telemetry.stages["kg"] = {.enabled = true,
+                              .attempted = true,
+                              .contributed = false,
+                              .skipped = false,
+                              .durationMs = 55.0,
+                              .rawHitCount = 20,
+                              .uniqueDocCount = 12};
+    telemetry.stages["graph_rerank"] = {.enabled = true,
+                                        .attempted = true,
+                                        .contributed = false,
+                                        .skipped = true,
+                                        .durationMs = 18.0,
+                                        .rawHitCount = 0,
+                                        .uniqueDocCount = 0};
+    telemetry.fusionSources["kg"] = {.enabled = true,
+                                     .contributedToFinal = false,
+                                     .configuredWeight = before.kgWeight,
+                                     .finalScoreMass = 0.02,
+                                     .finalTopDocCount = 0,
+                                     .rawHitCount = 20,
+                                     .uniqueDocCount = 12};
+
+    for (int i = 0; i < 9; ++i) {
+        tuner.observe(telemetry);
+    }
+
+    const auto after = tuner.getParams();
+    CHECK(after.kgMaxResults <= before.kgMaxResults);
+    CHECK(after.graphScoringBudgetMs <= before.graphScoringBudgetMs);
+    CHECK(after.graphRerankTopN <= before.graphRerankTopN);
+    CHECK(after.kgWeight >= Approx(0.02f));
+
+    const auto adaptive = tuner.adaptiveStateToJson();
+    CHECK(adaptive["changed_last_observation"].get<bool>());
+    CHECK(adaptive["last_decision"].get<std::string>().find("kg_latency_pressure") !=
+          std::string::npos);
+}
+
+TEST_CASE("SearchTuner: adaptive observation keeps KG floor and cools flapping",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 5000;
+    stats.codeRatio = 0.4f;
+    stats.proseRatio = 0.4f;
+    stats.embeddingCoverage = 0.8f;
+    stats.symbolDensity = 1.5f;
+
+    SearchTuner tuner(stats);
+
+    SearchTuner::RuntimeTelemetry badTelemetry;
+    badTelemetry.latencyMs = 140.0;
+    badTelemetry.topWindow = 25;
+    badTelemetry.stages["kg"] = {.enabled = true,
+                                 .attempted = true,
+                                 .contributed = false,
+                                 .skipped = false,
+                                 .durationMs = 70.0,
+                                 .rawHitCount = 10,
+                                 .uniqueDocCount = 8};
+    badTelemetry.stages["graph_rerank"] = {.enabled = true,
+                                           .attempted = true,
+                                           .contributed = false,
+                                           .skipped = true,
+                                           .durationMs = 12.0,
+                                           .rawHitCount = 0,
+                                           .uniqueDocCount = 0};
+    badTelemetry.fusionSources["kg"] = {.enabled = true,
+                                        .contributedToFinal = false,
+                                        .configuredWeight = tuner.getParams().kgWeight,
+                                        .finalScoreMass = 0.01,
+                                        .finalTopDocCount = 0,
+                                        .rawHitCount = 10,
+                                        .uniqueDocCount = 8};
+
+    for (int i = 0; i < 10; ++i) {
+        tuner.observe(badTelemetry);
+    }
+
+    const auto pressured = tuner.getParams();
+    CHECK(pressured.kgWeight >= Approx(0.02f));
+
+    SearchTuner::RuntimeTelemetry goodTelemetry;
+    goodTelemetry.latencyMs = 40.0;
+    goodTelemetry.topWindow = 25;
+    goodTelemetry.stages["kg"] = {.enabled = true,
+                                  .attempted = true,
+                                  .contributed = true,
+                                  .skipped = false,
+                                  .durationMs = 5.0,
+                                  .rawHitCount = 12,
+                                  .uniqueDocCount = 8};
+    goodTelemetry.stages["graph_rerank"] = {.enabled = true,
+                                            .attempted = true,
+                                            .contributed = true,
+                                            .skipped = false,
+                                            .durationMs = 4.0,
+                                            .rawHitCount = 0,
+                                            .uniqueDocCount = 0};
+    goodTelemetry.fusionSources["kg"] = {.enabled = true,
+                                         .contributedToFinal = true,
+                                         .configuredWeight = pressured.kgWeight,
+                                         .finalScoreMass = 0.18,
+                                         .finalTopDocCount = 4,
+                                         .rawHitCount = 12,
+                                         .uniqueDocCount = 8};
+
+    tuner.observe(goodTelemetry);
+    const auto cooled = tuner.adaptiveStateToJson();
+    CHECK(cooled["last_decision"].get<std::string>().find("cooldown_active") != std::string::npos);
+}

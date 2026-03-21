@@ -8,13 +8,15 @@
 #include <yams/daemon/resource/gpu_info.h>
 
 #include <nlohmann/json.hpp>
-#include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <mutex>
 #include <sstream>
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
+
+#include "ort_cxx_api_wrapper.h"
+#include "ort_runtime_loader.h"
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -315,6 +317,13 @@ public:
             test_mode_ = true;
             spdlog::warn("[ONNX] Mock provider mode enabled via env; skipping ONNX init");
             return;
+        }
+
+        const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+        if (!runtimeInfo.available) {
+            throw std::runtime_error(runtimeInfo.errorMessage.empty()
+                                         ? std::string("ONNX Runtime unavailable")
+                                         : runtimeInfo.errorMessage);
         }
 
         // Optional: initialize GenAI adapter when enabled at build + requested at runtime
@@ -1891,6 +1900,13 @@ Result<void> OnnxModelPool::initialize() {
     TuneAdvisor::setOnnxStartupMode(true);
 
     spdlog::info("Initializing ONNX model pool with max {} models", config_.maxLoadedModels);
+
+    const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+    if (!runtimeInfo.available) {
+        return Error{ErrorCode::InternalError, runtimeInfo.errorMessage.empty()
+                                                   ? std::string("ONNX Runtime unavailable")
+                                                   : runtimeInfo.errorMessage};
+    }
 
     // Eagerly initialize the global Ort::Env NOW, before any concurrent access.
     // This prevents "resource deadlock would occur" errors that can happen when

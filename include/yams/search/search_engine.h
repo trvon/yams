@@ -29,6 +29,8 @@ class KnowledgeGraphStore;
 
 namespace yams::search {
 
+class SearchTuner;
+
 // Import SearchResult from metadata namespace
 using yams::metadata::SearchResult;
 
@@ -1219,6 +1221,11 @@ public:
      * @param reranker The reranker implementation (or nullptr to disable)
      */
     void setReranker(std::shared_ptr<IReranker> reranker);
+
+    /**
+     * @brief Install a runtime SearchTuner for adaptive per-query tuning.
+     */
+    void setSearchTuner(std::shared_ptr<SearchTuner> tuner);
 
 private:
     class Impl;

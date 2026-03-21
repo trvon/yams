@@ -37,6 +37,10 @@ public:
 
         auto* cmd = app.add_subcommand("download", getDescription());
 
+        cmd->add_option("--status", statusJobId_, "Show daemon download job status by job id.");
+        cmd->add_flag("--list-jobs", listJobs_, "List tracked daemon download jobs.");
+        cmd->add_option("--cancel", cancelJobId_, "Cancel a daemon download job by job id.");
+
         // Inputs: URL or --list (mutually exclusive)
         cmd->add_option("url", url_,
                         "Source URL (HTTPS recommended; TLS verification on by default).");
@@ -136,12 +140,44 @@ public:
     }
 
     Result<void> execute() override {
-        // Validate inputs
-        if (!url_ && !listPath_) {
-            return Error{ErrorCode::InvalidArgument, "Either <url> or --list must be provided"};
+        const bool startMode = url_.has_value() || listPath_.has_value();
+        const bool statusMode = statusJobId_.has_value();
+        const bool cancelMode = cancelJobId_.has_value();
+        const int actionCount = static_cast<int>(startMode) + static_cast<int>(statusMode) +
+                                static_cast<int>(cancelMode) + static_cast<int>(listJobs_);
+
+        if (actionCount == 0) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Specify one of <url>, --list, --status, --list-jobs, or --cancel"};
+        }
+        if (actionCount > 1) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Specify only one action: download, --status, --list-jobs, or --cancel"};
         }
         if (url_ && listPath_) {
             return Error{ErrorCode::InvalidArgument, "Specify only one of <url> or --list"};
+        }
+
+        if (statusMode) {
+            auto resp = fetchDaemonDownloadStatus(*statusJobId_);
+            if (!resp) {
+                return resp.error();
+            }
+            return printDaemonStatus(resp.value());
+        }
+        if (listJobs_) {
+            auto resp = fetchDaemonDownloadJobs();
+            if (!resp) {
+                return resp.error();
+            }
+            return printDaemonJobList(resp.value());
+        }
+        if (cancelMode) {
+            auto resp = cancelDaemonDownloadJob(*cancelJobId_);
+            if (!resp) {
+                return resp.error();
+            }
+            return printDaemonStatus(resp.value());
         }
 
         // Try daemon path first if we can honor CLI options (list-style fallback behavior).
@@ -406,10 +442,13 @@ public:
 
 private:
     bool canUseDaemonDownload() const {
+        if (statusJobId_ || cancelJobId_ || listJobs_) {
+            return false;
+        }
         if (!url_ || listPath_) {
             return false;
         }
-        if (!headers_.empty() || checksum_.has_value()) {
+        if (!headers_.empty()) {
             return false;
         }
         if (exportPath_ || exportDir_) {
@@ -433,6 +472,80 @@ private:
         return true;
     }
 
+    Result<std::optional<yams::daemon::DownloadResponse>>
+    callDaemonDownloadAction(auto&& makeRequest) const {
+        using namespace yams::daemon;
+
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+        if (!leaseRes) {
+            return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        auto resp = makeRequest(client);
+        if (!resp) {
+            return resp.error();
+        }
+        return std::optional<DownloadResponse>{resp.value()};
+    }
+
+    Result<yams::daemon::DownloadResponse>
+    fetchDaemonDownloadStatus(const std::string& jobId) const {
+        auto resp = callDaemonDownloadAction([&](auto& client) {
+            return yams::cli::run_result<yams::daemon::DownloadResponse>(
+                client.call(yams::daemon::DownloadStatusRequest{jobId}), std::chrono::seconds(30));
+        });
+        if (!resp) {
+            return resp.error();
+        }
+        return resp.value().value();
+    }
+
+    Result<yams::daemon::DownloadResponse> cancelDaemonDownloadJob(const std::string& jobId) const {
+        auto resp = callDaemonDownloadAction([&](auto& client) {
+            return yams::cli::run_result<yams::daemon::DownloadResponse>(
+                client.call(yams::daemon::CancelDownloadJobRequest{jobId}),
+                std::chrono::seconds(30));
+        });
+        if (!resp) {
+            return resp.error();
+        }
+        return resp.value().value();
+    }
+
+    Result<yams::daemon::ListDownloadJobsResponse> fetchDaemonDownloadJobs() const {
+        using namespace yams::daemon;
+
+        ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+        if (!leaseRes) {
+            return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        auto resp = yams::cli::run_result<ListDownloadJobsResponse>(
+            client.call(ListDownloadJobsRequest{}), std::chrono::seconds(30));
+        if (!resp) {
+            return resp.error();
+        }
+        return resp.value();
+    }
+
     Result<std::optional<yams::daemon::DownloadResponse>> tryDaemonDownload() {
         using namespace yams::daemon;
 
@@ -452,6 +565,7 @@ private:
 
         DownloadRequest req;
         req.url = *url_;
+        req.checksum = checksum_.value_or(std::string{});
         req.tags = tags_;
         req.metadata = serviceMetadataMap();
         req.quiet = quiet_;
@@ -495,11 +609,22 @@ private:
             j["url"] = resp.url;
             j["hash"] = resp.hash;
             j["stored_path"] = resp.localPath;
+            j["job_id"] = resp.jobId;
+            j["state"] = resp.state;
+            j["created_at_ms"] = resp.createdAtMs;
+            j["updated_at_ms"] = resp.updatedAtMs;
             j["size_bytes"] = resp.size;
+            if (!resp.error.empty()) {
+                j["error"] = resp.error;
+            }
             std::cout << j.dump(2) << std::endl;
         } else {
             std::cout << "Download successful!" << std::endl;
             std::cout << "  URL: " << resp.url << std::endl;
+            if (!resp.jobId.empty()) {
+                std::cout << "  Job ID: " << resp.jobId << std::endl;
+                std::cout << "  State: " << resp.state << std::endl;
+            }
             std::cout << "  Content Hash: " << resp.hash << std::endl;
             std::cout << "  Size: " << resp.size << " bytes" << std::endl;
             std::cout << "  Stored at: " << resp.localPath << std::endl;
@@ -508,7 +633,86 @@ private:
         return Result<void>();
     }
 
+    Result<void> printDaemonStatus(const yams::daemon::DownloadResponse& resp) const {
+        if (jsonOutput_) {
+            json j;
+            j["job_id"] = resp.jobId;
+            j["state"] = resp.state;
+            j["success"] = resp.success;
+            j["url"] = resp.url;
+            j["hash"] = resp.hash;
+            j["stored_path"] = resp.localPath;
+            j["created_at_ms"] = resp.createdAtMs;
+            j["updated_at_ms"] = resp.updatedAtMs;
+            j["size_bytes"] = resp.size;
+            if (!resp.error.empty()) {
+                j["error"] = resp.error;
+            }
+            std::cout << j.dump(2) << std::endl;
+            return Result<void>();
+        }
+
+        std::cout << "Download job: " << resp.jobId << std::endl;
+        std::cout << "  State: " << resp.state << std::endl;
+        std::cout << "  Success: " << (resp.success ? "yes" : "no") << std::endl;
+        if (!resp.url.empty()) {
+            std::cout << "  URL: " << resp.url << std::endl;
+        }
+        if (!resp.hash.empty()) {
+            std::cout << "  Content Hash: " << resp.hash << std::endl;
+        }
+        if (!resp.localPath.empty()) {
+            std::cout << "  Stored at: " << resp.localPath << std::endl;
+        }
+        std::cout << "  Size: " << resp.size << " bytes" << std::endl;
+        if (!resp.error.empty()) {
+            std::cout << "  Error: " << resp.error << std::endl;
+        }
+        return Result<void>();
+    }
+
+    Result<void> printDaemonJobList(const yams::daemon::ListDownloadJobsResponse& resp) const {
+        if (jsonOutput_) {
+            json jobs = json::array();
+            for (const auto& job : resp.jobs) {
+                json item;
+                item["job_id"] = job.jobId;
+                item["state"] = job.state;
+                item["success"] = job.success;
+                item["url"] = job.url;
+                item["hash"] = job.hash;
+                item["stored_path"] = job.localPath;
+                item["created_at_ms"] = job.createdAtMs;
+                item["updated_at_ms"] = job.updatedAtMs;
+                item["size_bytes"] = job.size;
+                if (!job.error.empty()) {
+                    item["error"] = job.error;
+                }
+                jobs.push_back(std::move(item));
+            }
+            std::cout << jobs.dump(2) << std::endl;
+            return Result<void>();
+        }
+
+        if (resp.jobs.empty()) {
+            std::cout << "No tracked download jobs." << std::endl;
+            return Result<void>();
+        }
+
+        for (const auto& job : resp.jobs) {
+            std::cout << job.jobId << "  " << job.state;
+            if (!job.url.empty()) {
+                std::cout << "  " << job.url;
+            }
+            std::cout << std::endl;
+        }
+        return Result<void>();
+    }
+
     YamsCLI* cli_{nullptr};
+    std::optional<std::string> statusJobId_;
+    std::optional<std::string> cancelJobId_;
+    bool listJobs_{false};
     std::optional<std::string> url_;
     std::optional<fs::path> listPath_;
 

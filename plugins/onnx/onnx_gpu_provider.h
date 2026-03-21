@@ -3,8 +3,10 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/gpu_info.h>
 
-#include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
+
+#include "ort_cxx_api_wrapper.h"
+#include "ort_runtime_loader.h"
 
 #include <algorithm>
 #include <atomic>
@@ -124,7 +126,7 @@ inline void setEnvIfAbsent(const char* name, const std::string& value) {
 } // namespace detail
 
 // Try to attach the best available GPU execution provider at runtime.
-// Queries Ort::GetAvailableProviders() so this works with any ONNX Runtime
+// Queries the runtime-loaded ORT provider list so this works with any ONNX Runtime
 // build (Homebrew, pip, Conan, etc.) without compile-time defines.
 //
 // modelCacheDir: optional directory for CoreML model cache (eliminates
@@ -147,10 +149,14 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
         return "cpu";
     }
 
-    std::vector<std::string> providers;
-    try {
-        providers = Ort::GetAvailableProviders();
-    } catch (...) {
+    const auto& runtimeInfo = OrtRuntimeLoader::instance().ensureLoaded();
+    if (!runtimeInfo.available) {
+        spdlog::debug("[ONNX] Runtime unavailable; GPU providers disabled");
+        return "cpu";
+    }
+
+    auto providers = OrtRuntimeLoader::instance().availableProviders();
+    if (providers.empty()) {
         spdlog::debug("[ONNX] Could not query available providers");
         return "cpu";
     }

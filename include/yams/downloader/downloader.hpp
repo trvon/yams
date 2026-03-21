@@ -62,6 +62,7 @@ enum class ErrorCode {
     InvalidArgument,
     NetworkError,
     Timeout,
+    OperationCancelled,
     TlsVerificationFailed,
     ServerError,
     IoError,

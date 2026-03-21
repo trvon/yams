@@ -331,6 +331,25 @@ json MCPServer::describeOp(const std::string& target) const {
                  {"required", json::array({"url"})}},
             "execute", false};
 
+        ops["download_status"] = {
+            "Get daemon-managed download job status",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"job_id", {{"type", "string"}, {"description", "Download job id"}}}}},
+                 {"required", json::array({"job_id"})}},
+            "query", true};
+
+        ops["download_list_jobs"] = {"List daemon-managed download jobs", json{{"type", "object"}},
+                                     "query", true};
+
+        ops["download_cancel"] = {
+            "Cancel daemon-managed download job",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"job_id", {{"type", "string"}, {"description", "Download job id"}}}}},
+                 {"required", json::array({"job_id"})}},
+            "execute", false};
+
         ops["session_start"] = {
             "Start (and optionally warm) a session",
             json{{"type", "object"},
@@ -759,8 +778,12 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
         // Allowed write ops
         // "delete" maps to the "delete_by_name" tool internally
         static const std::unordered_map<std::string, std::string> opToTool = {
-            {"add", "add"},         {"update", "update"},     {"delete", "delete_by_name"},
-            {"restore", "restore"}, {"download", "download"},
+            {"add", "add"},
+            {"update", "update"},
+            {"delete", "delete_by_name"},
+            {"restore", "restore"},
+            {"download", "download"},
+            {"download_cancel", "download_cancel"},
         };
 
         json results = json::array();

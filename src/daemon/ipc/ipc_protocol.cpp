@@ -82,6 +82,18 @@ template <> struct MessageTypeTraits<DownloadRequest> {
     static constexpr MessageType value = MessageType::DownloadRequest;
     static constexpr const char* name = "Download";
 };
+template <> struct MessageTypeTraits<DownloadStatusRequest> {
+    static constexpr MessageType value = MessageType::DownloadStatusRequest;
+    static constexpr const char* name = "DownloadStatus";
+};
+template <> struct MessageTypeTraits<CancelDownloadJobRequest> {
+    static constexpr MessageType value = MessageType::CancelDownloadJobRequest;
+    static constexpr const char* name = "CancelDownloadJob";
+};
+template <> struct MessageTypeTraits<ListDownloadJobsRequest> {
+    static constexpr MessageType value = MessageType::ListDownloadJobsRequest;
+    static constexpr const char* name = "ListDownloadJobs";
+};
 template <> struct MessageTypeTraits<GetStatsRequest> {
     static constexpr MessageType value = MessageType::GetStatsRequest;
     static constexpr const char* name = "GetStats";
@@ -258,6 +270,9 @@ template <> struct MessageTypeTraits<GetStatsResponse> {
 template <> struct MessageTypeTraits<DownloadResponse> {
     static constexpr MessageType value = MessageType::DownloadResponse;
 };
+template <> struct MessageTypeTraits<ListDownloadJobsResponse> {
+    static constexpr MessageType value = MessageType::ListDownloadJobsResponse;
+};
 template <> struct MessageTypeTraits<DeleteResponse> {
     static constexpr MessageType value = MessageType::DeleteResponse;
 };
@@ -355,35 +370,38 @@ static constexpr MessageType kRequestTypeMap[] = {
     MessageType::GrepRequest,                // 16
     MessageType::UpdateDocumentRequest,      // 17
     MessageType::DownloadRequest,            // 18
-    MessageType::GetStatsRequest,            // 19
-    MessageType::PrepareSessionRequest,      // 20
-    MessageType::EmbedDocumentsRequest,      // 21
-    MessageType::PluginScanRequest,          // 22
-    MessageType::PluginLoadRequest,          // 23
-    MessageType::PluginUnloadRequest,        // 24
-    MessageType::PluginTrustListRequest,     // 25
-    MessageType::PluginTrustAddRequest,      // 26
-    MessageType::PluginTrustRemoveRequest,   // 27
-    MessageType::CancelRequest,              // 28
-    MessageType::CatRequest,                 // 29
-    MessageType::ListSessionsRequest,        // 30
-    MessageType::UseSessionRequest,          // 31
-    MessageType::AddPathSelectorRequest,     // 32
-    MessageType::RemovePathSelectorRequest,  // 33
-    MessageType::ListTreeDiffRequest,        // 34
-    MessageType::FileHistoryRequest,         // 35
-    MessageType::PruneRequest,               // 36
-    MessageType::ListSnapshotsRequest,       // 37
-    MessageType::RestoreCollectionRequest,   // 38
-    MessageType::RestoreSnapshotRequest,     // 39
-    MessageType::GraphQueryRequest,          // 40
-    MessageType::GraphPathHistoryRequest,    // 41
-    MessageType::GraphRepairRequest,         // 42
-    MessageType::GraphValidateRequest,       // 43
-    MessageType::KgIngestRequest,            // 44
-    MessageType::MetadataValueCountsRequest, // 45
-    MessageType::BatchRequest,               // 46
-    MessageType::RepairRequest_MsgType       // 47 (RepairRequest)
+    MessageType::DownloadStatusRequest,      // 19
+    MessageType::CancelDownloadJobRequest,   // 20
+    MessageType::ListDownloadJobsRequest,    // 21
+    MessageType::GetStatsRequest,            // 22
+    MessageType::PrepareSessionRequest,      // 23
+    MessageType::EmbedDocumentsRequest,      // 24
+    MessageType::PluginScanRequest,          // 25
+    MessageType::PluginLoadRequest,          // 26
+    MessageType::PluginUnloadRequest,        // 27
+    MessageType::PluginTrustListRequest,     // 28
+    MessageType::PluginTrustAddRequest,      // 29
+    MessageType::PluginTrustRemoveRequest,   // 30
+    MessageType::CancelRequest,              // 31
+    MessageType::CatRequest,                 // 32
+    MessageType::ListSessionsRequest,        // 33
+    MessageType::UseSessionRequest,          // 34
+    MessageType::AddPathSelectorRequest,     // 35
+    MessageType::RemovePathSelectorRequest,  // 36
+    MessageType::ListTreeDiffRequest,        // 37
+    MessageType::FileHistoryRequest,         // 38
+    MessageType::PruneRequest,               // 39
+    MessageType::ListSnapshotsRequest,       // 40
+    MessageType::RestoreCollectionRequest,   // 41
+    MessageType::RestoreSnapshotRequest,     // 42
+    MessageType::GraphQueryRequest,          // 43
+    MessageType::GraphPathHistoryRequest,    // 44
+    MessageType::GraphRepairRequest,         // 45
+    MessageType::GraphValidateRequest,       // 46
+    MessageType::KgIngestRequest,            // 47
+    MessageType::MetadataValueCountsRequest, // 48
+    MessageType::BatchRequest,               // 49
+    MessageType::RepairRequest_MsgType       // 50 (RepairRequest)
 };
 
 // MUST MATCH Request std::variant order in ipc_protocol.h
@@ -407,35 +425,38 @@ static constexpr const char* kRequestNameMap[] = {
     "Grep",                // 16
     "UpdateDocument",      // 17
     "Download",            // 18
-    "GetStats",            // 19
-    "PrepareSession",      // 20
-    "EmbedDocuments",      // 21
-    "PluginScan",          // 22
-    "PluginLoad",          // 23
-    "PluginUnload",        // 24
-    "PluginTrustList",     // 25
-    "PluginTrustAdd",      // 26
-    "PluginTrustRemove",   // 27
-    "Cancel",              // 28
-    "Cat",                 // 29
-    "ListSessions",        // 30
-    "UseSession",          // 31
-    "AddPathSelector",     // 32
-    "RemovePathSelector",  // 33
-    "ListTreeDiff",        // 34
-    "FileHistory",         // 35
-    "Prune",               // 36
-    "ListSnapshots",       // 37
-    "RestoreCollection",   // 38
-    "RestoreSnapshot",     // 39
-    "GraphQuery",          // 40
-    "GraphPathHistory",    // 41
-    "GraphRepair",         // 42
-    "GraphValidate",       // 43
-    "KgIngest",            // 44
-    "MetadataValueCounts", // 45
-    "Batch",               // 46
-    "Repair"               // 47
+    "DownloadStatus",      // 19
+    "CancelDownloadJob",   // 20
+    "ListDownloadJobs",    // 21
+    "GetStats",            // 22
+    "PrepareSession",      // 23
+    "EmbedDocuments",      // 24
+    "PluginScan",          // 25
+    "PluginLoad",          // 26
+    "PluginUnload",        // 27
+    "PluginTrustList",     // 28
+    "PluginTrustAdd",      // 29
+    "PluginTrustRemove",   // 30
+    "Cancel",              // 31
+    "Cat",                 // 32
+    "ListSessions",        // 33
+    "UseSession",          // 34
+    "AddPathSelector",     // 35
+    "RemovePathSelector",  // 36
+    "ListTreeDiff",        // 37
+    "FileHistory",         // 38
+    "Prune",               // 39
+    "ListSnapshots",       // 40
+    "RestoreCollection",   // 41
+    "RestoreSnapshot",     // 42
+    "GraphQuery",          // 43
+    "GraphPathHistory",    // 44
+    "GraphRepair",         // 45
+    "GraphValidate",       // 46
+    "KgIngest",            // 47
+    "MetadataValueCounts", // 48
+    "Batch",               // 49
+    "Repair"               // 50
 };
 
 // MUST MATCH Response std::variant order in ipc_protocol.h
@@ -459,31 +480,32 @@ static constexpr MessageType kResponseTypeMap[] = {
     MessageType::UpdateDocumentResponse,      // 16
     MessageType::GetStatsResponse,            // 17
     MessageType::DownloadResponse,            // 18
-    MessageType::DeleteResponse,              // 19
-    MessageType::PrepareSessionResponse,      // 20
-    MessageType::EmbedDocumentsResponse,      // 21
-    MessageType::PluginScanResponse,          // 22
-    MessageType::PluginLoadResponse,          // 23
-    MessageType::PluginTrustListResponse,     // 24
-    MessageType::CatResponse,                 // 25
-    MessageType::ListSessionsResponse,        // 26
-    MessageType::ListTreeDiffResponse,        // 27
-    MessageType::FileHistoryResponse,         // 28
-    MessageType::PruneResponse,               // 29
-    MessageType::ListSnapshotsResponse,       // 30
-    MessageType::RestoreCollectionResponse,   // 31
-    MessageType::RestoreSnapshotResponse,     // 32
-    MessageType::GraphQueryResponse,          // 33
-    MessageType::GraphPathHistoryResponse,    // 34
-    MessageType::GraphRepairResponse,         // 35
-    MessageType::GraphValidateResponse,       // 36
-    MessageType::KgIngestResponse,            // 37
-    MessageType::MetadataValueCountsResponse, // 38
-    MessageType::BatchResponse,               // 39
-    MessageType::EmbeddingEvent,              // 40
-    MessageType::ModelLoadEvent,              // 41
-    MessageType::RepairResponse_MsgType,      // 42
-    MessageType::RepairEvent_MsgType          // 43
+    MessageType::ListDownloadJobsResponse,    // 19
+    MessageType::DeleteResponse,              // 20
+    MessageType::PrepareSessionResponse,      // 21
+    MessageType::EmbedDocumentsResponse,      // 22
+    MessageType::PluginScanResponse,          // 23
+    MessageType::PluginLoadResponse,          // 24
+    MessageType::PluginTrustListResponse,     // 25
+    MessageType::CatResponse,                 // 26
+    MessageType::ListSessionsResponse,        // 27
+    MessageType::ListTreeDiffResponse,        // 28
+    MessageType::FileHistoryResponse,         // 29
+    MessageType::PruneResponse,               // 30
+    MessageType::ListSnapshotsResponse,       // 31
+    MessageType::RestoreCollectionResponse,   // 32
+    MessageType::RestoreSnapshotResponse,     // 33
+    MessageType::GraphQueryResponse,          // 34
+    MessageType::GraphPathHistoryResponse,    // 35
+    MessageType::GraphRepairResponse,         // 36
+    MessageType::GraphValidateResponse,       // 37
+    MessageType::KgIngestResponse,            // 38
+    MessageType::MetadataValueCountsResponse, // 39
+    MessageType::BatchResponse,               // 40
+    MessageType::EmbeddingEvent,              // 41
+    MessageType::ModelLoadEvent,              // 42
+    MessageType::RepairResponse_MsgType,      // 43
+    MessageType::RepairEvent_MsgType          // 44
 };
 
 MessageType getMessageType(const Request& req) {

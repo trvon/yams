@@ -838,6 +838,7 @@ template <> struct ProtoBinding<DownloadRequest> {
         auto* o = env.mutable_download_request();
         o->set_url(yams::common::sanitizeUtf8(r.url));
         o->set_output_path(yams::common::sanitizeUtf8(r.outputPath));
+        o->set_checksum(yams::common::sanitizeUtf8(r.checksum));
         set_string_list(r.tags, o->mutable_tags());
         to_kv_pairs(r.metadata, o->mutable_metadata());
         o->set_quiet(r.quiet);
@@ -847,9 +848,52 @@ template <> struct ProtoBinding<DownloadRequest> {
         DownloadRequest r{};
         r.url = i.url();
         r.outputPath = i.output_path();
+        r.checksum = i.checksum();
         r.tags = get_string_list(i.tags());
         r.metadata = from_kv_pairs(i.metadata());
         r.quiet = i.quiet();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<DownloadStatusRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kDownloadStatusRequest;
+    static void set(Envelope& env, const DownloadStatusRequest& r) {
+        auto* o = env.mutable_download_status_request();
+        o->set_job_id(yams::common::sanitizeUtf8(r.jobId));
+    }
+    static DownloadStatusRequest get(const Envelope& env) {
+        const auto& i = env.download_status_request();
+        DownloadStatusRequest r{};
+        r.jobId = i.job_id();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<CancelDownloadJobRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kCancelDownloadJobRequest;
+    static void set(Envelope& env, const CancelDownloadJobRequest& r) {
+        auto* o = env.mutable_cancel_download_job_request();
+        o->set_job_id(yams::common::sanitizeUtf8(r.jobId));
+    }
+    static CancelDownloadJobRequest get(const Envelope& env) {
+        const auto& i = env.cancel_download_job_request();
+        CancelDownloadJobRequest r{};
+        r.jobId = i.job_id();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<ListDownloadJobsRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListDownloadJobsRequest;
+    static void set(Envelope& env, const ListDownloadJobsRequest& r) {
+        auto* o = env.mutable_list_download_jobs_request();
+        o->set_limit(r.limit);
+    }
+    static ListDownloadJobsRequest get(const Envelope& env) {
+        const auto& i = env.list_download_jobs_request();
+        ListDownloadJobsRequest r{};
+        r.limit = i.limit();
         return r;
     }
 };
@@ -1926,12 +1970,16 @@ template <> struct ProtoBinding<DownloadResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kDownloadResponse;
     static void set(Envelope& env, const DownloadResponse& r) {
         auto* o = env.mutable_download_response();
-        o->set_url(r.url);
-        o->set_path(r.localPath);
-        o->set_hash(r.hash);
+        o->set_url(yams::common::sanitizeUtf8(r.url));
+        o->set_path(yams::common::sanitizeUtf8(r.localPath));
+        o->set_hash(yams::common::sanitizeUtf8(r.hash));
+        o->set_job_id(yams::common::sanitizeUtf8(r.jobId));
+        o->set_state(yams::common::sanitizeUtf8(r.state));
+        o->set_created_at_ms(r.createdAtMs);
+        o->set_updated_at_ms(r.updatedAtMs);
         o->set_size(static_cast<uint64_t>(r.size));
         o->set_success(r.success);
-        o->set_error(r.error);
+        o->set_error(yams::common::sanitizeUtf8(r.error));
     }
     static DownloadResponse get(const Envelope& env) {
         const auto& i = env.download_response();
@@ -1939,9 +1987,53 @@ template <> struct ProtoBinding<DownloadResponse> {
         r.url = i.url();
         r.localPath = i.path();
         r.hash = i.hash();
+        r.jobId = i.job_id();
+        r.state = i.state();
+        r.createdAtMs = i.created_at_ms();
+        r.updatedAtMs = i.updated_at_ms();
         r.size = i.size();
         r.success = i.success();
         r.error = i.error();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<ListDownloadJobsResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListDownloadJobsResponse;
+    static void set(Envelope& env, const ListDownloadJobsResponse& r) {
+        auto* o = env.mutable_list_download_jobs_response();
+        for (const auto& job : r.jobs) {
+            auto* item = o->add_jobs();
+            item->set_url(yams::common::sanitizeUtf8(job.url));
+            item->set_path(yams::common::sanitizeUtf8(job.localPath));
+            item->set_hash(yams::common::sanitizeUtf8(job.hash));
+            item->set_job_id(yams::common::sanitizeUtf8(job.jobId));
+            item->set_state(yams::common::sanitizeUtf8(job.state));
+            item->set_created_at_ms(job.createdAtMs);
+            item->set_updated_at_ms(job.updatedAtMs);
+            item->set_size(static_cast<uint64_t>(job.size));
+            item->set_success(job.success);
+            item->set_error(yams::common::sanitizeUtf8(job.error));
+        }
+    }
+    static ListDownloadJobsResponse get(const Envelope& env) {
+        const auto& i = env.list_download_jobs_response();
+        ListDownloadJobsResponse r{};
+        r.jobs.reserve(static_cast<std::size_t>(i.jobs_size()));
+        for (const auto& item : i.jobs()) {
+            DownloadResponse job{};
+            job.url = item.url();
+            job.localPath = item.path();
+            job.hash = item.hash();
+            job.jobId = item.job_id();
+            job.state = item.state();
+            job.createdAtMs = item.created_at_ms();
+            job.updatedAtMs = item.updated_at_ms();
+            job.size = item.size();
+            job.success = item.success();
+            job.error = item.error();
+            r.jobs.push_back(std::move(job));
+        }
         return r;
     }
 };
@@ -3334,6 +3426,21 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kDownloadStatusRequest: {
+            auto v = ProtoBinding<DownloadStatusRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kCancelDownloadJobRequest: {
+            auto v = ProtoBinding<CancelDownloadJobRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kListDownloadJobsRequest: {
+            auto v = ProtoBinding<ListDownloadJobsRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
         case Envelope::kGetStatsRequest: {
             auto v = ProtoBinding<GetStatsRequest>::get(env);
             m.payload = Request{std::move(v)};
@@ -3554,6 +3661,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kDownloadResponse: {
             auto v = ProtoBinding<DownloadResponse>::get(env);
             m.payload = Response{std::in_place_type<DownloadResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kListDownloadJobsResponse: {
+            auto v = ProtoBinding<ListDownloadJobsResponse>::get(env);
+            m.payload = Response{std::in_place_type<ListDownloadJobsResponse>, std::move(v)};
             break;
         }
         case Envelope::kDeleteResponse: {

@@ -3,12 +3,13 @@
 // Plugin harness test: isolated plugin loading with graceful degradation
 // Migrated from GTest to Catch2, enhanced with timeout and multi-plugin support
 
+#include <nlohmann/json.hpp>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <future>
-#include <catch2/catch_test_macros.hpp>
 #include "../../common/env_compat.h"
+#include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h> // For getpid()
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/model_provider_v1.h>
@@ -193,6 +194,48 @@ TEST_CASE("Plugin: ONNX plugin loading with isolation", "[daemon][plugin][onnx]"
 
         SUCCEED("Multiple load/unload cycles completed");
     }
+}
+
+TEST_CASE("Plugin: ONNX plugin reports missing runtime cleanly",
+          "[daemon][plugin][onnx][runtime]") {
+    IsolatedPluginEnv env;
+
+    auto pluginPath = getOnnxPluginPath();
+    if (!pluginPath || !fs::exists(*pluginPath)) {
+        SKIP("ONNX plugin not available (set TEST_ONNX_PLUGIN_FILE or build plugins/onnx)");
+    }
+
+    EnvGuard runtimeLib("YAMS_ONNX_RUNTIME_LIB");
+    runtimeLib.set((env.tempDir / "missing-onnxruntime.dylib").string());
+
+    AbiPluginHost host(nullptr);
+    host.setTrustFile(env.trustFile);
+    REQUIRE(host.trustAdd(pluginPath->parent_path()));
+
+    auto loadResult = loadWithTimeout([&]() { return host.load(*pluginPath, "{}"); });
+    REQUIRE(loadResult);
+
+    auto healthResult = host.health(loadResult.value().name);
+    REQUIRE(healthResult);
+
+    auto health = nlohmann::json::parse(healthResult.value(), nullptr, false);
+    REQUIRE_FALSE(health.is_discarded());
+    CHECK(health.value("status", "") == "unavailable");
+    CHECK((health.value("reason", "") == "runtime_load_failed" ||
+           health.value("reason", "") == "runtime_not_found"));
+    CHECK_FALSE(health.value("runtime_status", "").empty());
+    CHECK_FALSE(health.value("runtime_error", "").empty());
+
+    auto ifaceResult = host.getInterface(loadResult.value().name, "model_provider_v1", 1);
+    REQUIRE(ifaceResult);
+    auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceResult.value());
+    REQUIRE(table != nullptr);
+
+    bool loaded = true;
+    CHECK(table->is_model_loaded(table->self, "e5-small", &loaded) == YAMS_ERR_INTERNAL);
+    CHECK_FALSE(loaded);
+
+    REQUIRE(host.unload(loadResult.value().name));
 }
 
 TEST_CASE("Plugin: Error handling and edge cases", "[daemon][plugin][error]") {

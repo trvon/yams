@@ -157,10 +157,26 @@ TEST_CASE("MCP Schema - Internal tools contain all individual ops",
     REQUIRE(result["tools"].is_array());
 
     // All individual tools are in the internal registry for dispatch
-    std::vector<std::string> expected = {
-        "search",        "grep",  "download", "session_start",    "session_stop",  "session_pin",
-        "session_unpin", "graph", "get",      "status",           "update",        "delete_by_name",
-        "list",          "add",   "restore",  "list_collections", "list_snapshots"};
+    std::vector<std::string> expected = {"search",
+                                         "grep",
+                                         "download",
+                                         "download_status",
+                                         "download_list_jobs",
+                                         "download_cancel",
+                                         "session_start",
+                                         "session_stop",
+                                         "session_pin",
+                                         "session_unpin",
+                                         "graph",
+                                         "get",
+                                         "status",
+                                         "update",
+                                         "delete_by_name",
+                                         "list",
+                                         "add",
+                                         "restore",
+                                         "list_collections",
+                                         "list_snapshots"};
 
     std::vector<std::string> actual;
     for (const auto& t : result["tools"]) {
@@ -453,4 +469,28 @@ TEST_CASE("MCP Download - relative staging config does not hard-fail in unwritab
 
     std::error_code cleanup_ec;
     fs::remove_all(root, cleanup_ec);
+}
+
+TEST_CASE("MCP Schema - Download job tools expose expected params",
+          "[mcp][schema][download-jobs][catch2]") {
+    auto server = ServerUnderTest::make();
+    json tools = server->testListInternalTools();
+
+    auto statusTool = findTool(tools, "download_status");
+    REQUIRE(statusTool.has_value());
+    auto statusProps = toolProps(*statusTool);
+    REQUIRE(statusProps.has_value());
+    CHECK(hasProp(*statusProps, "job_id"));
+
+    auto listTool = findTool(tools, "download_list_jobs");
+    REQUIRE(listTool.has_value());
+    auto listProps = toolProps(*listTool);
+    REQUIRE(listProps.has_value());
+    CHECK(listProps->empty());
+
+    auto cancelTool = findTool(tools, "download_cancel");
+    REQUIRE(cancelTool.has_value());
+    auto cancelProps = toolProps(*cancelTool);
+    REQUIRE(cancelProps.has_value());
+    CHECK(hasProp(*cancelProps, "job_id"));
 }

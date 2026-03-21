@@ -551,6 +551,76 @@ json MCPDownloadResponse::toJson() const {
     return j;
 }
 
+MCPDownloadJobRequest MCPDownloadJobRequest::fromJson(const json& j) {
+    MCPDownloadJobRequest req;
+    req.jobId = j.value("job_id", std::string{});
+    return req;
+}
+
+json MCPDownloadJobRequest::toJson() const {
+    return json{{"job_id", jobId}};
+}
+
+MCPDownloadJobResponse MCPDownloadJobResponse::fromJson(const json& j) {
+    MCPDownloadJobResponse resp;
+    resp.jobId = j.value("job_id", std::string{});
+    resp.state = j.value("state", std::string{});
+    resp.success = j.value("success", false);
+    resp.url = j.value("url", std::string{});
+    resp.hash = j.value("hash", std::string{});
+    resp.storedPath = j.value("stored_path", std::string{});
+    resp.sizeBytes = j.value("size_bytes", uint64_t{0});
+    resp.createdAtMs = j.value("created_at_ms", uint64_t{0});
+    resp.updatedAtMs = j.value("updated_at_ms", uint64_t{0});
+    resp.error = j.value("error", std::string{});
+    return resp;
+}
+
+json MCPDownloadJobResponse::toJson() const {
+    json j{{"job_id", jobId},
+           {"state", state},
+           {"success", success},
+           {"url", url},
+           {"hash", hash},
+           {"stored_path", storedPath},
+           {"size_bytes", sizeBytes},
+           {"created_at_ms", createdAtMs},
+           {"updated_at_ms", updatedAtMs},
+           {"error", error}};
+    return j;
+}
+
+MCPListDownloadJobsRequest MCPListDownloadJobsRequest::fromJson(const json& j) {
+    (void)j;
+    return {};
+}
+
+json MCPListDownloadJobsRequest::toJson() const {
+    return json::object();
+}
+
+MCPListDownloadJobsResponse MCPListDownloadJobsResponse::fromJson(const json& j) {
+    MCPListDownloadJobsResponse resp;
+    if (j.contains("jobs") && j["jobs"].is_array()) {
+        resp.jobs.reserve(j["jobs"].size());
+        for (const auto& item : j["jobs"]) {
+            if (item.is_object()) {
+                resp.jobs.push_back(MCPDownloadJobResponse::fromJson(item));
+            }
+        }
+    }
+    return resp;
+}
+
+json MCPListDownloadJobsResponse::toJson() const {
+    json j;
+    j["jobs"] = json::array();
+    for (const auto& job : jobs) {
+        j["jobs"].push_back(job.toJson());
+    }
+    return j;
+}
+
 // MCPStoreDocumentRequest implementation
 MCPStoreDocumentRequest MCPStoreDocumentRequest::fromJson(const json& j) {
     MCPStoreDocumentRequest req;

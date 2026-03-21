@@ -295,10 +295,23 @@ message UpdateDocumentRequest {
 message DownloadRequest {
   string url = 1;
   string output_path = 2;
-  repeated string tags = 3;
-  repeated KvPair metadata = 4;
-  bool quiet = 5;
+  string checksum = 3;
+  repeated string tags = 4;
+  repeated KvPair metadata = 5;
+  bool quiet = 6;
   string session_id = 99;
+}
+
+message DownloadStatusRequest {
+  string job_id = 1;
+}
+
+message CancelDownloadJobRequest {
+  string job_id = 1;
+}
+
+message ListDownloadJobsRequest {
+  uint32 limit = 1;
 }
 
 message GetStatsRequest {
@@ -547,9 +560,17 @@ message DownloadResponse {
   string url = 1;
   string path = 2;
   string hash = 3;
-  uint64 size = 4;
-  bool success = 5;
-  string error = 6;
+  string job_id = 4;
+  string state = 5;
+  uint64 created_at_ms = 6;
+  uint64 updated_at_ms = 7;
+  uint64 size = 8;
+  bool success = 9;
+  string error = 10;
+}
+
+message ListDownloadJobsResponse {
+  repeated DownloadResponse jobs = 1;
 }
 message GetStatsResponse {
   string json = 1;
@@ -1007,6 +1028,9 @@ message Envelope {
     GrepRequest grep_request = 27;
     UpdateDocumentRequest update_document_request = 28;
     DownloadRequest download_request = 29;
+    DownloadStatusRequest download_status_request = 59;
+    CancelDownloadJobRequest cancel_download_job_request = 60;
+    ListDownloadJobsRequest list_download_jobs_request = 61;
     GetStatsRequest get_stats_request = 30;
     PrepareSessionRequest prepare_session_request = 31;
     EmbedDocumentsRequest embed_documents_request = 32;
@@ -1066,6 +1090,7 @@ message Envelope {
     UpdateDocumentResponse update_document_response = 116;
     GetStatsResponse get_stats_response = 117;
     DownloadResponse download_response = 118;
+    ListDownloadJobsResponse list_download_jobs_response = 147;
     DeleteResponse delete_response = 119;
     PrepareSessionResponse prepare_session_response = 120;
     EmbedDocumentsResponse embed_documents_response = 121;

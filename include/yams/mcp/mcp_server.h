@@ -424,6 +424,12 @@ private:
     boost::asio::awaitable<Result<MCPGrepResponse>> handleGrepDocuments(const MCPGrepRequest& req);
     boost::asio::awaitable<Result<MCPDownloadResponse>>
     handleDownload(const MCPDownloadRequest& req);
+    boost::asio::awaitable<Result<MCPDownloadJobResponse>>
+    handleDownloadStatus(const MCPDownloadJobRequest& req);
+    boost::asio::awaitable<Result<MCPListDownloadJobsResponse>>
+    handleListDownloadJobs(const MCPListDownloadJobsRequest& req);
+    boost::asio::awaitable<Result<MCPDownloadJobResponse>>
+    handleCancelDownload(const MCPDownloadJobRequest& req);
     boost::asio::awaitable<Result<MCPStoreDocumentResponse>>
     handleStoreDocument(const MCPStoreDocumentRequest& req);
     boost::asio::awaitable<Result<MCPRetrieveDocumentResponse>>

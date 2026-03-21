@@ -136,7 +136,7 @@ public:
             if (repo)
                 return repo;
         }
-        return metadataRepo_; // Fallback to old member
+        return loadMetadataRepo(); // Fallback to old member
     }
     std::shared_ptr<IModelProvider> getModelProvider() const { return loadModelProvider(); }
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
@@ -147,7 +147,7 @@ public:
             if (db)
                 return db;
         }
-        return vectorDatabase_; // Fallback to old member
+        return loadVectorDatabase(); // Fallback to old member
     }
     std::shared_ptr<WorkerPool> getWorkerPool() const { return nullptr; }
     WorkCoordinator* getWorkCoordinator() const { return workCoordinator_.get(); }
@@ -319,7 +319,7 @@ public:
             if (store)
                 return store;
         }
-        return kgStore_; // Fallback to old member
+        return loadKgStore(); // Fallback to old member
     }
 
     // KG Write Queue - serializes KG writes to eliminate lock contention
@@ -487,7 +487,7 @@ public:
         storeModelProvider(std::move(provider));
     }
     void __test_setMetadataRepo(std::shared_ptr<metadata::MetadataRepository> repo) {
-        metadataRepo_ = std::move(repo);
+        storeMetadataRepo(std::move(repo));
     }
     void __test_setContentStore(std::shared_ptr<api::IContentStore> store) {
         std::atomic_store_explicit(&contentStore_, std::move(store), std::memory_order_release);
@@ -548,6 +548,39 @@ public:
     }
 
 private:
+    std::shared_ptr<metadata::MetadataRepository> loadMetadataRepo() const {
+        return std::atomic_load_explicit(&metadataRepo_, std::memory_order_acquire);
+    }
+
+    void storeMetadataRepo(std::shared_ptr<metadata::MetadataRepository> repo) {
+        std::atomic_store_explicit(&metadataRepo_, std::move(repo), std::memory_order_release);
+    }
+
+    std::shared_ptr<metadata::KnowledgeGraphStore> loadKgStore() const {
+        return std::atomic_load_explicit(&kgStore_, std::memory_order_acquire);
+    }
+
+    void storeKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
+        std::atomic_store_explicit(&kgStore_, std::move(store), std::memory_order_release);
+    }
+
+    std::shared_ptr<GraphComponent> loadGraphComponent() const {
+        return std::atomic_load_explicit(&graphComponent_, std::memory_order_acquire);
+    }
+
+    void storeGraphComponent(std::shared_ptr<GraphComponent> component) {
+        std::atomic_store_explicit(&graphComponent_, std::move(component),
+                                   std::memory_order_release);
+    }
+
+    std::shared_ptr<vector::VectorDatabase> loadVectorDatabase() const {
+        return std::atomic_load_explicit(&vectorDatabase_, std::memory_order_acquire);
+    }
+
+    void storeVectorDatabase(std::shared_ptr<vector::VectorDatabase> db) {
+        std::atomic_store_explicit(&vectorDatabase_, std::move(db), std::memory_order_release);
+    }
+
     std::shared_ptr<IModelProvider> loadModelProvider() const {
         return std::atomic_load_explicit(&modelProvider_, std::memory_order_acquire);
     }

@@ -202,6 +202,65 @@ TEST_CASE("MCP DTO parsing - DownloadResponse preserves indexed flag",
     }
 }
 
+TEST_CASE("MCP DTO parsing - Download job request and response roundtrip",
+          "[mcp][dto][download][catch2]") {
+    using yams::mcp::MCPDownloadJobRequest;
+    using yams::mcp::MCPDownloadJobResponse;
+
+    {
+        const auto req = MCPDownloadJobRequest::fromJson(json{{"job_id", "job-123"}});
+        CHECK(req.jobId == "job-123");
+
+        const auto out = req.toJson();
+        REQUIRE(out.contains("job_id"));
+        CHECK(out["job_id"] == "job-123");
+    }
+
+    {
+        const auto resp = MCPDownloadJobResponse::fromJson(json{{"job_id", "job-1"},
+                                                                {"state", "running"},
+                                                                {"success", false},
+                                                                {"url", "https://example.com/a"},
+                                                                {"hash", "abc"},
+                                                                {"stored_path", "/tmp/a"},
+                                                                {"size_bytes", 42},
+                                                                {"created_at_ms", 100},
+                                                                {"updated_at_ms", 120},
+                                                                {"error", ""}});
+        CHECK(resp.jobId == "job-1");
+        CHECK(resp.state == "running");
+        CHECK_FALSE(resp.success);
+        CHECK(resp.sizeBytes == 42);
+
+        const auto out = resp.toJson();
+        CHECK(out["job_id"] == "job-1");
+        CHECK(out["state"] == "running");
+        CHECK(out["size_bytes"] == 42);
+    }
+}
+
+TEST_CASE("MCP DTO parsing - List download jobs response accepts job arrays",
+          "[mcp][dto][download][catch2]") {
+    using yams::mcp::MCPListDownloadJobsRequest;
+    using yams::mcp::MCPListDownloadJobsResponse;
+
+    const auto req = MCPListDownloadJobsRequest::fromJson(json::object());
+    CHECK(req.toJson().empty());
+
+    const auto resp = MCPListDownloadJobsResponse::fromJson(json{
+        {"jobs",
+         json::array({json{{"job_id", "job-1"}, {"state", "running"}},
+                      json{{"job_id", "job-2"}, {"state", "completed"}, {"success", true}}})}});
+    REQUIRE(resp.jobs.size() == 2);
+    CHECK(resp.jobs[0].jobId == "job-1");
+    CHECK(resp.jobs[1].state == "completed");
+
+    const auto out = resp.toJson();
+    REQUIRE(out.contains("jobs"));
+    REQUIRE(out["jobs"].is_array());
+    REQUIRE(out["jobs"].size() == 2);
+}
+
 TEST_CASE("MCP DTO parsing - ListDocumentsRequest accepts string/array for tags",
           "[mcp][dto][list][catch2]") {
     using yams::mcp::MCPListDocumentsRequest;

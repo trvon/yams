@@ -116,6 +116,18 @@ public:
     boost::asio::awaitable<Result<GetStatsResponse>> getStats(const GetStatsRequest& req);
     boost::asio::awaitable<Result<UpdateDocumentResponse>>
     updateDocument(const UpdateDocumentRequest& req);
+    boost::asio::awaitable<Result<DownloadResponse>>
+    downloadStatus(const DownloadStatusRequest& req) {
+        return call<DownloadStatusRequest>(req);
+    }
+    boost::asio::awaitable<Result<DownloadResponse>>
+    cancelDownloadJob(const CancelDownloadJobRequest& req) {
+        return call<CancelDownloadJobRequest>(req);
+    }
+    boost::asio::awaitable<Result<ListDownloadJobsResponse>>
+    listDownloadJobs(const ListDownloadJobsRequest& req) {
+        return call<ListDownloadJobsRequest>(req);
+    }
     boost::asio::awaitable<Result<PrepareSessionResponse>>
     prepareSession(const PrepareSessionRequest& req) {
         return call<PrepareSessionRequest>(req);
@@ -432,8 +444,9 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, ModelStatusRequest>, std::is_same<Req, AddDocumentRequest>,
             std::is_same<Req, GrepRequest>, std::is_same<Req, FileHistoryRequest>,
             std::is_same<Req, UpdateDocumentRequest>, std::is_same<Req, DownloadRequest>,
-            std::is_same<Req, GetStatsRequest>, std::is_same<Req, PrepareSessionRequest>,
-            std::is_same<Req, EmbedDocumentsRequest>,
+            std::is_same<Req, DownloadStatusRequest>, std::is_same<Req, CancelDownloadJobRequest>,
+            std::is_same<Req, ListDownloadJobsRequest>, std::is_same<Req, GetStatsRequest>,
+            std::is_same<Req, PrepareSessionRequest>, std::is_same<Req, EmbedDocumentsRequest>,
             // Plugin management requests
             std::is_same<Req, PluginScanRequest>, std::is_same<Req, PluginLoadRequest>,
             std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,

@@ -2008,6 +2008,7 @@ struct UpdateDocumentRequest {
 struct DownloadRequest {
     std::string url;                             // URL to download
     std::string outputPath;                      // Optional output path/name
+    std::string checksum;                        // Optional checksum "<algo>:<hex>"
     std::vector<std::string> tags;               // Tags to apply to downloaded file
     std::map<std::string, std::string> metadata; // Metadata to apply
     bool quiet = false;                          // Suppress info logging
@@ -2015,7 +2016,7 @@ struct DownloadRequest {
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << url << outputPath << tags << metadata << quiet;
+        ser << url << outputPath << checksum << tags << metadata << quiet;
     }
 
     template <typename Deserializer>
@@ -2030,6 +2031,10 @@ struct DownloadRequest {
         if (!op)
             return op.error();
         req.outputPath = std::move(op.value());
+        auto cs = deser.readString();
+        if (!cs)
+            return cs.error();
+        req.checksum = std::move(cs.value());
         auto t = deser.readStringVector();
         if (!t)
             return t.error();
@@ -2042,6 +2047,69 @@ struct DownloadRequest {
         if (!q)
             return q.error();
         req.quiet = q.value();
+        return req;
+    }
+};
+
+struct DownloadStatusRequest {
+    std::string jobId;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << jobId;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<DownloadStatusRequest> deserialize(Deserializer& deser) {
+        DownloadStatusRequest req;
+        auto job = deser.readString();
+        if (!job)
+            return job.error();
+        req.jobId = std::move(job.value());
+        return req;
+    }
+};
+
+struct CancelDownloadJobRequest {
+    std::string jobId;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << jobId;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<CancelDownloadJobRequest> deserialize(Deserializer& deser) {
+        CancelDownloadJobRequest req;
+        auto job = deser.readString();
+        if (!job)
+            return job.error();
+        req.jobId = std::move(job.value());
+        return req;
+    }
+};
+
+struct ListDownloadJobsRequest {
+    uint32_t limit{20};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << limit;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListDownloadJobsRequest> deserialize(Deserializer& deser) {
+        ListDownloadJobsRequest req;
+        auto lim = deser.template read<uint32_t>();
+        if (!lim)
+            return lim.error();
+        req.limit = lim.value();
         return req;
     }
 };
@@ -3321,6 +3389,9 @@ struct RepairResponse {
 // Forward declarations for late-defined request types used in the Request variant
 struct CatRequest;
 struct ListSessionsRequest;
+struct DownloadStatusRequest;
+struct CancelDownloadJobRequest;
+struct ListDownloadJobsRequest;
 struct UseSessionRequest;
 struct AddPathSelectorRequest;
 struct RemovePathSelectorRequest;
@@ -3332,10 +3403,11 @@ using Request = std::variant<
     SearchRequest, GetRequest, GetInitRequest, GetChunkRequest, GetEndRequest, DeleteRequest,
     ListRequest, ShutdownRequest, StatusRequest, PingRequest, GenerateEmbeddingRequest,
     BatchEmbeddingRequest, LoadModelRequest, UnloadModelRequest, ModelStatusRequest,
-    AddDocumentRequest, GrepRequest, UpdateDocumentRequest, DownloadRequest, GetStatsRequest,
-    PrepareSessionRequest, EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest,
-    PluginUnloadRequest, PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest,
-    CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
+    AddDocumentRequest, GrepRequest, UpdateDocumentRequest, DownloadRequest, DownloadStatusRequest,
+    CancelDownloadJobRequest, ListDownloadJobsRequest, GetStatsRequest, PrepareSessionRequest,
+    EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest, PluginUnloadRequest,
+    PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest, CancelRequest,
+    CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
     RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
     ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
     GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest, KgIngestRequest,
@@ -6742,14 +6814,19 @@ struct DownloadResponse {
     std::string hash;      // Content hash of downloaded file
     std::string localPath; // Local path where file was stored
     std::string url;       // Original URL
-    size_t size = 0;       // File size in bytes
-    bool success = false;  // Download success status
-    std::string error;     // Error message if failed
+    std::string jobId;     // Daemon-assigned job id
+    std::string state;     // queued|running|completed|failed
+    uint64_t createdAtMs{0};
+    uint64_t updatedAtMs{0};
+    size_t size = 0;      // File size in bytes
+    bool success = false; // Download success status
+    std::string error;    // Error message if failed
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << hash << localPath << url << static_cast<uint64_t>(size) << success << error;
+        ser << hash << localPath << url << jobId << state << createdAtMs << updatedAtMs
+            << static_cast<uint64_t>(size) << success << error;
     }
 
     template <typename Deserializer>
@@ -6768,6 +6845,22 @@ struct DownloadResponse {
         if (!u)
             return u.error();
         res.url = std::move(u.value());
+        auto jid = deser.readString();
+        if (!jid)
+            return jid.error();
+        res.jobId = std::move(jid.value());
+        auto st = deser.readString();
+        if (!st)
+            return st.error();
+        res.state = std::move(st.value());
+        auto created = deser.template read<uint64_t>();
+        if (!created)
+            return created.error();
+        res.createdAtMs = created.value();
+        auto updated = deser.template read<uint64_t>();
+        if (!updated)
+            return updated.error();
+        res.updatedAtMs = updated.value();
         auto s = deser.template read<uint64_t>();
         if (!s)
             return s.error();
@@ -6780,6 +6873,27 @@ struct DownloadResponse {
         if (!e)
             return e.error();
         res.error = std::move(e.value());
+        return res;
+    }
+};
+
+struct ListDownloadJobsResponse {
+    std::vector<DownloadResponse> jobs;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << jobs;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<ListDownloadJobsResponse> deserialize(Deserializer& deser) {
+        ListDownloadJobsResponse res;
+        auto items = deser.template readVector<DownloadResponse>();
+        if (!items)
+            return items.error();
+        res.jobs = std::move(items.value());
         return res;
     }
 };
@@ -7167,12 +7281,13 @@ using Response =
                  StatusResponse, SuccessResponse, ErrorResponse, PongResponse, EmbeddingResponse,
                  BatchEmbeddingResponse, ModelLoadResponse, ModelStatusResponse, ListResponse,
                  AddDocumentResponse, GrepResponse, UpdateDocumentResponse, GetStatsResponse,
-                 DownloadResponse, DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse,
-                 PluginScanResponse, PluginLoadResponse, PluginTrustListResponse, CatResponse,
-                 ListSessionsResponse, ListTreeDiffResponse, FileHistoryResponse, PruneResponse,
-                 ListSnapshotsResponse, RestoreCollectionResponse, RestoreSnapshotResponse,
-                 GraphQueryResponse, GraphPathHistoryResponse, GraphRepairResponse,
-                 GraphValidateResponse, KgIngestResponse, MetadataValueCountsResponse,
+                 DownloadResponse, ListDownloadJobsResponse, DeleteResponse, PrepareSessionResponse,
+                 EmbedDocumentsResponse, PluginScanResponse, PluginLoadResponse,
+                 PluginTrustListResponse, CatResponse, ListSessionsResponse, ListTreeDiffResponse,
+                 FileHistoryResponse, PruneResponse, ListSnapshotsResponse,
+                 RestoreCollectionResponse, RestoreSnapshotResponse, GraphQueryResponse,
+                 GraphPathHistoryResponse, GraphRepairResponse, GraphValidateResponse,
+                 KgIngestResponse, MetadataValueCountsResponse,
                  // Batch response (Track B)
                  BatchResponse,
                  // Streaming events (progress/heartbeats)
@@ -7542,6 +7657,9 @@ enum class MessageType : uint8_t {
     UnloadModelRequest = 12,
     ModelStatusRequest = 13,
     DownloadRequest = 17,
+    DownloadStatusRequest = 74,
+    CancelDownloadJobRequest = 75,
+    ListDownloadJobsRequest = 76,
     AddDocumentRequest = 18,
     GrepRequest = 19,
     UpdateDocumentRequest = 20,
@@ -7595,6 +7713,7 @@ enum class MessageType : uint8_t {
     ModelStatusResponse = 138,
     ListResponse = 141,
     DownloadResponse = 142,
+    ListDownloadJobsResponse = 173,
     AddDocumentResponse = 143,
     GrepResponse = 144,
     UpdateDocumentResponse = 145,

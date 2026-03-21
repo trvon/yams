@@ -6,8 +6,10 @@
 #include <yams/daemon/resource/gpu_info.h>
 
 #include <nlohmann/json.hpp>
-#include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
+
+#include "ort_cxx_api_wrapper.h"
+#include "ort_runtime_loader.h"
 
 #include <algorithm>
 #include <cmath>
@@ -57,6 +59,13 @@ public:
             std::getenv("YAMS_TEST_MODE")) {
             testMode_ = true;
             return;
+        }
+
+        const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+        if (!runtimeInfo.available) {
+            throw std::runtime_error(runtimeInfo.errorMessage.empty()
+                                         ? std::string("ONNX Runtime unavailable")
+                                         : runtimeInfo.errorMessage);
         }
 
         env_ = &get_colbert_ort_env();

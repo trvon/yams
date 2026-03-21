@@ -653,6 +653,8 @@ struct QueryDiagnosticsSummary {
     std::unordered_map<std::string, std::vector<std::string>> stageSkipReasons;
     std::unordered_map<std::string, std::vector<double>> fusionSourceScoreMassSamples;
     std::unordered_map<std::string, std::vector<double>> fusionSourceFinalDocSamples;
+    std::unordered_map<std::string, std::vector<double>> tunerSignalSamples;
+    std::unordered_map<std::string, std::uint64_t> tunerDecisionCounts;
 };
 
 static const std::vector<std::string>& trackedTimingKeys() {
@@ -1191,6 +1193,36 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         } catch (...) {
         }
     }
+
+    if (auto tunerSummary = searchStats.find("tuner_adjustments_json");
+        tunerSummary != searchStats.end()) {
+        try {
+            auto parsed = json::parse(tunerSummary->second);
+            if (parsed.is_object()) {
+                if (auto decision = parsed.find("last_decision");
+                    decision != parsed.end() && decision->is_string()) {
+                    summary.tunerDecisionCounts[decision->get<std::string>()]++;
+                }
+                static const std::vector<std::string> kKeys = {
+                    "ewma_latency_ms",
+                    "ewma_kg_latency_share",
+                    "ewma_kg_utility",
+                    "ewma_kg_score_mass_share",
+                    "ewma_kg_final_doc_share",
+                    "ewma_kg_contribution_rate",
+                    "ewma_graph_rerank_latency_ms",
+                    "ewma_graph_rerank_skip_rate",
+                    "ewma_graph_rerank_contribution_rate",
+                };
+                for (const auto& key : kKeys) {
+                    if (auto it = parsed.find(key); it != parsed.end() && it->is_number()) {
+                        summary.tunerSignalSamples[key].push_back(it->get<double>());
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
 }
 
 static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
@@ -1334,6 +1366,13 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         };
     }
     out["fusion_sources"] = fusionSources;
+
+    json tunerSignals = json::object();
+    for (const auto& [signalName, samples] : summary.tunerSignalSamples) {
+        tunerSignals[signalName] = summarizeSamples(samples);
+    }
+    out["tuner_signals"] = tunerSignals;
+    out["tuner_decisions"] = summary.tunerDecisionCounts;
 
     return out;
 }
@@ -2477,6 +2516,92 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
              {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
          }},
+        {"kg_budget_5ms",
+         "KG tradeoff probe: keep winner policy but tighten graph scoring budget to 5ms",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_GRAPH_BUDGET_MS", "5"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+             {"YAMS_SEARCH_INCLUDE_COMPONENT_TIMING", "1"},
+         },
+         false,
+         true},
+        {"kg_topn_12",
+         "KG tradeoff probe: keep winner policy but limit graph rerank window to top-12",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_GRAPH_RERANK_TOPN", "12"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+             {"YAMS_SEARCH_INCLUDE_COMPONENT_TIMING", "1"},
+         },
+         false,
+         true},
+        {"kg_weight_002_topn12",
+         "KG tradeoff probe: keep KG enabled with lighter weight 0.02 and top-12 rerank window",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_KG_WEIGHT", "0.02"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_GRAPH_RERANK_TOPN", "12"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+             {"YAMS_SEARCH_INCLUDE_COMPONENT_TIMING", "1"},
+         },
+         false,
+         true},
         {"rerank_3x_blend40_top50",
          "3x pool + cross-encoder rerank top-50, blend 40/60 (conservative)",
          {
@@ -3230,8 +3355,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             for (size_t i = 0; i < std::min((size_t)5, results.size()); ++i) {
                 std::string filename = fs::path(results[i].path).filename().string();
                 std::string docId = filename;
-                if (docId.size() > 4 && docId.substr(docId.size() - 4) == ".txt") {
-                    docId = docId.substr(0, docId.size() - 4);
+                if (docId.size() > 4 && docId.compare(docId.size() - 4, 4, ".txt") == 0) {
+                    docId.resize(docId.size() - 4);
                 }
                 bool relevant = tq.relevantDocIds.count(docId) > 0;
                 spdlog::debug("  [{}] Result {}: path='{}' docId='{}' score={:.4f} {}", searchType,
@@ -3282,8 +3407,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
             if (tq.useDocIds) {
                 std::string docId = filename;
-                if (docId.size() > 4 && docId.substr(docId.size() - 4) == ".txt") {
-                    docId = docId.substr(0, docId.size() - 4);
+                if (docId.size() > 4 && docId.compare(docId.size() - 4, 4, ".txt") == 0) {
+                    docId.resize(docId.size() - 4);
                 }
                 debugEntry.returnedDocIds.push_back(docId);
                 key = docId;
@@ -3972,7 +4097,7 @@ struct BenchFixture {
             // Probe the exact selected socket path before ingesting to catch startup races.
             constexpr int kStatusProbeAttempts = 8;
             for (int attempt = 1; attempt <= kStatusProbeAttempts; ++attempt) {
-                auto statusProbe = yams::cli::run_sync(client->status(), 5s);
+                auto statusProbe = yams::cli::run_sync(client->status(true), 5s);
                 if (statusProbe) {
                     if (attempt > 1) {
                         spdlog::info("[Bench] Client status probe succeeded after {} attempts",
@@ -4016,7 +4141,7 @@ struct BenchFixture {
         connectClientWithProbe("initial setup");
 
         const bool usingExternalBenchDataDir = harnessOptions.dataDir.has_value();
-        auto initialStatusResult = yams::cli::run_sync(client->status(), 5s);
+        auto initialStatusResult = yams::cli::run_sync(client->status(true), 5s);
         const auto getInitialCount = [&](const std::string& key) -> uint64_t {
             if (!initialStatusResult) {
                 return 0;
@@ -4092,6 +4217,14 @@ struct BenchFixture {
                     Error{ErrorCode::Unknown, "ingest not attempted"};
                 constexpr int kIngestAttempts = 2;
                 for (int ingestAttempt = 1; ingestAttempt <= kIngestAttempts; ++ingestAttempt) {
+                    if (!client) {
+                        connectClientWithProbe("directory ingest attempt");
+                        if (!client) {
+                            throw std::runtime_error(
+                                "Benchmark client unavailable before directory ingest attempt");
+                        }
+                    }
+
                     addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 120s);
                     if (addResult) {
                         break;
@@ -4196,7 +4329,7 @@ struct BenchFixture {
 
                         // Status polls may intermittently fail even when work is done; perform one
                         // final verification poll before classifying as stalled.
-                        auto finalVerify = yams::cli::run_sync(client->status(), 10s);
+                        auto finalVerify = yams::cli::run_sync(client->status(true), 10s);
                         if (finalVerify) {
                             const auto& counts = finalVerify.value().requestCounts;
                             auto get = [&](const std::string& key) -> uint64_t {
@@ -4255,7 +4388,7 @@ struct BenchFixture {
                             "YAMS_POST_EXTRACTION_CONCURRENT=12 YAMS_DB_POOL_MAX=48");
                     }
 
-                    auto statusResult = yams::cli::run_sync(client->status(), 5s);
+                    auto statusResult = yams::cli::run_sync(client->status(true), 5s);
                     if (statusResult) {
                         const auto& counts = statusResult.value().requestCounts;
                         uint32_t depth = statusResult.value().postIngestQueueDepth;
@@ -4397,7 +4530,7 @@ struct BenchFixture {
             auto deadline = std::chrono::steady_clock::now() + 30s;
             bool embeddingReady = false;
             while (std::chrono::steady_clock::now() < deadline) {
-                auto statusResult = yams::cli::run_sync(client->status(), 5s);
+                auto statusResult = yams::cli::run_sync(client->status(true), 5s);
                 if (statusResult && statusResult.value().embeddingAvailable) {
                     spdlog::info("Embedding provider is available (backend: {}, model: {})",
                                  statusResult.value().embeddingBackend,
@@ -4516,7 +4649,7 @@ struct BenchFixture {
                                      lastObservedDocsEmbedded, lastObservedVectorCount,
                                      lastObservedEmbedQueued, lastObservedEmbedInFlight);
                     }
-                    auto statusResult = yams::cli::run_sync(client->status(), 5s);
+                    auto statusResult = yams::cli::run_sync(client->status(true), 5s);
                     if (statusResult) {
                         bool vectorDbReady = statusResult.value().vectorDbReady;
                         if (auto it = statusResult.value().readinessStates.find("vector_db");
@@ -4778,7 +4911,7 @@ struct BenchFixture {
                 }
 
                 // Final status check
-                auto finalStatus = yams::cli::run_sync(client->status(), 5s);
+                auto finalStatus = yams::cli::run_sync(client->status(true), 5s);
                 if (finalStatus) {
                     uint64_t finalVectorCount = 0;
                     auto it = finalStatus.value().requestCounts.find("vector_count");
@@ -4849,7 +4982,7 @@ struct BenchFixture {
                         spdlog::warn("Vector DB not ready yet; waiting briefly before queries...");
                         const auto guardDeadline = std::chrono::steady_clock::now() + 30s;
                         while (std::chrono::steady_clock::now() < guardDeadline) {
-                            auto st = yams::cli::run_sync(client->status(), 5s);
+                            auto st = yams::cli::run_sync(client->status(true), 5s);
                             if (st) {
                                 bool ready = st.value().vectorDbReady;
                                 if (auto it = st.value().readinessStates.find("vector_db");
@@ -4883,7 +5016,7 @@ struct BenchFixture {
 
         if (!warmDataDirPath.empty()) {
             auto finalCacheMetadata = expectedCacheMetadata;
-            auto finalStatusForCache = yams::cli::run_sync(client->status(), 5s);
+            auto finalStatusForCache = yams::cli::run_sync(client->status(true), 5s);
             if (finalStatusForCache) {
                 finalCacheMetadata =
                     currentBenchCacheMetadata(expectedCacheMetadata, finalStatusForCache.value());
@@ -4915,7 +5048,7 @@ struct BenchFixture {
         const auto searchEngineDeadline = std::chrono::steady_clock::now() + 60s;
         bool searchEngineReady = false;
         while (std::chrono::steady_clock::now() < searchEngineDeadline) {
-            auto statusCheck = yams::cli::run_sync(client->status(), 5s);
+            auto statusCheck = yams::cli::run_sync(client->status(true), 5s);
             if (statusCheck) {
                 auto it = statusCheck.value().readinessStates.find("search_engine");
                 if (it != statusCheck.value().readinessStates.end() && it->second) {
@@ -4968,7 +5101,7 @@ struct BenchFixture {
 
             while (std::chrono::steady_clock::now() < kgDeadline) {
                 const auto now = std::chrono::steady_clock::now();
-                auto statusCheck = yams::cli::run_sync(client->status(), 5s);
+                auto statusCheck = yams::cli::run_sync(client->status(true), 5s);
                 auto statsCheck =
                     yams::cli::run_sync(client->getStats(yams::daemon::GetStatsRequest{}), 10s);
 
@@ -5088,7 +5221,7 @@ struct BenchFixture {
 
         // Verify document count using status metrics (avoids degraded search false negatives)
         uint64_t indexedDocCount = 0;
-        auto statusResult = yams::cli::run_sync(client->status(), 5s);
+        auto statusResult = yams::cli::run_sync(client->status(true), 5s);
         if (warmCacheMetadata && warmCacheMetadata->status == "primed") {
             indexedDocCount = static_cast<uint64_t>(warmCacheMetadata->expectedDocs);
         } else if (statusResult) {
@@ -5130,7 +5263,7 @@ struct BenchFixture {
         // Goal: distinguish "no docs" vs "docs but query returns empty".
         {
             // Log StatusResponse (it already powers our ingestion waits).
-            auto statusRes = yams::cli::run_sync(client->status(), 5s);
+            auto statusRes = yams::cli::run_sync(client->status(true), 5s);
             if (statusRes) {
                 const auto& st = statusRes.value();
                 uint64_t documentsTotal = 0;
@@ -5466,7 +5599,7 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
             throw std::runtime_error("Benchmark fixture did not initialize a daemon client");
         }
 
-        auto status = yams::cli::run_sync(g_fixture->client->status(), 5s);
+        auto status = yams::cli::run_sync(g_fixture->client->status(true), 5s);
         if (status) {
             result.tuningState = status.value().searchTuningState;
             result.tuningReason = status.value().searchTuningReason;

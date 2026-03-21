@@ -6,8 +6,9 @@
 #include <yams/daemon/resource/gpu_info.h>
 
 #include <nlohmann/json.hpp>
-#include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
+#include "ort_cxx_api_wrapper.h"
+#include "ort_runtime_loader.h"
 
 #include <algorithm>
 #include <cctype>
@@ -132,6 +133,13 @@ public:
             testMode_ = true;
             spdlog::warn("[Reranker] Mock mode enabled via env; skipping ONNX init");
             return;
+        }
+
+        const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+        if (!runtimeInfo.available) {
+            throw std::runtime_error(runtimeInfo.errorMessage.empty()
+                                         ? std::string("ONNX Runtime unavailable")
+                                         : runtimeInfo.errorMessage);
         }
 
         // Get global ONNX environment (shared across all reranker sessions)

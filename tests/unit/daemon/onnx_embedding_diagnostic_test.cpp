@@ -12,11 +12,12 @@
 #include <yams/daemon/resource/onnx_model_pool.h>
 
 #include "../../common/env_compat.h"
+#include "plugins/onnx/ort_runtime_loader.h"
 
-#include <atomic>
 #include <algorithm>
-#include <cmath>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -24,8 +25,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <onnxruntime_cxx_api.h>
 
 namespace yams::daemon::test {
 
@@ -126,7 +125,9 @@ struct DiagnosticFixture {
 // 1. Report available ONNX Runtime providers
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Diagnostic: available providers", "[daemon][onnx][diagnostic][.requires_model]") {
-    auto providers = Ort::GetAvailableProviders();
+    const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+    REQUIRE(runtimeInfo.available);
+    auto providers = yams::onnx_util::OrtRuntimeLoader::instance().availableProviders();
 
     UNSCOPED_INFO("=== ONNX Runtime Available Providers ===");
     for (const auto& p : providers) {
@@ -473,7 +474,9 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Diagnostic: CoreML config variants",
           "[daemon][onnx][diagnostic][.requires_model]") {
-    auto providers = Ort::GetAvailableProviders();
+    const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+    REQUIRE(runtimeInfo.available);
+    auto providers = yams::onnx_util::OrtRuntimeLoader::instance().availableProviders();
     const bool hasCoreML =
         std::find(providers.begin(), providers.end(), "CoreMLExecutionProvider") != providers.end();
     if (!hasCoreML) {
@@ -630,7 +633,9 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
           "[daemon][onnx][diagnostic][.requires_model]") {
-    auto providers = Ort::GetAvailableProviders();
+    const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+    REQUIRE(runtimeInfo.available);
+    auto providers = yams::onnx_util::OrtRuntimeLoader::instance().availableProviders();
     const bool hasMIGraphX = std::find(providers.begin(), providers.end(),
                                        "MIGraphXExecutionProvider") != providers.end();
     if (!hasMIGraphX) {

@@ -132,6 +132,7 @@ endif
 yams_onnx_plugin_srcs = [
   'onnx_plugin.cpp',
   'model_provider.cpp',
+  'ort_runtime_loader.cpp',
   'onnx_model_pool.cpp',
   'onnx_reranker_session.cpp',
   'onnx_colbert_session.cpp',
@@ -167,7 +168,6 @@ elif host_machine.system() == 'darwin'
 endif
 
 onnx_plugin_deps = [
-  onnx_dep,
   spdlog_dep,
   json_dep,
   yams_core,
@@ -176,6 +176,10 @@ onnx_plugin_deps = [
   dependency('yams_daemon_client'),
   boost_dep,
 ] + win_extra_deps
+
+onnx_compile_dep = onnx_dep.partial_dependency(compile_args: true, includes: true)
+
+onnx_plugin_deps += [onnx_compile_dep]
 
 # In-process daemon fallback paths inside yams_daemon_client reference symbols
 # implemented by yams_daemon (for example StreamingRequestProcessor). Link

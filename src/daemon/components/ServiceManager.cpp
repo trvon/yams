@@ -1243,10 +1243,11 @@ void ServiceManager::shutdown() {
 
     // Release all remaining resources
     spdlog::info("[ServiceManager] Phase 8: Releasing remaining resources");
-    metadataRepo_.reset();
+    storeMetadataRepo(std::shared_ptr<metadata::MetadataRepository>{});
     spdlog::info("[ServiceManager] Phase 9.2: Metadata repository reset");
     spdlog::info("[ServiceManager] Phase 8.3: Vector search uses VectorDatabase directly");
-    contentStore_.reset();
+    std::atomic_store_explicit(&contentStore_, std::shared_ptr<api::IContentStore>{},
+                               std::memory_order_release);
     spdlog::info("[ServiceManager] Phase 8.4: Content store reset");
     searchComponent_.reset();
     spdlog::info("[ServiceManager] Phase 8.4.1: Search component reset");
@@ -1344,7 +1345,7 @@ ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDi
         auto result = vectorSystemManager_->initializeOnce(dataDir);
         if (result && result.value()) {
             // Sync local members from VectorSystemManager for backward compatibility
-            vectorDatabase_ = vectorSystemManager_->getVectorDatabase();
+            storeVectorDatabase(vectorSystemManager_->getVectorDatabase());
         }
         return result;
     }
@@ -1810,12 +1811,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             auto repoRes = init::record_duration(
                 std::string(readiness::kMetadataRepo),
                 [&]() -> yams::Result<void> {
-                    metadataRepo_ = std::make_shared<metadata::MetadataRepository>(
+                    auto metadataRepo = std::make_shared<metadata::MetadataRepository>(
                         *connectionPool_, readConnectionPool_.get());
                     state_.readiness.metadataRepoReady = true;
                     // Initialize component-owned metrics (sync with DB once at startup)
-                    metadataRepo_->initializeCounters();
-                    metadataRepo_->warmValueCountsCache(); // Pre-warm common queries
+                    metadataRepo->initializeCounters();
+                    metadataRepo->warmValueCountsCache(); // Pre-warm common queries
+                    storeMetadataRepo(metadataRepo);
                     spdlog::info("Metadata repository initialized successfully");
 
                     // Note: RepairManager initialization remains deferred
@@ -1916,26 +1918,30 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 if (kgRes) {
                     auto uniqueKg = std::move(kgRes).value();
                     // Promote to shared_ptr for broader use and store as member
-                    kgStore_ = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(uniqueKg));
+                    auto kgStore =
+                        std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(uniqueKg));
+                    storeKgStore(kgStore);
                     // PBI-043-12: Wire KG store to metadata repository for tree diff integration
-                    if (metadataRepo_) {
-                        metadataRepo_->setKnowledgeGraphStore(kgStore_);
+                    auto metadataRepo = loadMetadataRepo();
+                    if (metadataRepo) {
+                        metadataRepo->setKnowledgeGraphStore(kgStore);
                         spdlog::info(
                             "KG store wired to metadata repository for tree diff integration");
                     }
                     // PBI-009: Initialize GraphComponent after KG store is ready
                     try {
-                        graphComponent_ =
-                            std::make_shared<GraphComponent>(metadataRepo_, kgStore_, this);
-                        auto initResult = graphComponent_->initialize();
+                        auto graphComponent =
+                            std::make_shared<GraphComponent>(metadataRepo, kgStore, this);
+                        auto initResult = graphComponent->initialize();
                         if (!initResult) {
                             spdlog::warn("GraphComponent initialization failed: {}",
                                          initResult.error().message);
-                            graphComponent_.reset();
+                            storeGraphComponent(std::shared_ptr<GraphComponent>{});
                         } else {
                             spdlog::info("GraphComponent initialized successfully");
-                            if (metadataRepo_) {
-                                metadataRepo_->setGraphComponent(graphComponent_);
+                            storeGraphComponent(graphComponent);
+                            if (metadataRepo) {
+                                metadataRepo->setGraphComponent(graphComponent);
                                 spdlog::info("GraphComponent wired to metadata repository");
                             }
                         }
@@ -1948,8 +1954,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
         auto newPostIngest = std::make_shared<PostIngestQueue>(
-            contentStore_, metadataRepo_, contentExtractors_, kgStore_, graphComponent_,
-            workCoordinator_.get(), nullptr, qcap);
+            getContentStore(), loadMetadataRepo(), contentExtractors_, loadKgStore(),
+            loadGraphComponent(), workCoordinator_.get(), nullptr, qcap);
         newPostIngest->start();
 
         try {
@@ -1988,14 +1994,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } catch (...) {
         }
         (void)taThreads; // Retrieved for future use in embedding service configuration
-        auto embeddingService = std::make_shared<EmbeddingService>(contentStore_, metadataRepo_,
-                                                                   workCoordinator_.get());
+        auto embeddingService = std::make_shared<EmbeddingService>(
+            getContentStore(), loadMetadataRepo(), workCoordinator_.get());
 
         auto initRes = embeddingService->initialize();
         if (initRes) {
             embeddingService->setProviders([this]() { return this->loadModelProvider(); },
                                            [this]() { return this->resolvePreferredModel(); },
-                                           [this]() { return this->vectorDatabase_; },
+                                           [this]() { return this->loadVectorDatabase(); },
                                            [this]() { return this->getKgStore(); });
             embeddingService->start();
             std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
@@ -2048,7 +2054,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // VectorIndexManager removed - using VectorDatabase directly for vector search
     // Mark vector index as ready since VectorDatabase handles all vector operations
-    if (vectorDatabase_) {
+    if (loadVectorDatabase()) {
         state_.readiness.vectorIndexReady = true;
         writeBootstrapStatusFile(config_, state_);
     }
@@ -2164,8 +2170,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
             // Log vector count from database
-            if (vectorDatabase_) {
-                auto dbVectorCount = vectorDatabase_->getVectorCount();
+            if (auto vectorDatabase = loadVectorDatabase()) {
+                auto dbVectorCount = vectorDatabase->getVectorCount();
                 if (dbVectorCount > 0) {
                     spdlog::info("[VectorInit] Found {} vectors in database", dbVectorCount);
                 }
@@ -2179,8 +2185,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     if (embeddingPreloadOnStartup_) {
         size_t vdim = 0;
         try {
-            if (vectorDatabase_)
-                vdim = vectorDatabase_->getConfig().embedding_dim;
+            if (auto vectorDatabase = loadVectorDatabase())
+                vdim = vectorDatabase->getConfig().embedding_dim;
         } catch (...) {
         }
         if (vdim == 0) {
@@ -2196,11 +2202,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     try {
         state_.readiness.searchProgress = 10;
         writeBootstrapStatusFile(config_, state_);
-        if (metadataRepo_) {
+        if (loadMetadataRepo()) {
             state_.readiness.searchProgress = 40;
             writeBootstrapStatusFile(config_, state_);
         }
-        if (vectorDatabase_) {
+        if (loadVectorDatabase()) {
             state_.readiness.searchProgress = 70;
             writeBootstrapStatusFile(config_, state_);
         }
@@ -2214,10 +2220,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         if (vectorsDisabled) {
             spdlog::info(
                 "[SearchBuild] Vector search disabled via env flag; building text-only engine");
-        } else if (vectorDatabase_) {
+        } else if (auto vectorDatabase = loadVectorDatabase()) {
             try {
                 // Use VectorDatabase directly - it knows the actual DB size
-                auto vectorCount = vectorDatabase_->getVectorCount();
+                auto vectorCount = vectorDatabase->getVectorCount();
                 vectorEnabled = (vectorCount > 0);
                 spdlog::info("[SearchBuild] Vector DB has {} vectors, vector_enabled={}",
                              vectorCount, vectorEnabled);
@@ -2255,8 +2261,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
         }
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, kgStore_, vectorDatabase_, embGen, "initial", build_timeout,
-            getWorkerExecutor());
+            loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), embGen, "initial",
+            build_timeout, getWorkerExecutor());
 
         if (buildResult.has_value()) {
             const auto& built = buildResult.value();
@@ -2269,11 +2275,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
-            state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);
+            state_.readiness.vectorIndexReady = (loadVectorDatabase() != nullptr);
 
             // Track doc count at build time for re-tuning decisions
-            if (metadataRepo_) {
-                auto countRes = metadataRepo_->getDocumentCount();
+            if (auto metadataRepo = loadMetadataRepo()) {
+                auto countRes = metadataRepo->getDocumentCount();
                 if (countRes) {
                     if (searchComponent_) {
                         searchComponent_->recordSuccessfulBuild(countRes.value());
@@ -2774,7 +2780,8 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
     try {
         // Phase 2.4: Use SearchEngineManager
-        auto graphService = graphComponent_ ? graphComponent_->getQueryService() : nullptr;
+        auto graphComponent = loadGraphComponent();
+        auto graphService = graphComponent ? graphComponent->getQueryService() : nullptr;
 
         // Get embedding generator from model provider if available
         std::shared_ptr<vector::EmbeddingGenerator> embGen;
@@ -2788,8 +2795,8 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, kgStore_, vectorDatabase_, embGen, "rebuild_enabled", build_timeout,
-            getWorkerExecutor());
+            loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), embGen, "rebuild_enabled",
+            build_timeout, getWorkerExecutor());
 
         if (rebuildResult.has_value()) {
             const auto& rebuilt = rebuildResult.value();
@@ -2801,11 +2808,11 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
-            state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);
+            state_.readiness.vectorIndexReady = (loadVectorDatabase() != nullptr);
 
             // Track doc count at build time for re-tuning decisions
-            if (metadataRepo_) {
-                auto countRes = metadataRepo_->getDocumentCount();
+            if (auto metadataRepo = loadMetadataRepo()) {
+                auto countRes = metadataRepo->getDocumentCount();
                 if (countRes) {
                     if (searchComponent_) {
                         searchComponent_->recordSuccessfulBuild(countRes.value());
@@ -2889,8 +2896,8 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
 
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                metadataRepo_, kgStore_, vectorDatabase_, embGen, "rebuild", build_timeout,
-                getWorkerExecutor());
+                loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), embGen, "rebuild",
+                build_timeout, getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();
@@ -2903,11 +2910,11 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 // Update readiness indicators after successful rebuild
                 state_.readiness.searchEngineReady = true;
                 state_.readiness.searchProgress = 100;
-                state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);
+                state_.readiness.vectorIndexReady = (loadVectorDatabase() != nullptr);
 
                 // Track doc count at build time for re-tuning decisions
-                if (metadataRepo_) {
-                    auto countRes = metadataRepo_->getDocumentCount();
+                if (auto metadataRepo = loadMetadataRepo()) {
+                    auto countRes = metadataRepo->getDocumentCount();
                     if (countRes) {
                         if (searchComponent_) {
                             searchComponent_->recordSuccessfulBuild(countRes.value());
@@ -2959,13 +2966,15 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
     ctx.store = getContentStore(); // Thread-safe via atomic_load
-    ctx.metadataRepo = metadataRepo_;
+    auto metadataRepo = loadMetadataRepo();
+    ctx.metadataRepo = metadataRepo;
     ctx.searchEngine = getSearchEngineSnapshot();
     ctx.vectorDatabase = getVectorDatabase();
-    ctx.kgStore = this->kgStore_; // PBI-043: tree diff KG integration
+    ctx.kgStore = loadKgStore(); // PBI-043: tree diff KG integration
+    auto graphComponent = loadGraphComponent();
     ctx.graphQueryService = graphQueryServiceOverride_
                                 ? graphQueryServiceOverride_
-                                : (graphComponent_ ? graphComponent_->getQueryService() : nullptr);
+                                : (graphComponent ? graphComponent->getQueryService() : nullptr);
     ctx.contentExtractors = contentExtractors_;
 
     // Log vector capability status
@@ -2977,7 +2986,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     // Do NOT degrade just because embeddings are missing; hybrid falls back to keyword/KG.
     // Only degrade when core metadata repository is unavailable or when explicitly forced.
     try {
-        bool degraded = (metadataRepo_ == nullptr);
+        bool degraded = (metadataRepo == nullptr);
         int prog = 0;
         std::string details;
 
@@ -3202,8 +3211,9 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
         } catch (...) {
         }
     }
-    auto res = co_await searchEngineManager_.buildEngine(metadataRepo_, kgStore_, vectorDatabase_,
-                                                         gen, "co_buildEngine", timeout_ms, exec);
+    auto res = co_await searchEngineManager_.buildEngine(loadMetadataRepo(), loadKgStore(),
+                                                         loadVectorDatabase(), gen,
+                                                         "co_buildEngine", timeout_ms, exec);
     if (res.has_value()) {
         co_return res.value();
     }

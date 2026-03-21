@@ -945,6 +945,7 @@ if catch2_dep.found()
     catch2_daemon_reranker_exe = executable('catch2_daemon_reranker',
       files(
         'unit/daemon/onnx_reranker_session_test.cpp',
+        '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_reranker_session.cpp',
       ),
       include_directories: incs,
@@ -958,6 +959,7 @@ if catch2_dep.found()
       files(
         'unit/daemon/onnx_model_provider_config_test.cpp',
         '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
@@ -970,7 +972,10 @@ if catch2_dep.found()
     )
 
     catch2_gpu_provider_exe = executable('catch2_gpu_provider',
-      files('unit/daemon/onnx_gpu_provider_catch2_test.cpp'),
+      files(
+        'unit/daemon/onnx_gpu_provider_catch2_test.cpp',
+        '../plugins/onnx/ort_runtime_loader.cpp',
+      ),
       include_directories: incs,
       dependencies: [catch2_dep, catch2_main_dep] + test_deps + [onnx_dep],
       cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -982,6 +987,7 @@ if catch2_dep.found()
       files(
         'unit/daemon/onnx_embedding_diagnostic_test.cpp',
         '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
@@ -1314,6 +1320,7 @@ if catch2_dep.found()
       files(
         'unit/daemon/onnx_model_pool_catch2_test.cpp',
         '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
@@ -1517,6 +1524,7 @@ if catch2_dep.found()
       'unit/cli/daemon_helpers_pool_catch2_test.cpp',
       'unit/cli/daemon_command_catch2_test.cpp',
       'unit/cli/data_dir_resolution_catch2_test.cpp',
+      'unit/cli/download_command_catch2_test.cpp',
       'unit/cli/doctor_command_catch2_test.cpp',
       'unit/cli/dr_command_catch2_test.cpp',
       'unit/cli/error_hints_catch2_test.cpp',

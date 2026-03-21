@@ -120,6 +120,8 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     std::optional<TuningState> effectiveOverride =
         envOverride.has_value() ? envOverride : options.tuningStateOverride;
 
+    std::shared_ptr<SearchTuner> runtimeTuner;
+
     // Check for tuning state override (useful for benchmarks with known corpus types)
     if (effectiveOverride.has_value()) {
         TuningState overrideState = effectiveOverride.value();
@@ -145,18 +147,17 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         auto statsResult = metadataRepo_->getCorpusStats();
         if (statsResult.has_value()) {
             // Create tuner and get optimized config
-            SearchTuner tuner(statsResult.value());
-            cfg = tuner.getConfig();
+            runtimeTuner = std::make_shared<SearchTuner>(statsResult.value());
+            cfg = runtimeTuner->getConfig();
 
             // Preserve user-specified options that shouldn't be overridden by tuner
             cfg.maxResults = options.config.maxResults;
             cfg.enableParallelExecution = options.config.enableParallelExecution;
             cfg.includeDebugInfo = options.config.includeDebugInfo;
-
             spdlog::info("SearchEngine auto-tuned to state={} (k={}, text={:.2f}, vector={:.2f}, "
                          "fusion={}, semantic_rescue={}@{:.4f})",
-                         tuningStateToString(tuner.currentState()), tuner.getRrfK(), cfg.textWeight,
-                         cfg.vectorWeight,
+                         tuningStateToString(runtimeTuner->currentState()), runtimeTuner->getRrfK(),
+                         cfg.textWeight, cfg.vectorWeight,
                          SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
                          cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore);
         } else {
@@ -181,6 +182,10 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.vectorWeight = *vectorWeight;
             spdlog::info("SearchEngine vectorWeight overridden to {:.2f} via env",
                          cfg.vectorWeight);
+        }
+        if (auto kgWeight = getEnvFloat("YAMS_SEARCH_KG_WEIGHT")) {
+            cfg.kgWeight = *kgWeight;
+            spdlog::info("SearchEngine kgWeight overridden to {:.2f} via env", cfg.kgWeight);
         }
         if (auto graphVectorWeight = getEnvFloat("YAMS_SEARCH_GRAPH_VECTOR_WEIGHT")) {
             cfg.graphVectorWeight = *graphVectorWeight;
@@ -299,6 +304,10 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.vectorMaxResults = static_cast<size_t>(*vectorMax);
             spdlog::info("SearchEngine vectorMaxResults overridden to {} via env",
                          cfg.vectorMaxResults);
+        }
+        if (auto kgMax = getEnvInt("YAMS_KG_MAX_RESULTS")) {
+            cfg.kgMaxResults = static_cast<size_t>(*kgMax);
+            spdlog::info("SearchEngine kgMaxResults overridden to {} via env", cfg.kgMaxResults);
         }
 
         if (auto intentAdaptive = getEnvBool("YAMS_SEARCH_ENABLE_INTENT_ADAPTIVE")) {
@@ -721,12 +730,19 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         }
     }
 
+    if (runtimeTuner) {
+        runtimeTuner->seedRuntimeConfig(cfg);
+    }
+
     // Create the SearchEngine using the factory function
     // Factory returns unique_ptr, convert to shared_ptr for builder interface
     auto engine =
         createSearchEngine(metadataRepo_, vectorDatabase_, embeddingGenerator_, kgStore_, cfg);
     if (!engine) {
         return Error{ErrorCode::InvalidState, "Failed to create SearchEngine"};
+    }
+    if (runtimeTuner) {
+        engine->setSearchTuner(runtimeTuner);
     }
     return std::shared_ptr<SearchEngine>(std::move(engine));
 }

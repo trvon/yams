@@ -6,7 +6,8 @@
 #include <string>
 #include <vector>
 
-#include <onnxruntime_cxx_api.h>
+#include "plugins/onnx/ort_cxx_api_wrapper.h"
+#include "plugins/onnx/ort_runtime_loader.h"
 
 #if defined(__APPLE__)
 
@@ -14,7 +15,9 @@
 
 TEST_CASE("CoreMLExecutionProvider is available in linked ONNX Runtime",
           "[daemon][gpu][onnx][coreml][catch2]") {
-    auto providers = Ort::GetAvailableProviders();
+    const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+    REQUIRE(runtimeInfo.available);
+    auto providers = yams::onnx_util::OrtRuntimeLoader::instance().availableProviders();
 
     // Log all available providers for diagnostics
     INFO("Available ONNX Runtime providers:");
@@ -28,6 +31,8 @@ TEST_CASE("CoreMLExecutionProvider is available in linked ONNX Runtime",
 }
 
 TEST_CASE("appendGpuProvider attaches CoreML on macOS", "[daemon][gpu][onnx][coreml][catch2]") {
+    const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+    REQUIRE(runtimeInfo.available);
     Ort::SessionOptions opts;
     // Test with default (no cache dir)
     REQUIRE_NOTHROW((void)yams::onnx_util::appendGpuProvider(opts));
@@ -35,6 +40,8 @@ TEST_CASE("appendGpuProvider attaches CoreML on macOS", "[daemon][gpu][onnx][cor
 
 TEST_CASE("appendGpuProvider accepts optional cache directory",
           "[daemon][gpu][onnx][coreml][catch2]") {
+    const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+    REQUIRE(runtimeInfo.available);
     Ort::SessionOptions opts;
     REQUIRE_NOTHROW((void)yams::onnx_util::appendGpuProvider(opts, "/tmp"));
 }
@@ -50,7 +57,9 @@ TEST_CASE("GPU detection and ONNX provider are consistent on Apple Silicon",
     CHECK(gpu.provider == "coreml");
     CHECK(gpu.unifiedMemory);
 
-    auto providers = Ort::GetAvailableProviders();
+    const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+    REQUIRE(runtimeInfo.available);
+    auto providers = yams::onnx_util::OrtRuntimeLoader::instance().availableProviders();
     bool hasCoreML =
         std::find(providers.begin(), providers.end(), "CoreMLExecutionProvider") != providers.end();
     CHECK(hasCoreML);

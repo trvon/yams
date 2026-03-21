@@ -83,7 +83,7 @@ public:
             // Set up callbacks
             auto progressCb = req.progressCallback ? req.progressCallback
                                                    : [](const downloader::ProgressEvent&) {};
-            auto shouldCancel = []() { return false; };
+            auto shouldCancel = req.shouldCancel ? req.shouldCancel : []() { return false; };
             auto logCb = [](std::string_view) { /* ignore for now */ };
 
             // Execute download using cached manager
@@ -91,6 +91,9 @@ public:
             auto result = manager_->download(downloaderReq, progressCb, shouldCancel, logCb);
             if (!result.ok()) {
                 spdlog::error("DownloadService: Download failed: {}", result.error().message);
+                if (result.error().code == downloader::ErrorCode::OperationCancelled) {
+                    return Error{ErrorCode::OperationCancelled, result.error().message};
+                }
                 return Error{ErrorCode::NetworkError, result.error().message};
             }
 
@@ -152,8 +155,9 @@ public:
                             if ((docInfo.mimeType.empty() ||
                                  docInfo.mimeType == "application/octet-stream") &&
                                 !docInfo.fileExtension.empty()) {
-                                docInfo.mimeType = detection::FileTypeDetector::getMimeTypeFromExtension(
-                                    docInfo.fileExtension);
+                                docInfo.mimeType =
+                                    detection::FileTypeDetector::getMimeTypeFromExtension(
+                                        docInfo.fileExtension);
                             }
                         } catch (...) {
                         }
@@ -279,8 +283,9 @@ public:
                                 bool textLike = false;
                                 try {
                                     (void)detection::FileTypeDetector::initializeWithMagicNumbers();
-                                    textLike = detection::FileTypeDetector::instance().isTextMimeType(
-                                        docInfo.mimeType);
+                                    textLike =
+                                        detection::FileTypeDetector::instance().isTextMimeType(
+                                            docInfo.mimeType);
                                 } catch (...) {
                                 }
 

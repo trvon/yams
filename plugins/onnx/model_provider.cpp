@@ -1,7 +1,6 @@
 // Replace stub with actual ONNX-backed implementation
 #include "model_provider.h"
 #include <nlohmann/json.hpp>
-#include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -12,6 +11,7 @@
 #include <fstream>
 #include <optional>
 #include <thread>
+#include "ort_runtime_loader.h"
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_colbert_session.h>
@@ -150,6 +150,7 @@ struct ProviderCtx {
     std::string colbertModelPath;  // Path to ColBERT model
     std::size_t configuredMaxLoadedModels = 0;
     std::size_t configuredHotPoolSize = 0;
+    yams::onnx_util::OrtRuntimeInfo runtimeInfo;
 
     // Check if model is in cooldown period after failures
     bool isInCooldown(const std::string& modelId) const {
@@ -191,6 +192,15 @@ struct ProviderCtx {
             last_error = "disabled_by_env";
             return;
         }
+
+        runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+        if (!runtimeInfo.available) {
+            last_error = runtimeInfo.reason.empty() ? "runtime_not_available" : runtimeInfo.reason;
+            spdlog::warn("[ONNX-Plugin] ONNX Runtime unavailable: {}",
+                         runtimeInfo.errorMessage.empty() ? last_error : runtimeInfo.errorMessage);
+            return;
+        }
+
         yams::daemon::ModelPoolConfig cfg;
         // Defaults: prefer lazy loading to avoid blocking startup
         // Models will be loaded on first use, not during plugin initialization
@@ -1486,15 +1496,21 @@ struct ProviderSingleton {
             j["graph_optimization"] = "enabled";
 
             // Best-effort: report ONNX Runtime build's available providers
-            try {
-                auto providers = Ort::GetAvailableProviders();
+            auto providers = yams::onnx_util::OrtRuntimeLoader::instance().availableProviders();
+            if (!providers.empty()) {
                 auto arr = nlohmann::json::array();
                 for (const auto& p : providers)
                     arr.push_back(p);
                 j["available_providers"] = std::move(arr);
-            } catch (...) {
-                // ignore
             }
+
+            const auto& runtimeInfo = c->runtimeInfo;
+            if (!runtimeInfo.version.empty())
+                j["runtime_version"] = runtimeInfo.version;
+            if (!runtimeInfo.libraryPath.empty())
+                j["runtime_library"] = runtimeInfo.libraryPath;
+            if (!runtimeInfo.reason.empty())
+                j["runtime_status"] = runtimeInfo.reason;
 
             // Report the actual execution provider used by a session (not a platform guess)
             std::string ep = "cpu";
@@ -1859,6 +1875,9 @@ extern "C" const char* yams_onnx_get_health_json_cstr() {
     if (c.disabled) {
         j["status"] = "disabled";
         j["reason"] = c.last_error.empty() ? "disabled_by_env" : c.last_error;
+    } else if (!c.runtimeInfo.available) {
+        j["status"] = "unavailable";
+        j["reason"] = c.last_error.empty() ? "runtime_not_available" : c.last_error;
     } else if (!c.pool) {
         j["status"] = "unavailable";
         j["reason"] = "no_pool";
@@ -1906,12 +1925,23 @@ extern "C" const char* yams_onnx_get_health_json_cstr() {
 
         j["execution_provider"] = ep;
 
-        try {
-            auto providers = Ort::GetAvailableProviders();
+        auto providers = yams::onnx_util::OrtRuntimeLoader::instance().availableProviders();
+        if (!providers.empty()) {
             j["available_providers"] = providers;
-        } catch (...) {
-            // omit on failure
         }
+    }
+
+    if (!c.runtimeInfo.version.empty()) {
+        j["runtime_version"] = c.runtimeInfo.version;
+    }
+    if (!c.runtimeInfo.libraryPath.empty()) {
+        j["runtime_library"] = c.runtimeInfo.libraryPath;
+    }
+    if (!c.runtimeInfo.reason.empty()) {
+        j["runtime_status"] = c.runtimeInfo.reason;
+    }
+    if (!c.runtimeInfo.errorMessage.empty()) {
+        j["runtime_error"] = c.runtimeInfo.errorMessage;
     }
 
     // Add model states for diagnostics

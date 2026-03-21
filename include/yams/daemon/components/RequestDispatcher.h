@@ -53,6 +53,14 @@ public:
     static void __test_forceCatNativeMissingContentOnce();
     static void __test_resetDocumentsQueryTraceCache();
     static void __test_forceDocumentsHashFailureOnce();
+    static void __test_setDocumentsEnqueueFailuresBeforeSuccess(int count);
+    static void __test_resetDownloadJobs();
+    static void __test_forgetDownloadJobsCache();
+    static void __test_seedDownloadJob(const DownloadResponse& response);
+    static void __test_forceGetResponseDocumentsVectorOnce();
+    static void __test_forceGetEmptyResultOnce();
+    static void __test_forceDownloadServiceUnavailableOnce();
+    static void __test_forceDownloadServiceSuccessOnce();
 
     // PBI-008-11: Session prepare (warming) options and entrypoint
     struct PrepareSessionOptions {
@@ -90,6 +98,11 @@ private:
     boost::asio::awaitable<Response> handleUpdateDocumentRequest(const UpdateDocumentRequest& req);
     boost::asio::awaitable<Response> handleGrepRequest(const GrepRequest& req);
     boost::asio::awaitable<Response> handleDownloadRequest(const DownloadRequest& req);
+    boost::asio::awaitable<Response> handleDownloadStatusRequest(const DownloadStatusRequest& req);
+    boost::asio::awaitable<Response>
+    handleCancelDownloadJobRequest(const CancelDownloadJobRequest& req);
+    boost::asio::awaitable<Response>
+    handleListDownloadJobsRequest(const ListDownloadJobsRequest& req);
     boost::asio::awaitable<Response> handlePrepareSessionRequest(const PrepareSessionRequest& req);
 
     // Session management handlers

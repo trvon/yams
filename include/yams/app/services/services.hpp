@@ -859,6 +859,7 @@ struct DownloadServiceRequest {
     downloader::RetryPolicy retry;
     downloader::RateLimit rateLimit;
     std::function<void(const downloader::ProgressEvent&)> progressCallback;
+    std::function<bool()> shouldCancel;
     bool resume{true};
     std::optional<std::string> proxy;
     downloader::TlsConfig tls;

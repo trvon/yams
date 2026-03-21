@@ -225,6 +225,8 @@ public:
     std::vector<std::uint64_t> requestedOffsets;
     std::vector<std::uint64_t> requestedSizes;
     std::vector<std::byte> payload;
+    bool checkCancelBeforeSink{false};
+    bool cancelObserved{false};
     int probeCallCount{0};
     int fetchCallCount{0};
 
@@ -249,7 +251,8 @@ public:
                               std::uint64_t size, const TlsConfig&,
                               const std::optional<std::string>&, std::chrono::milliseconds,
                               const std::function<Expected<void>(std::span<const std::byte>)>& sink,
-                              const ShouldCancel&, const ProgressCallback& onProgress) override {
+                              const ShouldCancel& shouldCancel,
+                              const ProgressCallback& onProgress) override {
         fetchCallCount++;
         requestedOffsets.push_back(offset);
         requestedSizes.push_back(size);
@@ -258,6 +261,10 @@ public:
             ev.downloadedBytes = 0;
             ev.stage = ProgressStage::Downloading;
             onProgress(ev);
+        }
+        if (checkCancelBeforeSink && shouldCancel && shouldCancel()) {
+            cancelObserved = true;
+            return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
         }
         if (!payload.empty()) {
             auto res = sink(std::span<const std::byte>(payload.data(), payload.size()));
@@ -522,7 +529,7 @@ TEST_CASE("PersistentResumeStore: Round-trip", "[downloader][resume]") {
         for (int i = 0; i < 5; ++i) {
             yams::downloader::IResumeStore::State state;
             state.etag = "etag-" + std::to_string(i);
-            state.totalBytes = 1000 * (i + 1);
+            state.totalBytes = 1000L * (i + 1);
             REQUIRE(store.save("http://example.com/file" + std::to_string(i), state).ok());
         }
 
@@ -716,6 +723,36 @@ TEST_CASE("DownloadManager: Export with ETag matching", "[downloader][export]") 
     }
 
     // Cleanup
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("DownloadManager: Cooperative cancellation stops fetch", "[downloader][cancel][catch2]") {
+    auto tempDir = make_temp_dir();
+    StorageConfig storage{tempDir / "objects", tempDir / "staging"};
+    DownloaderConfig cfg;
+
+    auto http = std::make_unique<TestHttpAdapter>();
+    auto* httpPtr = http.get();
+    httpPtr->resumeSupported = false;
+    httpPtr->contentLength = 5;
+    httpPtr->payload = to_bytes("ABCDE");
+    httpPtr->checkCancelBeforeSink = true;
+
+    auto disk = std::make_unique<FakeDiskWriter>(storage);
+
+    auto dm = makeDownloadManagerWithDependencies(storage, cfg, std::move(http), std::move(disk),
+                                                  nullptr, nullptr, nullptr);
+
+    DownloadRequest req;
+    req.url = "https://example.com/cancel.bin";
+
+    bool canceled = true;
+    auto result = dm->download(req, {}, [&]() { return canceled; });
+    REQUIRE_FALSE(result.ok());
+    CHECK(result.error().code == ErrorCode::OperationCancelled);
+    CHECK(httpPtr->cancelObserved);
+
     std::error_code ec;
     fs::remove_all(tempDir, ec);
 }

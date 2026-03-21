@@ -62,6 +62,11 @@ public:
     }
 
     LifecycleSnapshot getLifecycleSnapshot() const override {
+        ++getLifecycleSnapshotCalls_;
+        if (throwOnGetLifecycleSnapshotCall_ > 0 &&
+            getLifecycleSnapshotCalls_ == throwOnGetLifecycleSnapshotCall_) {
+            throw std::runtime_error("getLifecycleSnapshot boom");
+        }
         if (throwOnGetLifecycleSnapshotCount_ > 0) {
             --throwOnGetLifecycleSnapshotCount_;
             throw std::runtime_error("getLifecycleSnapshot boom");
@@ -98,6 +103,7 @@ public:
     void setThrowOnGetLifecycleSnapshotCount(int count) {
         throwOnGetLifecycleSnapshotCount_ = count;
     }
+    void setThrowOnGetLifecycleSnapshotCall(int call) { throwOnGetLifecycleSnapshotCall_ = call; }
     const std::vector<std::string>& removedHashes() const { return removedHashes_; }
 
 private:
@@ -107,7 +113,9 @@ private:
     std::string lastReason_;
     int setSubsystemDegradedCalls_{0};
     bool throwOnSetSubsystemDegraded_{false};
+    mutable int getLifecycleSnapshotCalls_{0};
     mutable int throwOnGetLifecycleSnapshotCount_{0};
+    int throwOnGetLifecycleSnapshotCall_{0};
     std::vector<std::string> removedHashes_;
 };
 
@@ -345,7 +353,7 @@ class StubPruneMetadataRepository : public metadata::MetadataRepository {
 public:
     StubPruneMetadataRepository() : metadata::MetadataRepository(*getPruneTestPool()) {}
 
-    void addDocument(metadata::DocumentInfo doc) {
+    void addDocument(const metadata::DocumentInfo& doc) {
         std::lock_guard<std::mutex> lk(mu_);
         docs_.push_back(doc);
         docsByHash_[doc.sha256Hash] = doc;
@@ -2275,6 +2283,63 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(getResp.name == doc.fileName);
     }
 
+    SECTION("get request maps fallback documents vector response") {
+        auto repoPath = makeTempDir("yams_get_documents_vector_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(72, "/tmp/get/documents-vector.txt",
+                           "abababababababababababababababababababababababababababababababab");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        store->setBlob(doc.sha256Hash, "documents vector content");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        RequestDispatcher::__test_forceGetResponseDocumentsVectorOnce();
+
+        GetRequest req;
+        req.hash = doc.sha256Hash;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GetResponse>(resp));
+        const auto& getResp = std::get<GetResponse>(resp);
+        CHECK(getResp.hash == doc.sha256Hash);
+        CHECK(getResp.name == doc.fileName);
+        CHECK(getResp.path == doc.filePath);
+    }
+
+    SECTION("get request returns not found when service result is forced empty") {
+        auto repoPath = makeTempDir("yams_get_empty_result_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(73, "/tmp/get/empty-result.txt",
+                           "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        store->setBlob(doc.sha256Hash, "empty result content");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        RequestDispatcher::__test_forceGetEmptyResultOnce();
+
+        GetRequest req;
+        req.hash = doc.sha256Hash;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message == "No documents found matching criteria");
+    }
+
     SECTION("file history reports missing metadata repository") {
         FileHistoryRequest req;
         req.filepath = "missing.txt";
@@ -2844,6 +2909,37 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
               "Ingestion accepted for asynchronous processing (daemon initializing).");
     }
 
+    SECTION("add document hashes file path while daemon is initializing") {
+        DaemonConfig notReadyCfg;
+        notReadyCfg.dataDir = makeTempDir("yams_documents_dispatcher_not_ready_file_hash_");
+        StubLifecycle notReadyLifecycle(LifecycleState::Starting);
+        StateComponent notReadyState;
+        notReadyState.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        notReadyState.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm notReadyLifecycleFsm;
+        ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
+        RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
+
+        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        drainStoreDocumentTasks();
+
+        auto filePath = writeTempFile("yams_documents_init_file_hash_", "init-file-hash.txt",
+                                      "init file hash content");
+        AddDocumentRequest req;
+        req.path = filePath.string();
+
+        auto resp = dispatchRequest(notReadyDispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        auto hasher = yams::crypto::createSHA256Hasher();
+        REQUIRE(hasher != nullptr);
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.hash == hasher->hashFile(req.path));
+        CHECK(addResp.message ==
+              "Ingestion accepted for asynchronous processing (daemon initializing).");
+    }
+
     SECTION("add document treats directory path as async directory ingestion") {
         auto dirPath = makeTempDir("yams_documents_directory_ingest_");
         drainStoreDocumentTasks();
@@ -2922,6 +3018,74 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(addResp.documentsAdded == 0);
         CHECK(addResp.hash == hasher->hashFile(req.path));
         CHECK(addResp.message == "Ingestion accepted for asynchronous processing.");
+    }
+
+    SECTION("add document hashes file path on pressure path after one retry") {
+        const bool originalGovernor = TuneAdvisor::enableResourceGovernor();
+        const bool originalAdmission = TuneAdvisor::enableAdmissionControl();
+        const uint32_t originalCapacity = TuneAdvisor::storeDocumentChannelCapacity();
+        auto restore = ScopeExit([&] {
+            TuneAdvisor::setEnableResourceGovernor(originalGovernor);
+            TuneAdvisor::setEnableAdmissionControl(originalAdmission);
+            TuneAdvisor::setStoreDocumentChannelCapacity(originalCapacity);
+            ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Normal);
+            RequestDispatcher::__test_setDocumentsEnqueueFailuresBeforeSuccess(0);
+            drainStoreDocumentTasks();
+        });
+
+        TuneAdvisor::setEnableResourceGovernor(true);
+        TuneAdvisor::setEnableAdmissionControl(true);
+        TuneAdvisor::setStoreDocumentChannelCapacity(64);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+        drainStoreDocumentTasks();
+
+        EnvGuard retriesGuard("YAMS_INGEST_ENQUEUE_RETRIES", "3");
+        EnvGuard baseDelayGuard("YAMS_INGEST_ENQUEUE_BASE_DELAY_MS", "1");
+        EnvGuard maxDelayGuard("YAMS_INGEST_ENQUEUE_MAX_DELAY_MS", "1");
+        RequestDispatcher::__test_setDocumentsEnqueueFailuresBeforeSuccess(1);
+
+        auto filePath = writeTempFile("yams_documents_pressure_retry_", "pressure-retry.txt",
+                                      "pressure retry content");
+        AddDocumentRequest req;
+        req.path = filePath.string();
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        auto hasher = yams::crypto::createSHA256Hasher();
+        REQUIRE(hasher != nullptr);
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.hash == hasher->hashFile(req.path));
+        CHECK(addResp.message == "Queued for deferred processing (system under pressure).");
+    }
+
+    SECTION("add document falls back to initializing path when later lifecycle snapshot throws") {
+        DaemonConfig notReadyCfg;
+        notReadyCfg.dataDir = makeTempDir("yams_documents_dispatcher_lifecycle_throw_late_");
+        StubLifecycle notReadyLifecycle(LifecycleState::Ready);
+        notReadyLifecycle.setThrowOnGetLifecycleSnapshotCall(2);
+        StateComponent notReadyState;
+        notReadyState.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        notReadyState.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm notReadyLifecycleFsm;
+        ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
+        RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
+
+        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        drainStoreDocumentTasks();
+
+        AddDocumentRequest req;
+        req.name = "late-throw.txt";
+        req.content = "late throw";
+
+        auto resp = dispatchRequest(notReadyDispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.message ==
+              "Ingestion accepted for asynchronous processing (daemon initializing).");
     }
 
     SECTION("add document reports queue full on async single-file path") {
@@ -3294,6 +3458,697 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InternalError);
         CHECK(err.message == "Content unavailable");
+    }
+}
+
+TEST_CASE("RequestDispatcher: download handler enforces daemon policy",
+          "[daemon][documents][dispatcher][download]") {
+    EnvGuard daemonDownloadEnv("YAMS_ENABLE_DAEMON_DOWNLOAD", "0");
+
+    auto dispatchDownload = [](RequestDispatcher& dispatcher, const std::string& url,
+                               std::string outputPath = {}, std::string checksum = {}) {
+        DownloadRequest req;
+        req.url = url;
+        req.outputPath = std::move(outputPath);
+        req.checksum = std::move(checksum);
+        return dispatchRequest(dispatcher, Request{req});
+    };
+    auto waitForDownloadJob = [](RequestDispatcher& dispatcher, const std::string& jobId,
+                                 std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        DownloadResponse latest;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto resp = dispatchRequest(dispatcher, Request{DownloadStatusRequest{jobId}});
+            if (std::holds_alternative<DownloadResponse>(resp)) {
+                latest = std::get<DownloadResponse>(resp);
+                if (latest.state != "queued" && latest.state != "running") {
+                    return latest;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return latest;
+    };
+
+    SECTION("disabled policy returns safe reminder") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_disabled_");
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://example.com/file.bin");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("Daemon download is disabled") != std::string::npos);
+    }
+
+    SECTION("disallowed scheme is rejected before download starts") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_scheme_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "http://example.com/file.bin");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("scheme 'http'") != std::string::npos);
+    }
+
+    SECTION("invalid URL shape is rejected before policy host checks") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_invalid_url_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "not-a-url");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error == "Invalid download URL");
+    }
+
+    SECTION("download URL rejects missing authority after scheme") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_missing_authority_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error == "Invalid download URL");
+    }
+
+    SECTION("download URL rejects empty host after credentials stripping") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_empty_host_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://user@/file.bin");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error == "Invalid download URL");
+    }
+
+    SECTION("wildcard host policy accepts matching subdomains before checksum gate") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_wildcard_host_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = true;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.allowedHosts = {"*.example.com"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://api.example.com/file.bin");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("checksum is required") != std::string::npos);
+    }
+
+    SECTION("IPv6 authority parses and matches exact allowed host") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_ipv6_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = true;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.allowedHosts = {"::1"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://[::1]/file.bin");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("checksum is required") != std::string::npos);
+    }
+
+    SECTION("invalid IPv6 authority is rejected") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_ipv6_invalid_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://[]/file.bin");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error == "Invalid download URL");
+    }
+
+    SECTION("disallowed host is rejected before download starts") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_host_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.allowedHosts = {"downloads.example.com"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://example.com/file.bin");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("host 'example.com'") != std::string::npos);
+    }
+
+    SECTION("store-only policy rejects output path") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_store_only_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.storeOnly = true;
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://example.com/file.bin", "/tmp/export.bin");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("store_only=true") != std::string::npos);
+    }
+
+    SECTION("invalid checksum format is rejected before download starts") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_bad_checksum_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp =
+            dispatchDownload(dispatcher, "https://example.com/file.bin", {}, "sha1:not-allowed");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("invalid checksum format") != std::string::npos);
+    }
+
+    SECTION("unsupported checksum algorithm with valid hex is rejected") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_bad_checksum_algo_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp =
+            dispatchDownload(dispatcher, "https://example.com/file.bin", {}, "sha1:abcdef12");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("invalid checksum format") != std::string::npos);
+    }
+
+    SECTION("malformed checksum missing separator is rejected") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_bad_checksum_shape_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://example.com/file.bin", {}, "sha256");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("invalid checksum format") != std::string::npos);
+    }
+
+    SECTION("checksum-required policy rejects missing checksum") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_checksum_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = true;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto resp = dispatchDownload(dispatcher, "https://example.com/file.bin");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.error.find("checksum is required") != std::string::npos);
+    }
+
+    SECTION("valid checksum enters job tracking and handles unavailable service") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_valid_checksum_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.allowedHosts = {"*"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        RequestDispatcher::__test_forceDownloadServiceUnavailableOnce();
+
+        auto resp =
+            dispatchDownload(dispatcher, "https://example.com/file.bin", {}, "sha256:abcd1234");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK_FALSE(dl.success);
+        CHECK(dl.state == "queued");
+        CHECK_FALSE(dl.jobId.empty());
+
+        const auto finalStatus = waitForDownloadJob(dispatcher, dl.jobId);
+        CHECK(finalStatus.jobId == dl.jobId);
+        CHECK(finalStatus.state == "failed");
+        CHECK(finalStatus.error == "Download service not available in daemon");
+    }
+
+    SECTION("sha512 checksum enters job tracking and handles unavailable service") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_sha512_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.allowedHosts = {"*"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        RequestDispatcher::__test_forceDownloadServiceUnavailableOnce();
+
+        auto resp = dispatchDownload(dispatcher, "https://example.com/file.bin", {},
+                                     "sha512:abcdef1234567890");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK(dl.state == "queued");
+        CHECK_FALSE(dl.jobId.empty());
+
+        const auto finalStatus = waitForDownloadJob(dispatcher, dl.jobId);
+        CHECK(finalStatus.jobId == dl.jobId);
+        CHECK(finalStatus.state == "failed");
+        CHECK(finalStatus.error == "Download service not available in daemon");
+    }
+
+    SECTION("md5 checksum enters job tracking and handles unavailable service") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_md5_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.allowedHosts = {"*"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        RequestDispatcher::__test_forceDownloadServiceUnavailableOnce();
+
+        auto resp = dispatchDownload(dispatcher, "https://example.com/file.bin", {},
+                                     "md5:abcdef1234567890");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK(dl.state == "queued");
+        CHECK_FALSE(dl.jobId.empty());
+
+        const auto finalStatus = waitForDownloadJob(dispatcher, dl.jobId);
+        CHECK(finalStatus.jobId == dl.jobId);
+        CHECK(finalStatus.state == "failed");
+        CHECK(finalStatus.error == "Download service not available in daemon");
+    }
+
+    SECTION("forced successful download completes the tracked job") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_success_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.allowedHosts = {"*"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        RequestDispatcher::__test_forceDownloadServiceSuccessOnce();
+
+        auto resp =
+            dispatchDownload(dispatcher, "https://example.com/file.bin", {}, "sha256:abcd1234");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK(dl.state == "queued");
+        CHECK_FALSE(dl.jobId.empty());
+
+        const auto finalStatus = waitForDownloadJob(dispatcher, dl.jobId);
+        CHECK(finalStatus.jobId == dl.jobId);
+        CHECK(finalStatus.state == "completed");
+        CHECK(finalStatus.success);
+        CHECK(finalStatus.error.empty());
+        CHECK(finalStatus.hash == "sha256:forced-download-success");
+        CHECK(finalStatus.localPath.find("forced-download-success.bin") != std::string::npos);
+        CHECK(finalStatus.size == 64);
+    }
+}
+
+TEST_CASE("RequestDispatcher: download job status and list use in-memory registry",
+          "[daemon][documents][dispatcher][download-jobs]") {
+    RequestDispatcher::__test_resetDownloadJobs();
+
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_download_job_registry_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    DownloadResponse first;
+    first.url = "https://example.com/a.bin";
+    first.jobId = "download-1";
+    first.state = "completed";
+    first.createdAtMs = 100;
+    first.updatedAtMs = 200;
+    first.success = true;
+
+    DownloadResponse second;
+    second.url = "https://example.com/b.bin";
+    second.jobId = "download-2";
+    second.state = "failed";
+    second.createdAtMs = 300;
+    second.updatedAtMs = 400;
+    second.success = false;
+    second.error = "network boom";
+
+    RequestDispatcher::__test_seedDownloadJob(first);
+    RequestDispatcher::__test_seedDownloadJob(second);
+
+    SECTION("download status returns the seeded job") {
+        auto resp = dispatchRequest(dispatcher, Request{DownloadStatusRequest{"download-2"}});
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK(dl.jobId == "download-2");
+        CHECK(dl.state == "failed");
+        CHECK(dl.error == "network boom");
+    }
+
+    SECTION("download status returns not found for unknown job") {
+        auto resp = dispatchRequest(dispatcher, Request{DownloadStatusRequest{"missing-job"}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message == "Download job not found");
+    }
+
+    SECTION("list download jobs returns most recent first and honors limit") {
+        auto resp = dispatchRequest(dispatcher, Request{ListDownloadJobsRequest{1}});
+
+        REQUIRE(std::holds_alternative<ListDownloadJobsResponse>(resp));
+        const auto& jobs = std::get<ListDownloadJobsResponse>(resp);
+        REQUIRE(jobs.jobs.size() == 1);
+        CHECK(jobs.jobs.front().jobId == "download-2");
+        CHECK(jobs.jobs.front().state == "failed");
+    }
+
+    SECTION("list download jobs clamps zero limit to one") {
+        auto resp = dispatchRequest(dispatcher, Request{ListDownloadJobsRequest{0}});
+
+        REQUIRE(std::holds_alternative<ListDownloadJobsResponse>(resp));
+        const auto& jobs = std::get<ListDownloadJobsResponse>(resp);
+        REQUIRE(jobs.jobs.size() == 1);
+        CHECK(jobs.jobs.front().jobId == "download-2");
+    }
+
+    SECTION("cancel download job marks running job as canceled") {
+        DownloadResponse running;
+        running.url = "https://example.com/c.bin";
+        running.jobId = "download-3";
+        running.state = "running";
+        running.createdAtMs = 500;
+        running.updatedAtMs = 500;
+        running.success = false;
+        RequestDispatcher::__test_seedDownloadJob(running);
+
+        auto resp = dispatchRequest(dispatcher, Request{CancelDownloadJobRequest{"download-3"}});
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK(dl.jobId == "download-3");
+        CHECK(dl.state == "canceled");
+        CHECK(dl.error == "Canceled by client");
+        CHECK_FALSE(dl.success);
+    }
+
+    SECTION("cancel download job keeps terminal jobs terminal") {
+        auto resp = dispatchRequest(dispatcher, Request{CancelDownloadJobRequest{"download-2"}});
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK(dl.jobId == "download-2");
+        CHECK(dl.state == "failed");
+        CHECK(dl.error == "network boom");
+    }
+
+    SECTION("cancel download job returns not found for unknown job") {
+        auto resp = dispatchRequest(dispatcher, Request{CancelDownloadJobRequest{"missing-job"}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message == "Download job not found");
+    }
+}
+
+TEST_CASE("RequestDispatcher: download jobs reload from persisted registry",
+          "[daemon][documents][dispatcher][download-jobs]") {
+    RequestDispatcher::__test_resetDownloadJobs();
+    auto dispatchDownload = [](RequestDispatcher& dispatcher, const std::string& url,
+                               std::string outputPath = {}, std::string checksum = {}) {
+        DownloadRequest req;
+        req.url = url;
+        req.outputPath = std::move(outputPath);
+        req.checksum = std::move(checksum);
+        return dispatchRequest(dispatcher, Request{req});
+    };
+    auto waitForDownloadJob = [](RequestDispatcher& dispatcher, const std::string& jobId,
+                                 std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        DownloadResponse latest;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto resp = dispatchRequest(dispatcher, Request{DownloadStatusRequest{jobId}});
+            if (std::holds_alternative<DownloadResponse>(resp)) {
+                latest = std::get<DownloadResponse>(resp);
+                if (latest.state != "queued" && latest.state != "running") {
+                    return latest;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return latest;
+    };
+
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_download_job_registry_persist_");
+    cfg.downloadPolicy.enable = true;
+    cfg.downloadPolicy.requireChecksum = false;
+    cfg.downloadPolicy.allowedSchemes = {"https"};
+    cfg.downloadPolicy.allowedHosts = {"*"};
+
+    std::string jobId;
+
+    {
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        RequestDispatcher::__test_forceDownloadServiceUnavailableOnce();
+
+        auto resp =
+            dispatchDownload(dispatcher, "https://example.com/file.bin", {}, "sha256:abcd1234");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        REQUIRE_FALSE(dl.jobId.empty());
+        CHECK_FALSE(dl.success);
+        CHECK(dl.state == "queued");
+        jobId = dl.jobId;
+
+        const auto finalStatus = waitForDownloadJob(dispatcher, jobId);
+        CHECK(finalStatus.state == "failed");
+        CHECK(finalStatus.error == "Download service not available in daemon");
+    }
+
+    RequestDispatcher::__test_forgetDownloadJobsCache();
+
+    {
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        auto statusResp = dispatchRequest(dispatcher, Request{DownloadStatusRequest{jobId}});
+        REQUIRE(std::holds_alternative<DownloadResponse>(statusResp));
+        const auto& status = std::get<DownloadResponse>(statusResp);
+        CHECK(status.jobId == jobId);
+        CHECK(status.state == "failed");
+        CHECK(status.error == "Download service not available in daemon");
+
+        auto listResp = dispatchRequest(dispatcher, Request{ListDownloadJobsRequest{1}});
+        REQUIRE(std::holds_alternative<ListDownloadJobsResponse>(listResp));
+        const auto& list = std::get<ListDownloadJobsResponse>(listResp);
+        REQUIRE(list.jobs.size() == 1);
+        CHECK(list.jobs.front().jobId == jobId);
+        CHECK(list.jobs.front().state == "failed");
     }
 }
 

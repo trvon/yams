@@ -328,6 +328,7 @@ TEST_CASE("DownloadProtocol: Request serialization", "[daemon][protocol][downloa
         DownloadRequest req;
         req.url = "https://example.com/file.txt";
         req.outputPath = "/tmp/output.txt";
+        req.checksum = "sha256:abcdef0123456789";
         req.tags = {"tag1", "tag2", "tag3"};
         req.metadata = {{"key1", "value1"}, {"key2", "value2"}};
         req.quiet = true;
@@ -345,6 +346,7 @@ TEST_CASE("DownloadProtocol: Request serialization", "[daemon][protocol][downloa
         REQUIRE(downloadReq != nullptr);
         REQUIRE(downloadReq->url == req.url);
         REQUIRE(downloadReq->outputPath == req.outputPath);
+        REQUIRE(downloadReq->checksum == req.checksum);
         REQUIRE(downloadReq->tags == req.tags);
         REQUIRE(downloadReq->metadata == req.metadata);
         REQUIRE(downloadReq->quiet == req.quiet);
@@ -355,6 +357,7 @@ TEST_CASE("DownloadProtocol: Request serialization", "[daemon][protocol][downloa
         DownloadRequest req;
         req.url = "https://example.com/file with spaces & special=chars?param=value#anchor";
         req.outputPath = "/path/with spaces/and-特殊文字/file.txt";
+        req.checksum = "sha512:ABCDEF123456";
         req.tags = {"tag with spaces", "tag/with/slashes", "tag&special"};
         req.metadata = {{"key with spaces", "value\nwith\nnewlines"}, {"特殊", "文字"}};
         msg.payload = Request{req};
@@ -370,6 +373,7 @@ TEST_CASE("DownloadProtocol: Request serialization", "[daemon][protocol][downloa
         REQUIRE(downloadReq != nullptr);
         REQUIRE(downloadReq->url == req.url);
         REQUIRE(downloadReq->outputPath == req.outputPath);
+        REQUIRE(downloadReq->checksum == req.checksum);
         REQUIRE(downloadReq->tags == req.tags);
         REQUIRE(downloadReq->metadata == req.metadata);
     }
@@ -399,6 +403,60 @@ TEST_CASE("DownloadProtocol: Request serialization", "[daemon][protocol][downloa
         REQUIRE(downloadReq->metadata.size() == 100);
         REQUIRE(downloadReq->tags.size() == 50);
     }
+
+    SECTION("DownloadStatusRequest roundtrip") {
+        Message msg{PROTOCOL_VERSION, 106, std::chrono::steady_clock::now(), Request{}};
+        DownloadStatusRequest req;
+        req.jobId = "download-17";
+        msg.payload = Request{req};
+
+        auto framedResult = framer->frame_message(msg);
+        REQUIRE(framedResult);
+
+        auto parsedResult = framer->parse_frame(framedResult.value());
+        REQUIRE(parsedResult);
+
+        auto* statusReq =
+            std::get_if<DownloadStatusRequest>(&std::get<Request>(parsedResult.value().payload));
+        REQUIRE(statusReq != nullptr);
+        REQUIRE(statusReq->jobId == req.jobId);
+    }
+
+    SECTION("CancelDownloadJobRequest roundtrip") {
+        Message msg{PROTOCOL_VERSION, 106, std::chrono::steady_clock::now(), Request{}};
+        CancelDownloadJobRequest req;
+        req.jobId = "download-18";
+        msg.payload = Request{req};
+
+        auto framedResult = framer->frame_message(msg);
+        REQUIRE(framedResult);
+
+        auto parsedResult = framer->parse_frame(framedResult.value());
+        REQUIRE(parsedResult);
+
+        auto* cancelReq =
+            std::get_if<CancelDownloadJobRequest>(&std::get<Request>(parsedResult.value().payload));
+        REQUIRE(cancelReq != nullptr);
+        REQUIRE(cancelReq->jobId == req.jobId);
+    }
+
+    SECTION("ListDownloadJobsRequest roundtrip") {
+        Message msg{PROTOCOL_VERSION, 107, std::chrono::steady_clock::now(), Request{}};
+        ListDownloadJobsRequest req;
+        req.limit = 7;
+        msg.payload = Request{req};
+
+        auto framedResult = framer->frame_message(msg);
+        REQUIRE(framedResult);
+
+        auto parsedResult = framer->parse_frame(framedResult.value());
+        REQUIRE(parsedResult);
+
+        auto* listReq =
+            std::get_if<ListDownloadJobsRequest>(&std::get<Request>(parsedResult.value().payload));
+        REQUIRE(listReq != nullptr);
+        REQUIRE(listReq->limit == req.limit);
+    }
 }
 
 TEST_CASE("DownloadProtocol: Response serialization", "[daemon][protocol][download]") {
@@ -410,6 +468,10 @@ TEST_CASE("DownloadProtocol: Response serialization", "[daemon][protocol][downlo
         res.hash = "sha256:abcdef1234567890";
         res.localPath = "/tmp/downloaded_file.txt";
         res.url = "https://example.com/file.txt";
+        res.jobId = "download-42";
+        res.state = "completed";
+        res.createdAtMs = 1111;
+        res.updatedAtMs = 2222;
         res.size = 12345;
         res.success = true;
         res.error = "";
@@ -427,6 +489,10 @@ TEST_CASE("DownloadProtocol: Response serialization", "[daemon][protocol][downlo
         REQUIRE(downloadRes->hash == res.hash);
         REQUIRE(downloadRes->localPath == res.localPath);
         REQUIRE(downloadRes->url == res.url);
+        REQUIRE(downloadRes->jobId == res.jobId);
+        REQUIRE(downloadRes->state == res.state);
+        REQUIRE(downloadRes->createdAtMs == res.createdAtMs);
+        REQUIRE(downloadRes->updatedAtMs == res.updatedAtMs);
         REQUIRE(downloadRes->size == res.size);
         REQUIRE(downloadRes->success == true);
     }
@@ -437,6 +503,10 @@ TEST_CASE("DownloadProtocol: Response serialization", "[daemon][protocol][downlo
         res.hash = "";
         res.localPath = "";
         res.url = "https://example.com/nonexistent.txt";
+        res.jobId = "download-43";
+        res.state = "failed";
+        res.createdAtMs = 3333;
+        res.updatedAtMs = 4444;
         res.size = 0;
         res.success = false;
         res.error = "404 Not Found";
@@ -454,6 +524,41 @@ TEST_CASE("DownloadProtocol: Response serialization", "[daemon][protocol][downlo
         REQUIRE_FALSE(downloadRes->success);
         REQUIRE(downloadRes->error == "404 Not Found");
         REQUIRE(downloadRes->size == 0);
+    }
+
+    SECTION("ListDownloadJobsResponse roundtrip") {
+        Message msg{PROTOCOL_VERSION, 103, std::chrono::steady_clock::now(), Response{}};
+        ListDownloadJobsResponse res;
+        DownloadResponse first;
+        first.url = "https://example.com/a";
+        first.jobId = "download-1";
+        first.state = "completed";
+        first.createdAtMs = 100;
+        first.updatedAtMs = 200;
+        first.success = true;
+        DownloadResponse second;
+        second.url = "https://example.com/b";
+        second.jobId = "download-2";
+        second.state = "failed";
+        second.createdAtMs = 300;
+        second.updatedAtMs = 400;
+        second.success = false;
+        second.error = "boom";
+        res.jobs = {first, second};
+        msg.payload = Response{res};
+
+        auto framedResult = framer->frame_message(msg);
+        REQUIRE(framedResult);
+
+        auto parsedResult = framer->parse_frame(framedResult.value());
+        REQUIRE(parsedResult);
+
+        auto* listRes = std::get_if<ListDownloadJobsResponse>(
+            &std::get<Response>(parsedResult.value().payload));
+        REQUIRE(listRes != nullptr);
+        REQUIRE(listRes->jobs.size() == 2);
+        REQUIRE(listRes->jobs.at(0).jobId == "download-1");
+        REQUIRE(listRes->jobs.at(1).error == "boom");
     }
 }
 
@@ -738,6 +843,7 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         DownloadRequest req;
         req.url = invalidUtf8("https://example.com/file");
         req.outputPath = invalidUtf8("/tmp/download", ".txt");
+        req.checksum = invalidUtf8("sha256:", "deadbeef");
         req.tags = {invalidUtf8("tag-download")};
         req.metadata = {{invalidUtf8("source"), invalidUtf8("cli")}};
 
@@ -751,6 +857,7 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         REQUIRE(got != nullptr);
         checkSanitizedField("DownloadRequest.url", got->url, req.url);
         checkSanitizedField("DownloadRequest.outputPath", got->outputPath, req.outputPath);
+        checkSanitizedField("DownloadRequest.checksum", got->checksum, req.checksum);
         checkSanitizedField("DownloadRequest.tags[0]", got->tags.at(0), req.tags.at(0));
     }
 
@@ -786,6 +893,10 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
     dr.hash = "deadbeef";
     dr.localPath = "/tmp/file";
     dr.url = "https://example.com";
+    dr.jobId = "download-9";
+    dr.state = "completed";
+    dr.createdAtMs = 123;
+    dr.updatedAtMs = 456;
     dr.size = 1234;
     dr.success = true;
     dr.error = "";
@@ -800,6 +911,10 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
     auto* got = std::get_if<DownloadResponse>(&std::get<Response>(dec.value().payload));
     REQUIRE(got != nullptr);
     REQUIRE(got->hash == "deadbeef");
+    REQUIRE(got->jobId == "download-9");
+    REQUIRE(got->state == "completed");
+    REQUIRE(got->createdAtMs == 123);
+    REQUIRE(got->updatedAtMs == 456);
     REQUIRE(got->size == 1234);
     REQUIRE(got->success == true);
 
@@ -853,15 +968,16 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
         err.code = ErrorCode::InvalidData;
         err.message = invalidUtf8("bad-search-query");
 
-        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{err}, 20));
-        REQUIRE(enc);
+        auto encoded = ProtoSerializer::encode_payload(makeMessageWith(Response{err}, 20));
+        REQUIRE(encoded);
 
-        auto dec = ProtoSerializer::decode_payload(enc.value());
-        REQUIRE(dec);
+        auto decoded = ProtoSerializer::decode_payload(encoded.value());
+        REQUIRE(decoded);
 
-        auto* got = std::get_if<ErrorResponse>(&std::get<Response>(dec.value().payload));
-        REQUIRE(got != nullptr);
-        checkSanitizedField("ErrorResponse.message", got->message, err.message);
+        auto* decodedError =
+            std::get_if<ErrorResponse>(&std::get<Response>(decoded.value().payload));
+        REQUIRE(decodedError != nullptr);
+        checkSanitizedField("ErrorResponse.message", decodedError->message, err.message);
     }
 
     SECTION("RepairEvent sanitizes invalid UTF-8 progress text") {
@@ -870,17 +986,17 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
         ev.operation = invalidUtf8("fts5");
         ev.message = invalidUtf8("rebuilding-index");
 
-        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{ev}, 21));
-        REQUIRE(enc);
+        auto encoded = ProtoSerializer::encode_payload(makeMessageWith(Response{ev}, 21));
+        REQUIRE(encoded);
 
-        auto dec = ProtoSerializer::decode_payload(enc.value());
-        REQUIRE(dec);
+        auto decoded = ProtoSerializer::decode_payload(encoded.value());
+        REQUIRE(decoded);
 
-        auto* got = std::get_if<RepairEvent>(&std::get<Response>(dec.value().payload));
-        REQUIRE(got != nullptr);
-        checkSanitizedField("RepairEvent.phase", got->phase, ev.phase);
-        checkSanitizedField("RepairEvent.operation", got->operation, ev.operation);
-        checkSanitizedField("RepairEvent.message", got->message, ev.message);
+        auto* decodedEvent = std::get_if<RepairEvent>(&std::get<Response>(decoded.value().payload));
+        REQUIRE(decodedEvent != nullptr);
+        checkSanitizedField("RepairEvent.phase", decodedEvent->phase, ev.phase);
+        checkSanitizedField("RepairEvent.operation", decodedEvent->operation, ev.operation);
+        checkSanitizedField("RepairEvent.message", decodedEvent->message, ev.message);
     }
 
     SECTION("RepairResponse sanitizes invalid UTF-8 errors and operation messages") {
@@ -893,22 +1009,24 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
         op.message = invalidUtf8("bad utf8 in batch");
         resp.operationResults.push_back(op);
 
-        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 22));
-        REQUIRE(enc);
+        auto encoded = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 22));
+        REQUIRE(encoded);
 
-        auto dec = ProtoSerializer::decode_payload(enc.value());
-        REQUIRE(dec);
+        auto decoded = ProtoSerializer::decode_payload(encoded.value());
+        REQUIRE(decoded);
 
-        auto* got = std::get_if<RepairResponse>(&std::get<Response>(dec.value().payload));
-        REQUIRE(got != nullptr);
-        REQUIRE(got->errors.size() == resp.errors.size());
-        checkSanitizedField("RepairResponse.errors[0]", got->errors.at(0), resp.errors.at(0));
-        REQUIRE(got->operationResults.size() == 1);
+        auto* decodedResponse =
+            std::get_if<RepairResponse>(&std::get<Response>(decoded.value().payload));
+        REQUIRE(decodedResponse != nullptr);
+        REQUIRE(decodedResponse->errors.size() == resp.errors.size());
+        checkSanitizedField("RepairResponse.errors[0]", decodedResponse->errors.at(0),
+                            resp.errors.at(0));
+        REQUIRE(decodedResponse->operationResults.size() == 1);
         checkSanitizedField("RepairResponse.operationResults[0].operation",
-                            got->operationResults.at(0).operation,
+                            decodedResponse->operationResults.at(0).operation,
                             resp.operationResults.at(0).operation);
         checkSanitizedField("RepairResponse.operationResults[0].message",
-                            got->operationResults.at(0).message,
+                            decodedResponse->operationResults.at(0).message,
                             resp.operationResults.at(0).message);
     }
 
@@ -920,18 +1038,19 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
         resp.hasContent = false;
         resp.metadata = {{invalidUtf8("task"), invalidUtf8("performance")}};
 
-        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 24));
-        REQUIRE(enc);
+        auto encoded = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 24));
+        REQUIRE(encoded);
 
-        auto dec = ProtoSerializer::decode_payload(enc.value());
-        REQUIRE(dec);
+        auto decoded = ProtoSerializer::decode_payload(encoded.value());
+        REQUIRE(decoded);
 
-        auto* got = std::get_if<GetResponse>(&std::get<Response>(dec.value().payload));
-        REQUIRE(got != nullptr);
-        checkSanitizedField("GetResponse.hash", got->hash, resp.hash);
-        checkSanitizedField("GetResponse.name", got->name, resp.name);
-        checkSanitizedField("GetResponse.path", got->path, resp.path);
-        REQUIRE_FALSE(got->hasContent);
+        auto* decodedResponse =
+            std::get_if<GetResponse>(&std::get<Response>(decoded.value().payload));
+        REQUIRE(decodedResponse != nullptr);
+        checkSanitizedField("GetResponse.hash", decodedResponse->hash, resp.hash);
+        checkSanitizedField("GetResponse.name", decodedResponse->name, resp.name);
+        checkSanitizedField("GetResponse.path", decodedResponse->path, resp.path);
+        REQUIRE_FALSE(decodedResponse->hasContent);
     }
 }
 
@@ -1064,6 +1183,12 @@ TEST_CASE("MessageType: Request and response enum mappings", "[daemon][protocol]
     SECTION("Request type mappings") {
         REQUIRE(MessageType::CatRequest == getMessageType(Request{CatRequest{}}));
         REQUIRE(MessageType::ListSessionsRequest == getMessageType(Request{ListSessionsRequest{}}));
+        REQUIRE(MessageType::DownloadStatusRequest ==
+                getMessageType(Request{DownloadStatusRequest{.jobId = "download-1"}}));
+        REQUIRE(MessageType::CancelDownloadJobRequest ==
+                getMessageType(Request{CancelDownloadJobRequest{.jobId = "download-2"}}));
+        REQUIRE(MessageType::ListDownloadJobsRequest ==
+                getMessageType(Request{ListDownloadJobsRequest{.limit = 5}}));
         REQUIRE(MessageType::UseSessionRequest ==
                 getMessageType(Request{UseSessionRequest{.session_name = "s"}}));
         REQUIRE(MessageType::AddPathSelectorRequest ==
@@ -1077,11 +1202,19 @@ TEST_CASE("MessageType: Request and response enum mappings", "[daemon][protocol]
         REQUIRE(MessageType::CatResponse == getMessageType(Response{CatResponse{}}));
         REQUIRE(MessageType::ListResponse == getMessageType(Response{ListResponse{}}));
         REQUIRE(MessageType::StatusResponse == getMessageType(Response{StatusResponse{}}));
+        REQUIRE(MessageType::ListDownloadJobsResponse ==
+                getMessageType(Response{ListDownloadJobsResponse{}}));
     }
 
     SECTION("Request name extraction") {
         REQUIRE(std::string("Cat") == getRequestName(Request{CatRequest{}}));
         REQUIRE(std::string("ListSessions") == getRequestName(Request{ListSessionsRequest{}}));
+        REQUIRE(std::string("DownloadStatus") ==
+                getRequestName(Request{DownloadStatusRequest{.jobId = "download-1"}}));
+        REQUIRE(std::string("CancelDownloadJob") ==
+                getRequestName(Request{CancelDownloadJobRequest{.jobId = "download-2"}}));
+        REQUIRE(std::string("ListDownloadJobs") ==
+                getRequestName(Request{ListDownloadJobsRequest{.limit = 5}}));
         REQUIRE(std::string("UseSession") ==
                 getRequestName(Request{UseSessionRequest{.session_name = "x"}}));
         REQUIRE(std::string("AddPathSelector") ==
