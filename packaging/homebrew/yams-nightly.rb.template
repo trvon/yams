@@ -66,6 +66,13 @@ class YamsNightly < Formula
 
     expected_rpath = (HOMEBREW_PREFIX/"lib").to_s
 
+    current_rpaths = lambda do |binary|
+      Utils.safe_popen_read("otool", "-l", binary.to_s)
+           .scan(/^\s*path\s+([^\s]+)\s+\(offset/m)
+           .flatten
+           .uniq
+    end
+
     Dir[plugin_dir/"*.dylib"].sort.each do |plugin_path|
       plugin = Pathname(plugin_path)
 
@@ -75,13 +82,13 @@ class YamsNightly < Formula
         mode = plugin.stat.mode & 0o777
         plugin.chmod(mode | 0o200)
 
-        unless Utils.safe_popen_read("otool", "-l", plugin.to_s).include?(expected_rpath)
+        unless current_rpaths.call(plugin).include?(expected_rpath)
           unless system "install_name_tool", "-add_rpath", expected_rpath, plugin.to_s
             odie "Failed to add rpath '#{expected_rpath}' to #{plugin}"
           end
         end
 
-        unless Utils.safe_popen_read("otool", "-l", plugin.to_s).include?(expected_rpath)
+        unless current_rpaths.call(plugin).include?(expected_rpath)
           odie "RPATH verification failed for #{plugin}; expected '#{expected_rpath}'"
         end
       rescue StandardError => e
