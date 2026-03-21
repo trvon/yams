@@ -445,6 +445,12 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.graphRerankTopN);
         }
 
+        if (auto includeTiming = getEnvBool("YAMS_SEARCH_INCLUDE_COMPONENT_TIMING")) {
+            cfg.includeComponentTiming = *includeTiming;
+            spdlog::info("SearchEngine includeComponentTiming overridden to {} via env",
+                         cfg.includeComponentTiming);
+        }
+
         if (auto graphWeight = getEnvFloat("YAMS_SEARCH_GRAPH_RERANK_WEIGHT")) {
             cfg.graphRerankWeight = std::max(0.0f, *graphWeight);
             spdlog::info("SearchEngine graphRerankWeight overridden to {:.3f} via env",

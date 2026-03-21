@@ -1000,6 +1000,22 @@ boost::asio::awaitable<Result<SearchResponse>> DaemonClient::search(const Search
     co_return co_await streamingSearch(req);
 }
 
+boost::asio::awaitable<Result<SearchResponse>> DaemonClient::unarySearch(const SearchRequest& req) {
+    auto r = co_await sendRequest(Request{req});
+    if (!r) {
+        co_return r.error();
+    }
+
+    auto& payload = r.value();
+    if (auto* ok = std::get_if<SearchResponse>(&payload)) {
+        co_return *ok;
+    }
+    if (auto* er = std::get_if<ErrorResponse>(&payload)) {
+        co_return Error{er->code, er->message};
+    }
+    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+}
+
 boost::asio::awaitable<Result<SearchResponse>>
 DaemonClient::streamingSearch(const SearchRequest& req) {
     auto handler = std::make_shared<StreamingSearchHandler>(req.pathsOnly, req.limit);

@@ -51,6 +51,7 @@ public:
     static void __test_forceCatMissingContentOnce();
     static void __test_forceCatNativeMissingDocumentOnce();
     static void __test_forceCatNativeMissingContentOnce();
+    static void __test_resetDocumentsQueryTraceCache();
 
     // PBI-008-11: Session prepare (warming) options and entrypoint
     struct PrepareSessionOptions {

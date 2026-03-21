@@ -71,10 +71,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         lastLoadWithOptionsModel_.clear();
         lastLoadWithOptionsJson_.clear();
-        if (!isAvailable()) {
+        if (!available_) {
             return yams::Error{yams::ErrorCode::InvalidState, "Provider unavailable"};
         }
-        if (!isModelLoaded(modelName)) {
+        if (std::find(loadedModels_.begin(), loadedModels_.end(), modelName) ==
+            loadedModels_.end()) {
             loadedModels_.push_back(modelName);
         }
         return yams::Result<void>();
@@ -83,12 +84,13 @@ public:
     yams::Result<void> loadModelWithOptions(const std::string& modelName,
                                             const std::string& optionsJson) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!isAvailable()) {
+        if (!available_) {
             return yams::Error{yams::ErrorCode::InvalidState, "Provider unavailable"};
         }
         lastLoadWithOptionsModel_ = modelName;
         lastLoadWithOptionsJson_ = optionsJson;
-        if (!isModelLoaded(modelName)) {
+        if (std::find(loadedModels_.begin(), loadedModels_.end(), modelName) ==
+            loadedModels_.end()) {
             loadedModels_.push_back(modelName);
         }
         return yams::Result<void>();

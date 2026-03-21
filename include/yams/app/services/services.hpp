@@ -203,6 +203,8 @@ struct SearchRequest {
     std::vector<std::string> pathPatterns; // multiple glob patterns (preferred)
     std::vector<std::string> tags;         // filter by tags (presence-based)
     bool matchAllTags{false};              // require all specified tags
+    std::vector<std::pair<std::string, std::string>>
+        metadataFilters; // internal structured metadata filters parsed from query
 
     // File type filters
     std::string fileType;  // "image", "document", "text", etc.

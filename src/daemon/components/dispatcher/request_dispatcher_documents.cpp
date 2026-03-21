@@ -31,6 +31,17 @@ namespace yams::daemon {
 
 namespace {
 
+std::atomic<int> g_queryTraceEnabledCached{-1};
+std::atomic<uint32_t> g_inflightListRequests{0};
+std::atomic<uint32_t> g_inflightGrepRequests{0};
+std::atomic<bool> g_forceListUnknownExceptionOnce{false};
+std::atomic<bool> g_forceCatMissingDocumentOnce{false};
+std::atomic<bool> g_forceCatMissingContentOnce{false};
+std::atomic<bool> g_forceCatNativeMissingDocumentOnce{false};
+std::atomic<bool> g_forceCatNativeMissingContentOnce{false};
+std::string g_forceListExceptionMessage;
+std::mutex g_forceListExceptionMutex;
+
 int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) {
     const char* raw = std::getenv(name);
     if (!raw || !*raw) {
@@ -45,25 +56,14 @@ int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) 
 }
 
 bool query_trace_enabled() {
-    static std::atomic<int> cached{-1};
-    int v = cached.load(std::memory_order_relaxed);
+    int v = g_queryTraceEnabledCached.load(std::memory_order_relaxed);
     if (v >= 0)
         return v == 1;
     const char* env = std::getenv("YAMS_QUERY_TRACE");
     bool enabled = env && *env && std::string_view(env) != "0";
-    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    g_queryTraceEnabledCached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
-
-std::atomic<uint32_t> g_inflightListRequests{0};
-std::atomic<uint32_t> g_inflightGrepRequests{0};
-std::atomic<bool> g_forceListUnknownExceptionOnce{false};
-std::atomic<bool> g_forceCatMissingDocumentOnce{false};
-std::atomic<bool> g_forceCatMissingContentOnce{false};
-std::atomic<bool> g_forceCatNativeMissingDocumentOnce{false};
-std::atomic<bool> g_forceCatNativeMissingContentOnce{false};
-std::string g_forceListExceptionMessage;
-std::mutex g_forceListExceptionMutex;
 
 struct ListInflightGuard {
     ~ListInflightGuard() { g_inflightListRequests.fetch_sub(1, std::memory_order_acq_rel); }
@@ -181,6 +181,10 @@ void RequestDispatcher::__test_forceCatNativeMissingDocumentOnce() {
 
 void RequestDispatcher::__test_forceCatNativeMissingContentOnce() {
     g_forceCatNativeMissingContentOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_resetDocumentsQueryTraceCache() {
+    g_queryTraceEnabledCached.store(-1, std::memory_order_release);
 }
 
 // PBI-008-11 scaffold: prepare session using app services (no IPC exposure yet)

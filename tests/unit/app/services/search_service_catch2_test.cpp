@@ -249,6 +249,15 @@ struct SearchServiceFixture {
             spdlog::warn("Failed to index document content: {}", indexResult.error().message);
     }
 
+    void setMetadataForHash(const std::string& hash, const std::string& key,
+                            const std::string& value) {
+        auto docResult = metadataRepo->getDocumentByHash(hash);
+        REQUIRE(docResult);
+        REQUIRE(docResult.value().has_value());
+        auto result = metadataRepo->setMetadata(docResult.value()->id, key, MetadataValue(value));
+        REQUIRE(result);
+    }
+
     SearchRequest createBasicSearchRequest(const std::string& query) {
         SearchRequest request;
         request.query = query;
@@ -490,6 +499,44 @@ TEST_CASE("SearchService: keyword search", "[unit][services][search]") {
     for (const auto& doc : result.value().results) {
         CHECK(doc.score > 0.0);
     }
+}
+
+TEST_CASE("SearchService: explicit keyword search does not auto-fallback to fuzzy",
+          "[unit][services][search]") {
+    SearchServiceFixture f;
+    auto request = f.createBasicSearchRequest("xyzzyveryunlikelytomatchanything");
+    request.type = "keyword";
+    request.fuzzy = false;
+
+    auto result = runAwait(f.searchService->search(request));
+    REQUIRE(result);
+    CHECK(result.value().total == kZeroTotal);
+    CHECK(result.value().results.empty());
+    CHECK(result.value().type == "full-text");
+}
+
+TEST_CASE("SearchService: explicit keyword key=value query uses metadata filters",
+          "[unit][services][search]") {
+    SearchServiceFixture f;
+    REQUIRE(f.testHashes.size() >= 2);
+    f.setMetadataForHash(f.testHashes[0], "task", "performance");
+    f.setMetadataForHash(f.testHashes[0], "owner", "opencode");
+    f.setMetadataForHash(f.testHashes[1], "task", "performance");
+    f.setMetadataForHash(f.testHashes[1], "owner", "someone-else");
+
+    auto request = f.createBasicSearchRequest("task=performance owner=opencode");
+    request.type = "keyword";
+    request.fuzzy = false;
+
+    auto result = runAwait(f.searchService->search(request));
+    REQUIRE(result);
+    CHECK(result.value().type == "metadata");
+    CHECK(result.value().total >= 1);
+    REQUIRE_FALSE(result.value().results.empty());
+    const bool matchedExpectedHash =
+        std::any_of(result.value().results.begin(), result.value().results.end(),
+                    [&](const SearchItem& item) { return item.hash == f.testHashes[0]; });
+    CHECK(matchedExpectedHash);
 }
 
 TEST_CASE("SearchService: semantic search", "[unit][services][search]") {

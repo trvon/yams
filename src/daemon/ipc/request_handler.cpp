@@ -464,6 +464,13 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 const uint64_t sock_fd = sock && sock->is_open()
                                              ? static_cast<uint64_t>(sock->native_handle())
                                              : static_cast<uint64_t>(-1);
+                if (stream_trace) {
+                    spdlog::info("stream-trace: [conn={}] read timeout after {} ms (idle_count={} "
+                                 "active_inflight={} completed={})",
+                                 conn_token, read_timeout.count(), consecutive_idle_timeouts + 1,
+                                 inflight_.load(std::memory_order_acquire),
+                                 completed_requests->load(std::memory_order_acquire));
+                }
 
                 spdlog::debug(
                     "Read timeout (persistent) on socket {} after {} ms — keeping connection open",
@@ -504,6 +511,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     break;
                 }
                 bytes_read = read_bytes;
+                if (stream_trace) {
+                    spdlog::info("stream-trace: [conn={}] read {} bytes from socket", conn_token,
+                                 bytes_read);
+                }
                 spdlog::debug("socket.async_read returned {} bytes", bytes_read);
                 consecutive_idle_timeouts = 0; // traffic observed, reset idle counter
                 if (bytes_read == 0) {
@@ -648,6 +659,13 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         fsm.on_header_parsed(finfo);
                         fsm.on_body_parsed();
                     }
+                    if (stream_trace) {
+                        spdlog::info(
+                            "stream-trace: [conn={}] parsed request req_id={} type={} expects={}",
+                            conn_token, message.requestId,
+                            static_cast<int>(getMessageType(*request_ptr)),
+                            message.expectsStreamingResponse);
+                    }
 
                     // Handle the request with correlation id
                     // Route through streaming-aware path so FSM transitions are captured
@@ -695,6 +713,13 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                 spawn_exec = config_.cli_executor;
                                 spdlog::debug("[MUX_SPAWN] req_id={} using CLI executor",
                                               request_id);
+                            }
+                            if (stream_trace) {
+                                spdlog::info(
+                                    "stream-trace: [conn={}] spawning req_id={} type={} expects={}",
+                                    conn_token, request_id,
+                                    static_cast<int>(getMessageType(routed_request)),
+                                    expects_streaming);
                             }
                             boost::asio::co_spawn(
                                 spawn_exec,

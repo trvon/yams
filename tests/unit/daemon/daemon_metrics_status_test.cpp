@@ -19,10 +19,12 @@
 
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -564,9 +566,21 @@ public:
         return std::async(std::launch::deferred, [this, hash]() { return retrieveRaw(hash); });
     }
 
-    Result<api::StoreResult> store(const std::filesystem::path&, const api::ContentMetadata&,
+    Result<api::StoreResult> store(const std::filesystem::path& path, const api::ContentMetadata&,
                                    api::ProgressCallback) override {
-        return ErrorCode::NotImplemented;
+        std::ifstream ifs(path, std::ios::binary);
+        if (!ifs.good()) {
+            return Error{ErrorCode::FileNotFound, "stub file not found"};
+        }
+        std::vector<std::byte> bytes;
+        char ch = 0;
+        while (ifs.get(ch)) {
+            bytes.push_back(static_cast<std::byte>(ch));
+        }
+        if (!ifs.eof()) {
+            return Error{ErrorCode::IOError, "stub read failed"};
+        }
+        return storeBytes(bytes, {});
     }
     Result<api::RetrieveResult> retrieve(const std::string&, const std::filesystem::path&,
                                          api::ProgressCallback) override {
@@ -840,6 +854,28 @@ Response dispatchRequest(RequestDispatcher& dispatcher, const Request& req) {
     auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(req), boost::asio::use_future);
     ioc.run();
     return fut.get();
+}
+
+std::shared_ptr<SpscQueue<InternalEventBus::StoreDocumentTask>>
+getStoreDocumentTaskChannel(std::size_t capacity = 1024) {
+    auto existing = InternalEventBus::instance().get_channel<InternalEventBus::StoreDocumentTask>(
+        "store_document_tasks");
+    if (existing) {
+        return existing;
+    }
+    return InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+        "store_document_tasks", capacity);
+}
+
+void drainStoreDocumentTasks() {
+    auto channel = InternalEventBus::instance().get_channel<InternalEventBus::StoreDocumentTask>(
+        "store_document_tasks");
+    if (!channel) {
+        return;
+    }
+    InternalEventBus::StoreDocumentTask task;
+    while (channel->try_pop(task)) {
+    }
 }
 
 template <typename Predicate> bool waitForCondition(Predicate&& predicate, int attempts = 100) {
@@ -2181,6 +2217,37 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(getResp.related.front().relationship == "same_content");
     }
 
+    SECTION("get request hits query trace branch when cache is reset") {
+        auto repoPath = makeTempDir("yams_get_query_trace_repo_") / "metadata.db";
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto doc = makeDoc(71, "/tmp/get/query-trace.txt",
+                           "9999999999999999999999999999999999999999999999999999999999999999");
+        REQUIRE(repo->insertDocument(doc).has_value());
+        store->setBlob(doc.sha256Hash, "query trace content");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        EnvGuard traceGuard("YAMS_QUERY_TRACE", "1");
+        auto resetTraceGuard =
+            ScopeExit([] { RequestDispatcher::__test_resetDocumentsQueryTraceCache(); });
+        RequestDispatcher::__test_resetDocumentsQueryTraceCache();
+
+        GetRequest req;
+        req.hash = doc.sha256Hash;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<GetResponse>(resp));
+        const auto& getResp = std::get<GetResponse>(resp);
+        CHECK(getResp.hash == doc.sha256Hash);
+        CHECK(getResp.name == doc.fileName);
+    }
+
     SECTION("file history reports missing metadata repository") {
         FileHistoryRequest req;
         req.filepath = "missing.txt";
@@ -2346,6 +2413,9 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         svc.__test_setMetadataRepo(repo);
 
         EnvGuard traceGuard("YAMS_QUERY_TRACE", "1");
+        auto resetTraceGuard =
+            ScopeExit([] { RequestDispatcher::__test_resetDocumentsQueryTraceCache(); });
+        RequestDispatcher::__test_resetDocumentsQueryTraceCache();
 
         ListRequest req;
         req.limit = 3;
@@ -2489,6 +2559,180 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InternalError);
         CHECK(err.message == "List failed: unknown error");
+    }
+
+    SECTION("add document queues deferred work when system is under pressure") {
+        const bool originalGovernor = TuneAdvisor::enableResourceGovernor();
+        const bool originalAdmission = TuneAdvisor::enableAdmissionControl();
+        const uint32_t originalCapacity = TuneAdvisor::storeDocumentChannelCapacity();
+        auto restore = ScopeExit([&] {
+            TuneAdvisor::setEnableResourceGovernor(originalGovernor);
+            TuneAdvisor::setEnableAdmissionControl(originalAdmission);
+            TuneAdvisor::setStoreDocumentChannelCapacity(originalCapacity);
+            ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Normal);
+            drainStoreDocumentTasks();
+        });
+
+        TuneAdvisor::setEnableResourceGovernor(true);
+        TuneAdvisor::setEnableAdmissionControl(true);
+        TuneAdvisor::setStoreDocumentChannelCapacity(64);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+        drainStoreDocumentTasks();
+
+        EnvGuard retriesGuard("YAMS_INGEST_ENQUEUE_RETRIES", "not-a-number");
+        EnvGuard baseDelayGuard("YAMS_INGEST_ENQUEUE_BASE_DELAY_MS", "-5");
+        EnvGuard maxDelayGuard("YAMS_INGEST_ENQUEUE_MAX_DELAY_MS", "999999");
+
+        AddDocumentRequest req;
+        req.name = "pressure.txt";
+        req.content = "queued under pressure";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        INFO([&] {
+            if (std::holds_alternative<ErrorResponse>(resp)) {
+                return std::get<ErrorResponse>(resp).message;
+            }
+            return std::string("not an error");
+        }());
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        auto hasher = yams::crypto::createSHA256Hasher();
+        REQUIRE(hasher != nullptr);
+        CHECK(addResp.path == "pressure.txt");
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.hash == hasher->hash(req.content));
+        CHECK(addResp.message == "Queued for deferred processing (system under pressure).");
+
+        auto channel = getStoreDocumentTaskChannel();
+        InternalEventBus::StoreDocumentTask task;
+        REQUIRE(channel->try_pop(task));
+        CHECK(task.request.name == req.name);
+        CHECK(task.request.content == req.content);
+    }
+
+    SECTION("add document reports resource exhaustion when pressure queue is full") {
+        const bool originalGovernor = TuneAdvisor::enableResourceGovernor();
+        const bool originalAdmission = TuneAdvisor::enableAdmissionControl();
+        const uint32_t originalCapacity = TuneAdvisor::storeDocumentChannelCapacity();
+        auto restore = ScopeExit([&] {
+            TuneAdvisor::setEnableResourceGovernor(originalGovernor);
+            TuneAdvisor::setEnableAdmissionControl(originalAdmission);
+            TuneAdvisor::setStoreDocumentChannelCapacity(originalCapacity);
+            ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Normal);
+            drainStoreDocumentTasks();
+        });
+
+        TuneAdvisor::setEnableResourceGovernor(true);
+        TuneAdvisor::setEnableAdmissionControl(true);
+        TuneAdvisor::setStoreDocumentChannelCapacity(64);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+        drainStoreDocumentTasks();
+
+        auto channel = getStoreDocumentTaskChannel();
+        InternalEventBus::StoreDocumentTask filler;
+        while (channel->try_push(filler)) {
+        }
+
+        AddDocumentRequest req;
+        req.name = "queue-full.txt";
+        req.content = "full";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::ResourceExhausted);
+        CHECK(err.message == "Ingestion queue is full. Please try again later.");
+    }
+
+    SECTION("add document queues async work while daemon is initializing") {
+        DaemonConfig notReadyCfg;
+        notReadyCfg.dataDir = makeTempDir("yams_documents_dispatcher_not_ready_");
+        StubLifecycle notReadyLifecycle(LifecycleState::Starting);
+        StateComponent notReadyState;
+        notReadyState.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        notReadyState.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm notReadyLifecycleFsm;
+        ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
+        RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
+
+        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        drainStoreDocumentTasks();
+
+        AddDocumentRequest req;
+        req.name = "initializing.txt";
+        req.content = "booting daemon";
+
+        auto resp = dispatchRequest(notReadyDispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        auto hasher = yams::crypto::createSHA256Hasher();
+        REQUIRE(hasher != nullptr);
+        CHECK(addResp.path == "initializing.txt");
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.hash == hasher->hash(req.content));
+        CHECK(addResp.message ==
+              "Ingestion accepted for asynchronous processing (daemon initializing).");
+
+        auto channel = getStoreDocumentTaskChannel();
+        InternalEventBus::StoreDocumentTask task;
+        REQUIRE(channel->try_pop(task));
+        CHECK(task.request.name == req.name);
+        CHECK(task.request.content == req.content);
+    }
+
+    SECTION("add document uses async single-file path by default when ready") {
+        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        drainStoreDocumentTasks();
+
+        AddDocumentRequest req;
+        req.name = "async-default.txt";
+        req.content = "ready but async";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        auto hasher = yams::crypto::createSHA256Hasher();
+        REQUIRE(hasher != nullptr);
+        CHECK(addResp.path == "async-default.txt");
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.hash == hasher->hash(req.content));
+        CHECK(addResp.extractionStatus == "pending");
+        CHECK(addResp.message == "Ingestion accepted for asynchronous processing.");
+
+        auto channel = getStoreDocumentTaskChannel();
+        InternalEventBus::StoreDocumentTask task;
+        REQUIRE(channel->try_pop(task));
+        CHECK(task.request.name == req.name);
+        CHECK(task.request.content == req.content);
+    }
+
+    SECTION("add document uses sync fallback when explicitly enabled") {
+        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "1");
+        drainStoreDocumentTasks();
+        svc.__test_setContentStore(std::make_shared<StubContentStore>());
+
+        AddDocumentRequest req;
+        req.name = "sync-add.txt";
+        req.content = "sync path content";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        CHECK(addResp.path == "sync-add.txt");
+        CHECK(addResp.documentsAdded == 1);
+        CHECK(addResp.size == req.content.size());
+        CHECK(addResp.extractionStatus == "pending");
+        CHECK(addResp.message == "Document stored successfully.");
+        CHECK_FALSE(addResp.hash.empty());
+
+        auto channel = getStoreDocumentTaskChannel();
+        InternalEventBus::StoreDocumentTask task;
+        CHECK_FALSE(channel->try_pop(task));
     }
 
     SECTION("file history skips documents when metadata lookup fails") {

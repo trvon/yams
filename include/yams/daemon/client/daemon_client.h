@@ -367,6 +367,7 @@ public:
     };
 
     // Streaming search helper method
+    boost::asio::awaitable<Result<SearchResponse>> unarySearch(const SearchRequest& req);
     boost::asio::awaitable<Result<SearchResponse>> streamingSearch(const SearchRequest& req);
 
     // Streaming list helper method

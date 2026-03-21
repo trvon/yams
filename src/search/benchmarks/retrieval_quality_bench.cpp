@@ -645,7 +645,20 @@ struct QueryDiagnosticsSummary {
     std::vector<double> aggressiveFtsClauseSamples;
     std::vector<double> aggressiveFtsHitSamples;
     std::vector<double> aggressiveFtsAddedSamples;
+    std::unordered_map<std::string, std::vector<double>> timingSamplesMs;
 };
+
+static const std::vector<std::string>& trackedTimingKeys() {
+    static const std::vector<std::string> kKeys = {
+        "latency", "embedding", "concepts", "text",     "vector",       "entity_vector",
+        "kg",      "path",      "tag",      "metadata", "multi_vector", "graph_rerank",
+    };
+    return kKeys;
+}
+
+static std::string timingStatKey(const std::string& name) {
+    return std::string("timing_") + name + "_ms";
+}
 
 static std::unordered_set<std::string> splitTabSet(const std::string& value) {
     std::unordered_set<std::string> out;
@@ -1042,6 +1055,13 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         summary.aggressiveFtsAddedSamples.push_back(*v);
     }
 
+    for (const auto& timingName : trackedTimingKeys()) {
+        const auto key = timingStatKey(timingName);
+        if (auto v = parseDoubleStat(searchStats, key)) {
+            summary.timingSamplesMs[timingName].push_back(*v);
+        }
+    }
+
     auto prefusion = searchStats.find("trace_prefusion_signal_summary_json");
     if (prefusion != searchStats.end()) {
         try {
@@ -1199,6 +1219,15 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"aggressive_fts_added_count", summarizeSamples(summary.aggressiveFtsAddedSamples)},
     };
 
+    json timings = json::object();
+    for (const auto& timingName : trackedTimingKeys()) {
+        auto it = summary.timingSamplesMs.find(timingName);
+        if (it != summary.timingSamplesMs.end() && !it->second.empty()) {
+            timings[timingName] = summarizeSamples(it->second);
+        }
+    }
+    out["timings_ms"] = timings;
+
     return out;
 }
 
@@ -1305,6 +1334,8 @@ struct OptimizationCandidate {
     std::string name;
     std::string description;
     std::vector<EnvSetting> envOverrides;
+    bool enginePolicyCandidate = false;
+    bool diagnosticCandidate = false;
 };
 
 struct OptimizationRunResult {
@@ -2080,7 +2111,9 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
              {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
              {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
-         }},
+         },
+         false,
+         true},
         {"diag_winner_topk20",
          "Winner config + topK=20 (recall@20 diagnostic)",
          {
@@ -2098,7 +2131,9 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
              {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
              {"YAMS_BENCH_TOPK", "20"},
-         }},
+         },
+         false,
+         true},
         {"diag_winner_topk50",
          "Winner config + topK=50 (recall@50 diagnostic)",
          {
@@ -2116,7 +2151,9 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
              {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
              {"YAMS_BENCH_TOPK", "50"},
-         }},
+         },
+         false,
+         true},
         {"diag_winner_3x_topk50",
          "Winner + 3x candidates + topK=50 (maximum retrieval diagnostic)",
          {
@@ -2135,7 +2172,9 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
              {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
              {"YAMS_BENCH_TOPK", "50"},
-         }},
+         },
+         false,
+         true},
 
         // ── Tier-2 cross-encoder reranker candidates ──────────────────
         // Strategy: expand pool (3x) to get ~50 candidates, then use the
@@ -2146,8 +2185,8 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
         // recover these.
         // Current benchmark evidence: blend-60 beats blend-70 on both q20 and q300,
         // while graph rerank / semantic rescue stay effectively inactive on SciFact.
-        // That makes pre-fusion recall (wider fusion windows, stronger lexical floor)
-        // the main tunable frontier after reranker blending.
+        // Treat rerank_3x_blend60_top50 as the engine-policy baseline; heavier recall probes
+        // below remain diagnostics unless they win on both quality and latency.
 
         {"rerank_3x_replace_top50",
          "3x pool + cross-encoder rerank top-50, replace scores (max reranker impact)",
@@ -2198,7 +2237,9 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
              {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
              {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
-         }},
+         },
+         true,
+         false},
         {"rerank_4x_blend60_top50",
          "Pre-fusion recall probe: winner + larger candidate multiplier (4x), rerank window stays "
          "at top-50",
@@ -2223,7 +2264,9 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
              {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
              {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
-         }},
+         },
+         false,
+         true},
         {"rerank_3x_blend60_top50_fuse100",
          "Pre-fusion recall probe: winner + moderately wider fusion window (fusion limit 100)",
          {
@@ -2248,7 +2291,9 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
              {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
              {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
-         }},
+         },
+         false,
+         true},
         {"rerank_3x_blend60_top50_lexical16",
          "Pre-fusion recall probe: winner + milder lexical floor (top-16 / +0.24)",
          {
@@ -2272,7 +2317,9 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
              {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
              {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
-         }},
+         },
+         false,
+         true},
         {"rerank_3x_blend60_top50_fuse200",
          "Pre-fusion recall probe: winner + wider fusion window (fusion limit 200), rerank window "
          "stays at top-50",
@@ -2754,6 +2801,42 @@ static std::set<std::string> parseCandidateFilter(const char* raw) {
     return selected;
 }
 
+enum class OptimizationProfile {
+    EnginePolicy,
+    Diagnostics,
+    All,
+};
+
+static OptimizationProfile parseOptimizationProfile(const char* raw) {
+    if (!raw || !*raw) {
+        return OptimizationProfile::EnginePolicy;
+    }
+
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (value == "diagnostic" || value == "diagnostics" || value == "probe" || value == "probes") {
+        return OptimizationProfile::Diagnostics;
+    }
+    if (value == "all") {
+        return OptimizationProfile::All;
+    }
+    return OptimizationProfile::EnginePolicy;
+}
+
+static const char* optimizationProfileName(OptimizationProfile profile) {
+    switch (profile) {
+        case OptimizationProfile::EnginePolicy:
+            return "engine-policy";
+        case OptimizationProfile::Diagnostics:
+            return "diagnostics";
+        case OptimizationProfile::All:
+            return "all";
+    }
+    return "engine-policy";
+}
+
 static double computeHybridRegressionPenalty(const RetrievalMetrics& hybrid,
                                              const RetrievalMetrics& keyword) {
     const double hybridMrrLoss = std::max(0.0, keyword.mrr - hybrid.mrr);
@@ -2764,16 +2847,66 @@ static double computeDuplicatePenalty(const RetrievalMetrics& hybrid) {
     return std::min(0.08, std::max(0.0, hybrid.duplicateRateAtK) * 0.30);
 }
 
+static double computeLatencyPenalty(double avgHybridQueryMs) {
+    // Keep latency meaningful in the 3-7s/query range seen in real SciFact runs.
+    // The previous cap saturated far too early and made materially slower candidates
+    // look effectively free once they crossed ~800ms/query.
+    return std::clamp(std::max(0.0, avgHybridQueryMs) / 25000.0, 0.0, 0.25);
+}
+
+static std::string summarizeTimingTradeoffs(const json& hybridDiag) {
+    if (!hybridDiag.is_object()) {
+        return "timings=unavailable";
+    }
+    const auto timingsIt = hybridDiag.find("timings_ms");
+    if (timingsIt == hybridDiag.end() || !timingsIt->is_object()) {
+        return "timings=unavailable";
+    }
+
+    const json& timings = *timingsIt;
+    std::vector<std::pair<std::string, double>> ranked;
+    ranked.reserve(timings.size());
+    for (const auto& [name, stats] : timings.items()) {
+        if (!stats.is_object()) {
+            continue;
+        }
+        auto meanIt = stats.find("mean");
+        if (meanIt == stats.end() || !meanIt->is_number()) {
+            continue;
+        }
+        ranked.emplace_back(name, meanIt->get<double>());
+    }
+
+    if (ranked.empty()) {
+        return "timings=unavailable";
+    }
+
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1);
+    const size_t limit = std::min<size_t>(3, ranked.size());
+    for (size_t i = 0; i < limit; ++i) {
+        if (i > 0) {
+            oss << "  ";
+        }
+        oss << ranked[i].first << '=' << ranked[i].second << "ms";
+    }
+    return oss.str();
+}
+
 static double computeOptimizationObjective(const RetrievalMetrics& hybrid,
                                            const RetrievalMetrics& keyword,
                                            double avgHybridQueryMs) {
-    // Accuracy-first with a mild latency penalty and explicit hybrid-vs-keyword gain signal.
+    // Accuracy-first, but keep latency meaningful so recall probes do not win by default when
+    // they materially slow search without improving quality.
     const double quality =
         0.40 * hybrid.mrr + 0.30 * hybrid.ndcgAtK + 0.20 * hybrid.recallAtK + 0.10 * hybrid.map;
     const double hybridGain = std::max(0.0, hybrid.mrr - keyword.mrr);
     const double regressionPenalty = computeHybridRegressionPenalty(hybrid, keyword);
     const double duplicatePenalty = computeDuplicatePenalty(hybrid);
-    const double latencyPenalty = std::min(0.10, std::max(0.0, avgHybridQueryMs) / 8000.0);
+    const double latencyPenalty = computeLatencyPenalty(avgHybridQueryMs);
     return quality + 0.10 * hybridGain - regressionPenalty - duplicatePenalty - latencyPenalty;
 }
 
@@ -5242,30 +5375,29 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
 
 static int runOptimizationLoop() {
     std::vector<OptimizationCandidate> candidates = defaultOptimizationCandidates();
+    const auto optProfile = parseOptimizationProfile(std::getenv("YAMS_BENCH_OPT_PROFILE"));
+    const bool hasExplicitCandidateFilter =
+        std::getenv("YAMS_BENCH_OPT_CANDIDATE") &&
+        std::strlen(std::getenv("YAMS_BENCH_OPT_CANDIDATE")) > 0;
 
-    if (!(std::getenv("YAMS_BENCH_OPT_CANDIDATE") &&
-          std::strlen(std::getenv("YAMS_BENCH_OPT_CANDIDATE")) > 0)) {
-        static const std::vector<std::string> kRecommendedCandidates = {
-            "rerank_3x_blend60_top50",         "rerank_4x_blend60_top50",
-            "rerank_3x_blend60_top50_fuse100", "rerank_3x_blend60_top50_lexical16",
-            "rerank_3x_blend60_top50_fuse200", "rerank_3x_blend60_top50_lexical20",
-        };
-        std::vector<OptimizationCandidate> recommended;
-        recommended.reserve(kRecommendedCandidates.size());
-        for (const auto& name : kRecommendedCandidates) {
-            auto it = std::find_if(
-                candidates.begin(), candidates.end(),
-                [&](const OptimizationCandidate& candidate) { return candidate.name == name; });
-            if (it != candidates.end()) {
-                recommended.push_back(*it);
+    if (!hasExplicitCandidateFilter) {
+        std::vector<OptimizationCandidate> filteredByProfile;
+        filteredByProfile.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+            const bool keep =
+                optProfile == OptimizationProfile::All ||
+                (optProfile == OptimizationProfile::EnginePolicy &&
+                 candidate.enginePolicyCandidate) ||
+                (optProfile == OptimizationProfile::Diagnostics && candidate.diagnosticCandidate);
+            if (keep) {
+                filteredByProfile.push_back(candidate);
             }
         }
-        if (!recommended.empty()) {
-            spdlog::info(
-                "[OptLoop] No candidate filter set; using recommended benchmark set rooted "
-                "in {} with pre-fusion recall probes",
-                recommended.front().name);
-            candidates = std::move(recommended);
+        if (!filteredByProfile.empty()) {
+            spdlog::info("[OptLoop] No candidate filter set; using optimization profile '{}' with "
+                         "{} candidates",
+                         optimizationProfileName(optProfile), filteredByProfile.size());
+            candidates = std::move(filteredByProfile);
         }
     }
 
@@ -5345,6 +5477,8 @@ static int runOptimizationLoop() {
     std::cout << "\n" << std::string(78, '=') << "\n";
     std::cout << "            RETRIEVAL OPTIMIZATION LOOP (code/mixed first)\n";
     std::cout << std::string(78, '=') << "\n";
+    std::cout << "Profile: " << optimizationProfileName(optProfile)
+              << (hasExplicitCandidateFilter ? " (explicit candidate filter)" : "") << "\n";
 
     std::vector<OptimizationRunResult> allResults;
     allResults.reserve(candidates.size());
@@ -5384,6 +5518,7 @@ static int runOptimizationLoop() {
                   << "  graph_apply_rate=" << hybridDiag["graph_rerank_apply_rate"].get<double>()
                   << "  miss_pre_fusion_rate="
                   << hybridDiag["miss_missing_pre_fusion_rate"].get<double>() << "\n";
+        std::cout << "    timing_tradeoffs=" << summarizeTimingTradeoffs(hybridDiag) << "\n";
         if (result.traceTopN > 0 || result.traceComponentTopN > 0) {
             std::cout << "    trace_top_n=" << result.traceTopN
                       << "  trace_component_top_n=" << result.traceComponentTopN << "\n";

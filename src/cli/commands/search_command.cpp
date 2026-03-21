@@ -1428,6 +1428,23 @@ public:
                          literalFlag = literalText_]() -> boost::asio::awaitable<void> {
                 auto& client = **daemonLease;
                 spdlog::info("[CLI:Search] Work coroutine started, enableStream={}", enableStream);
+                auto unaryCallWithFreshLease = [&, dreq, clientConfig]()
+                    -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+                    auto unaryConfig = clientConfig;
+                    unaryConfig.enableChunkedResponses = false;
+                    unaryConfig.singleUseConnections = true;
+
+                    auto unaryLeaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                        unaryConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+                    if (!unaryLeaseRes) {
+                        co_return unaryLeaseRes.error();
+                    }
+
+                    auto unaryLease = std::move(unaryLeaseRes.value());
+                    auto& unaryClient = **unaryLease;
+                    unaryClient.setStreamingEnabled(false);
+                    co_return co_await unaryClient.unarySearch(dreq);
+                };
                 auto callOnce = [&](const yams::daemon::SearchRequest& rq)
                     -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
                     spdlog::info("[CLI:Search] callOnce invoked, enableStream={}", enableStream);
@@ -1435,8 +1452,8 @@ public:
                         spdlog::info("[CLI:Search] Calling streamingSearch");
                         co_return co_await client.streamingSearch(rq);
                     }
-                    spdlog::info("[CLI:Search] Calling client.call (unary)");
-                    co_return co_await client.call(rq);
+                    spdlog::info("[CLI:Search] Calling unarySearch");
+                    co_return co_await client.unarySearch(rq);
                 };
                 const auto ipcStart = std::chrono::steady_clock::now();
                 spdlog::info("[CLI:Search] About to call callOnce");
@@ -1453,7 +1470,7 @@ public:
                         spdlog::warn("Streaming search timed out; retrying unary path with "
                                      "extended header timeout");
                         client.setHeaderTimeout(std::chrono::milliseconds(bodyTimeoutMs));
-                        auto ur = co_await client.call(dreq);
+                        auto ur = co_await unaryCallWithFreshLease();
                         if (ur) {
                             auto ok = render(ur.value());
                             done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
@@ -1818,73 +1835,40 @@ public:
             return renderResults(items, ctx);
         };
 
+        auto unaryCallWithFreshLease =
+            [&, dreq,
+             clientConfig]() -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+            auto unaryConfig = clientConfig;
+            unaryConfig.enableChunkedResponses = false;
+            unaryConfig.singleUseConnections = true;
+
+            auto unaryLeaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                unaryConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+            if (!unaryLeaseRes) {
+                co_return unaryLeaseRes.error();
+            }
+
+            auto unaryLease = std::move(unaryLeaseRes.value());
+            auto& unaryClient = **unaryLease;
+            unaryClient.setStreamingEnabled(false);
+            co_return co_await unaryClient.unarySearch(dreq);
+        };
+
         // Async daemon request with retries
         auto callOnce = [&](const yams::daemon::SearchRequest& rq)
             -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
             if (clientConfig.enableChunkedResponses)
                 co_return co_await client.streamingSearch(rq);
-            co_return co_await client.call(rq);
+            co_return co_await client.unarySearch(rq);
         };
 
-        // Prefer streaming by default with a guard: if no results arrive quickly,
-        // race a unary call and use whichever finishes first. Skipped when --cold.
         Result<yams::daemon::SearchResponse> result_stream_or_unary(
             Error{ErrorCode::Unknown, "uninitialized"});
         if (clientConfig.enableChunkedResponses) {
-            // Race: streaming vs delayed unary (2s). Whichever sets first wins.
-            std::shared_ptr<std::atomic_bool> decided = std::make_shared<std::atomic_bool>(false);
-            std::shared_ptr<std::promise<Result<yams::daemon::SearchResponse>>> prom =
-                std::make_shared<std::promise<Result<yams::daemon::SearchResponse>>>();
-            auto fut = prom->get_future();
-
-            auto timer = std::make_shared<boost::asio::steady_timer>(getExecutor());
-            timer->expires_after(std::chrono::seconds(2));
-
-            boost::asio::co_spawn(
-                getExecutor(),
-                [&, decided, prom, leaseHandle, timer]() -> boost::asio::awaitable<void> {
-                    auto& cliRef = **leaseHandle;
-                    auto sr = co_await cliRef.streamingSearch(dreq);
-                    if (!decided->exchange(true)) {
-                        prom->set_value(std::move(sr));
-                        timer->cancel();
-                    }
-                    co_return;
-                },
-                boost::asio::detached);
-
-            boost::asio::co_spawn(
-                getExecutor(),
-                [&, decided, prom, leaseHandle, timer]() -> boost::asio::awaitable<void> {
-                    boost::system::error_code ec;
-                    co_await timer->async_wait(
-                        boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-                    if (!ec && !decided->load()) {
-                        auto& cliRef = **leaseHandle;
-                        auto ur = co_await cliRef.call(dreq);
-                        if (!decided->exchange(true))
-                            prom->set_value(std::move(ur));
-                    }
-                    co_return;
-                },
-                boost::asio::detached);
-
-            auto wait_ms = static_cast<int>(bodyTimeoutMs_ > 0 ? bodyTimeoutMs_ : 60000);
-            if (fut.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
-                result_stream_or_unary = fut.get();
-            } else {
-                result_stream_or_unary = Error{ErrorCode::Timeout, "Search timed out"};
-            }
-            // Cancel timer if we timed out and streaming didn't already cancel it
-            // Use post() to serialize with timer operations on the executor
-            boost::asio::post(getExecutor(), [timer, decided]() {
-                if (!decided->load(std::memory_order_acquire)) {
-                    timer->cancel();
-                }
-            });
+            result_stream_or_unary = co_await client.streamingSearch(dreq);
         } else {
             // Non-streaming path (cold): unary only
-            result_stream_or_unary = co_await client.call(dreq);
+            result_stream_or_unary = co_await client.unarySearch(dreq);
         }
 
         auto r = result_stream_or_unary;
@@ -1894,7 +1878,7 @@ public:
                 err.message.find("Read timeout") != std::string::npos) {
                 // Silent retry with unary path and extended header timeout
                 client.setHeaderTimeout(std::chrono::milliseconds(bodyTimeoutMs_));
-                auto ur = co_await client.call(dreq);
+                auto ur = co_await unaryCallWithFreshLease();
                 if (ur)
                     co_return render(ur.value());
                 // If unary retry also failed, fallback to local

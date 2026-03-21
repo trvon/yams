@@ -27,10 +27,12 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -115,6 +117,62 @@ static std::string escapeRegex(const std::string& text) {
         escaped += c;
     }
     return escaped;
+}
+
+struct ParsedMetadataQuery {
+    std::string residualQuery;
+    std::vector<std::pair<std::string, std::string>> filters;
+};
+
+std::string trimAscii(std::string value) {
+    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
+    value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
+    return value;
+}
+
+bool isStructuredMetadataToken(std::string_view token) {
+    const auto pos = token.find('=');
+    if (pos == std::string_view::npos || pos == 0 || pos + 1 >= token.size()) {
+        return false;
+    }
+    if (token.find('=', pos + 1) != std::string_view::npos) {
+        return false;
+    }
+    static constexpr std::string_view kDisallowed = "\"'()[]{}<>|&";
+    return token.find_first_of(kDisallowed) == std::string_view::npos;
+}
+
+ParsedMetadataQuery extractStructuredMetadataQuery(std::string_view query) {
+    ParsedMetadataQuery parsed;
+    std::istringstream stream{std::string{query}};
+    std::vector<std::string> residualTokens;
+    std::map<std::string, std::string> dedupedFilters;
+    for (std::string token; stream >> token;) {
+        if (!isStructuredMetadataToken(token)) {
+            residualTokens.push_back(std::move(token));
+            continue;
+        }
+        const auto pos = token.find('=');
+        std::string key = trimAscii(token.substr(0, pos));
+        std::string value = trimAscii(token.substr(pos + 1));
+        if (key.empty() || value.empty()) {
+            residualTokens.push_back(std::move(token));
+            continue;
+        }
+        dedupedFilters[std::move(key)] = std::move(value);
+    }
+
+    for (const auto& [key, value] : dedupedFilters) {
+        parsed.filters.emplace_back(key, value);
+    }
+    for (std::size_t i = 0; i < residualTokens.size(); ++i) {
+        if (i > 0) {
+            parsed.residualQuery += ' ';
+        }
+        parsed.residualQuery += residualTokens[i];
+    }
+    return parsed;
 }
 
 std::size_t annotateResultRelations(std::vector<SearchItem>& results,
@@ -686,8 +744,18 @@ public:
         auto parsed = yams::search::parseQueryQualifiers(req.query);
         SearchRequest normalizedReq = req;
         normalizedReq.query = parsed.normalizedQuery;
+        if (normalizedReq.type == "keyword") {
+            auto structured = extractStructuredMetadataQuery(normalizedReq.query);
+            if (!structured.filters.empty()) {
+                normalizedReq.metadataFilters = std::move(structured.filters);
+                normalizedReq.query = std::move(structured.residualQuery);
+                spdlog::debug("SearchService: extracted {} structured metadata filters from query",
+                              normalizedReq.metadataFilters.size());
+            }
+        }
 
-        if (normalizedReq.query.empty() && normalizedReq.hash.empty()) {
+        if (normalizedReq.query.empty() && normalizedReq.hash.empty() &&
+            normalizedReq.metadataFilters.empty()) {
             co_return Error{ErrorCode::InvalidArgument, "Query or hash is required"};
         }
         constexpr std::size_t kMaxReasonableLimit = 100000;
@@ -876,15 +944,19 @@ public:
 
         if (result && !normalizedReq.pathsOnly) {
             auto resp = std::move(result).value();
-            if (enhancedCfg_.enable) {
+            const bool metadataOnlyResult = resp.type == "metadata";
+            if (enhancedCfg_.enable && !metadataOnlyResult) {
                 enhanced_.apply(ctx_, enhancedCfg_, normalizedReq.query, resp.results);
             }
-            co_await hydrateSnippetsAsync_worker(normalizedReq, resp, &metadataTelemetry);
+            if (!metadataOnlyResult) {
+                co_await hydrateSnippetsAsync_worker(normalizedReq, resp, &metadataTelemetry);
+            }
             result = Result<SearchResponse>(std::move(resp));
         }
 
         if (result) {
             auto resp = std::move(result).value();
+            const bool metadataOnlyResult = resp.type == "metadata";
             if (forcedHybridFallback) {
                 const std::string fallbackReason =
                     repairDetails_.empty() ? "hybrid_disabled" : repairDetails_;
@@ -897,13 +969,19 @@ public:
                     resp.queryInfo += " (degraded fallback: " + fallbackReason + ")";
                 }
             }
-            if (!resp.results.empty() && ctx_.kgStore) {
+            if (!metadataOnlyResult && !resp.results.empty() && ctx_.kgStore) {
                 const auto enriched = annotateResultRelations(resp.results, ctx_.kgStore.get());
                 resp.searchStats["relation_results_enriched"] = std::to_string(enriched);
             }
             auto totalElapsed = duration_cast<milliseconds>(steady_clock::now() - t0).count();
             resp.executionTimeMs = static_cast<int64_t>(totalElapsed);
             resp.searchStats["latency_ms"] = std::to_string(totalElapsed);
+            if (!resp.componentTimingMicros.empty()) {
+                for (const auto& [name, micros] : resp.componentTimingMicros) {
+                    resp.searchStats[std::string("timing_") + name + "_ms"] =
+                        fmt::format("{:.3f}", static_cast<double>(micros) / 1000.0);
+                }
+            }
             resp.searchStats["metadata_operations"] =
                 std::to_string(metadataTelemetry.operations.load(std::memory_order_relaxed));
             resp.searchStats["metadata_retries"] =
@@ -2021,6 +2099,101 @@ private:
             }
         }
 
+        auto intersectDocIds = [&](std::vector<int64_t> ids) {
+            if (!docIds.has_value()) {
+                docIds = std::move(ids);
+                return;
+            }
+            std::unordered_set<int64_t> accepted(ids.begin(), ids.end());
+            std::vector<int64_t> intersected;
+            intersected.reserve(docIds->size());
+            for (int64_t id : *docIds) {
+                if (accepted.count(id) > 0) {
+                    intersected.push_back(id);
+                }
+            }
+            docIds = std::move(intersected);
+        };
+
+        if (!req.metadataFilters.empty()) {
+            metadata::DocumentQueryOptions options;
+            options.limit = 0;
+            options.orderByIndexedDesc = true;
+            options.metadataFilters = req.metadataFilters;
+
+            auto metadataDocsResult = ctx_.metadataRepo->queryDocuments(options);
+            if (!metadataDocsResult) {
+                return Error{ErrorCode::InternalError, "Metadata filter search failed: " +
+                                                           metadataDocsResult.error().message};
+            }
+
+            std::vector<int64_t> metadataDocIds;
+            metadataDocIds.reserve(metadataDocsResult.value().size());
+            for (const auto& doc : metadataDocsResult.value()) {
+                metadataDocIds.push_back(doc.id);
+            }
+            intersectDocIds(std::move(metadataDocIds));
+
+            if (processedQuery.empty()) {
+                std::unordered_set<int64_t> allowedIds;
+                if (docIds.has_value()) {
+                    allowedIds.insert(docIds->begin(), docIds->end());
+                }
+
+                SearchResponse resp;
+                resp.type = "metadata";
+                resp.usedHybrid = false;
+
+                const size_t effectiveLimit =
+                    req.limit > 0 ? req.limit : metadataDocsResult.value().size();
+                for (const auto& doc : metadataDocsResult.value()) {
+                    if (!allowedIds.empty() && allowedIds.count(doc.id) == 0) {
+                        continue;
+                    }
+
+                    if (req.pathsOnly) {
+                        if (resp.paths.size() >= effectiveLimit) {
+                            break;
+                        }
+                        resp.paths.push_back(!doc.filePath.empty() ? doc.filePath : doc.fileName);
+                        continue;
+                    }
+
+                    if (resp.results.size() >= effectiveLimit) {
+                        break;
+                    }
+
+                    SearchItem item;
+                    item.id = doc.id;
+                    item.hash = doc.sha256Hash;
+                    item.title = doc.fileName;
+                    item.path = doc.filePath;
+                    item.fileName = doc.fileName;
+                    item.score = 1.0;
+                    item.mimeType = doc.mimeType;
+                    item.size = static_cast<std::uint64_t>(std::max<int64_t>(doc.fileSize, 0));
+                    item.created = std::chrono::duration_cast<std::chrono::seconds>(
+                                       doc.createdTime.time_since_epoch())
+                                       .count();
+                    item.modified = std::chrono::duration_cast<std::chrono::seconds>(
+                                        doc.modifiedTime.time_since_epoch())
+                                        .count();
+                    item.indexed = std::chrono::duration_cast<std::chrono::seconds>(
+                                       doc.indexedTime.time_since_epoch())
+                                       .count();
+                    item.matchReason = "metadata filter match";
+                    item.searchMethod = "metadata";
+                    resp.results.push_back(std::move(item));
+                }
+
+                resp.total = req.pathsOnly ? resp.paths.size() : resp.results.size();
+                if (!req.pathsOnly) {
+                    applyExtensionFacets(resp);
+                }
+                return resp;
+            }
+        }
+
         auto convertResults = [&](const metadata::SearchResults& metaResults) {
             YAMS_ZONE_SCOPED_N("search_service::convert_results");
             std::vector<SearchItem> serviceResults;
@@ -2140,10 +2313,13 @@ private:
             return resp;
         };
 
-        // Fuzzy or full-text via metadata repository. When the caller enables fuzzy, run both
-        // searches and merge so literal/BM25 hits are never dropped.
+        // Fuzzy or full-text via metadata repository. When the caller explicitly requests
+        // keyword search, keep it keyword-only and do not silently fan out into fuzzy fallback.
+        // This matters for structured key=value queries where fuzzy fallback can explode cost on
+        // large corpora while producing low-signal matches.
         if (!req.fuzzy) {
-            return runFullTextSearch(req, true);
+            const bool allowAutoFuzzyFallback = req.type != "keyword";
+            return runFullTextSearch(req, allowAutoFuzzyFallback);
         }
 
         auto keywordReq = req;
