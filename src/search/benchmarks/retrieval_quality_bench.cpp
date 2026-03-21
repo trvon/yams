@@ -646,6 +646,13 @@ struct QueryDiagnosticsSummary {
     std::vector<double> aggressiveFtsHitSamples;
     std::vector<double> aggressiveFtsAddedSamples;
     std::unordered_map<std::string, std::vector<double>> timingSamplesMs;
+    std::unordered_map<std::string, std::uint64_t> stageEnabledCount;
+    std::unordered_map<std::string, std::uint64_t> stageAttemptedCount;
+    std::unordered_map<std::string, std::uint64_t> stageContributedCount;
+    std::unordered_map<std::string, std::uint64_t> stageSkippedCount;
+    std::unordered_map<std::string, std::vector<std::string>> stageSkipReasons;
+    std::unordered_map<std::string, std::vector<double>> fusionSourceScoreMassSamples;
+    std::unordered_map<std::string, std::vector<double>> fusionSourceFinalDocSamples;
 };
 
 static const std::vector<std::string>& trackedTimingKeys() {
@@ -1128,6 +1135,62 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         } catch (...) {
         }
     }
+
+    if (auto stageSummary = searchStats.find("trace_stage_summary_json");
+        stageSummary != searchStats.end()) {
+        try {
+            auto parsed = json::parse(stageSummary->second);
+            if (parsed.is_object()) {
+                for (const auto& [stageName, stageData] : parsed.items()) {
+                    if (!stageData.is_object()) {
+                        continue;
+                    }
+                    if (stageData.value("enabled", false)) {
+                        summary.stageEnabledCount[stageName]++;
+                    }
+                    if (stageData.value("attempted", false)) {
+                        summary.stageAttemptedCount[stageName]++;
+                    }
+                    if (stageData.value("contributed", false)) {
+                        summary.stageContributedCount[stageName]++;
+                    }
+                    if (stageData.value("skipped", false)) {
+                        summary.stageSkippedCount[stageName]++;
+                        auto reason = stageData.value("skip_reason", std::string{});
+                        if (!reason.empty()) {
+                            summary.stageSkipReasons[stageName].push_back(reason);
+                        }
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    if (auto fusionSummary = searchStats.find("trace_fusion_source_summary_json");
+        fusionSummary != searchStats.end()) {
+        try {
+            auto parsed = json::parse(fusionSummary->second);
+            if (parsed.is_object()) {
+                for (const auto& [sourceName, sourceData] : parsed.items()) {
+                    if (!sourceData.is_object()) {
+                        continue;
+                    }
+                    if (auto it = sourceData.find("final_score_mass");
+                        it != sourceData.end() && it->is_number()) {
+                        summary.fusionSourceScoreMassSamples[sourceName].push_back(
+                            it->get<double>());
+                    }
+                    if (auto it = sourceData.find("final_top_doc_count");
+                        it != sourceData.end() && it->is_number()) {
+                        summary.fusionSourceFinalDocSamples[sourceName].push_back(
+                            it->get<double>());
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
 }
 
 static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
@@ -1227,6 +1290,50 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         }
     }
     out["timings_ms"] = timings;
+
+    json stages = json::object();
+    for (const auto& [stageName, enabledCount] : summary.stageEnabledCount) {
+        const double enabled = static_cast<double>(enabledCount);
+        const auto attemptedIt = summary.stageAttemptedCount.find(stageName);
+        const auto contributedIt = summary.stageContributedCount.find(stageName);
+        const auto skippedIt = summary.stageSkippedCount.find(stageName);
+        const double attempted = attemptedIt != summary.stageAttemptedCount.end()
+                                     ? static_cast<double>(attemptedIt->second)
+                                     : 0.0;
+        const double contributed = contributedIt != summary.stageContributedCount.end()
+                                       ? static_cast<double>(contributedIt->second)
+                                       : 0.0;
+        const double skipped = skippedIt != summary.stageSkippedCount.end()
+                                   ? static_cast<double>(skippedIt->second)
+                                   : 0.0;
+        stages[stageName] = {
+            {"enabled_rate", enabled / queryCount},
+            {"attempt_rate", attempted / queryCount},
+            {"contribution_rate", contributed / queryCount},
+            {"skip_rate", skipped / queryCount},
+            {"skip_reasons", summary.stageSkipReasons.contains(stageName)
+                                 ? json(summary.stageSkipReasons.at(stageName))
+                                 : json::array()},
+        };
+    }
+    out["stage_contributions"] = stages;
+
+    json fusionSources = json::object();
+    for (const auto& [sourceName, masses] : summary.fusionSourceScoreMassSamples) {
+        auto finalDocIt = summary.fusionSourceFinalDocSamples.find(sourceName);
+        fusionSources[sourceName] = {
+            {"final_score_mass", summarizeSamples(masses)},
+            {"final_top_doc_count", finalDocIt != summary.fusionSourceFinalDocSamples.end()
+                                        ? summarizeSamples(finalDocIt->second)
+                                        : json{{"count", 0},
+                                               {"mean", 0.0},
+                                               {"p50", 0.0},
+                                               {"p95", 0.0},
+                                               {"min", 0.0},
+                                               {"max", 0.0}}},
+        };
+    }
+    out["fusion_sources"] = fusionSources;
 
     return out;
 }
@@ -2894,6 +3001,51 @@ static std::string summarizeTimingTradeoffs(const json& hybridDiag) {
         oss << ranked[i].first << '=' << ranked[i].second << "ms";
     }
     return oss.str();
+}
+
+static std::string summarizeStageTradeoffs(const json& hybridDiag) {
+    if (!hybridDiag.is_object()) {
+        return "stages=unavailable";
+    }
+    const auto stagesIt = hybridDiag.find("stage_contributions");
+    if (stagesIt == hybridDiag.end() || !stagesIt->is_object()) {
+        return "stages=unavailable";
+    }
+
+    const json& stages = *stagesIt;
+    std::vector<std::string> parts;
+    for (const auto& [name, stats] : stages.items()) {
+        if (!stats.is_object()) {
+            continue;
+        }
+        const double contributionRate = stats.value("contribution_rate", 0.0);
+        const double skipRate = stats.value("skip_rate", 0.0);
+        if (contributionRate <= 0.0 && skipRate <= 0.0) {
+            continue;
+        }
+        std::ostringstream oss;
+        oss << name << ":contrib=" << std::fixed << std::setprecision(2) << contributionRate
+            << ",skip=" << skipRate;
+        parts.push_back(oss.str());
+    }
+
+    if (parts.empty()) {
+        return "stages=unavailable";
+    }
+
+    std::sort(parts.begin(), parts.end());
+    if (parts.size() > 3) {
+        parts.resize(3);
+    }
+
+    std::ostringstream out;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) {
+            out << "  ";
+        }
+        out << parts[i];
+    }
+    return out.str();
 }
 
 static double computeOptimizationObjective(const RetrievalMetrics& hybrid,
@@ -5519,6 +5671,7 @@ static int runOptimizationLoop() {
                   << "  miss_pre_fusion_rate="
                   << hybridDiag["miss_missing_pre_fusion_rate"].get<double>() << "\n";
         std::cout << "    timing_tradeoffs=" << summarizeTimingTradeoffs(hybridDiag) << "\n";
+        std::cout << "    stage_tradeoffs=" << summarizeStageTradeoffs(hybridDiag) << "\n";
         if (result.traceTopN > 0 || result.traceComponentTopN > 0) {
             std::cout << "    trace_top_n=" << result.traceTopN
                       << "  trace_component_top_n=" << result.traceComponentTopN << "\n";

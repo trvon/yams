@@ -158,6 +158,38 @@ TEST_CASE("componentSourceToString covers all sources", "[search][config][catch2
     CHECK(std::string(componentSourceToString(S::Unknown)) == "unknown");
 }
 
+TEST_CASE("componentSourceWeight matches config fields", "[search][config][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.textWeight = 0.41f;
+    cfg.graphTextWeight = 0.12f;
+    cfg.pathTreeWeight = 0.09f;
+    cfg.kgWeight = 0.07f;
+    cfg.vectorWeight = 0.31f;
+    cfg.graphVectorWeight = 0.13f;
+    cfg.entityVectorWeight = 0.05f;
+    cfg.tagWeight = 0.02f;
+    cfg.metadataWeight = 0.03f;
+
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Text) == Approx(0.41f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::GraphText) ==
+          Approx(0.12f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::PathTree) ==
+          Approx(0.09f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::KnowledgeGraph) ==
+          Approx(0.07f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Vector) ==
+          Approx(0.31f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::GraphVector) ==
+          Approx(0.13f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::EntityVector) ==
+          Approx(0.05f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Tag) == Approx(0.02f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Metadata) ==
+          Approx(0.03f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Symbol) ==
+          Approx(0.0f));
+}
+
 // ────────────────────────────────────────────────────────────────────────────────
 // isVectorComponent / isTextAnchoringComponent
 // ────────────────────────────────────────────────────────────────────────────────

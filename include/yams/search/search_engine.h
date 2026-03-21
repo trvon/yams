@@ -505,6 +505,34 @@ inline constexpr const char* componentSourceToString(ComponentResult::Source sou
     return "unknown";
 }
 
+inline float componentSourceWeight(const SearchEngineConfig& config,
+                                   ComponentResult::Source source) noexcept {
+    switch (source) {
+        case ComponentResult::Source::Text:
+            return config.textWeight;
+        case ComponentResult::Source::GraphText:
+            return config.graphTextWeight;
+        case ComponentResult::Source::PathTree:
+            return config.pathTreeWeight;
+        case ComponentResult::Source::KnowledgeGraph:
+            return config.kgWeight;
+        case ComponentResult::Source::Vector:
+            return config.vectorWeight;
+        case ComponentResult::Source::GraphVector:
+            return config.graphVectorWeight;
+        case ComponentResult::Source::EntityVector:
+            return config.entityVectorWeight;
+        case ComponentResult::Source::Tag:
+            return config.tagWeight;
+        case ComponentResult::Source::Metadata:
+            return config.metadataWeight;
+        case ComponentResult::Source::Symbol:
+        case ComponentResult::Source::Unknown:
+            return 0.0f;
+    }
+    return 0.0f;
+}
+
 inline constexpr bool isVectorComponent(ComponentResult::Source source) noexcept {
     return source == ComponentResult::Source::Vector ||
            source == ComponentResult::Source::GraphVector ||
@@ -602,6 +630,33 @@ inline void accumulateComponentScore(SearchResult& r, ComponentResult::Source so
         default:
             break;
     }
+}
+
+inline double componentSourceScoreInResult(const SearchResult& r,
+                                           ComponentResult::Source source) noexcept {
+    switch (source) {
+        case ComponentResult::Source::Vector:
+        case ComponentResult::Source::EntityVector:
+            return r.vectorScore.value_or(0.0);
+        case ComponentResult::Source::GraphVector:
+            return r.graphVectorScore.value_or(0.0);
+        case ComponentResult::Source::Text:
+            return r.keywordScore.value_or(0.0);
+        case ComponentResult::Source::GraphText:
+            return r.graphTextScore.value_or(0.0);
+        case ComponentResult::Source::KnowledgeGraph:
+            return r.kgScore.value_or(0.0);
+        case ComponentResult::Source::PathTree:
+            return r.pathScore.value_or(0.0);
+        case ComponentResult::Source::Tag:
+        case ComponentResult::Source::Metadata:
+            return r.tagScore.value_or(0.0);
+        case ComponentResult::Source::Symbol:
+            return r.symbolScore.value_or(0.0);
+        case ComponentResult::Source::Unknown:
+            return 0.0;
+    }
+    return 0.0;
 }
 
 inline double strongVectorOnlyReliefStrength(const SearchEngineConfig& config, double rawVector,

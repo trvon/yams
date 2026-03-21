@@ -7,6 +7,7 @@
 #include <yams/search/graph_expansion.h>
 #include <yams/search/query_expansion.h>
 #include <yams/search/query_text_utils.h>
+#include <yams/search/search_tracing.h>
 
 #include <algorithm>
 #include <unordered_map>
@@ -95,6 +96,63 @@ TEST_CASE("graph_expansion tokenizes biomedical query terms and weights node typ
           Approx(0.0f));
     CHECK(graphNodeExpansionWeight(std::make_optional<std::string>("location"), "plasma membrane") <
           0.5f);
+}
+
+TEST_CASE("search_tracing captures stage and fusion contribution summaries",
+          "[search][helpers][trace][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.textWeight = 0.7f;
+    cfg.vectorWeight = 0.3f;
+
+    SearchTraceCollector collector(cfg);
+    collector.markStageConfigured("text", true);
+    collector.markStageAttempted("text");
+
+    std::vector<ComponentResult> textResults = {
+        {.documentHash = "doc-a",
+         .filePath = "corpus/doc-a.txt",
+         .score = 0.9f,
+         .source = ComponentResult::Source::Text,
+         .rank = 0},
+        {.documentHash = "doc-b",
+         .filePath = "corpus/doc-b.txt",
+         .score = 0.5f,
+         .source = ComponentResult::Source::Text,
+         .rank = 1},
+    };
+    collector.markStageResult("text", textResults, 1200, true);
+    collector.markStageConfigured("kg", true);
+    collector.markStageSkipped("kg", "budget_guard");
+
+    auto stageJson = collector.buildStageSummaryJson();
+    CHECK(stageJson["text"]["attempted"].get<bool>());
+    CHECK(stageJson["text"]["contributed"].get<bool>());
+    CHECK(stageJson["text"]["unique_doc_count"].get<int>() == 2);
+    CHECK(stageJson["kg"]["skipped"].get<bool>());
+    CHECK(stageJson["kg"]["skip_reason"].get<std::string>() == "budget_guard");
+
+    SearchResult fused;
+    fused.document.filePath = "corpus/doc-a.txt";
+    fused.document.sha256Hash = "doc-a";
+    fused.keywordScore = 0.42;
+    fused.vectorScore = 0.11;
+
+    auto fusionJson =
+        collector.buildFusionSourceSummaryJson({{.documentHash = "doc-a",
+                                                 .filePath = "corpus/doc-a.txt",
+                                                 .score = 0.9f,
+                                                 .source = ComponentResult::Source::Text,
+                                                 .rank = 0},
+                                                {.documentHash = "doc-a",
+                                                 .filePath = "corpus/doc-a.txt",
+                                                 .score = 0.6f,
+                                                 .source = ComponentResult::Source::Vector,
+                                                 .rank = 0}},
+                                               {fused}, 5);
+    CHECK(fusionJson["text"]["enabled"].get<bool>());
+    CHECK(fusionJson["text"]["contributed_to_final"].get<bool>());
+    CHECK(fusionJson["text"]["final_top_doc_count"].get<int>() == 1);
+    CHECK(fusionJson["vector"]["final_score_mass"].get<double>() == Approx(0.11));
 }
 
 } // namespace yams::search

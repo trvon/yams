@@ -884,30 +884,7 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
 }
 
 float ResultFusion::getComponentWeight(ComponentResult::Source source) const {
-    switch (source) {
-        case ComponentResult::Source::Text:
-            return config_.textWeight;
-        case ComponentResult::Source::GraphText:
-            return config_.graphTextWeight;
-        case ComponentResult::Source::PathTree:
-            return config_.pathTreeWeight;
-        case ComponentResult::Source::KnowledgeGraph:
-            return config_.kgWeight;
-        case ComponentResult::Source::Vector:
-            return config_.vectorWeight;
-        case ComponentResult::Source::GraphVector:
-            return config_.graphVectorWeight;
-        case ComponentResult::Source::EntityVector:
-            return config_.entityVectorWeight;
-        case ComponentResult::Source::Tag:
-            return config_.tagWeight;
-        case ComponentResult::Source::Metadata:
-            return config_.metadataWeight;
-        case ComponentResult::Source::Symbol:
-        case ComponentResult::Source::Unknown:
-            return 0.0f;
-    }
-    return 0.0f;
+    return componentSourceWeight(config_, source);
 }
 
 // ============================================================================
@@ -1096,6 +1073,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<SearchResult> postFusionSnapshot;
     std::vector<SearchResult> graphlessPostFusionSnapshot;
     std::vector<SearchResult> postGraphSnapshot;
+    SearchTraceCollector traceCollector(config_);
     bool graphRerankApplied = false;
     bool crossRerankApplied = false;
     size_t graphWindowGuardReplacementCount = 0;
@@ -1133,6 +1111,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     bool embeddingStarted = false;
     auto launchEmbeddingIfNeeded = [&]() {
         if (!embeddingStarted && needsEmbedding && embeddingGen_) {
+            traceCollector.markStageAttempted("embedding");
             embStart = std::chrono::steady_clock::now();
             embeddingFuture = postWork(
                 [this, &query]() {
@@ -1179,10 +1158,22 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("Failed to generate query embedding: {}", e.what());
+                auto embEnd = std::chrono::steady_clock::now();
+                traceCollector.markStageFailure(
+                    "embedding",
+                    std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart)
+                        .count());
             }
             auto embEnd = std::chrono::steady_clock::now();
             componentTiming["embedding"] =
                 std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart).count();
+            std::vector<ComponentResult> embeddingMarker;
+            if (queryEmbedding.has_value()) {
+                embeddingMarker.push_back(ComponentResult{.score = 1.0f});
+            }
+            traceCollector.markStageResult("embedding", embeddingMarker,
+                                           componentTiming["embedding"],
+                                           queryEmbedding.has_value());
         }
     };
 
@@ -1193,8 +1184,24 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const size_t fusionCandidateLimit =
         config_.fusionCandidateLimit > 0 ? config_.fusionCandidateLimit : autoFusionLimit;
 
+    traceCollector.markStageConfigured("embedding", needsEmbedding && embeddingGen_ != nullptr);
+    traceCollector.markStageConfigured("concepts", conceptExtractor_ != nullptr);
+
     SearchEngineConfig workingConfig = config_;
     workingConfig.maxResults = fusionCandidateLimit;
+    traceCollector.markStageConfigured("text", workingConfig.textWeight > 0.0f);
+    traceCollector.markStageConfigured("kg", workingConfig.kgWeight > 0.0f && kgStore_ != nullptr);
+    traceCollector.markStageConfigured("path", workingConfig.pathTreeWeight > 0.0f);
+    traceCollector.markStageConfigured("vector", workingConfig.vectorWeight > 0.0f);
+    traceCollector.markStageConfigured("entity_vector", workingConfig.entityVectorWeight > 0.0f);
+    traceCollector.markStageConfigured("tag",
+                                       workingConfig.tagWeight > 0.0f && !params.tags.empty());
+    traceCollector.markStageConfigured("metadata", workingConfig.metadataWeight > 0.0f);
+    traceCollector.markStageConfigured("multi_vector", config_.enableMultiVectorQuery ||
+                                                           config_.enableGraphQueryExpansion);
+    traceCollector.markStageConfigured("graph_rerank",
+                                       config_.enableGraphRerank && kgScorer_ != nullptr);
+    traceCollector.markStageConfigured("reranker", config_.enableReranking && reranker_ != nullptr);
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
         if (conceptsMaterialized || !conceptFuture.valid()) {
@@ -1232,9 +1239,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     concepts.resize(workingConfig.conceptMaxCount);
                 }
             }
+            std::vector<ComponentResult> conceptMarker;
+            if (!concepts.empty()) {
+                conceptMarker.push_back(ComponentResult{.score = 1.0f});
+            }
+            traceCollector.markStageResult("concepts", conceptMarker, componentTiming["concepts"],
+                                           !concepts.empty());
         } else if (waitIfConfigured && conceptStatus == std::future_status::timeout) {
             timedOut.push_back("concepts");
             conceptsMaterialized = true;
+            traceCollector.markStageTimeout("concepts");
         }
 
         if (conceptsMaterialized && concepts.empty()) {
@@ -1355,6 +1369,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (!future.valid())
             return ComponentStatus::Success;
 
+        traceCollector.markStageAttempted(name);
+
         auto waitStart = std::chrono::steady_clock::now();
 
         // componentTimeout of 0 means no timeout (wait indefinitely)
@@ -1377,6 +1393,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 componentTiming[name] = duration;
 
                 if (results) {
+                    traceCollector.markStageResult(name, results.value(), duration,
+                                                   !results.value().empty());
                     if (!results.value().empty()) {
                         allComponentResults.insert(allComponentResults.end(),
                                                    results.value().begin(), results.value().end());
@@ -1388,16 +1406,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 } else {
                     spdlog::debug("Parallel {} query returned error: {}", name,
                                   results.error().message);
+                    traceCollector.markStageFailure(name, duration);
                     return ComponentStatus::Failed;
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("Parallel {} query failed: {}", name, e.what());
+                auto waitEnd = std::chrono::steady_clock::now();
+                traceCollector.markStageFailure(
+                    name, std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart)
+                              .count());
                 return ComponentStatus::Failed;
             }
         } else {
             spdlog::warn("Parallel {} query timed out after {} ms", name,
                          config_.componentTimeout.count());
             stats_.timedOutQueries.fetch_add(1, std::memory_order_relaxed);
+            auto waitEnd = std::chrono::steady_clock::now();
+            traceCollector.markStageTimeout(
+                name,
+                std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart).count());
             return ComponentStatus::TimedOut;
         }
     };
@@ -1551,6 +1578,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (shouldSkipSemantic) {
                 skipped.push_back("vector");
                 skipped.push_back("entity_vector");
+                traceCollector.markStageSkipped("vector", "adaptive_vector_skip");
+                traceCollector.markStageSkipped("entity_vector", "adaptive_vector_skip");
                 spdlog::debug("Tiered search: skipping embedding/vector tier (tier1 candidates={} "
                               ">= threshold={}, text_hits={}, top_text_score={:.3f})",
                               tier1CandidateCount, adaptiveSkipMinHits, tier1TextHits,
@@ -1693,9 +1722,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         auto runSequential = [&](auto queryFn, const char* name, float weight,
                                  std::atomic<uint64_t>& queryCount,
                                  std::atomic<uint64_t>& avgTime) {
-            if (weight <= 0.0f)
+            if (weight <= 0.0f) {
+                traceCollector.markStageSkipped(name, "disabled_by_weight");
                 return;
+            }
 
+            traceCollector.markStageAttempted(name);
             YAMS_ZONE_SCOPED_N(name);
             auto start = std::chrono::steady_clock::now();
             auto results = queryFn();
@@ -1706,6 +1738,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             componentTiming[name] = duration;
 
             if (results) {
+                traceCollector.markStageResult(name, results.value(), duration,
+                                               !results.value().empty());
                 if (!results.value().empty()) {
                     allComponentResults.insert(allComponentResults.end(), results.value().begin(),
                                                results.value().end());
@@ -1715,6 +1749,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 avgTime.store(duration, std::memory_order_relaxed);
             } else {
                 failed.push_back(name);
+                traceCollector.markStageFailure(name, duration);
             }
         };
 
@@ -1890,6 +1925,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         graphVectorGeneratedTerms = graphTerms.size();
         size_t multiVecHits = 0;
         size_t baseVectorCount = 0;
+        std::vector<ComponentResult> mergedVectorResults;
+        std::vector<ComponentResult> mergedGraphVectorResults;
 
         if (!subPhrases.empty() || !graphTerms.empty()) {
             spdlog::debug("multi_vector: generated {} sub-phrases from query '{}'",
@@ -1900,10 +1937,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::vector<ComponentResult> nonVectorResults;
             nonVectorResults.reserve(allComponentResults.size());
 
-            std::vector<ComponentResult> mergedVectorResults;
             std::unordered_map<std::string, size_t> bestVectorByHash;
             bestVectorByHash.reserve(workingConfig.vectorMaxResults * 2);
-            std::vector<ComponentResult> mergedGraphVectorResults;
             std::unordered_map<std::string, size_t> bestGraphVectorByHash;
             bestGraphVectorByHash.reserve(workingConfig.vectorMaxResults * 2);
             std::unordered_set<std::string> graphVectorCorroboratedHashes;
@@ -2106,6 +2141,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (graphVectorAddedNewCount > 0 || graphVectorReplacedBaseCount > 0) {
             contributing.push_back("graph_vector");
         }
+        std::vector<ComponentResult> traceMultiVectorResults;
+        for (const auto& comp : allComponentResults) {
+            if (comp.source == ComponentResult::Source::Vector ||
+                comp.source == ComponentResult::Source::EntityVector ||
+                comp.source == ComponentResult::Source::GraphVector) {
+                traceMultiVectorResults.push_back(comp);
+            }
+        }
+        traceCollector.markStageResult("multi_vector", traceMultiVectorResults, mvDuration,
+                                       multiVecHits > 0 || graphVectorAddedNewCount > 0 ||
+                                           graphVectorReplacedBaseCount > 0);
         spdlog::debug(
             "multi_vector: merged {} vector updates from {} sub-phrases "
             "(raw_hits={}, added={}, replaced={}, base_vectors={}, final_components={}) in {}us",
@@ -2447,6 +2493,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     contributing.push_back("graph_rerank");
                 } else {
                     skipped.push_back("graph_rerank");
+                    traceCollector.markStageSkipped("graph_rerank", "no_positive_graph_signal");
                 }
 
                 if (stageTraceEnabled) {
@@ -2465,6 +2512,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 }
             } else {
                 failed.push_back("graph_rerank");
+                traceCollector.markStageFailure("graph_rerank");
                 spdlog::debug("[graph_rerank] KG scoring failed: {}",
                               graphScoresResult.error().message);
             }
@@ -2474,6 +2522,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         componentTiming["graph_rerank"] =
             std::chrono::duration_cast<std::chrono::microseconds>(graphRerankEnd - graphRerankStart)
                 .count();
+        if (graphRerankApplied) {
+            traceCollector.markStageResult("graph_rerank", {}, componentTiming["graph_rerank"],
+                                           true);
+        }
     }
 
     if (stageTraceEnabled) {
@@ -2486,9 +2538,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const bool rerankAvailable = reranker_ && reranker_->isReady();
     if (!config_.enableReranking && rerankAvailable && !response.results.empty()) {
         skipped.push_back("reranker");
+        traceCollector.markStageSkipped("reranker", "disabled_in_config");
     }
     if (config_.enableReranking && rerankAvailable && !response.results.empty()) {
         YAMS_ZONE_SCOPED_N("reranking");
+        traceCollector.markStageAttempted("reranker");
+        const auto rerankStart = std::chrono::steady_clock::now();
         const size_t rerankWindow = std::min(config_.rerankTopK, response.results.size());
 
         if (config_.useScoreBasedReranking && rerankWindow > 1) {
@@ -2510,6 +2565,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         if (rerankerCoolingDown) {
             skipped.push_back("reranker");
+            traceCollector.markStageSkipped("reranker", "cooldown_active");
             const int64_t remainingMs = (cooldownUntilMicros - nowMicros) / 1000;
             spdlog::debug("[reranker] Cooldown active; skipping rerank ({} ms remaining)",
                           std::max<int64_t>(remainingMs, 0));
@@ -2522,6 +2578,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 spdlog::debug("[reranker] Skipping rerank (score gap {:.4f} >= {:.4f})", scoreGap,
                               config_.rerankScoreGapThreshold);
                 skipRerank = true;
+                traceCollector.markStageSkipped("reranker", "score_gap_guard");
             }
         }
 
@@ -2675,6 +2732,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
                     crossRerankApplied = true;
                     contributing.push_back("reranker");
+                    auto rerankEnd = std::chrono::steady_clock::now();
+                    const auto rerankDuration =
+                        std::chrono::duration_cast<std::chrono::microseconds>(rerankEnd -
+                                                                              rerankStart)
+                            .count();
+                    componentTiming["reranker"] = rerankDuration;
+                    traceCollector.markStageResult("reranker", {}, rerankDuration, true);
                 } else {
                     if (isRerankerCooldownError(rerankResult.error().code)) {
                         const int64_t nextCooldown =
@@ -2694,13 +2758,24 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         spdlog::warn("[reranker] Reranking failed: {}",
                                      rerankResult.error().message);
                     }
+                    auto rerankEnd = std::chrono::steady_clock::now();
+                    traceCollector.markStageFailure(
+                        "reranker", std::chrono::duration_cast<std::chrono::microseconds>(
+                                        rerankEnd - rerankStart)
+                                        .count());
                 }
             } else {
                 spdlog::debug("[reranker] Skipping rerank: no snippets available");
+                auto rerankEnd = std::chrono::steady_clock::now();
+                traceCollector.markStageSkipped("reranker", "no_snippets_available");
+                componentTiming["reranker"] =
+                    std::chrono::duration_cast<std::chrono::microseconds>(rerankEnd - rerankStart)
+                        .count();
             }
         }
     } else if (config_.enableReranking && !rerankAvailable) {
         spdlog::debug("[reranker] Unavailable; falling back to fused scores");
+        traceCollector.markStageSkipped("reranker", "unavailable");
     }
 
     const size_t compactRerankWindow = std::min(
@@ -3182,6 +3257,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             joinWithTab(collectRankedResultDocIds(response.results, traceTopCount));
 
         response.debugStats["trace_component_hits_json"] = componentSummary.dump();
+        response.debugStats["trace_stage_summary_json"] =
+            traceCollector.buildStageSummaryJson().dump();
+        response.debugStats["trace_fusion_source_summary_json"] =
+            traceCollector
+                .buildFusionSourceSummaryJson(allComponentResults, response.results,
+                                              componentTopCount)
+                .dump();
         response.debugStats["trace_prefusion_signal_summary_json"] = preFusionSignalSummary.dump();
         response.debugStats["trace_fusion_top_json"] = fusionTopSummary.dump();
         response.debugStats["trace_graphless_fusion_top_json"] = graphlessFusionTopSummary.dump();

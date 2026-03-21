@@ -4,10 +4,13 @@
 #include <yams/search/search_tracing.h>
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace yams::search {
+
+using nlohmann::json;
 
 std::string deriveDocIdFromPath(const std::string& path) {
     if (path.empty()) {
@@ -153,6 +156,166 @@ nlohmann::json buildComponentHitSummaryJson(const std::vector<ComponentResult>& 
         };
     }
 
+    return out;
+}
+
+SearchTraceCollector::SearchTraceCollector(const SearchEngineConfig& config) : config_(config) {}
+
+void SearchTraceCollector::markStageConfigured(const std::string& name, bool enabled) {
+    stages_[name].enabled = enabled;
+}
+
+void SearchTraceCollector::markStageAttempted(const std::string& name) {
+    auto& stage = stages_[name];
+    stage.attempted = true;
+    stage.skipped = false;
+    stage.skipReason.clear();
+}
+
+void SearchTraceCollector::markStageResult(const std::string& name,
+                                           const std::vector<ComponentResult>& results,
+                                           std::int64_t durationMicros, bool contributed) {
+    auto& stage = stages_[name];
+    stage.attempted = true;
+    stage.failed = false;
+    stage.timedOut = false;
+    stage.skipped = false;
+    stage.skipReason.clear();
+    stage.contributed = contributed;
+    stage.durationMicros = durationMicros;
+    stage.rawHitCount = results.size();
+
+    std::unordered_set<std::string> uniqueDocs;
+    uniqueDocs.reserve(results.size());
+    for (const auto& comp : results) {
+        const std::string docId = documentIdForTrace(comp.filePath, comp.documentHash);
+        if (!docId.empty()) {
+            uniqueDocs.insert(docId);
+        }
+    }
+    stage.uniqueDocCount = uniqueDocs.size();
+}
+
+void SearchTraceCollector::markStageTimeout(const std::string& name, std::int64_t durationMicros) {
+    auto& stage = stages_[name];
+    stage.attempted = true;
+    stage.timedOut = true;
+    stage.failed = false;
+    stage.skipped = false;
+    stage.skipReason.clear();
+    stage.contributed = false;
+    stage.durationMicros = durationMicros;
+}
+
+void SearchTraceCollector::markStageFailure(const std::string& name, std::int64_t durationMicros) {
+    auto& stage = stages_[name];
+    stage.attempted = true;
+    stage.failed = true;
+    stage.timedOut = false;
+    stage.skipped = false;
+    stage.skipReason.clear();
+    stage.contributed = false;
+    stage.durationMicros = durationMicros;
+}
+
+void SearchTraceCollector::markStageSkipped(const std::string& name, std::string reason) {
+    auto& stage = stages_[name];
+    stage.skipped = true;
+    stage.attempted = false;
+    stage.failed = false;
+    stage.timedOut = false;
+    stage.contributed = false;
+    stage.rawHitCount = 0;
+    stage.uniqueDocCount = 0;
+    stage.durationMicros = 0;
+    stage.skipReason = std::move(reason);
+}
+
+nlohmann::json SearchTraceCollector::buildStageSummaryJson() const {
+    nlohmann::json out = nlohmann::json::object();
+    for (const auto& [name, stage] : stages_) {
+        out[name] = {
+            {"enabled", stage.enabled},
+            {"attempted", stage.attempted},
+            {"contributed", stage.contributed},
+            {"timed_out", stage.timedOut},
+            {"failed", stage.failed},
+            {"skipped", stage.skipped},
+            {"skip_reason", stage.skipReason},
+            {"raw_hit_count", stage.rawHitCount},
+            {"unique_doc_count", stage.uniqueDocCount},
+            {"duration_ms", static_cast<double>(stage.durationMicros) / 1000.0},
+        };
+    }
+    return out;
+}
+
+nlohmann::json SearchTraceCollector::buildFusionSourceSummaryJson(
+    const std::vector<ComponentResult>& componentResults,
+    const std::vector<SearchResult>& finalResults, std::size_t topPerSource) const {
+    struct SourceSummary {
+        std::size_t rawHitCount = 0;
+        std::unordered_set<std::string> uniqueDocs;
+        std::unordered_set<std::string> finalDocs;
+        double scoreMass = 0.0;
+    };
+
+    std::unordered_map<ComponentResult::Source, SourceSummary> summaries;
+    summaries.reserve(10);
+
+    for (const auto& comp : componentResults) {
+        auto& summary = summaries[comp.source];
+        summary.rawHitCount++;
+        const std::string docId = documentIdForTrace(comp.filePath, comp.documentHash);
+        if (!docId.empty()) {
+            summary.uniqueDocs.insert(docId);
+        }
+    }
+
+    const std::size_t limit = std::min(topPerSource, finalResults.size());
+    for (std::size_t i = 0; i < limit; ++i) {
+        const auto& result = finalResults[i];
+        const std::string docId =
+            documentIdForTrace(result.document.filePath, result.document.sha256Hash);
+        if (docId.empty()) {
+            continue;
+        }
+
+        for (int rawSource = static_cast<int>(ComponentResult::Source::Text);
+             rawSource <= static_cast<int>(ComponentResult::Source::Unknown); ++rawSource) {
+            const auto source = static_cast<ComponentResult::Source>(rawSource);
+            const double contribution = componentSourceScoreInResult(result, source);
+            if (std::abs(contribution) <= 1e-12) {
+                continue;
+            }
+            auto& summary = summaries[source];
+            summary.finalDocs.insert(docId);
+            summary.scoreMass += contribution;
+        }
+    }
+
+    nlohmann::json out = nlohmann::json::object();
+    for (int rawSource = static_cast<int>(ComponentResult::Source::Text);
+         rawSource <= static_cast<int>(ComponentResult::Source::Unknown); ++rawSource) {
+        const auto source = static_cast<ComponentResult::Source>(rawSource);
+        const auto sourceName = componentSourceToString(source);
+        const auto weight = componentSourceWeight(config_, source);
+        auto it = summaries.find(source);
+        const bool present = it != summaries.end();
+        const std::size_t rawHits = present ? it->second.rawHitCount : 0;
+        const std::size_t uniqueDocs = present ? it->second.uniqueDocs.size() : 0;
+        const std::size_t finalDocs = present ? it->second.finalDocs.size() : 0;
+        const double scoreMass = present ? it->second.scoreMass : 0.0;
+        out[sourceName] = {
+            {"weight", weight},
+            {"enabled", weight > 0.0f},
+            {"raw_hit_count", rawHits},
+            {"unique_doc_count", uniqueDocs},
+            {"contributed_to_final", finalDocs > 0},
+            {"final_top_doc_count", finalDocs},
+            {"final_score_mass", scoreMass},
+        };
+    }
     return out;
 }
 

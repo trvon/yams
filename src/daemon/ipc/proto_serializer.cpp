@@ -110,7 +110,7 @@ template <> struct ProtoBinding<ErrorResponse> {
     static void set(Envelope& env, const ErrorResponse& er) {
         auto* pe = env.mutable_error();
         pe->set_code(static_cast<uint32_t>(er.code));
-        pe->set_message(er.message);
+        pe->set_message(yams::common::sanitizeUtf8(er.message));
     }
     static ErrorResponse get(const Envelope& env) {
         ErrorResponse er{};
@@ -125,9 +125,9 @@ template <> struct ProtoBinding<GetResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGetResponse;
     static void set(Envelope& env, const GetResponse& r) {
         auto* o = env.mutable_get_response();
-        o->set_hash(r.hash);
-        o->set_name(r.name);
-        o->set_path(r.path);
+        o->set_hash(yams::common::sanitizeUtf8(r.hash));
+        o->set_name(yams::common::sanitizeUtf8(r.name));
+        o->set_path(yams::common::sanitizeUtf8(r.path));
         o->set_compressed(r.compressed);
         if (r.compressionAlgorithm)
             o->set_compression_algorithm(*r.compressionAlgorithm);
@@ -286,24 +286,24 @@ template <> struct ProtoBinding<GetRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGetRequest;
     static void set(Envelope& env, const GetRequest& r) {
         auto* o = env.mutable_get_request();
-        o->set_hash(r.hash);
+        o->set_hash(yams::common::sanitizeUtf8(r.hash));
         o->set_accept_compressed(r.acceptCompressed);
-        o->set_name(r.name);
+        o->set_name(yams::common::sanitizeUtf8(r.name));
         o->set_by_name(r.byName);
-        o->set_file_type(r.fileType);
-        o->set_mime_type(r.mimeType);
-        o->set_extension(r.extension);
+        o->set_file_type(yams::common::sanitizeUtf8(r.fileType));
+        o->set_mime_type(yams::common::sanitizeUtf8(r.mimeType));
+        o->set_extension(yams::common::sanitizeUtf8(r.extension));
         o->set_binary_only(r.binaryOnly);
         o->set_text_only(r.textOnly);
-        o->set_created_after(r.createdAfter);
-        o->set_created_before(r.createdBefore);
-        o->set_modified_after(r.modifiedAfter);
-        o->set_modified_before(r.modifiedBefore);
-        o->set_indexed_after(r.indexedAfter);
-        o->set_indexed_before(r.indexedBefore);
+        o->set_created_after(yams::common::sanitizeUtf8(r.createdAfter));
+        o->set_created_before(yams::common::sanitizeUtf8(r.createdBefore));
+        o->set_modified_after(yams::common::sanitizeUtf8(r.modifiedAfter));
+        o->set_modified_before(yams::common::sanitizeUtf8(r.modifiedBefore));
+        o->set_indexed_after(yams::common::sanitizeUtf8(r.indexedAfter));
+        o->set_indexed_before(yams::common::sanitizeUtf8(r.indexedBefore));
         o->set_latest(r.latest);
         o->set_oldest(r.oldest);
-        o->set_output_path(r.outputPath);
+        o->set_output_path(yams::common::sanitizeUtf8(r.outputPath));
         o->set_metadata_only(r.metadataOnly);
         o->set_max_bytes(r.maxBytes);
         o->set_chunk_size(r.chunkSize);
@@ -450,8 +450,8 @@ template <> struct ProtoBinding<ListRequest> {
         o->set_offset(r.offset);
         o->set_recent_count(r.recentCount);
         o->set_recent(r.recent);
-        o->set_format(r.format);
-        o->set_sort_by(r.sortBy);
+        o->set_format(yams::common::sanitizeUtf8(r.format));
+        o->set_sort_by(yams::common::sanitizeUtf8(r.sortBy));
         o->set_reverse(r.reverse);
         o->set_verbose(r.verbose);
         o->set_show_snippets(r.showSnippets);
@@ -460,35 +460,35 @@ template <> struct ProtoBinding<ListRequest> {
         o->set_group_by_session(r.groupBySession);
         o->set_snippet_length(r.snippetLength);
         o->set_no_snippets(r.noSnippets);
-        o->set_file_type(r.fileType);
-        o->set_mime_type(r.mimeType);
-        o->set_extensions(r.extensions);
+        o->set_file_type(yams::common::sanitizeUtf8(r.fileType));
+        o->set_mime_type(yams::common::sanitizeUtf8(r.mimeType));
+        o->set_extensions(yams::common::sanitizeUtf8(r.extensions));
         o->set_binary_only(r.binaryOnly);
         o->set_text_only(r.textOnly);
-        o->set_created_after(r.createdAfter);
-        o->set_created_before(r.createdBefore);
-        o->set_modified_after(r.modifiedAfter);
-        o->set_modified_before(r.modifiedBefore);
-        o->set_indexed_after(r.indexedAfter);
-        o->set_indexed_before(r.indexedBefore);
+        o->set_created_after(yams::common::sanitizeUtf8(r.createdAfter));
+        o->set_created_before(yams::common::sanitizeUtf8(r.createdBefore));
+        o->set_modified_after(yams::common::sanitizeUtf8(r.modifiedAfter));
+        o->set_modified_before(yams::common::sanitizeUtf8(r.modifiedBefore));
+        o->set_indexed_after(yams::common::sanitizeUtf8(r.indexedAfter));
+        o->set_indexed_before(yams::common::sanitizeUtf8(r.indexedBefore));
         o->set_show_changes(r.showChanges);
-        o->set_since_time(r.sinceTime);
+        o->set_since_time(yams::common::sanitizeUtf8(r.sinceTime));
         o->set_show_diff_tags(r.showDiffTags);
         o->set_show_deleted(r.showDeleted);
-        o->set_change_window(r.changeWindow);
+        o->set_change_window(yams::common::sanitizeUtf8(r.changeWindow));
         set_string_list(r.tags, o->mutable_tags());
-        o->set_filter_tags(r.filterTags);
+        o->set_filter_tags(yams::common::sanitizeUtf8(r.filterTags));
         o->set_match_all_tags(r.matchAllTags);
-        o->set_name_pattern(r.namePattern);
+        o->set_name_pattern(yams::common::sanitizeUtf8(r.namePattern));
         o->set_paths_only(r.pathsOnly);
         // Metadata key-value filters
         to_kv_pairs(r.metadataFilters, o->mutable_metadata_filters());
         o->set_match_all_metadata(r.matchAllMetadata);
         if (!r.sessionId.empty()) {
-            o->set_session_id(r.sessionId);
+            o->set_session_id(yams::common::sanitizeUtf8(r.sessionId));
         }
         if (!r.instanceId.empty()) {
-            o->set_instance_id(r.instanceId);
+            o->set_instance_id(yams::common::sanitizeUtf8(r.instanceId));
         }
     }
     static ListRequest get(const Envelope& env) {
@@ -681,26 +681,26 @@ template <> struct ProtoBinding<AddDocumentRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kAddDocumentRequest;
     static void set(Envelope& env, const AddDocumentRequest& r) {
         auto* o = env.mutable_add_document_request();
-        o->set_path(r.path);
-        o->set_content(r.content);
-        o->set_name(r.name);
+        o->set_path(yams::common::sanitizeUtf8(r.path));
+        o->set_content(yams::common::sanitizeUtf8(r.content));
+        o->set_name(yams::common::sanitizeUtf8(r.name));
         set_string_list(r.tags, o->mutable_tags());
         to_kv_pairs(r.metadata, o->mutable_metadata());
         o->set_recursive(r.recursive);
         o->set_include_hidden(r.includeHidden);
         set_string_list(r.includePatterns, o->mutable_include_patterns());
         set_string_list(r.excludePatterns, o->mutable_exclude_patterns());
-        o->set_collection(r.collection);
-        o->set_snapshot_id(r.snapshotId);
-        o->set_snapshot_label(r.snapshotLabel);
-        o->set_mime_type(r.mimeType);
+        o->set_collection(yams::common::sanitizeUtf8(r.collection));
+        o->set_snapshot_id(yams::common::sanitizeUtf8(r.snapshotId));
+        o->set_snapshot_label(yams::common::sanitizeUtf8(r.snapshotLabel));
+        o->set_mime_type(yams::common::sanitizeUtf8(r.mimeType));
         o->set_disable_auto_mime(r.disableAutoMime);
         o->set_no_embeddings(r.noEmbeddings);
         if (!r.sessionId.empty()) {
-            o->set_session_id(r.sessionId);
+            o->set_session_id(yams::common::sanitizeUtf8(r.sessionId));
         }
         if (!r.instanceId.empty()) {
-            o->set_instance_id(r.instanceId);
+            o->set_instance_id(yams::common::sanitizeUtf8(r.instanceId));
         }
     }
     static AddDocumentRequest get(const Envelope& env) {
@@ -731,8 +731,8 @@ template <> struct ProtoBinding<GrepRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGrepRequest;
     static void set(Envelope& env, const GrepRequest& r) {
         auto* o = env.mutable_grep_request();
-        o->set_pattern(r.pattern);
-        o->set_path(r.path);
+        o->set_pattern(yams::common::sanitizeUtf8(r.pattern));
+        o->set_path(yams::common::sanitizeUtf8(r.path));
         set_string_list(r.paths, o->mutable_paths());
         o->set_case_insensitive(r.caseInsensitive);
         o->set_invert_match(r.invertMatch);
@@ -753,15 +753,15 @@ template <> struct ProtoBinding<GrepRequest> {
         o->set_semantic_limit(static_cast<uint64_t>(r.semanticLimit));
         set_string_list(r.filterTags, o->mutable_filter_tags());
         o->set_match_all_tags(r.matchAllTags);
-        o->set_color_mode(r.colorMode);
+        o->set_color_mode(yams::common::sanitizeUtf8(r.colorMode));
         o->set_before_context(r.beforeContext);
         o->set_after_context(r.afterContext);
         o->set_show_diff(r.showDiff);
         if (r.useSession && !r.sessionName.empty()) {
-            o->set_session_id(r.sessionName);
+            o->set_session_id(yams::common::sanitizeUtf8(r.sessionName));
         }
         if (!r.instanceId.empty()) {
-            o->set_instance_id(r.instanceId);
+            o->set_instance_id(yams::common::sanitizeUtf8(r.instanceId));
         }
     }
     static GrepRequest get(const Envelope& env) {
@@ -806,9 +806,9 @@ template <> struct ProtoBinding<UpdateDocumentRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kUpdateDocumentRequest;
     static void set(Envelope& env, const UpdateDocumentRequest& r) {
         auto* o = env.mutable_update_document_request();
-        o->set_hash(r.hash);
-        o->set_name(r.name);
-        o->set_new_content(r.newContent);
+        o->set_hash(yams::common::sanitizeUtf8(r.hash));
+        o->set_name(yams::common::sanitizeUtf8(r.name));
+        o->set_new_content(yams::common::sanitizeUtf8(r.newContent));
         set_string_list(r.addTags, o->mutable_add_tags());
         set_string_list(r.removeTags, o->mutable_remove_tags());
         to_kv_pairs(r.metadata, o->mutable_metadata());
@@ -836,8 +836,8 @@ template <> struct ProtoBinding<DownloadRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kDownloadRequest;
     static void set(Envelope& env, const DownloadRequest& r) {
         auto* o = env.mutable_download_request();
-        o->set_url(r.url);
-        o->set_output_path(r.outputPath);
+        o->set_url(yams::common::sanitizeUtf8(r.url));
+        o->set_output_path(yams::common::sanitizeUtf8(r.outputPath));
         set_string_list(r.tags, o->mutable_tags());
         to_kv_pairs(r.metadata, o->mutable_metadata());
         o->set_quiet(r.quiet);
@@ -3048,14 +3048,14 @@ template <> struct ProtoBinding<RepairEvent> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kRepairEvent;
     static void set(Envelope& env, const RepairEvent& r) {
         auto* o = env.mutable_repair_event();
-        o->set_phase(r.phase);
-        o->set_operation(r.operation);
+        o->set_phase(yams::common::sanitizeUtf8(r.phase));
+        o->set_operation(yams::common::sanitizeUtf8(r.operation));
         o->set_processed(r.processed);
         o->set_total(r.total);
         o->set_succeeded(r.succeeded);
         o->set_failed(r.failed);
         o->set_skipped(r.skipped);
-        o->set_message(r.message);
+        o->set_message(yams::common::sanitizeUtf8(r.message));
     }
     static RepairEvent get(const Envelope& env) {
         const auto& i = env.repair_event();
@@ -3084,12 +3084,12 @@ template <> struct ProtoBinding<RepairResponse> {
         set_string_list(r.errors, o->mutable_errors());
         for (const auto& op : r.operationResults) {
             auto* op_pb = o->add_operation_results();
-            op_pb->set_operation(op.operation);
+            op_pb->set_operation(yams::common::sanitizeUtf8(op.operation));
             op_pb->set_processed(op.processed);
             op_pb->set_succeeded(op.succeeded);
             op_pb->set_failed(op.failed);
             op_pb->set_skipped(op.skipped);
-            op_pb->set_message(op.message);
+            op_pb->set_message(yams::common::sanitizeUtf8(op.message));
         }
     }
     static RepairResponse get(const Envelope& env) {

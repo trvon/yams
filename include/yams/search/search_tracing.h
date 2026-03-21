@@ -3,9 +3,11 @@
 
 #pragma once
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -33,6 +35,42 @@ std::string joinWithTab(const std::vector<std::string>& values);
 
 nlohmann::json buildComponentHitSummaryJson(const std::vector<ComponentResult>& componentResults,
                                             size_t topPerComponent);
+
+struct TraceStageSummary {
+    bool enabled = false;
+    bool attempted = false;
+    bool contributed = false;
+    bool timedOut = false;
+    bool failed = false;
+    bool skipped = false;
+    std::string skipReason;
+    std::size_t rawHitCount = 0;
+    std::size_t uniqueDocCount = 0;
+    std::int64_t durationMicros = 0;
+};
+
+class SearchTraceCollector {
+public:
+    explicit SearchTraceCollector(const SearchEngineConfig& config);
+
+    void markStageConfigured(const std::string& name, bool enabled);
+    void markStageAttempted(const std::string& name);
+    void markStageResult(const std::string& name, const std::vector<ComponentResult>& results,
+                         std::int64_t durationMicros, bool contributed);
+    void markStageTimeout(const std::string& name, std::int64_t durationMicros = 0);
+    void markStageFailure(const std::string& name, std::int64_t durationMicros = 0);
+    void markStageSkipped(const std::string& name, std::string reason);
+
+    nlohmann::json buildStageSummaryJson() const;
+    nlohmann::json
+    buildFusionSourceSummaryJson(const std::vector<ComponentResult>& componentResults,
+                                 const std::vector<SearchResult>& finalResults,
+                                 std::size_t topPerSource) const;
+
+private:
+    const SearchEngineConfig& config_;
+    std::map<std::string, TraceStageSummary> stages_;
+};
 
 nlohmann::json buildFusionTopSummaryJson(const std::vector<SearchResult>& results, size_t maxDocs);
 

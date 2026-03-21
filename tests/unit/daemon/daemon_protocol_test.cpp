@@ -39,6 +39,19 @@ Message makeMessageWith(Response r, uint64_t id = 43) {
     m.payload = std::move(r);
     return m;
 }
+
+std::string invalidUtf8(std::string_view prefix, std::string_view suffix = {}) {
+    std::string value(prefix);
+    value.push_back(static_cast<char>(0xFF));
+    value.append(suffix);
+    return value;
+}
+
+void checkSanitizedField(std::string_view fieldName, const std::string& actual,
+                         const std::string& original) {
+    INFO(fieldName);
+    CHECK(actual == yams::common::sanitizeUtf8(original));
+}
 } // namespace
 
 // =============================================================================
@@ -578,6 +591,194 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         CHECK(got->texts[0] == yams::common::sanitizeUtf8(req.texts[0]));
         CHECK(got->texts[1] == yams::common::sanitizeUtf8(req.texts[1]));
     }
+
+    SECTION("GetRequest sanitizes invalid UTF-8 text fields") {
+        GetRequest req;
+        req.hash = invalidUtf8("sha256:");
+        req.name = invalidUtf8("notes", ".md");
+        req.fileType = invalidUtf8("text");
+        req.mimeType = invalidUtf8("text/plain");
+        req.extension = invalidUtf8(".md");
+        req.createdAfter = invalidUtf8("2025-01-01");
+        req.modifiedBefore = invalidUtf8("2025-12-31");
+        req.indexedAfter = invalidUtf8("yesterday");
+        req.outputPath = invalidUtf8("/tmp/out", ".txt");
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 15));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<GetRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        checkSanitizedField("GetRequest.hash", got->hash, req.hash);
+        checkSanitizedField("GetRequest.name", got->name, req.name);
+        checkSanitizedField("GetRequest.fileType", got->fileType, req.fileType);
+        checkSanitizedField("GetRequest.mimeType", got->mimeType, req.mimeType);
+        checkSanitizedField("GetRequest.extension", got->extension, req.extension);
+        checkSanitizedField("GetRequest.createdAfter", got->createdAfter, req.createdAfter);
+        checkSanitizedField("GetRequest.modifiedBefore", got->modifiedBefore, req.modifiedBefore);
+        checkSanitizedField("GetRequest.indexedAfter", got->indexedAfter, req.indexedAfter);
+        checkSanitizedField("GetRequest.outputPath", got->outputPath, req.outputPath);
+    }
+
+    SECTION("ListRequest sanitizes invalid UTF-8 filter and session fields") {
+        ListRequest req;
+        req.format = invalidUtf8("table");
+        req.sortBy = invalidUtf8("date");
+        req.fileType = invalidUtf8("text");
+        req.mimeType = invalidUtf8("text/plain");
+        req.extensions = invalidUtf8("md,txt");
+        req.createdAfter = invalidUtf8("2025-01-01");
+        req.changeWindow = invalidUtf8("24h");
+        req.tags = {invalidUtf8("task=perf"), "owner=opencode"};
+        req.filterTags = invalidUtf8("phase=checkpoint");
+        req.namePattern = invalidUtf8("*.md");
+        req.metadataFilters = {{invalidUtf8("task"), invalidUtf8("performance")},
+                               {"owner", invalidUtf8("opencode")}};
+        req.sessionId = invalidUtf8("feature-auth");
+        req.instanceId = invalidUtf8("inst-list");
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 16));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<ListRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        checkSanitizedField("ListRequest.format", got->format, req.format);
+        checkSanitizedField("ListRequest.sortBy", got->sortBy, req.sortBy);
+        checkSanitizedField("ListRequest.fileType", got->fileType, req.fileType);
+        checkSanitizedField("ListRequest.mimeType", got->mimeType, req.mimeType);
+        checkSanitizedField("ListRequest.extensions", got->extensions, req.extensions);
+        checkSanitizedField("ListRequest.createdAfter", got->createdAfter, req.createdAfter);
+        checkSanitizedField("ListRequest.changeWindow", got->changeWindow, req.changeWindow);
+        REQUIRE(got->tags.size() == req.tags.size());
+        checkSanitizedField("ListRequest.tags[0]", got->tags[0], req.tags[0]);
+        checkSanitizedField("ListRequest.filterTags", got->filterTags, req.filterTags);
+        checkSanitizedField("ListRequest.namePattern", got->namePattern, req.namePattern);
+        checkSanitizedField(
+            "ListRequest.metadataFilters.task",
+            got->metadataFilters.at(yams::common::sanitizeUtf8(req.metadataFilters.begin()->first)),
+            req.metadataFilters.begin()->second);
+        checkSanitizedField("ListRequest.sessionId", got->sessionId, req.sessionId);
+        checkSanitizedField("ListRequest.instanceId", got->instanceId, req.instanceId);
+    }
+
+    SECTION("AddDocumentRequest sanitizes invalid UTF-8 metadata and routing fields") {
+        AddDocumentRequest req;
+        req.path = invalidUtf8("/tmp/doc", ".md");
+        req.name = invalidUtf8("doc", ".md");
+        req.tags = {invalidUtf8("tag-a"), "tag-b"};
+        req.metadata = {{invalidUtf8("task"), invalidUtf8("performance")}};
+        req.includePatterns = {invalidUtf8("*.md")};
+        req.excludePatterns = {invalidUtf8("*.bin")};
+        req.collection = invalidUtf8("notes");
+        req.snapshotId = invalidUtf8("snap-123");
+        req.snapshotLabel = invalidUtf8("checkpoint");
+        req.sessionId = invalidUtf8("session-a");
+        req.instanceId = invalidUtf8("instance-a");
+        req.mimeType = invalidUtf8("text/plain");
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 17));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<AddDocumentRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        checkSanitizedField("AddDocumentRequest.path", got->path, req.path);
+        checkSanitizedField("AddDocumentRequest.name", got->name, req.name);
+        checkSanitizedField("AddDocumentRequest.tags[0]", got->tags.at(0), req.tags.at(0));
+        checkSanitizedField("AddDocumentRequest.collection", got->collection, req.collection);
+        checkSanitizedField("AddDocumentRequest.snapshotId", got->snapshotId, req.snapshotId);
+        checkSanitizedField("AddDocumentRequest.snapshotLabel", got->snapshotLabel,
+                            req.snapshotLabel);
+        checkSanitizedField("AddDocumentRequest.sessionId", got->sessionId, req.sessionId);
+        checkSanitizedField("AddDocumentRequest.instanceId", got->instanceId, req.instanceId);
+        checkSanitizedField("AddDocumentRequest.mimeType", got->mimeType, req.mimeType);
+    }
+
+    SECTION("GrepRequest sanitizes invalid UTF-8 filter and session fields") {
+        GrepRequest req;
+        req.pattern = invalidUtf8("task=performance");
+        req.path = invalidUtf8("/tmp");
+        req.paths = {invalidUtf8("/repo/src")};
+        req.includePatterns = {invalidUtf8("*.cpp")};
+        req.filterTags = {invalidUtf8("owner=opencode")};
+        req.colorMode = invalidUtf8("auto");
+        req.useSession = true;
+        req.sessionName = invalidUtf8("session-grep");
+        req.instanceId = invalidUtf8("instance-grep");
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 18));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<GrepRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        checkSanitizedField("GrepRequest.pattern", got->pattern, req.pattern);
+        checkSanitizedField("GrepRequest.path", got->path, req.path);
+        checkSanitizedField("GrepRequest.paths[0]", got->paths.at(0), req.paths.at(0));
+        checkSanitizedField("GrepRequest.includePatterns[0]", got->includePatterns.at(0),
+                            req.includePatterns.at(0));
+        checkSanitizedField("GrepRequest.filterTags[0]", got->filterTags.at(0),
+                            req.filterTags.at(0));
+        checkSanitizedField("GrepRequest.colorMode", got->colorMode, req.colorMode);
+        checkSanitizedField("GrepRequest.sessionName", got->sessionName, req.sessionName);
+        checkSanitizedField("GrepRequest.instanceId", got->instanceId, req.instanceId);
+    }
+
+    SECTION("DownloadRequest sanitizes invalid UTF-8 text fields") {
+        DownloadRequest req;
+        req.url = invalidUtf8("https://example.com/file");
+        req.outputPath = invalidUtf8("/tmp/download", ".txt");
+        req.tags = {invalidUtf8("tag-download")};
+        req.metadata = {{invalidUtf8("source"), invalidUtf8("cli")}};
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 19));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<DownloadRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        checkSanitizedField("DownloadRequest.url", got->url, req.url);
+        checkSanitizedField("DownloadRequest.outputPath", got->outputPath, req.outputPath);
+        checkSanitizedField("DownloadRequest.tags[0]", got->tags.at(0), req.tags.at(0));
+    }
+
+    SECTION("UpdateDocumentRequest sanitizes invalid UTF-8 text fields") {
+        UpdateDocumentRequest req;
+        req.hash = invalidUtf8("sha256:");
+        req.name = invalidUtf8("doc", ".md");
+        req.newContent = invalidUtf8("updated content");
+        req.addTags = {invalidUtf8("tag-add")};
+        req.removeTags = {invalidUtf8("tag-remove")};
+        req.metadata = {{invalidUtf8("task"), invalidUtf8("performance")}};
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 23));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<UpdateDocumentRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        checkSanitizedField("UpdateDocumentRequest.hash", got->hash, req.hash);
+        checkSanitizedField("UpdateDocumentRequest.name", got->name, req.name);
+        checkSanitizedField("UpdateDocumentRequest.newContent", got->newContent, req.newContent);
+        checkSanitizedField("UpdateDocumentRequest.addTags[0]", got->addTags.at(0),
+                            req.addTags.at(0));
+        checkSanitizedField("UpdateDocumentRequest.removeTags[0]", got->removeTags.at(0),
+                            req.removeTags.at(0));
+    }
 }
 
 TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serialization]") {
@@ -645,6 +846,92 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
         CHECK(gotGraph->edges[0].edgeId == 42);
         CHECK(gotGraph->edges[0].relation == "defines");
         CHECK(gotGraph->edges[0].properties == "{\"source\":\"test\"}");
+    }
+
+    SECTION("ErrorResponse sanitizes invalid UTF-8 message") {
+        ErrorResponse err;
+        err.code = ErrorCode::InvalidData;
+        err.message = invalidUtf8("bad-search-query");
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{err}, 20));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<ErrorResponse>(&std::get<Response>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        checkSanitizedField("ErrorResponse.message", got->message, err.message);
+    }
+
+    SECTION("RepairEvent sanitizes invalid UTF-8 progress text") {
+        RepairEvent ev;
+        ev.phase = invalidUtf8("repairing");
+        ev.operation = invalidUtf8("fts5");
+        ev.message = invalidUtf8("rebuilding-index");
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{ev}, 21));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<RepairEvent>(&std::get<Response>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        checkSanitizedField("RepairEvent.phase", got->phase, ev.phase);
+        checkSanitizedField("RepairEvent.operation", got->operation, ev.operation);
+        checkSanitizedField("RepairEvent.message", got->message, ev.message);
+    }
+
+    SECTION("RepairResponse sanitizes invalid UTF-8 errors and operation messages") {
+        RepairResponse resp;
+        resp.success = false;
+        resp.errors = {invalidUtf8("fts5 failed"), invalidUtf8("mime failed")};
+
+        RepairOperationResult op;
+        op.operation = invalidUtf8("embeddings");
+        op.message = invalidUtf8("bad utf8 in batch");
+        resp.operationResults.push_back(op);
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 22));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<RepairResponse>(&std::get<Response>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        REQUIRE(got->errors.size() == resp.errors.size());
+        checkSanitizedField("RepairResponse.errors[0]", got->errors.at(0), resp.errors.at(0));
+        REQUIRE(got->operationResults.size() == 1);
+        checkSanitizedField("RepairResponse.operationResults[0].operation",
+                            got->operationResults.at(0).operation,
+                            resp.operationResults.at(0).operation);
+        checkSanitizedField("RepairResponse.operationResults[0].message",
+                            got->operationResults.at(0).message,
+                            resp.operationResults.at(0).message);
+    }
+
+    SECTION("GetResponse sanitizes invalid UTF-8 descriptor fields without content") {
+        GetResponse resp;
+        resp.hash = invalidUtf8("sha256:");
+        resp.name = invalidUtf8("doc", ".md");
+        resp.path = invalidUtf8("/tmp/doc", ".md");
+        resp.hasContent = false;
+        resp.metadata = {{invalidUtf8("task"), invalidUtf8("performance")}};
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 24));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<GetResponse>(&std::get<Response>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        checkSanitizedField("GetResponse.hash", got->hash, resp.hash);
+        checkSanitizedField("GetResponse.name", got->name, resp.name);
+        checkSanitizedField("GetResponse.path", got->path, resp.path);
+        REQUIRE_FALSE(got->hasContent);
     }
 }
 
