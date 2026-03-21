@@ -62,7 +62,8 @@ public:
     }
 
     LifecycleSnapshot getLifecycleSnapshot() const override {
-        if (throwOnGetLifecycleSnapshot_) {
+        if (throwOnGetLifecycleSnapshotCount_ > 0) {
+            --throwOnGetLifecycleSnapshotCount_;
             throw std::runtime_error("getLifecycleSnapshot boom");
         }
         return snapshot_;
@@ -91,7 +92,12 @@ public:
         setSubsystemDegradedCalls_ = 0;
     }
     void setThrowOnSetSubsystemDegraded(bool enabled) { throwOnSetSubsystemDegraded_ = enabled; }
-    void setThrowOnGetLifecycleSnapshot(bool enabled) { throwOnGetLifecycleSnapshot_ = enabled; }
+    void setThrowOnGetLifecycleSnapshot(bool enabled) {
+        throwOnGetLifecycleSnapshotCount_ = enabled ? 1 : 0;
+    }
+    void setThrowOnGetLifecycleSnapshotCount(int count) {
+        throwOnGetLifecycleSnapshotCount_ = count;
+    }
     const std::vector<std::string>& removedHashes() const { return removedHashes_; }
 
 private:
@@ -101,7 +107,7 @@ private:
     std::string lastReason_;
     int setSubsystemDegradedCalls_{0};
     bool throwOnSetSubsystemDegraded_{false};
-    bool throwOnGetLifecycleSnapshot_{false};
+    mutable int throwOnGetLifecycleSnapshotCount_{0};
     std::vector<std::string> removedHashes_;
 };
 
@@ -2632,6 +2638,71 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(task.request.content == req.content);
     }
 
+    SECTION("add document clears deferred hash when pressure-path hashing fails") {
+        const bool originalGovernor = TuneAdvisor::enableResourceGovernor();
+        const bool originalAdmission = TuneAdvisor::enableAdmissionControl();
+        const uint32_t originalCapacity = TuneAdvisor::storeDocumentChannelCapacity();
+        auto restore = ScopeExit([&] {
+            TuneAdvisor::setEnableResourceGovernor(originalGovernor);
+            TuneAdvisor::setEnableAdmissionControl(originalAdmission);
+            TuneAdvisor::setStoreDocumentChannelCapacity(originalCapacity);
+            ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Normal);
+            drainStoreDocumentTasks();
+        });
+
+        TuneAdvisor::setEnableResourceGovernor(true);
+        TuneAdvisor::setEnableAdmissionControl(true);
+        TuneAdvisor::setStoreDocumentChannelCapacity(64);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+        drainStoreDocumentTasks();
+
+        auto filePath = writeTempFile("yams_documents_pressure_file_", "pressure-file.txt",
+                                      "pressure file content");
+        RequestDispatcher::__test_forceDocumentsHashFailureOnce();
+
+        AddDocumentRequest req;
+        req.path = filePath.string();
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.hash.empty());
+        CHECK(addResp.message == "Queued for deferred processing (system under pressure).");
+    }
+
+    SECTION("add document clears deferred hash for recursive pressure path") {
+        const bool originalGovernor = TuneAdvisor::enableResourceGovernor();
+        const bool originalAdmission = TuneAdvisor::enableAdmissionControl();
+        const uint32_t originalCapacity = TuneAdvisor::storeDocumentChannelCapacity();
+        auto restore = ScopeExit([&] {
+            TuneAdvisor::setEnableResourceGovernor(originalGovernor);
+            TuneAdvisor::setEnableAdmissionControl(originalAdmission);
+            TuneAdvisor::setStoreDocumentChannelCapacity(originalCapacity);
+            ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Normal);
+            drainStoreDocumentTasks();
+        });
+
+        TuneAdvisor::setEnableResourceGovernor(true);
+        TuneAdvisor::setEnableAdmissionControl(true);
+        TuneAdvisor::setStoreDocumentChannelCapacity(64);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+        drainStoreDocumentTasks();
+
+        AddDocumentRequest req;
+        req.path = makeTempDir("yams_documents_pressure_recursive_").string();
+        req.recursive = true;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.hash.empty());
+        CHECK(addResp.message == "Queued for deferred processing (system under pressure).");
+    }
+
     SECTION("add document reports resource exhaustion when pressure queue is full") {
         const bool originalGovernor = TuneAdvisor::enableResourceGovernor();
         const bool originalAdmission = TuneAdvisor::enableAdmissionControl();
@@ -2742,6 +2813,37 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(err.message == "Ingestion queue is full. Please try again later.");
     }
 
+    SECTION("add document clears async hash when daemon-initializing hashing fails") {
+        DaemonConfig notReadyCfg;
+        notReadyCfg.dataDir = makeTempDir("yams_documents_dispatcher_not_ready_hash_fail_");
+        StubLifecycle notReadyLifecycle(LifecycleState::Starting);
+        StateComponent notReadyState;
+        notReadyState.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        notReadyState.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm notReadyLifecycleFsm;
+        ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
+        RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
+
+        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        drainStoreDocumentTasks();
+
+        auto filePath =
+            writeTempFile("yams_documents_init_hash_fail_", "init-file.txt", "init file content");
+        RequestDispatcher::__test_forceDocumentsHashFailureOnce();
+
+        AddDocumentRequest req;
+        req.path = filePath.string();
+
+        auto resp = dispatchRequest(notReadyDispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.hash.empty());
+        CHECK(addResp.message ==
+              "Ingestion accepted for asynchronous processing (daemon initializing).");
+    }
+
     SECTION("add document treats directory path as async directory ingestion") {
         auto dirPath = makeTempDir("yams_documents_directory_ingest_");
         drainStoreDocumentTasks();
@@ -2848,6 +2950,27 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::ResourceExhausted);
         CHECK(err.message == "Ingestion queue is full. Please try again later.");
+    }
+
+    SECTION("add document clears async hash when hashing fails on ready path") {
+        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        drainStoreDocumentTasks();
+
+        auto filePath = writeTempFile("yams_documents_async_hash_fail_", "async-hash-fail.txt",
+                                      "async hash fail content");
+        RequestDispatcher::__test_forceDocumentsHashFailureOnce();
+
+        AddDocumentRequest req;
+        req.path = filePath.string();
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(resp));
+        const auto& addResp = std::get<AddDocumentResponse>(resp);
+        CHECK(addResp.documentsAdded == 0);
+        CHECK(addResp.hash.empty());
+        CHECK(addResp.extractionStatus == "pending");
+        CHECK(addResp.message == "Ingestion accepted for asynchronous processing.");
     }
 
     SECTION("add document uses sync fallback when explicitly enabled") {

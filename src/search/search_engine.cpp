@@ -3257,13 +3257,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             joinWithTab(collectRankedResultDocIds(response.results, traceTopCount));
 
         response.debugStats["trace_component_hits_json"] = componentSummary.dump();
-        response.debugStats["trace_stage_summary_json"] =
-            traceCollector.buildStageSummaryJson().dump();
-        response.debugStats["trace_fusion_source_summary_json"] =
-            traceCollector
-                .buildFusionSourceSummaryJson(allComponentResults, response.results,
-                                              componentTopCount)
-                .dump();
         response.debugStats["trace_prefusion_signal_summary_json"] = preFusionSignalSummary.dump();
         response.debugStats["trace_fusion_top_json"] = fusionTopSummary.dump();
         response.debugStats["trace_graphless_fusion_top_json"] = graphlessFusionTopSummary.dump();
@@ -3272,6 +3265,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["trace_graph_displacement_summary_json"] =
             graphDisplacementSummary.dump();
     }
+
+    response.debugStats["trace_stage_summary_json"] = traceCollector.buildStageSummaryJson().dump();
+    response.debugStats["trace_fusion_source_summary_json"] =
+        traceCollector
+            .buildFusionSourceSummaryJson(allComponentResults, response.results,
+                                          std::max<size_t>(userLimit, size_t{25}))
+            .dump();
 
     auto endTime = std::chrono::steady_clock::now();
     response.executionTimeMs =

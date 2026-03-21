@@ -18,6 +18,11 @@ AFL++ fuzzing harnesses for CLI/daemon IPC protocol testing per issue #8.
 - `fuzz_plugin_abi_mount` - ABI plugin mount/load/unload path via `AbiPluginLoader`
 - `fuzz_plugin_abi_negotiation` - ABI manifest/interface negotiation across controlled plugins
 
+### Planned Surfaces
+- Daemon download job IPC and policy boundary
+  - future target: request decode / policy decision / state persistence / progress framing
+  - security focus: SSRF-like inputs, redirect escapes, oversized metadata, hostile resume state
+
 Fuzzers run in `aflplusplus/aflplusplus` Docker container for reproducibility.
 
 ## Usage
@@ -190,6 +195,18 @@ Add custom seeds from:
 - Manual construction
 
 Corpus should cover request types, edge cases, and real-world patterns. Do not include secrets.
+
+### Planned Download Boundary Seeds
+
+When daemon download jobs are introduced, add sanitized seeds for:
+
+- allowed vs disallowed schemes
+- allowed vs disallowed hosts
+- redirect chains that escape host policy
+- missing checksum vs required-checksum requests
+- resume/job-state collisions on same URL with different owners or fingerprints
+- oversized content-length metadata
+- malformed progress/job-status payloads
 
 ## CI Integration
 

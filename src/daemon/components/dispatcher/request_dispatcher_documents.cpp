@@ -39,8 +39,15 @@ std::atomic<bool> g_forceCatMissingDocumentOnce{false};
 std::atomic<bool> g_forceCatMissingContentOnce{false};
 std::atomic<bool> g_forceCatNativeMissingDocumentOnce{false};
 std::atomic<bool> g_forceCatNativeMissingContentOnce{false};
+std::atomic<bool> g_forceDocumentsHashFailureOnce{false};
 std::string g_forceListExceptionMessage;
 std::mutex g_forceListExceptionMutex;
+
+void maybeThrowForcedDocumentsHashFailure() {
+    if (g_forceDocumentsHashFailureOnce.exchange(false, std::memory_order_acq_rel)) {
+        throw std::runtime_error("forced documents hash failure");
+    }
+}
 
 int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) {
     const char* raw = std::getenv(name);
@@ -185,6 +192,10 @@ void RequestDispatcher::__test_forceCatNativeMissingContentOnce() {
 
 void RequestDispatcher::__test_resetDocumentsQueryTraceCache() {
     g_queryTraceEnabledCached.store(-1, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceDocumentsHashFailureOnce() {
+    g_forceDocumentsHashFailureOnce.store(true, std::memory_order_release);
 }
 
 // PBI-008-11 scaffold: prepare session using app services (no IPC exposure yet)
@@ -715,6 +726,7 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                     if (!reqIsDir && !req.recursive) {
                         try {
                             auto hasher = yams::crypto::createSHA256Hasher();
+                            maybeThrowForcedDocumentsHashFailure();
                             if (!req.content.empty()) {
                                 response.hash = hasher->hash(req.content);
                             } else if (!req.path.empty()) {
@@ -769,6 +781,7 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                     if (!isDir && !req.recursive) {
                         try {
                             auto hasher = yams::crypto::createSHA256Hasher();
+                            maybeThrowForcedDocumentsHashFailure();
                             if (!req.content.empty()) {
                                 response.hash = hasher->hash(req.content);
                             } else if (!req.path.empty()) {
@@ -819,6 +832,7 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                     // Compute hash for immediate feedback for single-file/content adds.
                     try {
                         auto hasher = yams::crypto::createSHA256Hasher();
+                        maybeThrowForcedDocumentsHashFailure();
                         if (!req.content.empty()) {
                             response.hash = hasher->hash(req.content);
                         } else if (!req.path.empty()) {

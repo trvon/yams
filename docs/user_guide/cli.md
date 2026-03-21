@@ -617,11 +617,13 @@ yams list src/main.cpp --snapshot-id=v1.0 --compare-to=v1.1
 **Smart behavior:**
 - `yams list` → List all documents
 - `yams list --snapshots` → List all available snapshots
-- `yams list <filepath>` → Show file history across snapshots
+- `yams list <directory>` → List indexed descendants under that directory (default `--limit 100`, use `--offset` to paginate)
+- `yams list <pattern-with-*-or-?>` → Treat input as a list pattern, including absolute path globs
+- `yams list <filepath>` → Show file history across snapshots when the input resolves to a file or historical path
 - `yams list <filepath> --snapshot-id=X` → Show file at snapshot X
 - `yams list <filepath> --snapshot-id=X --compare-to=Y` → Inline diff
 
-The command automatically detects file paths (contain `/` or `.`) and adapts its behavior accordingly.
+The command classifies inputs by meaning instead of just checking for `/` or `.`.
 
 ---
 
