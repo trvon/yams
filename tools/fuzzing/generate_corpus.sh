@@ -20,7 +20,8 @@ mkdir -p \
 	"${CORPUS_DIR}/query_parser" \
 	"${CORPUS_DIR}/plugin_trust" \
 	"${CORPUS_DIR}/plugin_abi_mount" \
-	"${CORPUS_DIR}/plugin_abi_negotiation"
+	"${CORPUS_DIR}/plugin_abi_negotiation" \
+	"${CORPUS_DIR}/download_jobs"
 
 echo "Creating minimal seed inputs..."
 
@@ -89,6 +90,16 @@ cat > "${CORPUS_DIR}/plugin_abi_negotiation/02_versions.txt" <<'EOF'
 v=1 v=2 v=999
 EOF
 head -c 128 /dev/urandom > "${CORPUS_DIR}/plugin_abi_negotiation/03_random.bin"
+
+# Daemon download job IPC seeds
+printf '\x00' > "${CORPUS_DIR}/download_jobs/00_zero.bin"
+cat > "${CORPUS_DIR}/download_jobs/01_start_url.txt" <<'EOF'
+https://example.com/archive.tar.gz
+EOF
+cat > "${CORPUS_DIR}/download_jobs/02_job_id.txt" <<'EOF'
+job-download-123
+EOF
+head -c 96 /dev/urandom > "${CORPUS_DIR}/download_jobs/03_random.bin"
 
 echo "Generating structured IPC seeds (Search/Grep/Delete) via seedgen (if available)..."
 if docker image inspect yams-fuzz >/dev/null 2>&1; then

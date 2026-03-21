@@ -182,5 +182,16 @@ fuzz_plugin_abi_negotiation = executable('fuzz_plugin_abi_negotiation',
   build_by_default: true,
 )
 
+# Daemon download job IPC fuzzer
+fuzz_download_jobs = executable('fuzz_download_jobs',
+  'fuzz_download_jobs.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
 message('Fuzzing harnesses configured with AFL++ libFuzzer mode')
 message('ASAN enabled via AFL_USE_ASAN=1 environment variable')

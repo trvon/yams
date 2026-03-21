@@ -100,11 +100,17 @@ yams search test
 ## Sanitizers (Debug)
 
 ```bash
-CFLAGS='-fsanitize=address,undefined' CXXFLAGS='-fsanitize=address,undefined' \
-  meson setup builddir --reconfigure
+meson setup build/asan --buildtype debug -Denable-asan=true -Db_sanitize=address -Db_lundef=false
+meson compile -C build/asan
+meson test -C build/asan
+
+meson setup builddir --buildtype debug -Denable-tsan=true -Db_sanitize=thread
 meson compile -C builddir
 meson test -C builddir
 ```
+
+On Apple Clang, prefer `-Db_lundef=false` for ASAN builds. Meson warns that `b_lundef=true`
+can be problematic with `-fsanitize=address`.
 
 ## Static Analysis and Formatting
 
@@ -112,7 +118,7 @@ meson test -C builddir
 # clang-format
 find src include -name '*.[ch]pp' -o -name '*.cc' -o -name '*.hh' | xargs clang-format -i
 
-# clang-tidy (integrate via editor or invoke directly)
+# clang-tidy (requires compile_commands.json; check-quality.sh audits availability)
 ```
 
 ## CCache (optional)

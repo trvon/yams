@@ -1,7 +1,7 @@
 #include <yams/common/test_utils.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/resource/onnx_genai_adapter.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
-#include <yams/vector/embedding_generator.h>
 #include <yams/vector/tokenizer.h>
 
 #include "onnx_gpu_provider.h"
@@ -34,10 +34,6 @@
 // building ONNX Runtime from source. For prebuilt binaries, we use
 // OrtSessionOptionsAppendExecutionProvider_* functions from the C API which are declared in
 // onnxruntime_c_api.h (included via onnxruntime_cxx_api.h).
-
-#ifdef YAMS_ENABLE_ONNX_GENAI
-#include <yams/daemon/resource/onnx_genai_adapter.h>
-#endif
 
 // Global ONNX Runtime environment - single instance per process, intentionally leaked.
 // Using leaking singleton pattern because ONNX Runtime's LoggingManager destructor
@@ -290,8 +286,7 @@ size_t mergeSharedBatchLimit(const std::string& modelName, const std::string& pr
 
 class OnnxModelSession::Impl {
 public:
-    Impl(const std::string& modelPath, const std::string& modelName,
-         const vector::EmbeddingConfig& config)
+    Impl(const std::string& modelPath, const std::string& modelName, const OnnxTextConfig& config)
         : modelPath_(modelPath), modelName_(modelName), config_(config), preprocessor_(config) {
         // Check if dynamic padding is disabled via environment variable
         if (const char* dp = std::getenv("YAMS_ONNX_DYNAMIC_PADDING")) {
@@ -1597,9 +1592,9 @@ private:
 
     std::string modelPath_;
     std::string modelName_;
-    vector::EmbeddingConfig config_;
-    yams::vector::TextPreprocessor preprocessor_;
-    vector::HuggingFaceTokenizer tokenizer_;
+    OnnxTextConfig config_;
+    OnnxTextPreprocessor preprocessor_;
+    yams::vector::HuggingFaceTokenizer tokenizer_;
 
     Ort::Env* env_ = nullptr; // shared global env
     std::unique_ptr<Ort::SessionOptions> sessionOptions_;
@@ -1735,7 +1730,7 @@ private:
 // ============================================================================
 
 OnnxModelSession::OnnxModelSession(const std::string& modelPath, const std::string& modelName,
-                                   const vector::EmbeddingConfig& config)
+                                   const OnnxTextConfig& config)
     : pImpl(std::make_unique<Impl>(modelPath, modelName, config)) {
     info_.name = modelName;
     info_.path = modelPath;
@@ -2308,7 +2303,7 @@ Result<void> OnnxModelPool::loadModelSync(const std::string& modelName) {
     poolConfig.preCreateResources = false;
 
     // Create embedding config
-    vector::EmbeddingConfig embConfig;
+    OnnxTextConfig embConfig;
     embConfig.model_path = modelPath;
     embConfig.model_name = modelName;
     embConfig.enable_gpu = gpuEnabled;
@@ -2979,7 +2974,7 @@ Result<OnnxModelPool::ModelSessionPtr>
 OnnxModelPool::createModelSession(const std::string& modelName) {
     std::string modelPath = resolveModelPath(modelName);
 
-    vector::EmbeddingConfig config;
+    OnnxTextConfig config;
     config.model_path = modelPath;
     config.model_name = modelName;
     config.enable_gpu = config_.enableGPU;

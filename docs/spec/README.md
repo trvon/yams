@@ -11,6 +11,18 @@ This directory contains interface specifications and schemas for YAMS plugins an
   - New: `graph_adapter_v1`, `graphjson_v1`, `graph_delta_v1`, `provenance_v1`, `card_anchor_v1`.
   - Bump the corresponding version when changing WIT/schemas/headers for that interface.
 
+Daemon IPC Note
+- Daemon-managed download jobs are now implemented as an internal IPC surface with:
+  - guarded start via `DownloadRequest`
+  - job status
+  - job listing
+  - job cancel
+- This surface is policy-gated, disabled by default, and not yet treated as a stable external
+  versioned interface in the same way as plugin WIT/schema specs.
+- See:
+  - [daemon-download-jobs.md](/Users/trevon/work/tools/yams/docs/design/daemon-download-jobs.md)
+  - [daemon_download_security_test_plan.md](/Users/trevon/work/tools/yams/docs/testing/daemon_download_security_test_plan.md)
+
 Policy
 - Any change to public surfaces requires either:
   - A version bump in `docs/spec/interface_versions.json` for the affected interfaces, or

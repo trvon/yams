@@ -1,8 +1,8 @@
 #pragma once
 
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/onnx_text_processing.h>
 #include <yams/daemon/resource/resource_pool.h>
-#include <yams/vector/embedding_generator.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -53,7 +53,7 @@ struct OnnxModelInfo {
 class OnnxModelSession {
 public:
     OnnxModelSession(const std::string& modelPath, const std::string& modelName,
-                     const vector::EmbeddingConfig& config);
+                     const OnnxTextConfig& config);
     ~OnnxModelSession();
 
     // Generate embedding for single text
@@ -83,7 +83,7 @@ public:
 
 private:
     OnnxModelInfo info_;
-    vector::EmbeddingConfig config_;
+    OnnxTextConfig config_;
 
     // ONNX Runtime components (using unique_ptr for PIMPL)
     class Impl;

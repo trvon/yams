@@ -14,6 +14,7 @@
 using namespace yams::storage;
 
 int main() {
+    const char* liveOptIn = std::getenv("YAMS_RUN_LIVE_S3_SMOKE");
     const char* bucket = std::getenv("S3_TEST_BUCKET");
     const char* regionEnv = std::getenv("AWS_REGION");
     const char* ak = std::getenv("AWS_ACCESS_KEY_ID");
@@ -21,6 +22,12 @@ int main() {
     const char* st = std::getenv("AWS_SESSION_TOKEN");
     const char* endpoint = std::getenv("S3_TEST_ENDPOINT"); // optional (for R2/minio)
     const char* pathStyle = std::getenv("S3_TEST_USE_PATH_STYLE");
+
+    if (!liveOptIn || std::string(liveOptIn) != "1") {
+        std::cout << "S3 plugin smoke: skipping; set YAMS_RUN_LIVE_S3_SMOKE=1 to enable live "
+                     "networked object-storage validation\n";
+        return 0;
+    }
 
     if (!bucket || (!ak || !sk)) {
         std::cout << "S3 plugin smoke: env not set; skipping (need S3_TEST_BUCKET, "

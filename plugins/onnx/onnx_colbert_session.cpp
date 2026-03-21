@@ -1,5 +1,5 @@
 #include <yams/daemon/resource/onnx_colbert_session.h>
-#include <yams/vector/embedding_generator.h>
+#include <yams/daemon/resource/onnx_text_processing.h>
 #include <yams/vector/tokenizer.h>
 
 #include "onnx_gpu_provider.h"
@@ -53,8 +53,7 @@ namespace yams::daemon {
 class OnnxColbertSession::Impl {
 public:
     Impl(const std::string& modelPath, const std::string& modelName, const ColbertConfig& config)
-        : modelPath_(modelPath), modelName_(modelName), config_(config),
-          preprocessor_(vector::EmbeddingConfig{}) {
+        : modelPath_(modelPath), modelName_(modelName), config_(config), preprocessor_({}) {
         if (std::getenv("YAMS_USE_MOCK_PROVIDER") || std::getenv("YAMS_SKIP_MODEL_LOADING") ||
             std::getenv("YAMS_TEST_MODE")) {
             testMode_ = true;
@@ -340,8 +339,8 @@ private:
     std::string modelPath_;
     std::string modelName_;
     ColbertConfig config_;
-    vector::TextPreprocessor preprocessor_;
-    vector::HuggingFaceTokenizer tokenizer_{};
+    OnnxTextPreprocessor preprocessor_;
+    yams::vector::HuggingFaceTokenizer tokenizer_{};
 
     Ort::Env* env_ = nullptr;
     std::unique_ptr<Ort::SessionOptions> sessionOptions_;

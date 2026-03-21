@@ -60,7 +60,6 @@ endif
 spdlog_dep = dependency('spdlog', required: false)
 json_dep = dependency('nlohmann_json', required: false)
 yams_core = dependency('yams_core', required: false)
-yams_vector = dependency('yams_vector', required: false)
 yams_onnx_resource = dependency('yams_onnx_resource', required: false)
 boost_dep = dependency('boost', modules: ['asio'], required: false)
 if not boost_dep.found()
@@ -132,10 +131,12 @@ endif
 yams_onnx_plugin_srcs = [
   'onnx_plugin.cpp',
   'model_provider.cpp',
+  'onnx_text_processing.cpp',
   'ort_runtime_loader.cpp',
   'onnx_model_pool.cpp',
   'onnx_reranker_session.cpp',
   'onnx_colbert_session.cpp',
+  '../../src/vector/tokenizer.cpp',
   '../../src/genai/onnx_genai_adapter.cpp',
 ]
 
@@ -171,7 +172,6 @@ onnx_plugin_deps = [
   spdlog_dep,
   json_dep,
   yams_core,
-  yams_vector,
   yams_onnx_resource,
   dependency('yams_daemon_client'),
   boost_dep,

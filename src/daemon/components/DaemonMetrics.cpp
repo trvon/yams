@@ -1109,11 +1109,13 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             // Heal/mirror vector DB readiness from the live handle.
             // Readiness semantics: false while empty/building; true only when the vector DB
             // is initialized AND has at least one vector row (serving).
+            std::size_t liveVectorRows = 0;
             try {
                 auto vdb = services_->getVectorDatabase();
                 if (vdb && vdb->isInitialized()) {
                     const auto dim = vdb->getConfig().embedding_dim;
                     const auto rows = vdb->getVectorCount();
+                    liveVectorRows = rows;
                     out.vectorDbReady = (rows > 0);
                     out.vectorDbInitAttempted = true;
 
@@ -1147,7 +1149,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             // Exact rows via cached value ONLY (updated periodically in background)
             {
                 std::shared_lock lock(cacheMutex_);
-                out.vectorRowsExact = cachedVectorRows_;
+                out.vectorRowsExact = std::max<std::uint64_t>(cachedVectorRows_, liveVectorRows);
             }
 #if defined(TRACY_ENABLE)
             // Per-subsystem plots (vector DB rows and file size bytes)
@@ -1464,15 +1466,28 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                         auto newReason = tuner.stateReason();
                         const auto& p = tuner.getParams();
                         std::map<std::string, double> newParams;
-                        newParams["rrfK"] = static_cast<double>(p.rrfK);
-                        newParams["textWeight"] = static_cast<double>(p.textWeight);
-                        newParams["vectorWeight"] = static_cast<double>(p.vectorWeight);
-                        newParams["pathTreeWeight"] = static_cast<double>(p.pathTreeWeight);
-                        newParams["kgWeight"] = static_cast<double>(p.kgWeight);
-                        newParams["tagWeight"] = static_cast<double>(p.tagWeight);
-                        newParams["metadataWeight"] = static_cast<double>(p.metadataWeight);
-                        newParams["similarityThreshold"] =
+                        newParams["rrf_k"] = static_cast<double>(p.rrfK);
+                        newParams["text_weight"] = static_cast<double>(p.textWeight);
+                        newParams["vector_weight"] = static_cast<double>(p.vectorWeight);
+                        newParams["entity_vector_weight"] =
+                            static_cast<double>(p.entityVectorWeight);
+                        newParams["path_tree_weight"] = static_cast<double>(p.pathTreeWeight);
+                        newParams["kg_weight"] = static_cast<double>(p.kgWeight);
+                        newParams["tag_weight"] = static_cast<double>(p.tagWeight);
+                        newParams["metadata_weight"] = static_cast<double>(p.metadataWeight);
+                        newParams["similarity_threshold"] =
                             static_cast<double>(p.similarityThreshold);
+                        newParams["vector_boost_factor"] = static_cast<double>(p.vectorBoostFactor);
+                        newParams["enable_graph_rerank"] = p.enableGraphRerank ? 1.0 : 0.0;
+                        newParams["graph_rerank_topn"] = static_cast<double>(p.graphRerankTopN);
+                        newParams["graph_rerank_weight"] = static_cast<double>(p.graphRerankWeight);
+                        newParams["graph_rerank_max_boost"] =
+                            static_cast<double>(p.graphRerankMaxBoost);
+                        newParams["graph_rerank_min_signal"] =
+                            static_cast<double>(p.graphRerankMinSignal);
+                        newParams["kg_max_results"] = static_cast<double>(p.kgMaxResults);
+                        newParams["graph_scoring_budget_ms"] =
+                            static_cast<double>(p.graphScoringBudgetMs);
 
                         // Update cache under exclusive lock
                         std::unique_lock tunerLock(tunerCacheMutex_);

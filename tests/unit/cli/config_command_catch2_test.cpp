@@ -270,9 +270,9 @@ TEST_CASE("ConfigCommand - storage command writes explicit R2 temp credential se
 
     const int rc = fixture.runCommand(
         {"yams", "config", "storage", "--s3-r2-auth-mode", "temp_credentials", "--s3-r2-api-token",
-         "cf-demo-token-value-1234567890-abcdef", "--s3-r2-account-id",
-         "377dc8ebb0de866fdec6be62f070405d", "--s3-r2-parent-access-key-id",
-         "d859a2a5af1ae68886821ad8a5582488", "--s3-r2-permission", "object-read-only",
+         "cf-test-token-not-real-1234567890-abcdef", "--s3-r2-account-id",
+         "00000000000000000000000000000000", "--s3-r2-parent-access-key-id",
+         "11111111111111111111111111111111", "--s3-r2-permission", "object-read-only",
          "--s3-r2-ttl-seconds", "1800"});
     REQUIRE(rc == 0);
 
@@ -280,11 +280,11 @@ TEST_CASE("ConfigCommand - storage command writes explicit R2 temp credential se
     REQUIRE(cfg.count("storage.s3.r2.auth_mode") == 1);
     CHECK(cfg.at("storage.s3.r2.auth_mode") == "temp_credentials");
     REQUIRE(cfg.count("storage.s3.r2.api_token") == 1);
-    CHECK(cfg.at("storage.s3.r2.api_token") == "cf-demo-token-value-1234567890-abcdef");
+    CHECK(cfg.at("storage.s3.r2.api_token") == "cf-test-token-not-real-1234567890-abcdef");
     REQUIRE(cfg.count("storage.s3.r2.account_id") == 1);
-    CHECK(cfg.at("storage.s3.r2.account_id") == "377dc8ebb0de866fdec6be62f070405d");
+    CHECK(cfg.at("storage.s3.r2.account_id") == "00000000000000000000000000000000");
     REQUIRE(cfg.count("storage.s3.r2.parent_access_key_id") == 1);
-    CHECK(cfg.at("storage.s3.r2.parent_access_key_id") == "d859a2a5af1ae68886821ad8a5582488");
+    CHECK(cfg.at("storage.s3.r2.parent_access_key_id") == "11111111111111111111111111111111");
     REQUIRE(cfg.count("storage.s3.r2.permission") == 1);
     CHECK(cfg.at("storage.s3.r2.permission") == "object-read-only");
     REQUIRE(cfg.count("storage.s3.r2.ttl_seconds") == 1);

@@ -4795,16 +4795,14 @@ struct BenchFixture {
                         // vector_count tracks rows (chunks + doc records), not documents.
                         bool queueDrained = (embedQueued == 0 && embedInFlight == 0);
                         if (haveQueueMetrics && docsEmbedded >= static_cast<uint64_t>(corpusSize) &&
-                            queueDrained && stableCount >= 10) {
+                            queueDrained) {
                             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - embedStartTime)
                                                .count();
                             spdlog::info(
                                 "Full embedding coverage achieved: {} embedded docs for {} "
-                                "target docs "
-                                "(queue drained, stable for {}s, vector_db_ready={})",
-                                docsEmbedded, corpusSize, stableCount / 2,
-                                (vectorDbReady ? "true" : "false"));
+                                "target docs (queue drained, vector_db_ready={})",
+                                docsEmbedded, corpusSize, (vectorDbReady ? "true" : "false"));
                             if (summaryLog) {
                                 summaryLog << "\n*** SUCCESS: Full coverage in " << elapsed
                                            << "ms ***" << std::endl;

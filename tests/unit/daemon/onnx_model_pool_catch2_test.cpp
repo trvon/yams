@@ -6,7 +6,6 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
-#include <yams/vector/embedding_generator.h>
 
 #include <atomic>
 #include <chrono>

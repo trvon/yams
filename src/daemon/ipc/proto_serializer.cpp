@@ -1326,6 +1326,21 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("vector_db_dim");
             kv->set_value(std::to_string(r.vectorDbDim));
         }
+        if (!r.searchTuningState.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("search_tuning_state");
+            kv->set_value(r.searchTuningState);
+        }
+        if (!r.searchTuningReason.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("search_tuning_reason");
+            kv->set_value(r.searchTuningReason);
+        }
+        for (const auto& [key, value] : r.searchTuningParams) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("search_tuning_param:" + key);
+            kv->set_value(std::to_string(value));
+        }
 
         // Proxy socket observability (serialized via request_counts until proto gains fields)
         if (!r.proxySocketPath.empty()) {
@@ -1478,6 +1493,22 @@ template <> struct ProtoBinding<StatusResponse> {
             if (kv.key() == "vector_db_dim") {
                 try {
                     r.vectorDbDim = static_cast<uint32_t>(std::stoul(kv.value()));
+                } catch (...) {
+                }
+                continue;
+            }
+            if (kv.key() == "search_tuning_state") {
+                r.searchTuningState = kv.value();
+                continue;
+            }
+            if (kv.key() == "search_tuning_reason") {
+                r.searchTuningReason = kv.value();
+                continue;
+            }
+            if (kv.key().rfind("search_tuning_param:", 0) == 0) {
+                try {
+                    r.searchTuningParams[kv.key().substr(std::strlen("search_tuning_param:"))] =
+                        std::stod(kv.value());
                 } catch (...) {
                 }
                 continue;

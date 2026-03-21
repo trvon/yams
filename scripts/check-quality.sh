@@ -29,6 +29,7 @@ SUPPRESSIONS_FILE=""
 BASELINE_FILE=""
 GENERATE_BASELINE=false
 CPPCHECK_BUILD_DIR=""
+CLANG_TIDY_AVAILABLE=false
 
 # Script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -268,6 +269,13 @@ if ! command -v "clang-format" &> /dev/null; then
     fi
 fi
 
+if command -v "clang-tidy" &> /dev/null; then
+    CLANG_TIDY_AVAILABLE=true
+else
+    print_warning "clang-tidy not found (compile database audit only)"
+    print_warning "Install with: brew install llvm"
+fi
+
 if [[ "$MISSING_TOOLS" == true ]]; then
     exit 1
 fi
@@ -279,8 +287,18 @@ cd "$PROJECT_ROOT"
 
 # Set up default paths
 if [[ -z "$BUILD_DIR" ]]; then
-    # Look for common build directories (prefer new yams-* presets)
-    for candidate in "build/yams-release" "build/yams-debug" "build" "cmake-build-release" "cmake-build-debug"; do
+    # Look for common build directories, preferring active Meson trees with compile_commands.json
+    for candidate in \
+        "builddir-nosan" \
+        "builddir" \
+        "builddir-asan" \
+        "builddir-ubsan" \
+        "build/asan" \
+        "build/yams-debug" \
+        "build/yams-release" \
+        "build" \
+        "cmake-build-release" \
+        "cmake-build-debug"; do
         if [[ -d "$candidate" ]]; then
             BUILD_DIR="$candidate"
             break
@@ -323,6 +341,103 @@ print_progress "Output format: $OUTPUT_FORMAT"
 print_progress "Git only: $GIT_ONLY"
 print_progress "Parallel: $PARALLEL"
 print_progress "Fix format: $FIX_FORMAT"
+
+meson_option_value() {
+    local build_dir=$1
+    local option_name=$2
+    local intro="$build_dir/meson-info/intro-buildoptions.json"
+
+    if [[ ! -f "$intro" ]]; then
+        return 1
+    fi
+
+    python3 - "$intro" "$option_name" <<'PY'
+import json
+import sys
+
+intro_path = sys.argv[1]
+option_name = sys.argv[2]
+with open(intro_path, 'r', encoding='utf-8') as fh:
+    data = json.load(fh)
+for item in data:
+    if item.get('name') == option_name:
+        value = item.get('value')
+        if isinstance(value, list):
+            print(','.join(str(v) for v in value))
+        else:
+            print(value)
+        break
+PY
+}
+
+find_first_build_dir() {
+    for candidate in "$@"; do
+        if [[ -d "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+report_sanitizer_build() {
+    local label=$1
+    local expected=$2
+    shift 2
+
+    local build_dir
+    build_dir=$(find_first_build_dir "$@") || {
+        print_warning "$label build directory not found"
+        return 0
+    }
+
+    local intro="$build_dir/meson-info/intro-buildoptions.json"
+    local ccdb="$build_dir/compile_commands.json"
+    if [[ ! -f "$intro" ]]; then
+        print_warning "$label build dir found but Meson intro options missing: $build_dir"
+        return 0
+    fi
+
+    local sanitize
+    sanitize=$(meson_option_value "$build_dir" "b_sanitize" || true)
+    local buildtype
+    buildtype=$(meson_option_value "$build_dir" "buildtype" || true)
+    local lundef
+    lundef=$(meson_option_value "$build_dir" "b_lundef" || true)
+
+    if [[ "$sanitize" == *"$expected"* ]]; then
+        print_success "$label build ready: $build_dir (buildtype=$buildtype, b_sanitize=$sanitize)"
+    else
+        print_warning "$label build dir found but sanitizer mismatch: $build_dir (b_sanitize=$sanitize)"
+    fi
+
+    if [[ -f "$ccdb" ]]; then
+        print_progress "$label compile database: $ccdb"
+    else
+        print_warning "$label compile database missing: $build_dir/compile_commands.json"
+    fi
+
+    if [[ "$expected" == "address" && "$lundef" == "true" ]]; then
+        print_warning "$label uses Clang ASAN with b_lundef=true; Meson warns this may fail. Prefer -Db_lundef=false."
+    fi
+}
+
+print_section "Toolchain Readiness"
+if [[ -n "$COMPILE_COMMANDS" && -f "$COMPILE_COMMANDS" ]]; then
+    print_success "Compile commands available: $COMPILE_COMMANDS"
+else
+    print_warning "compile_commands.json not found; clang-tidy and project-aware checks are limited"
+fi
+
+if [[ "$CLANG_TIDY_AVAILABLE" == true ]]; then
+    print_success "clang-tidy available"
+else
+    print_warning "clang-tidy unavailable in PATH"
+fi
+
+report_sanitizer_build "TSAN" "thread" "builddir" "build/tsan" "builddir-tsan"
+report_sanitizer_build "ASAN" "address" "builddir-asan" "build/asan" "builddir-asan"
+report_sanitizer_build "UBSAN" "undefined" "builddir-ubsan" "build/ubsan" "builddir-ubsan"
 
 # Get list of files to analyze
 print_section "Collecting Source Files"

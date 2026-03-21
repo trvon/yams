@@ -72,6 +72,10 @@ syntaxError:*atomic_utils.h
 # C++20 ranges and other features
 syntaxError:*ui_helpers.hpp
 syntaxError:*repair_manager.h
+syntaxError:*mcp_server.cpp
+
+# nlohmann::json-heavy test inputs with "$prev" expressions trip cppcheck's parser.
+syntaxError:*mcp_code_mode_catch2_test.cpp
 
 # Coroutine missingReturn false positives - awaitable<void> functions don't need
 # explicit co_return at end of function

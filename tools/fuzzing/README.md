@@ -17,11 +17,14 @@ AFL++ fuzzing harnesses for CLI/daemon IPC protocol testing per issue #8.
 - `fuzz_plugin_trust` - Plugin trust list parsing + safe path containment checks
 - `fuzz_plugin_abi_mount` - ABI plugin mount/load/unload path via `AbiPluginLoader`
 - `fuzz_plugin_abi_negotiation` - ABI manifest/interface negotiation across controlled plugins
+- `fuzz_download_jobs` - Daemon download job IPC request/response encoding and roundtrip stability
 
 ### Planned Surfaces
 - Daemon download job IPC and policy boundary
-  - future target: request decode / policy decision / state persistence / progress framing
-  - security focus: SSRF-like inputs, redirect escapes, oversized metadata, hostile resume state
+  - initial IPC roundtrip target now exists
+  - next target: policy decision / persisted job-state load-save / progress framing
+  - security focus: SSRF-like inputs, redirect escapes, oversized metadata, hostile cancel/resume
+    state
 
 Fuzzers run in `aflplusplus/aflplusplus` Docker container for reproducibility.
 
@@ -44,6 +47,7 @@ Run a fuzzer (interactive / live AFL++ UI):
 ./tools/fuzzing/fuzz.sh fuzz plugin_trust
 ./tools/fuzzing/fuzz.sh fuzz plugin_abi_mount
 ./tools/fuzzing/fuzz.sh fuzz plugin_abi_negotiation
+./tools/fuzzing/fuzz.sh fuzz download_jobs
 ```
 
 Notes:
@@ -96,6 +100,7 @@ data/fuzz/
 │   └── plugin_trust/             # Plugin trust/path seeds
 │   └── plugin_abi_mount/         # Plugin ABI mount/load seeds
 │   └── plugin_abi_negotiation/   # Plugin ABI negotiation seeds
+│   └── download_jobs/            # Daemon download job IPC seeds
 └── findings/                      # AFL++ output (crashes, hangs, queue)
     ├── ipc_protocol/
     ├── ipc_roundtrip/
@@ -106,6 +111,7 @@ data/fuzz/
     └── plugin_trust/
     └── plugin_abi_mount/
     └── plugin_abi_negotiation/
+    └── download_jobs/
 ```
 
 ### Instrumentation Flow
@@ -198,7 +204,7 @@ Corpus should cover request types, edge cases, and real-world patterns. Do not i
 
 ### Planned Download Boundary Seeds
 
-When daemon download jobs are introduced, add sanitized seeds for:
+Seed the existing `fuzz_download_jobs` target with sanitized inputs for:
 
 - allowed vs disallowed schemes
 - allowed vs disallowed hosts

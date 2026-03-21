@@ -1780,6 +1780,71 @@ yams restore --snapshot-id=v1.0 --output=. --overwrite
 7. **Test restores:** Verify snapshots with `--dry-run` before overwriting files
 8. **Trust the timestamps:** Snapshot IDs are ISO 8601 timestamps - sort naturally and are globally unique
 
+---
+
+## download {#cmd-download}
+
+Download an artifact and store it into YAMS, or manage daemon-tracked download jobs.
+
+Synopsis:
+- `yams download <url> [options]`
+- `yams download --status <job-id> [--json]`
+- `yams download --list-jobs [--json]`
+- `yams download --cancel <job-id> [--json]`
+
+Options:
+- `<url>`
+  - Artifact URL to download.
+- `--checksum <algo:hex>`
+  - Expected checksum. This is strongly recommended for direct downloads and may be required by daemon policy.
+- `--status <job-id>`
+  - Show the current state of a daemon-managed download job.
+- `--list-jobs`
+  - List tracked daemon download jobs.
+- `--cancel <job-id>`
+  - Cancel a daemon-managed download job.
+- `--json`
+  - Emit structured output for direct download results or job/status queries.
+
+Description:
+- Default behavior is store-only: downloaded content is verified and finalized into YAMS CAS.
+- The daemon path is policy-gated and disabled by default.
+- When daemon download is enabled, accepted requests are backgrounded as tracked jobs.
+- Current daemon job control supports:
+  - `start` via `yams download <url>`
+  - `status`
+  - `list-jobs`
+  - `cancel`
+- The daemon path is intentionally narrow:
+  - HTTPS-style allowlist policy is expected
+  - store-only behavior is enforced
+  - checksum policy may reject requests before network activity
+  - arbitrary export paths, custom headers, proxy overrides, and broader transport tuning are not part of the daemon job surface
+
+Notes:
+- The daemon feature gate is `YAMS_ENABLE_DAEMON_DOWNLOAD`.
+- A successful daemon-backed start returns a `jobId`; use that with `--status` or `--cancel`.
+- `cancel` is cooperative: the job transitions to `canceled`, and active downloader work is asked to stop.
+- Resume-by-job is not implemented yet; current downloader resume behavior is still internal to the downloader layer.
+
+Examples:
+```bash
+# Direct store-only download
+yams download "https://example.com/archive.tar.gz" --checksum sha256:<hex>
+
+# Start a daemon-managed download when the feature is enabled
+YAMS_ENABLE_DAEMON_DOWNLOAD=1 yams download "https://example.com/archive.tar.gz" --checksum sha256:<hex> --json
+
+# Check daemon job status
+yams download --status job-123 --json
+
+# List tracked daemon download jobs
+yams download --list-jobs
+
+# Cancel a running daemon download job
+yams download --cancel job-123
+```
+
 ## Tips
 
 YAMS-first workflow

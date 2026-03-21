@@ -4,10 +4,15 @@
 // Migrated from GTest to Catch2, enhanced with timeout and multi-plugin support
 
 #include <nlohmann/json.hpp>
+#include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <future>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #include "../../common/env_compat.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h> // For getpid()
@@ -87,6 +92,61 @@ std::optional<fs::path> getOnnxPluginPath() {
 
     return std::nullopt;
 }
+
+#if defined(__APPLE__)
+std::string shellQuote(const fs::path& path) {
+    std::string quoted = "'";
+    for (char ch : path.string()) {
+        if (ch == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted += ch;
+        }
+    }
+    quoted += "'";
+    return quoted;
+}
+
+std::string runCommand(const std::string& command) {
+    std::array<char, 512> buffer{};
+    std::string output;
+    FILE* pipe = ::popen(command.c_str(), "r");
+    if (!pipe) {
+        throw std::runtime_error("Failed to run command: " + command);
+    }
+
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        output += buffer.data();
+    }
+
+    const int status = ::pclose(pipe);
+    if (status != 0) {
+        throw std::runtime_error("Command failed: " + command +
+                                 " (status=" + std::to_string(status) + ")\n" + output);
+    }
+
+    return output;
+}
+
+fs::path currentExecutablePath() {
+    uint32_t size = 0;
+    (void)_NSGetExecutablePath(nullptr, &size);
+    std::string buffer(size, '\0');
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        throw std::runtime_error("Unable to resolve current executable path");
+    }
+    buffer.resize(std::strlen(buffer.c_str()));
+    return fs::weakly_canonical(fs::path(buffer));
+}
+
+int runExitCode(const std::string& command) {
+    const int rc = std::system(command.c_str());
+    if (rc == -1) {
+        throw std::runtime_error("Failed to execute command: " + command);
+    }
+    return rc;
+}
+#endif
 
 // Load plugin with timeout to prevent hanging on plugin crash
 template <typename Func>
@@ -205,8 +265,25 @@ TEST_CASE("Plugin: ONNX plugin reports missing runtime cleanly",
         SKIP("ONNX plugin not available (set TEST_ONNX_PLUGIN_FILE or build plugins/onnx)");
     }
 
+#if defined(__APPLE__)
+    const bool childMode = std::getenv("YAMS_ONNX_HARNESS_CHILD") != nullptr;
+    const fs::path missingRuntime = env.tempDir / "missing-onnxruntime.dylib";
+
+    if (!childMode) {
+        const fs::path exe = currentExecutablePath();
+        const std::string command =
+            "YAMS_ONNX_HARNESS_CHILD=1 YAMS_ONNX_RUNTIME_LIB=" + shellQuote(missingRuntime) + " " +
+            shellQuote(exe) + " " +
+            shellQuote("Plugin: ONNX plugin reports missing runtime cleanly") +
+            " --allow-running-no-tests";
+        INFO(command);
+        REQUIRE(runExitCode(command) == 0);
+        return;
+    }
+#else
     EnvGuard runtimeLib("YAMS_ONNX_RUNTIME_LIB");
-    runtimeLib.set((env.tempDir / "missing-onnxruntime.dylib").string());
+    runtimeLib.set((env.tempDir / "missing-onnxruntime.so").string());
+#endif
 
     AbiPluginHost host(nullptr);
     host.setTrustFile(env.trustFile);
@@ -219,6 +296,7 @@ TEST_CASE("Plugin: ONNX plugin reports missing runtime cleanly",
     REQUIRE(healthResult);
 
     auto health = nlohmann::json::parse(healthResult.value(), nullptr, false);
+    INFO(health.dump());
     REQUIRE_FALSE(health.is_discarded());
     CHECK(health.value("status", "") == "unavailable");
     CHECK((health.value("reason", "") == "runtime_load_failed" ||
@@ -237,6 +315,21 @@ TEST_CASE("Plugin: ONNX plugin reports missing runtime cleanly",
 
     REQUIRE(host.unload(loadResult.value().name));
 }
+
+#if defined(__APPLE__)
+TEST_CASE("Plugin: ONNX dylib avoids direct runtime linkage", "[daemon][plugin][onnx][linkage]") {
+    auto pluginPath = getOnnxPluginPath();
+    if (!pluginPath || !fs::exists(*pluginPath)) {
+        SKIP("ONNX plugin not available (set TEST_ONNX_PLUGIN_FILE or build plugins/onnx)");
+    }
+
+    const std::string output = runCommand("otool -L " + shellQuote(*pluginPath));
+    INFO(output);
+
+    CHECK(output.find("libonnxruntime") == std::string::npos);
+    CHECK(output.find("libyams_vector") == std::string::npos);
+}
+#endif
 
 TEST_CASE("Plugin: Error handling and edge cases", "[daemon][plugin][error]") {
     IsolatedPluginEnv env;

@@ -140,8 +140,8 @@ TEST_CASE("Storage runtime resolver detects Cloudflare token-shaped access key i
         out << "engine = \"s3\"\n";
         out << "[storage.s3]\n";
         out << "url = \"s3://bucket/prefix\"\n";
-        out << "endpoint = \"377dc8ebb0de866fdec6be62f070405d.r2.cloudflarestorage.com\"\n";
-        out << "access_key = \"6Xa-c7KrOd5f6Ze5KGXCxjJOPbhvHP1PgmVCLTA1\"\n";
+        out << "endpoint = \"00000000000000000000000000000000.r2.cloudflarestorage.com\"\n";
+        out << "access_key = \"cf-test-token-not-a-real-r2-access-key-0001\"\n";
     }
 
     auto decision =
@@ -190,7 +190,7 @@ TEST_CASE("Storage runtime resolver auto-resolves parent access key id in temp m
         out << "engine = \"s3\"\n";
         out << "[storage.s3]\n";
         out << "url = \"s3://yams-s3-smoke-personal/prefix\"\n";
-        out << "endpoint = \"377dc8ebb0de866fdec6be62f070405d.r2.cloudflarestorage.com\"\n";
+        out << "endpoint = \"00000000000000000000000000000000.r2.cloudflarestorage.com\"\n";
         out << "[storage.s3.r2]\n";
         out << "auth_mode = \"temp_credentials\"\n";
         out << "api_token = \"dummy-token-value-not-used-by-preflight\"\n";
@@ -212,7 +212,7 @@ TEST_CASE("Storage runtime resolver rejects mismatched explicit account id and e
         out << "engine = \"s3\"\n";
         out << "[storage.s3]\n";
         out << "url = \"s3://yams-s3-smoke-personal/prefix\"\n";
-        out << "endpoint = \"377dc8ebb0de866fdec6be62f070405d.r2.cloudflarestorage.com\"\n";
+        out << "endpoint = \"00000000000000000000000000000000.r2.cloudflarestorage.com\"\n";
         out << "[storage.s3.r2]\n";
         out << "auth_mode = \"temp_credentials\"\n";
         out << "account_id = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n";
@@ -228,12 +228,12 @@ TEST_CASE("Storage runtime resolver rejects mismatched explicit account id and e
 TEST_CASE("Storage runtime resolver helper identifies Cloudflare endpoint and token pattern",
           "[storage][runtime][resolver][r2][catch2]") {
     CHECK(yams::storage::isCloudflareR2EndpointHost(
-        "377dc8ebb0de866fdec6be62f070405d.r2.cloudflarestorage.com"));
+        "00000000000000000000000000000000.r2.cloudflarestorage.com"));
     CHECK(yams::storage::extractCloudflareR2AccountId(
-              "https://377dc8ebb0de866fdec6be62f070405d.r2.cloudflarestorage.com/path") ==
-          "377dc8ebb0de866fdec6be62f070405d");
+              "https://00000000000000000000000000000000.r2.cloudflarestorage.com/path") ==
+          "00000000000000000000000000000000");
     CHECK(yams::storage::looksLikeCloudflareApiBearerToken(
-        "6Xa-c7KrOd5f6Ze5KGXCxjJOPbhvHP1PgmVCLTA1"));
+        "cf-test-token-not-a-real-r2-access-key-0001"));
     CHECK_FALSE(yams::storage::looksLikeCloudflareApiBearerToken("AKIAIOSFODNN7EXAMPLE"));
 }
 
@@ -249,7 +249,7 @@ TEST_CASE("Storage runtime resolver keychain helper is platform-aware",
            token.error().code == yams::ErrorCode::InvalidData));
 #else
     auto token =
-        yams::storage::loadCloudflareApiTokenFromKeychain("377dc8ebb0de866fdec6be62f070405d");
+        yams::storage::loadCloudflareApiTokenFromKeychain("00000000000000000000000000000000");
     REQUIRE_FALSE(token.has_value());
     CHECK(token.error().code == yams::ErrorCode::NotSupported);
 

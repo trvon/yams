@@ -924,7 +924,13 @@ if catch2_dep.found()
   plugin_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
   if get_option('plugin-onnx')
 #Pass the expected plugin location to the test
-    onnx_plugin_path = join_paths(meson.project_build_root(), 'plugins', 'onnx', 'libyams_onnx_plugin.so')
+    onnx_plugin_name = 'libyams_onnx_plugin.so'
+    if host_machine.system() == 'darwin'
+      onnx_plugin_name = 'libyams_onnx_plugin.dylib'
+    elif host_machine.system() == 'windows'
+      onnx_plugin_name = 'yams_onnx_plugin.dll'
+    endif
+    onnx_plugin_path = join_paths(meson.project_build_root(), 'plugins', 'onnx', onnx_plugin_name)
     plugin_test_cpp_args += ['-Dyams_onnx_plugin_BUILT="' + onnx_plugin_path + '"']
   endif
 
@@ -945,8 +951,10 @@ if catch2_dep.found()
     catch2_daemon_reranker_exe = executable('catch2_daemon_reranker',
       files(
         'unit/daemon/onnx_reranker_session_test.cpp',
+        '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_reranker_session.cpp',
+        '../src/vector/tokenizer.cpp',
       ),
       include_directories: incs,
       dependencies: reranker_test_deps,
@@ -959,10 +967,12 @@ if catch2_dep.found()
       files(
         'unit/daemon/onnx_model_provider_config_test.cpp',
         '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
+        '../src/vector/tokenizer.cpp',
       ),
       include_directories: incs,
       dependencies: onnx_provider_test_deps,
@@ -987,10 +997,12 @@ if catch2_dep.found()
       files(
         'unit/daemon/onnx_embedding_diagnostic_test.cpp',
         '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
+        '../src/vector/tokenizer.cpp',
       ),
       include_directories: incs,
       dependencies: onnx_provider_test_deps,
@@ -1320,10 +1332,12 @@ if catch2_dep.found()
       files(
         'unit/daemon/onnx_model_pool_catch2_test.cpp',
         '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
+        '../src/vector/tokenizer.cpp',
       ),
       include_directories: incs,
       dependencies: onnx_provider_test_deps,

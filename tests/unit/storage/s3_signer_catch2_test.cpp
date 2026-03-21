@@ -153,14 +153,14 @@ TEST_CASE("S3Signer rejects Cloudflare bearer token shape for R2 access key",
           "[storage][s3][signer][r2][catch2]") {
     BackendConfig cfg;
     cfg.region = "auto";
-    cfg.credentials["access_key"] = "6Xa-c7KrOd5f6Ze5KGXCxjJOPbhvHP1PgmVCLTA1";
+    cfg.credentials["access_key"] = "cf-test-token-not-a-real-r2-access-key-0001";
     cfg.credentials["secret_key"] = "dummy-secret-that-would-otherwisetrytosign";
 
     CURL* curl = curl_easy_init();
     REQUIRE(curl != nullptr);
 
     std::string url =
-        "https://377dc8ebb0de866fdec6be62f070405d.r2.cloudflarestorage.com/bucket/key";
+        "https://00000000000000000000000000000000.r2.cloudflarestorage.com/bucket/key";
     auto res = S3Signer::signRequest(curl, cfg, "GET", url, {});
     REQUIRE_FALSE(res.has_value());
     CHECK(res.error().message.find("bearer token") != std::string::npos);
