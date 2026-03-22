@@ -189,6 +189,14 @@ yams stats
 yams search "test" --limit 1
 ```
 
+For ONNX-enabled builds and packages, a deeper plugin check is also useful:
+
+```bash
+YAMS_SKIP_MODEL_LOADING=1 yams doctor plugin onnx --no-daemon
+```
+
+Expected output includes `Interface: model_provider_v1 v1 -> AVAILABLE`.
+
 ## Uninstallation
 
 ### Homebrew

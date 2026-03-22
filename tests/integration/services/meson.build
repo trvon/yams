@@ -128,3 +128,27 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     args: ['--allow-running-no-tests'],
   )
 endif
+
+# Catch2 migration: grep service expectations
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+  catch2_grep_service_expectations_exe = executable('catch2_grep_service_expectations',
+    files('grep_service_expectations_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: ['-DYAMS_TESTING=1'],
+    install: false,
+  )
+
+  test('grep_service_expectations_catch2', catch2_grep_service_expectations_exe,
+    suite: ['catch2', 'integration', 'services', 'grep'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_STRESS_ITERS': services_stress_iters,
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'TSAN_OPTIONS': _test_tsan_options,
+    },
+    is_parallel: false,
+    timeout: get_option('integration-ui-timeout'),
+    args: ['--allow-running-no-tests'],
+  )
+endif

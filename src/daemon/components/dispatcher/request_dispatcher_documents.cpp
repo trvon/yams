@@ -1411,6 +1411,12 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                     (value == "1" || value == "true" || value == "yes" || value == "on");
             }
 
+            // Respect callers that explicitly request processing completion before returning.
+            // The async queue path acknowledges ingestion early and cannot satisfy that contract.
+            if (req.waitForProcessing) {
+                syncSingleFileAdd = true;
+            }
+
             if (!syncSingleFileAdd) {
                 const auto channelCapacity =
                     static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());

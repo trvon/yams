@@ -55,7 +55,12 @@ struct AsioConnection {
     ~AsioConnection() {
         alive.store(false, std::memory_order_release);
         if (socket) {
-            (void)socket.release();
+            boost::system::error_code ec;
+            if (socket->is_open()) {
+                socket->cancel(ec);
+                socket->close(ec);
+            }
+            socket.reset();
         }
     }
 

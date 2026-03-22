@@ -366,6 +366,7 @@ public:
 
     // Stop source for cancelling async initialization coroutine during shutdown
     yams::compat::stop_source asyncInitStopSource_;
+    std::future<void> asyncInitFuture_;
 
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
     AbiPluginHost* getAbiPluginHost() const { return abiHost_.get(); }

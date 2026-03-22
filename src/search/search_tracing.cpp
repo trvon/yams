@@ -114,8 +114,13 @@ std::string joinWithTab(const std::vector<std::string>& values) {
 
 nlohmann::json buildComponentHitSummaryJson(const std::vector<ComponentResult>& componentResults,
                                             size_t topPerComponent) {
-    std::unordered_map<ComponentResult::Source, std::vector<std::pair<size_t, std::string>>>
-        grouped;
+    struct RankedHit {
+        size_t rank = 0;
+        std::string docId;
+        double score = 0.0;
+    };
+
+    std::unordered_map<ComponentResult::Source, std::vector<RankedHit>> grouped;
     grouped.reserve(8);
 
     for (const auto& comp : componentResults) {
@@ -123,28 +128,37 @@ nlohmann::json buildComponentHitSummaryJson(const std::vector<ComponentResult>& 
         if (docId.empty()) {
             continue;
         }
-        grouped[comp.source].emplace_back(comp.rank, docId);
+        grouped[comp.source].push_back(RankedHit{
+            .rank = comp.rank,
+            .docId = docId,
+            .score = static_cast<double>(comp.score),
+        });
     }
 
     nlohmann::json out = nlohmann::json::object();
     for (auto& [source, docs] : grouped) {
         std::sort(docs.begin(), docs.end(), [](const auto& a, const auto& b) {
-            if (a.first != b.first) {
-                return a.first < b.first;
+            if (a.rank != b.rank) {
+                return a.rank < b.rank;
             }
-            return a.second < b.second;
+            return a.docId < b.docId;
         });
 
         std::vector<std::string> topDocIds;
+        nlohmann::json topHits = nlohmann::json::array();
         topDocIds.reserve(std::min(topPerComponent, docs.size()));
         std::unordered_set<std::string> seen;
         seen.reserve(docs.size());
-        for (const auto& [rank, docId] : docs) {
-            (void)rank;
-            if (!seen.insert(docId).second) {
+        for (const auto& hit : docs) {
+            if (!seen.insert(hit.docId).second) {
                 continue;
             }
-            topDocIds.push_back(docId);
+            topDocIds.push_back(hit.docId);
+            topHits.push_back({
+                {"doc_id", hit.docId},
+                {"rank", hit.rank + 1},
+                {"score", hit.score},
+            });
             if (topDocIds.size() >= topPerComponent) {
                 break;
             }
@@ -153,6 +167,7 @@ nlohmann::json buildComponentHitSummaryJson(const std::vector<ComponentResult>& 
         out[componentSourceToString(source)] = {
             {"raw_hits", docs.size()},
             {"unique_top_doc_ids", topDocIds},
+            {"top_hits", topHits},
         };
     }
 

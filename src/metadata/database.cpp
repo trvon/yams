@@ -394,8 +394,13 @@ void Database::close() {
         statementCache_.clear();
     }
     if (db_) {
-        sqlite3_close(db_);
+        sqlite3* db = db_;
         db_ = nullptr;
+        int rc = sqlite3_close_v2(db);
+        if (rc != SQLITE_OK) {
+            spdlog::warn("Database::close_v2 deferred/failed for '{}': {}", path_,
+                         sqlite3_errstr(rc));
+        }
     }
     path_.clear();
     inTransaction_ = false;

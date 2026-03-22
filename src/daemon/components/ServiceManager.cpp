@@ -38,6 +38,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/use_future.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -817,7 +818,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
     boost::asio::post(workCoordinator_->getExecutor(), [self, barrierPromise]() {
         spdlog::debug("ServiceManager: Async init sync point reached, spawning coroutine");
 
-        boost::asio::co_spawn(
+        self->asyncInitFuture_ = boost::asio::co_spawn(
             self->workCoordinator_->getExecutor(),
             [self, barrierPromise]() -> boost::asio::awaitable<void> {
                 auto localSelf = self;
@@ -855,7 +856,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                     }
                 }
             },
-            boost::asio::detached);
+            boost::asio::use_future);
     });
 }
 
@@ -895,6 +896,22 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 0: Requesting async init stop");
     if (asyncInitStopSource_.stop_possible()) {
         asyncInitStopSource_.request_stop();
+    }
+    try {
+        if (asyncInitFuture_.valid()) {
+            auto status = asyncInitFuture_.wait_for(std::chrono::seconds(5));
+            if (status == std::future_status::timeout) {
+                spdlog::warn("[ServiceManager] Phase 0: Async init future timed out");
+            } else {
+                asyncInitFuture_.get();
+                spdlog::info("[ServiceManager] Phase 0: Async init completed");
+            }
+            asyncInitFuture_ = std::future<void>();
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] Phase 0: Async init wait failed: {}", e.what());
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 0: Async init wait failed");
     }
 
     // Phase 1: Stop background task consumers FIRST (before io_context stop)
@@ -1215,6 +1232,23 @@ void ServiceManager::shutdown() {
         spdlog::warn("[ServiceManager] Phase 6.9: Exception during plugin unloading");
     }
 
+    // Release repo/content holders before pool shutdown so outstanding shared_ptr owners do not
+    // keep old SQLite handles alive across daemon cycles.
+    spdlog::info("[ServiceManager] Phase 6.9.5: Releasing repo/content holders before DB shutdown");
+    storeMetadataRepo(std::shared_ptr<metadata::MetadataRepository>{});
+    std::atomic_store_explicit(&contentStore_, std::shared_ptr<api::IContentStore>{},
+                               std::memory_order_release);
+    searchComponent_.reset();
+    try {
+        if (databaseManager_) {
+            databaseManager_->shutdown();
+            databaseManager_.reset();
+            spdlog::info("[ServiceManager] Phase 6.9.5: DatabaseManager reset");
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 6.9.5: Exception resetting DatabaseManager");
+    }
+
     spdlog::info("[ServiceManager] Phase 7: Shutting down database");
     try {
         std::shared_ptr<metadata::ConnectionPool> readPool;
@@ -1287,6 +1321,8 @@ void ServiceManager::shutdown() {
             databaseManager_->shutdown();
             databaseManager_.reset();
             spdlog::info("[ServiceManager] Phase 9.3: DatabaseManager reset");
+        } else {
+            spdlog::info("[ServiceManager] Phase 9.3: DatabaseManager already reset");
         }
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 9.3: Exception resetting DatabaseManager");

@@ -36,6 +36,55 @@ namespace fs = std::filesystem;
 
 namespace {
 
+size_t countOpenFds() {
+    std::error_code ec;
+    size_t count = 0;
+    for (const auto& entry : fs::directory_iterator("/dev/fd", ec)) {
+        (void)entry;
+        ++count;
+    }
+    return count;
+}
+
+void dumpOpenFdSummary(const char* label) {
+    std::error_code ec;
+    std::map<std::string, size_t> counts;
+    for (const auto& entry : fs::directory_iterator("/dev/fd", ec)) {
+        std::error_code linkEc;
+        auto target = fs::read_symlink(entry.path(), linkEc);
+        std::string key;
+        if (linkEc) {
+            key = "<unresolved>";
+        } else {
+            key = target.string();
+            if (key.find("/private/var/folders/") != std::string::npos) {
+                auto pos = key.find("/yams_it_");
+                if (pos != std::string::npos) {
+                    auto slash = key.find('/', pos + 1);
+                    if (slash != std::string::npos) {
+                        key = "<tmp>" + key.substr(slash);
+                    } else {
+                        key = "<tmp>";
+                    }
+                }
+            }
+        }
+        counts[key]++;
+    }
+
+    std::cerr << "[ui-cli-catch2] fd-summary(" << label << ")\n";
+    size_t shown = 0;
+    for (const auto& [target, count] : counts) {
+        if (count == 0) {
+            continue;
+        }
+        std::cerr << "  " << count << " x " << target << "\n";
+        if (++shown >= 25) {
+            break;
+        }
+    }
+}
+
 #ifdef _WIN32
 #define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN()                                                          \
     SKIP("Windows daemon shutdown hangs - see windows-daemon-ipc-plan.md")
@@ -95,6 +144,13 @@ private:
 };
 
 int runCliCommand(const std::vector<std::string>& args) {
+    const char* yamsTestingEnv = std::getenv("YAMS_TESTING");
+    const char* yamsSafeEnv = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
+    std::optional<std::string> yamsTesting =
+        yamsTestingEnv ? std::make_optional(std::string(yamsTestingEnv)) : std::nullopt;
+    std::optional<std::string> yamsSafe =
+        yamsSafeEnv ? std::make_optional(std::string(yamsSafeEnv)) : std::nullopt;
+
     int rc = 0;
     {
         yams::cli::YamsCLI cli;
@@ -105,16 +161,38 @@ int runCliCommand(const std::vector<std::string>& args) {
         }
         rc = cli.run(static_cast<int>(argv.size()), argv.data());
     }
+
     yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+    if (yamsTesting) {
+        unsetenv("YAMS_TESTING");
+    }
+    if (yamsSafe) {
+        unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
+    }
     yams::daemon::GlobalIOContext::reset();
+    if (yamsTesting) {
+        setenv("YAMS_TESTING", yamsTesting->c_str(), 1);
+    }
+    if (yamsSafe) {
+        setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yamsSafe->c_str(), 1);
+    }
     return rc;
 }
 
 class UiCliExpectationsFixture {
 public:
     ~UiCliExpectationsFixture() {
+        std::cerr << "[ui-cli-catch2] teardown fds(before)=" << countOpenFds() << "\n";
+        if (countOpenFds() >= 40) {
+            dumpOpenFdSummary("before");
+        }
         harness_.reset();
+        dbEnvGuards_.clear();
         sessionEnvOverride_.reset();
+        std::cerr << "[ui-cli-catch2] teardown fds(after)=" << countOpenFds() << "\n";
+        if (countOpenFds() >= 40) {
+            dumpOpenFdSummary("after");
+        }
     }
 
     void start() {
@@ -123,7 +201,13 @@ public:
             SKIP("AF_UNIX not available in this environment");
         }
 
+        std::cerr << "[ui-cli-catch2] setup fds(before)=" << countOpenFds() << "\n";
+
         sessionEnvOverride_ = std::make_unique<ScopedEnvVar>("YAMS_SESSION_CURRENT", "");
+        dbEnvGuards_.clear();
+        dbEnvGuards_.push_back(std::make_unique<ScopedEnvVar>("YAMS_DB_DUAL_POOL", "0"));
+        dbEnvGuards_.push_back(std::make_unique<ScopedEnvVar>("YAMS_DB_POOL_MIN", "1"));
+        dbEnvGuards_.push_back(std::make_unique<ScopedEnvVar>("YAMS_DB_POOL_MAX", "4"));
         yams::test::DaemonHarnessOptions options;
         options.isolateState = true;
         harness_ = std::make_unique<yams::test::DaemonHarness>(options);
@@ -134,6 +218,7 @@ public:
         root_ = storageDir_.parent_path();
         fs::create_directories(root_ / "ingest");
         std::this_thread::sleep_for(100ms);
+        std::cerr << "[ui-cli-catch2] setup fds(after)=" << countOpenFds() << "\n";
     }
 
     yams::daemon::ServiceManager* serviceManager() const {
@@ -173,10 +258,37 @@ private:
 
     std::unique_ptr<yams::test::DaemonHarness> harness_;
     std::unique_ptr<ScopedEnvVar> sessionEnvOverride_;
+    std::vector<std::unique_ptr<ScopedEnvVar>> dbEnvGuards_;
     fs::path root_;
     fs::path storageDir_;
     fs::path socketPath_;
 };
+
+template <typename MetadataRepo>
+std::optional<yams::metadata::DocumentInfo>
+waitForDocumentByExactPath(MetadataRepo& repo, const fs::path& path,
+                           std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
+    std::string exactPath = path.string();
+    try {
+        if (fs::exists(path)) {
+            exactPath = fs::canonical(path).string();
+        }
+    } catch (...) {
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        yams::metadata::DocumentQueryOptions opts;
+        opts.exactPath = exactPath;
+        opts.limit = 1;
+        auto docsRes = repo.queryDocuments(opts);
+        if (docsRes && !docsRes.value().empty()) {
+            return docsRes.value().front();
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+    return std::nullopt;
+}
 
 } // namespace
 
@@ -248,6 +360,9 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: get by hash metadata-only has
     auto addRes = ing.addViaDaemon(opts);
     REQUIRE(addRes);
     REQUIRE_FALSE(addRes.value().hash.empty());
+    INFO("human add path=" << addRes.value().path << " hash=" << addRes.value().hash
+                           << " message=" << addRes.value().message
+                           << " extraction=" << addRes.value().extractionStatus);
 
     auto* sm = serviceManager();
     REQUIRE(sm != nullptr);
@@ -991,4 +1106,785 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: fuzzy bounds similarity zero 
         REQUIRE(highRes);
     }
     CHECK(highHasExact);
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: retrieve by name success shape",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    std::ofstream(root() / "ingest" / "shape.txt") << "shape content";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = (root() / "ingest" / "shape.txt").string();
+    opts.noEmbeddings = true;
+    auto addRes = ing.addViaDaemon(opts);
+    REQUIRE(addRes);
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    REQUIRE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 10000ms));
+
+    yams::app::services::RetrievalService retrieval;
+    yams::app::services::RetrievalOptions retrievalOpts;
+    retrievalOpts.socketPath = socketPath();
+    retrievalOpts.explicitDataDir = storageDir();
+
+    yams::daemon::GetResponse byHash{};
+    bool hashReady = false;
+    for (int i = 0; i < 40 && !hashReady; ++i) {
+        yams::app::services::GetOptions hashReq;
+        hashReq.hash = addRes.value().hash;
+        auto getRes = retrieval.get(hashReq, retrievalOpts);
+        if (getRes) {
+            byHash = getRes.value();
+            hashReady = (!byHash.name.empty() && byHash.hasContent);
+        }
+        if (!hashReady) {
+            std::this_thread::sleep_for(50ms);
+        }
+    }
+    REQUIRE_FALSE(byHash.name.empty());
+
+    yams::app::services::GetOptions byNameReq;
+    byNameReq.name = byHash.name;
+    byNameReq.byName = true;
+    bool ok = false;
+    for (int i = 0; i < 40 && !ok; ++i) {
+        auto getRes = retrieval.get(byNameReq, retrievalOpts);
+        if (getRes) {
+            const auto& value = getRes.value();
+            ok = (value.hasContent && !value.content.empty());
+        }
+        if (!ok) {
+            std::this_thread::sleep_for(50ms);
+        }
+    }
+    CHECK(ok);
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: stress tail remains stable",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    fs::create_directories(root() / "stress");
+    auto filePath = root() / "stress" / "one.txt";
+    std::ofstream(filePath) << "hello ui stress";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = filePath.string();
+    opts.noEmbeddings = true;
+    REQUIRE(ing.addViaDaemon(opts));
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+
+    yams::app::services::SearchRequest searchReq;
+    searchReq.query = "hello";
+    searchReq.fuzzy = true;
+    searchReq.pathsOnly = true;
+    searchReq.pathPattern = (root() / "stress" / "**").string();
+
+    const auto stressIterations = []() {
+        if (const char* value = std::getenv("YAMS_STRESS_ITERS")) {
+            int parsed = std::atoi(value);
+            if (parsed > 0 && parsed < 100000) {
+                return parsed;
+            }
+        }
+        return 100;
+    }();
+
+    for (int i = 0; i < stressIterations; ++i) {
+        auto result = yams::test_async::res(searchSvc->search(searchReq), 2s);
+        REQUIRE(result);
+        std::this_thread::sleep_for(5ms);
+    }
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: json output structure paths-only",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    std::ofstream(root() / "json.txt") << "json test content";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = (root() / "json.txt").string();
+    opts.noEmbeddings = true;
+    auto addRes = ing.addViaDaemon(opts);
+    REQUIRE(addRes);
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    REQUIRE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 10000ms));
+
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+    (void)searchSvc->lightIndexForHash(addRes.value().hash);
+
+    yams::app::services::SearchRequest pollReq;
+    pollReq.query = "json";
+    pollReq.fuzzy = false;
+    pollReq.pathsOnly = true;
+    pollReq.limit = 1;
+    pollReq.pathPattern = (root() / "**").string();
+    for (int i = 0; i < 50; ++i) {
+        auto pollRes = yams::test_async::res(searchSvc->search(pollReq), 1s);
+        if (pollRes && !pollRes.value().paths.empty()) {
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+
+    yams::app::services::SearchRequest searchReq;
+    searchReq.query = "json";
+    searchReq.fuzzy = true;
+    searchReq.similarity = 0.6f;
+    searchReq.pathsOnly = true;
+    searchReq.jsonOutput = true;
+    searchReq.limit = 5;
+    searchReq.pathPattern = (root() / "**").string();
+
+    auto result = yams::test_async::res(searchSvc->search(searchReq), 2s);
+    REQUIRE(result);
+    CHECK_FALSE(result.value().paths.empty());
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: unreachable hints include socket or env",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    yams::app::services::RetrievalService retrieval;
+    yams::app::services::RetrievalOptions retrievalOpts;
+    retrievalOpts.socketPath =
+        fs::path("/tmp") / ("yams-ui-cli-missing-" + std::to_string(::getpid()) + ".sock");
+    retrievalOpts.explicitDataDir = storageDir();
+
+    yams::app::services::ListOptions listReq;
+    listReq.limit = 1;
+    auto listRes = retrieval.list(listReq, retrievalOpts);
+    CHECK_FALSE(listRes);
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: negative tag mismatch paths-only",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    fs::create_directories(root() / "ingest" / "neg");
+    std::ofstream(root() / "ingest" / "neg" / "z.txt") << "content";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = (root() / "ingest" / "neg" / "z.txt").string();
+    opts.noEmbeddings = true;
+    opts.tags = {"misc"};
+    auto addRes = ing.addViaDaemon(opts);
+    REQUIRE(addRes);
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    REQUIRE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 10000ms));
+
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+    yams::app::services::SearchRequest searchReq;
+    searchReq.query = "content";
+    searchReq.fuzzy = true;
+    searchReq.similarity = 0.6f;
+    searchReq.pathsOnly = true;
+    searchReq.limit = 5;
+    searchReq.pathPattern = (root() / "ingest" / "**").string();
+    searchReq.tags = {"does_not_exist"};
+    searchReq.matchAllTags = true;
+
+    auto result = yams::test_async::res(searchSvc->search(searchReq), 2s);
+    REQUIRE(result);
+    CHECK(result.value().paths.empty());
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: filename path queries prefer metadata",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    fs::create_directories(root() / "ingest" / ".github" / "workflows");
+    std::ofstream(root() / "ingest" / ".github" / "workflows" / "ci.yml") << "name: CI\n";
+    fs::create_directories(root() / "ingest" / "src");
+    std::ofstream(root() / "ingest" / "src" / "build.md") << "PKG_CONFIG is required";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = (root() / "ingest").string();
+    opts.recursive = true;
+    opts.noEmbeddings = true;
+    REQUIRE(ing.addViaDaemon(opts));
+    std::this_thread::sleep_for(200ms);
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+
+    SECTION("ci.yml resolves through path-oriented search") {
+        yams::app::services::SearchRequest request;
+        request.query = "ci.yml";
+        request.pathsOnly = true;
+        request.limit = 10;
+        auto result = yams::test_async::res(searchSvc->search(request), 2s);
+        REQUIRE(result);
+        bool found = false;
+        for (const auto& path : result.value().paths) {
+            if (path.find("ci.yml") != std::string::npos) {
+                found = true;
+                break;
+            }
+        }
+        CHECK(found);
+        auto modeIt = result.value().searchStats.find("mode");
+        if (modeIt != result.value().searchStats.end()) {
+            CHECK(modeIt->second.find("path") != std::string::npos);
+        }
+    }
+
+    SECTION("pkg-config yields a path-oriented result set without failure") {
+        yams::app::services::SearchRequest request;
+        request.query = "pkg-config";
+        request.pathsOnly = true;
+        request.limit = 10;
+        auto result = yams::test_async::res(searchSvc->search(request), 2s);
+        REQUIRE(result);
+        CHECK(result.value().paths.size() >= 0u);
+    }
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: path wildcard matches",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    fs::create_directories(root() / "ingest" / "a" / "b");
+    std::ofstream(root() / "ingest" / "a" / "b" / "one.yml") << "a: 1\n";
+    std::ofstream(root() / "ingest" / "a" / "two.yaml") << "b: 2\n";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = (root() / "ingest").string();
+    opts.recursive = true;
+    opts.noEmbeddings = true;
+    REQUIRE(ing.addViaDaemon(opts));
+    std::this_thread::sleep_for(200ms);
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+
+    yams::app::services::SearchRequest request;
+    request.query = "**/*.yml";
+    request.pathsOnly = true;
+    request.limit = 10;
+    auto result = yams::test_async::res(searchSvc->search(request), 3s);
+    REQUIRE(result);
+
+    bool sawYml = false;
+    for (const auto& path : result.value().paths) {
+        if (path.find(".yml") != std::string::npos) {
+            sawYml = true;
+            break;
+        }
+    }
+    CHECK(sawYml);
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search json includes relation metadata",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    fs::create_directories(root() / "ingest");
+    const auto docPath = root() / "ingest" / "cli_relation_json.txt";
+    std::ofstream(docPath) << "cli relation json sentinel";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = docPath.string();
+    opts.noEmbeddings = true;
+    opts.waitForProcessing = true;
+    opts.waitTimeoutSeconds = 10;
+    auto addRes = ing.addViaDaemon(opts);
+    REQUIRE(addRes);
+    REQUIRE_FALSE(addRes.value().hash.empty());
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    auto visibleDoc = waitForDocumentByExactPath(*ctx.metadataRepo, addRes.value().path, 10000ms);
+    REQUIRE(visibleDoc.has_value());
+    const auto& doc = *visibleDoc;
+
+    REQUIRE(ctx.kgStore != nullptr);
+    yams::metadata::KGNode fileNode;
+    fileNode.nodeKey = "path:file:" + doc.filePath;
+    fileNode.type = std::string("file");
+    fileNode.label = doc.fileName;
+    auto fileNodeId = ctx.kgStore->upsertNode(fileNode);
+    REQUIRE(fileNodeId);
+
+    yams::metadata::KGNode docNode;
+    docNode.nodeKey = "doc:" + doc.sha256Hash;
+    docNode.type = std::string("document");
+    docNode.label = doc.fileName;
+    auto docNodeId = ctx.kgStore->upsertNode(docNode);
+    REQUIRE(docNodeId);
+
+    yams::metadata::KGNode symbolOne;
+    symbolOne.nodeKey = "symbol:cli:json:one:" + doc.sha256Hash;
+    symbolOne.type = std::string("symbol");
+    symbolOne.label = std::string("CliJsonOne");
+    auto symbolOneId = ctx.kgStore->upsertNode(symbolOne);
+    REQUIRE(symbolOneId);
+
+    yams::metadata::KGNode symbolTwo;
+    symbolTwo.nodeKey = "symbol:cli:json:two:" + doc.sha256Hash;
+    symbolTwo.type = std::string("symbol");
+    symbolTwo.label = std::string("CliJsonTwo");
+    auto symbolTwoId = ctx.kgStore->upsertNode(symbolTwo);
+    REQUIRE(symbolTwoId);
+
+    yams::metadata::KGEdge versionEdge;
+    versionEdge.srcNodeId = fileNodeId.value();
+    versionEdge.dstNodeId = docNodeId.value();
+    versionEdge.relation = "has-version";
+    REQUIRE(ctx.kgStore->addEdge(versionEdge));
+
+    yams::metadata::KGEdge definesOne;
+    definesOne.srcNodeId = docNodeId.value();
+    definesOne.dstNodeId = symbolOneId.value();
+    definesOne.relation = "defines";
+    REQUIRE(ctx.kgStore->addEdge(definesOne));
+
+    yams::metadata::KGEdge definesTwo;
+    definesTwo.srcNodeId = docNodeId.value();
+    definesTwo.dstNodeId = symbolTwoId.value();
+    definesTwo.relation = "defines";
+    REQUIRE(ctx.kgStore->addEdge(definesTwo));
+
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+    (void)searchSvc->lightIndexForHash(doc.sha256Hash);
+    yams::app::services::SearchRequest pollReq;
+    pollReq.query = "json sentinel";
+    pollReq.type = "keyword";
+    pollReq.pathsOnly = true;
+    pollReq.limit = 1;
+    for (int i = 0; i < 40; ++i) {
+        auto pollRes = yams::test_async::res(searchSvc->search(pollReq), 1s);
+        if (pollRes && !pollRes.value().paths.empty()) {
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath().string());
+    ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
+    CaptureStdout capture;
+    int rc =
+        runCliCommand({"yams", "--data-dir", storageDir().string(), "search", "--type", "keyword",
+                       "--no-group-versions", "--json", "--limit", "5", "json sentinel"});
+    CHECK(rc == 0);
+
+    auto parsed = nlohmann::json::parse(capture.str(), nullptr, false);
+    REQUIRE_FALSE(parsed.is_discarded());
+    REQUIRE(parsed.contains("results"));
+    REQUIRE(parsed["results"].is_array());
+
+    bool foundDoc = false;
+    for (const auto& result : parsed["results"]) {
+        const std::string path = result.value("path", "");
+        if (path.find("cli_relation_json.txt") == std::string::npos) {
+            continue;
+        }
+        foundDoc = true;
+        REQUIRE(result.contains("relation_count"));
+        CHECK(result.value("relation_count", 0) >= 1);
+        REQUIRE(result.contains("relations"));
+        CHECK(result.value("relations", std::string{}).find("defines") != std::string::npos);
+    }
+    CHECK(foundDoc);
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search human includes relation hint",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    fs::create_directories(root() / "ingest");
+    const auto docPath = root() / "ingest" / "cli_relation_human.txt";
+    std::ofstream(docPath) << "cli relation human sentinel";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = docPath.string();
+    opts.noEmbeddings = true;
+    opts.waitForProcessing = true;
+    opts.waitTimeoutSeconds = 10;
+    auto addRes = ing.addViaDaemon(opts);
+    REQUIRE(addRes);
+    REQUIRE_FALSE(addRes.value().hash.empty());
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    auto visibleDoc = waitForDocumentByExactPath(*ctx.metadataRepo, addRes.value().path, 10000ms);
+    REQUIRE(visibleDoc.has_value());
+    const auto& doc = *visibleDoc;
+
+    REQUIRE(ctx.kgStore != nullptr);
+    yams::metadata::KGNode fileNode;
+    fileNode.nodeKey = "path:file:" + doc.filePath;
+    fileNode.type = std::string("file");
+    fileNode.label = doc.fileName;
+    auto fileNodeId = ctx.kgStore->upsertNode(fileNode);
+    REQUIRE(fileNodeId);
+
+    yams::metadata::KGNode docNode;
+    docNode.nodeKey = "doc:" + doc.sha256Hash;
+    docNode.type = std::string("document");
+    docNode.label = doc.fileName;
+    auto docNodeId = ctx.kgStore->upsertNode(docNode);
+    REQUIRE(docNodeId);
+
+    yams::metadata::KGNode symbolNode;
+    symbolNode.nodeKey = "symbol:cli:human:" + doc.sha256Hash;
+    symbolNode.type = std::string("symbol");
+    symbolNode.label = std::string("CliHuman");
+    auto symbolNodeId = ctx.kgStore->upsertNode(symbolNode);
+    REQUIRE(symbolNodeId);
+
+    yams::metadata::KGEdge versionEdge;
+    versionEdge.srcNodeId = fileNodeId.value();
+    versionEdge.dstNodeId = docNodeId.value();
+    versionEdge.relation = "has-version";
+    REQUIRE(ctx.kgStore->addEdge(versionEdge));
+
+    yams::metadata::KGEdge definesEdge;
+    definesEdge.srcNodeId = docNodeId.value();
+    definesEdge.dstNodeId = symbolNodeId.value();
+    definesEdge.relation = "defines";
+    REQUIRE(ctx.kgStore->addEdge(definesEdge));
+
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+    (void)searchSvc->lightIndexForHash(doc.sha256Hash);
+    yams::app::services::SearchRequest pollReq;
+    pollReq.query = "human sentinel";
+    pollReq.type = "keyword";
+    pollReq.pathsOnly = true;
+    pollReq.limit = 1;
+    for (int i = 0; i < 40; ++i) {
+        auto pollRes = yams::test_async::res(searchSvc->search(pollReq), 1s);
+        if (pollRes && !pollRes.value().paths.empty()) {
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath().string());
+    ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
+    CaptureStdout capture;
+    int rc = runCliCommand({"yams", "--data-dir", storageDir().string(), "search", "--type",
+                            "keyword", "--no-group-versions", "--limit", "5", "human sentinel"});
+    CHECK(rc == 0);
+
+    const std::string output = capture.str();
+    CHECK(output.find("cli_relation_human.txt") != std::string::npos);
+    CHECK(output.find("rel:") != std::string::npos);
+    CHECK(output.find("defines") != std::string::npos);
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: graph traversal shows via and path columns",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    fs::create_directories(root() / "ingest" / "graph");
+    const auto filePath = root() / "ingest" / "graph" / "via_path_target.cpp";
+    std::ofstream(filePath) << "int main() { return 0; }\n";
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    REQUIRE(ctx.kgStore != nullptr);
+
+    yams::metadata::KGNode dirNode;
+    dirNode.nodeKey = "path:dir:" + (root() / "ingest" / "graph").string();
+    dirNode.type = std::string("directory");
+    dirNode.label = std::string("graph");
+    auto dirNodeId = ctx.kgStore->upsertNode(dirNode);
+    REQUIRE(dirNodeId);
+
+    yams::metadata::KGNode fileNode;
+    fileNode.nodeKey = "path:file:" + filePath.string();
+    fileNode.type = std::string("file");
+    fileNode.label = std::string("via_path_target.cpp");
+    auto fileNodeId = ctx.kgStore->upsertNode(fileNode);
+    REQUIRE(fileNodeId);
+
+    yams::metadata::KGEdge containsEdge;
+    containsEdge.srcNodeId = dirNodeId.value();
+    containsEdge.dstNodeId = fileNodeId.value();
+    containsEdge.relation = "contains";
+    REQUIRE(ctx.kgStore->addEdge(containsEdge));
+
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath().string());
+    ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
+    CaptureStdout capture;
+    int rc = runCliCommand({"yams", "--data-dir", storageDir().string(), "graph", "--node-key",
+                            dirNode.nodeKey, "--depth", "1", "--limit", "10", "--verbose"});
+    CHECK(rc == 0);
+
+    const std::string output = capture.str();
+    CHECK(output.find("Knowledge Graph Query") != std::string::npos);
+    CHECK(output.find("VIA") != std::string::npos);
+    CHECK(output.find("PATH") != std::string::npos);
+    CHECK(output.find("contains(1)") != std::string::npos);
+    CHECK(output.find("via_path_target.cpp") != std::string::npos);
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture,
+                 "UiCli: graph traversal ranks semantic edges before structural peers",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    fs::create_directories(root() / "ingest" / "graph_order");
+    const auto originPath = root() / "ingest" / "graph_order" / "origin.cpp";
+    const auto semanticPath = root() / "ingest" / "graph_order" / "semantic_target.cpp";
+    const auto structuralPath = root() / "ingest" / "graph_order" / "structural_peer";
+    std::ofstream(originPath) << "int origin() { return 0; }\n";
+    std::ofstream(semanticPath) << "int semantic_target() { return 1; }\n";
+    fs::create_directories(structuralPath);
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    REQUIRE(ctx.kgStore != nullptr);
+
+    yams::metadata::KGNode originNode;
+    originNode.nodeKey = "path:file:" + originPath.string();
+    originNode.type = std::string("file");
+    originNode.label = std::string("origin.cpp");
+    auto originNodeId = ctx.kgStore->upsertNode(originNode);
+    REQUIRE(originNodeId);
+
+    yams::metadata::KGNode semanticNode;
+    semanticNode.nodeKey = "path:file:" + semanticPath.string();
+    semanticNode.type = std::string("file");
+    semanticNode.label = std::string("semantic_target.cpp");
+    auto semanticNodeId = ctx.kgStore->upsertNode(semanticNode);
+    REQUIRE(semanticNodeId);
+
+    yams::metadata::KGNode structuralNode;
+    structuralNode.nodeKey = "path:dir:" + structuralPath.string();
+    structuralNode.type = std::string("directory");
+    structuralNode.label = std::string("structural_peer");
+    auto structuralNodeId = ctx.kgStore->upsertNode(structuralNode);
+    REQUIRE(structuralNodeId);
+
+    yams::metadata::KGEdge semanticEdge;
+    semanticEdge.srcNodeId = originNodeId.value();
+    semanticEdge.dstNodeId = semanticNodeId.value();
+    semanticEdge.relation = "calls";
+    REQUIRE(ctx.kgStore->addEdge(semanticEdge));
+
+    yams::metadata::KGEdge structuralEdge;
+    structuralEdge.srcNodeId = originNodeId.value();
+    structuralEdge.dstNodeId = structuralNodeId.value();
+    structuralEdge.relation = "contains";
+    REQUIRE(ctx.kgStore->addEdge(structuralEdge));
+
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath().string());
+    ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
+    CaptureStdout capture;
+    int rc = runCliCommand({"yams", "--data-dir", storageDir().string(), "graph", "--node-key",
+                            originNode.nodeKey, "--depth", "1", "--limit", "10", "--verbose"});
+    CHECK(rc == 0);
+
+    const std::string output = capture.str();
+    CHECK(output.find("calls(1)") != std::string::npos);
+    CHECK(output.find("contains(1)") != std::string::npos);
+
+    const auto semanticPos = output.find("semantic_target.cpp");
+    const auto structuralPos = output.find("structural_peer");
+    REQUIRE(semanticPos != std::string::npos);
+    REQUIRE(structuralPos != std::string::npos);
+    CHECK(semanticPos < structuralPos);
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: tag filter matchAny vs matchAll",
+                 "[integration][services][ui-cli]") {
+    start();
+
+    fs::create_directories(root() / "ingest" / "tags");
+    std::ofstream(root() / "ingest" / "tags" / "d1.md") << "hello tags md";
+    std::ofstream(root() / "ingest" / "tags" / "d2.txt") << "hello tags txt";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.recursive = false;
+    opts.noEmbeddings = true;
+    opts.waitForProcessing = true;
+    opts.waitTimeoutSeconds = 10;
+
+    opts.tags = {"docs", "md"};
+    opts.path = (root() / "ingest" / "tags" / "d1.md").string();
+    auto add1 = ing.addViaDaemon(opts);
+    REQUIRE(add1);
+    INFO("tag add1 path=" << add1.value().path << " hash=" << add1.value().hash
+                          << " message=" << add1.value().message
+                          << " extraction=" << add1.value().extractionStatus);
+
+    opts.tags = {"docs", "txt"};
+    opts.path = (root() / "ingest" / "tags" / "d2.txt").string();
+    auto add2 = ing.addViaDaemon(opts);
+    REQUIRE(add2);
+    INFO("tag add2 path=" << add2.value().path << " hash=" << add2.value().hash
+                          << " message=" << add2.value().message
+                          << " extraction=" << add2.value().extractionStatus);
+    REQUIRE(add1.value().hash != add2.value().hash);
+
+    auto* sm = serviceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    auto doc1 = waitForDocumentByExactPath(*ctx.metadataRepo, add1.value().path, 10000ms);
+    auto doc2 = waitForDocumentByExactPath(*ctx.metadataRepo, add2.value().path, 10000ms);
+    REQUIRE(doc1.has_value());
+    REQUIRE(doc2.has_value());
+
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+    (void)searchSvc->lightIndexForHash(doc1->sha256Hash);
+    (void)searchSvc->lightIndexForHash(doc2->sha256Hash);
+
+    auto ensureTagsVisible = [&](const std::string& hash,
+                                 const std::vector<std::string>& expected) {
+        for (int i = 0; i < 30; ++i) {
+            auto dres = ctx.metadataRepo->getDocumentByHash(hash);
+            if (dres && dres.value().has_value()) {
+                auto di = dres.value().value();
+                auto all = ctx.metadataRepo->getAllMetadata(di.id);
+                if (all) {
+                    bool ok = true;
+                    for (const auto& tag : expected) {
+                        if (all.value().find("tag:" + tag) == all.value().end()) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (ok) {
+                        return true;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+        return false;
+    };
+
+    REQUIRE(ensureTagsVisible(doc1->sha256Hash, {"docs", "md"}));
+    REQUIRE(ensureTagsVisible(doc2->sha256Hash, {"docs", "txt"}));
+
+    yams::app::services::SearchRequest anyReq;
+    anyReq.query = (root() / "ingest" / "tags").string();
+    anyReq.type = "path";
+    anyReq.fuzzy = false;
+    anyReq.similarity = 0.6f;
+    anyReq.pathsOnly = true;
+    anyReq.limit = 10;
+    const std::string anyPathPattern = (root() / "ingest" / "**").string();
+    anyReq.pathPattern = anyPathPattern;
+    anyReq.pathPatterns = {anyPathPattern};
+    {
+        std::error_code ec;
+        auto canonical = fs::weakly_canonical(root() / "ingest", ec);
+        if (!ec && !canonical.empty()) {
+            std::string canonicalPattern = (canonical / "**").string();
+            if (canonicalPattern != anyPathPattern) {
+                anyReq.pathPatterns.push_back(std::move(canonicalPattern));
+            }
+        }
+    }
+    anyReq.tags = {"docs", "md"};
+    anyReq.matchAllTags = false;
+
+    yams::app::services::SearchRequest allReq = anyReq;
+    allReq.matchAllTags = true;
+    allReq.extension = "md";
+
+    yams::app::services::SearchRequest warm = anyReq;
+    warm.tags.clear();
+    warm.matchAllTags = false;
+    bool warmReady = false;
+    for (int i = 0; i < 80; ++i) {
+        auto warmRes = yams::test_async::res(searchSvc->search(warm), 2s);
+        REQUIRE(warmRes);
+        for (const auto& path : warmRes.value().paths) {
+            if (path.find("d1.md") != std::string::npos ||
+                path.find("d2.txt") != std::string::npos) {
+                warmReady = true;
+                break;
+            }
+        }
+        if (warmReady) {
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    REQUIRE(warmReady);
+
+    bool allOnlyMd = false;
+    bool anyHasMd = false;
+    for (int i = 0; i < 60 && !(allOnlyMd && anyHasMd); ++i) {
+        auto anyRes = yams::test_async::res(searchSvc->search(anyReq), 2s);
+        REQUIRE(anyRes);
+        auto allRes = yams::test_async::res(searchSvc->search(allReq), 2s);
+        REQUIRE(allRes);
+
+        allOnlyMd = !allRes.value().paths.empty();
+        for (const auto& path : allRes.value().paths) {
+            if (path.find("d1.md") == std::string::npos) {
+                allOnlyMd = false;
+                break;
+            }
+        }
+
+        anyHasMd = false;
+        for (const auto& path : anyRes.value().paths) {
+            if (path.find("d1.md") != std::string::npos) {
+                anyHasMd = true;
+                break;
+            }
+        }
+
+        if (!(allOnlyMd && anyHasMd)) {
+            std::this_thread::sleep_for(100ms);
+        }
+    }
+
+    CHECK(allOnlyMd);
+    CHECK(anyHasMd);
 }

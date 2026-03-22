@@ -555,7 +555,14 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool, ConnectionPool* rea
 }
 
 // Destructor must be defined in cpp file because of forward-declared CorpusStats in unique_ptr
-MetadataRepository::~MetadataRepository() = default;
+MetadataRepository::~MetadataRepository() {
+    std::lock_guard<std::mutex> lock(symspellInitMutex_);
+    symspellIndex_.reset();
+    symspellConn_.reset();
+    symspellInitialized_.store(false, std::memory_order_release);
+    graphComponent_.reset();
+    kgStore_.reset();
+}
 
 // Document operations
 Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {

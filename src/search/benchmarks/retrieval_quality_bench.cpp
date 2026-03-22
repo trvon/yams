@@ -48,8 +48,8 @@
 #include <spdlog/spdlog.h>
 #include <benchmark/benchmark.h>
 
-#include "tests/integration/daemon/test_async_helpers.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
+#include <yams/cli/cli_sync.h>
 #include <yams/cli/search_runner.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -84,6 +84,12 @@ namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 using namespace yams;
 using json = nlohmann::json;
+
+template <typename T, typename Rep, typename Period>
+static Result<T> benchRunSync(boost::asio::awaitable<Result<T>> aw,
+                              const std::chrono::duration<Rep, Period>& timeout) {
+    return yams::cli::run_sync<T, Rep, Period>(std::move(aw), timeout);
+}
 
 // Helper to discover GLiNER model path for entity extraction
 // Searches standard locations where yams init downloads models
@@ -690,9 +696,47 @@ static std::unordered_set<std::string> splitTabSet(const std::string& value) {
     return out;
 }
 
+static std::optional<size_t> findRankInTabList(const std::string& value,
+                                               const std::string& needle) {
+    if (value.empty() || needle.empty()) {
+        return std::nullopt;
+    }
+
+    size_t start = 0;
+    size_t rank = 0;
+    while (start <= value.size()) {
+        const size_t end = value.find('\t', start);
+        const size_t len = (end == std::string::npos) ? (value.size() - start) : (end - start);
+        if (len > 0) {
+            ++rank;
+            if (value.compare(start, len, needle) == 0 && len == needle.size()) {
+                return rank;
+            }
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return std::nullopt;
+}
+
 static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantDocIds,
                                        const std::vector<std::string>& returnedDocIds,
                                        const std::map<std::string, std::string>& searchStats) {
+    const std::string preFusionDocIds = searchStats.contains("trace_pre_fusion_doc_ids")
+                                            ? searchStats.at("trace_pre_fusion_doc_ids")
+                                            : "";
+    const std::string postFusionDocIds = searchStats.contains("trace_post_fusion_doc_ids")
+                                             ? searchStats.at("trace_post_fusion_doc_ids")
+                                             : "";
+    const std::string graphlessPostFusionDocIds =
+        searchStats.contains("trace_graphless_post_fusion_doc_ids")
+            ? searchStats.at("trace_graphless_post_fusion_doc_ids")
+            : "";
+    const std::string finalWindowDocIds =
+        searchStats.contains("trace_final_doc_ids") ? searchStats.at("trace_final_doc_ids") : "";
+
     const auto preSet = splitTabSet(searchStats.contains("trace_pre_fusion_doc_ids")
                                         ? searchStats.at("trace_pre_fusion_doc_ids")
                                         : "");
@@ -740,6 +784,34 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
             }
         }
         return json();
+    };
+
+    const auto findComponentHit = [](const json& componentHitsJson,
+                                     const std::string& docId) -> json {
+        if (!componentHitsJson.is_object()) {
+            return json::array();
+        }
+
+        json matches = json::array();
+        for (const auto& [component, details] : componentHitsJson.items()) {
+            if (!details.is_object()) {
+                continue;
+            }
+            const auto hitsIt = details.find("top_hits");
+            if (hitsIt == details.end() || !hitsIt->is_array()) {
+                continue;
+            }
+            for (const auto& hit : *hitsIt) {
+                if (!hit.is_object() || hit.value("doc_id", "") != docId) {
+                    continue;
+                }
+                json entry = hit;
+                entry["component"] = component;
+                matches.push_back(std::move(entry));
+                break;
+            }
+        }
+        return matches;
     };
 
     json relevant = json::array();
@@ -797,7 +869,22 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
             {"in_final_window", inFinalWindow},
             {"in_returned_topk", inReturnedTopK},
             {"component_top_hits", componentSources},
+            {"component_top_hit_details", findComponentHit(componentHits, docId)},
         };
+
+        const auto assignOptionalRank = [&entry](std::string_view key,
+                                                 const std::optional<size_t>& rank) {
+            if (rank.has_value()) {
+                entry[std::string(key)] = *rank;
+            } else {
+                entry[std::string(key)] = nullptr;
+            }
+        };
+        assignOptionalRank("pre_fusion_rank", findRankInTabList(preFusionDocIds, docId));
+        assignOptionalRank("post_fusion_rank", findRankInTabList(postFusionDocIds, docId));
+        assignOptionalRank("graphless_post_fusion_rank",
+                           findRankInTabList(graphlessPostFusionDocIds, docId));
+        assignOptionalRank("final_window_rank", findRankInTabList(finalWindowDocIds, docId));
 
         if (auto match = findDoc(fusionTop, docId); !match.is_null()) {
             entry["post_fusion"] = match;
@@ -1543,6 +1630,13 @@ static bool envTruthy(const char* value) {
         return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     });
     return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+static bool benchUseStreamingSearch() {
+    // Retrieval quality benchmarks measure ranking quality, not IPC chunking behavior.
+    // Default to unary search so streaming transport stalls do not skew IR evaluation,
+    // while preserving an opt-in path for transport debugging.
+    return envTruthy(std::getenv("YAMS_BENCH_ENABLE_STREAMING_SEARCH"));
 }
 
 static int parseIntEnvOrDefault(const char* key, int defaultValue, int minValue, int maxValue) {
@@ -3436,8 +3530,9 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         if (waitBudget < std::chrono::seconds(10)) {
             waitBudget = std::chrono::seconds(10);
         }
-        auto run = yams::cli::run_sync(yams::cli::search_runner::daemon_search(client, opts, true),
-                                       waitBudget);
+        auto run = benchRunSync(
+            yams::cli::search_runner::daemon_search(client, opts, benchUseStreamingSearch()),
+            waitBudget);
         if (!run) {
             spdlog::warn("Search failed for query '{}': {}", tq.query, run.error().message);
             continue;
@@ -3629,8 +3724,9 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                 shadowEntry.diagnostics.push_back("original_query=" + tq.query);
                 shadowEntry.diagnostics.push_back("shadow_query=" + diagQuery);
 
-                auto shadowRun = yams::cli::run_sync(
-                    yams::cli::search_runner::daemon_search(client, shadow, true),
+                auto shadowRun = benchRunSync(
+                    yams::cli::search_runner::daemon_search(client, shadow,
+                                                            benchUseStreamingSearch()),
                     std::chrono::duration_cast<std::chrono::milliseconds>(shadow.timeout) +
                         std::chrono::seconds(10));
                 if (shadowRun) {
@@ -4210,7 +4306,7 @@ struct BenchFixture {
             // takes 20-60s before any response header is sent.
             client->setHeaderTimeout(std::chrono::milliseconds(300000)); // 5 min
             client->setBodyTimeout(std::chrono::milliseconds(300000));   // 5 min
-            auto connectResult = yams::cli::run_sync(client->connect(), 5s);
+            auto connectResult = benchRunSync(client->connect(), 5s);
             if (!connectResult) {
                 throw std::runtime_error("Failed to connect: " + connectResult.error().message);
             }
@@ -4218,7 +4314,7 @@ struct BenchFixture {
             // Probe the exact selected socket path before ingesting to catch startup races.
             constexpr int kStatusProbeAttempts = 8;
             for (int attempt = 1; attempt <= kStatusProbeAttempts; ++attempt) {
-                auto statusProbe = yams::cli::run_sync(client->status(true), 5s);
+                auto statusProbe = benchRunSync(client->status(true), 5s);
                 if (statusProbe) {
                     if (attempt > 1) {
                         spdlog::info("[Bench] Client status probe succeeded after {} attempts",
@@ -4248,7 +4344,7 @@ struct BenchFixture {
                     client = std::make_unique<yams::daemon::DaemonClient>(clientCfg);
                     client->setHeaderTimeout(std::chrono::milliseconds(300000));
                     client->setBodyTimeout(std::chrono::milliseconds(300000));
-                    auto reconnectResult = yams::cli::run_sync(client->connect(), 5s);
+                    auto reconnectResult = benchRunSync(client->connect(), 5s);
                     if (!reconnectResult) {
                         throw std::runtime_error("Failed to reconnect after probe EOF: " +
                                                  reconnectResult.error().message);
@@ -4262,7 +4358,7 @@ struct BenchFixture {
         connectClientWithProbe("initial setup");
 
         const bool usingExternalBenchDataDir = harnessOptions.dataDir.has_value();
-        auto initialStatusResult = yams::cli::run_sync(client->status(true), 5s);
+        auto initialStatusResult = benchRunSync(client->status(true), 5s);
         const auto getInitialCount = [&](const std::string& key) -> uint64_t {
             if (!initialStatusResult) {
                 return 0;
@@ -4354,7 +4450,7 @@ struct BenchFixture {
                         }
                     }
 
-                    addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 120s);
+                    addResult = benchRunSync(client->streamingAddDocument(addReq), 120s);
                     if (addResult) {
                         break;
                     }
@@ -4458,7 +4554,7 @@ struct BenchFixture {
 
                         // Status polls may intermittently fail even when work is done; perform one
                         // final verification poll before classifying as stalled.
-                        auto finalVerify = yams::cli::run_sync(client->status(true), 10s);
+                        auto finalVerify = benchRunSync(client->status(true), 10s);
                         if (finalVerify) {
                             const auto& counts = finalVerify.value().requestCounts;
                             auto get = [&](const std::string& key) -> uint64_t {
@@ -4517,7 +4613,7 @@ struct BenchFixture {
                             "YAMS_POST_EXTRACTION_CONCURRENT=12 YAMS_DB_POOL_MAX=48");
                     }
 
-                    auto statusResult = yams::cli::run_sync(client->status(true), 5s);
+                    auto statusResult = benchRunSync(client->status(true), 5s);
                     if (statusResult) {
                         const auto& counts = statusResult.value().requestCounts;
                         uint32_t depth = statusResult.value().postIngestQueueDepth;
@@ -4640,7 +4736,7 @@ struct BenchFixture {
                 repairReq.foreground = true;
                 repairReq.maxRetries = 3;
                 spdlog::info("[Bench] Requesting embedding repair to resume warm-cache priming...");
-                auto repairResult = yams::cli::run_sync(client->callRepair(repairReq), 300s);
+                auto repairResult = benchRunSync(client->callRepair(repairReq), 300s);
                 if (!repairResult) {
                     spdlog::warn("[Bench] Embedding repair request failed: {}",
                                  repairResult.error().message);
@@ -4659,7 +4755,7 @@ struct BenchFixture {
             auto deadline = std::chrono::steady_clock::now() + 30s;
             bool embeddingReady = false;
             while (std::chrono::steady_clock::now() < deadline) {
-                auto statusResult = yams::cli::run_sync(client->status(true), 5s);
+                auto statusResult = benchRunSync(client->status(true), 5s);
                 if (statusResult && statusResult.value().embeddingAvailable) {
                     spdlog::info("Embedding provider is available (backend: {}, model: {})",
                                  statusResult.value().embeddingBackend,
@@ -4778,7 +4874,7 @@ struct BenchFixture {
                                      lastObservedDocsEmbedded, lastObservedVectorCount,
                                      lastObservedEmbedQueued, lastObservedEmbedInFlight);
                     }
-                    auto statusResult = yams::cli::run_sync(client->status(true), 5s);
+                    auto statusResult = benchRunSync(client->status(true), 5s);
                     if (statusResult) {
                         bool vectorDbReady = statusResult.value().vectorDbReady;
                         if (auto it = statusResult.value().readinessStates.find("vector_db");
@@ -5038,7 +5134,7 @@ struct BenchFixture {
                 }
 
                 // Final status check
-                auto finalStatus = yams::cli::run_sync(client->status(true), 5s);
+                auto finalStatus = benchRunSync(client->status(true), 5s);
                 if (finalStatus) {
                     uint64_t finalVectorCount = 0;
                     auto it = finalStatus.value().requestCounts.find("vector_count");
@@ -5109,7 +5205,7 @@ struct BenchFixture {
                         spdlog::warn("Vector DB not ready yet; waiting briefly before queries...");
                         const auto guardDeadline = std::chrono::steady_clock::now() + 30s;
                         while (std::chrono::steady_clock::now() < guardDeadline) {
-                            auto st = yams::cli::run_sync(client->status(true), 5s);
+                            auto st = benchRunSync(client->status(true), 5s);
                             if (st) {
                                 bool ready = st.value().vectorDbReady;
                                 if (auto it = st.value().readinessStates.find("vector_db");
@@ -5217,7 +5313,7 @@ struct BenchFixture {
                 warmCacheMetadata.has_value()
                     ? preferStrongerBenchCacheMetadata(expectedCacheMetadata, warmCacheMetadata)
                     : expectedCacheMetadata;
-            auto finalStatusForCache = yams::cli::run_sync(client->status(true), 5s);
+            auto finalStatusForCache = benchRunSync(client->status(true), 5s);
             if (finalStatusForCache) {
                 finalCacheMetadata = currentBenchCacheMetadata(
                     finalCacheMetadata, finalStatusForCache.value(), warmDataDirPath);
@@ -5249,7 +5345,7 @@ struct BenchFixture {
         const auto searchEngineDeadline = std::chrono::steady_clock::now() + 60s;
         bool searchEngineReady = false;
         while (std::chrono::steady_clock::now() < searchEngineDeadline) {
-            auto statusCheck = yams::cli::run_sync(client->status(true), 5s);
+            auto statusCheck = benchRunSync(client->status(true), 5s);
             if (statusCheck) {
                 auto it = statusCheck.value().readinessStates.find("search_engine");
                 if (it != statusCheck.value().readinessStates.end() && it->second) {
@@ -5303,9 +5399,9 @@ struct BenchFixture {
 
             while (std::chrono::steady_clock::now() < kgDeadline) {
                 const auto now = std::chrono::steady_clock::now();
-                auto statusCheck = yams::cli::run_sync(client->status(true), 5s);
+                auto statusCheck = benchRunSync(client->status(true), 5s);
                 auto statsCheck =
-                    yams::cli::run_sync(client->getStats(yams::daemon::GetStatsRequest{}), 10s);
+                    benchRunSync(client->getStats(yams::daemon::GetStatsRequest{}), 10s);
 
                 bool queuesDrained = false;
                 if (statusCheck) {
@@ -5445,7 +5541,7 @@ struct BenchFixture {
 
         // Verify document count using status metrics (avoids degraded search false negatives)
         uint64_t indexedDocCount = 0;
-        auto statusResult = yams::cli::run_sync(client->status(true), 5s);
+        auto statusResult = benchRunSync(client->status(true), 5s);
         if (warmCacheMetadata && warmCacheMetadata->status == "primed") {
             indexedDocCount = static_cast<uint64_t>(warmCacheMetadata->expectedDocs);
         } else if (statusResult) {
@@ -5473,7 +5569,14 @@ struct BenchFixture {
             if (waitBudget < std::chrono::seconds(10)) {
                 waitBudget = std::chrono::seconds(10);
             }
-            auto testResult = yams::cli::run_sync(client->search(testReq), waitBudget);
+            auto testSearch =
+                [&]() -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+                if (benchUseStreamingSearch()) {
+                    co_return co_await client->search(testReq);
+                }
+                co_return co_await client->unarySearch(testReq);
+            };
+            auto testResult = benchRunSync(testSearch(), waitBudget);
             indexedDocCount = testResult ? testResult.value().results.size() : 0;
         }
 
@@ -5487,7 +5590,7 @@ struct BenchFixture {
         // Goal: distinguish "no docs" vs "docs but query returns empty".
         {
             // Log StatusResponse (it already powers our ingestion waits).
-            auto statusRes = yams::cli::run_sync(client->status(true), 5s);
+            auto statusRes = benchRunSync(client->status(true), 5s);
             if (statusRes) {
                 const auto& st = statusRes.value();
                 uint64_t documentsTotal = 0;
@@ -5614,7 +5717,7 @@ struct BenchFixture {
             // Log GetStatsResponse (extra counters);
             // we also emit structured JSON (additional_stats) for easier parsing.
             yams::daemon::GetStatsRequest statsReq;
-            auto statsRes = yams::cli::run_sync(client->getStats(statsReq), 10s);
+            auto statsRes = benchRunSync(client->getStats(statsReq), 10s);
             if (statsRes) {
                 const auto& st = statsRes.value();
                 spdlog::info("GetStats: totalDocuments={} indexedDocuments={} vectorIndexSize={} "
@@ -5685,8 +5788,9 @@ struct BenchFixture {
                 if (waitBudget < std::chrono::seconds(10)) {
                     waitBudget = std::chrono::seconds(10);
                 }
-                auto run = yams::cli::run_sync(
-                    yams::cli::search_runner::daemon_search(*client, opts, true), waitBudget);
+                auto run = benchRunSync(yams::cli::search_runner::daemon_search(
+                                            *client, opts, benchUseStreamingSearch()),
+                                        waitBudget);
                 if (!run) {
                     sanityEntry.returnedPaths.push_back("error=" + run.error().message);
                     debugLogWriteJsonLine(sanityEntry);
@@ -5823,7 +5927,7 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
             throw std::runtime_error("Benchmark fixture did not initialize a daemon client");
         }
 
-        auto status = yams::cli::run_sync(g_fixture->client->status(true), 5s);
+        auto status = benchRunSync(g_fixture->client->status(true), 5s);
         if (status) {
             result.tuningState = status.value().searchTuningState;
             result.tuningReason = status.value().searchTuningReason;

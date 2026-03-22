@@ -890,10 +890,22 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
                r.symbolScore.value_or(0.0);
     };
 
-    const auto isVectorOnlyRescueCandidate = [this,
-                                              &lexicalAnchorScore](const SearchResult& r) -> bool {
+    const auto rawVectorScoreForResult = [&maxVectorRawScore](const std::string& dedupKey) {
+        if (auto it = maxVectorRawScore.find(dedupKey); it != maxVectorRawScore.end()) {
+            return it->second;
+        }
+        return 0.0;
+    };
+
+    const auto isVectorOnlyRescueCandidate =
+        [this, &lexicalAnchorScore, &rawVectorScoreForResult](const SearchResult& r) -> bool {
         const double lexical = lexicalAnchorScore(r);
-        const double vector = r.vectorScore.value_or(0.0);
+        const std::string dedupKey =
+            (config_.enablePathDedupInFusion && !r.document.filePath.empty())
+                ? std::string("path:") + r.document.filePath
+            : (!r.document.sha256Hash.empty()) ? std::string("hash:") + r.document.sha256Hash
+                                               : std::string("path:") + r.document.filePath;
+        const double vector = rawVectorScoreForResult(dedupKey);
         return lexical <= 0.0 &&
                vector >= std::max(0.0, static_cast<double>(config_.semanticRescueMinVectorScore));
     };

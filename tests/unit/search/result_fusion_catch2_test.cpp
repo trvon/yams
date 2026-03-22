@@ -109,3 +109,63 @@ TEST_CASE("Weighted reciprocal favors lexical over pure vector at equal rank",
 
     CHECK(results[0].document.sha256Hash.compare("doc-text") == 0);
 }
+
+TEST_CASE("ResultFusion COMB_MNZ backfills snippet from later anchored component",
+          "[search][fusion][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.maxResults = 10;
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
+    cfg.vectorWeight = 1.0f;
+    cfg.textWeight = 1.0f;
+    cfg.vectorOnlyThreshold = 0.0f;
+    cfg.vectorOnlyPenalty = 1.0f;
+
+    ResultFusion fusion(cfg);
+
+    ComponentResult vector = makeComponent("doc-hybrid", 0.95f, ComponentResult::Source::Vector, 0);
+    vector.snippet = std::nullopt;
+
+    ComponentResult text = makeComponent("doc-hybrid", 0.40f, ComponentResult::Source::Text, 5);
+    text.snippet = std::string("anchored snippet");
+
+    std::vector<ComponentResult> components;
+    components.push_back(vector);
+    components.push_back(text);
+
+    auto results = fusion.fuse(components);
+    REQUIRE(results.size() == 1U);
+    CHECK(results[0].snippet == "anchored snippet");
+}
+
+TEST_CASE("ResultFusion COMB_MNZ semantic rescue can retain below-threshold vector-only docs",
+          "[search][fusion][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.maxResults = 1;
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
+    cfg.textWeight = 1.0f;
+    cfg.vectorWeight = 1.0f;
+    cfg.vectorOnlyThreshold = 0.92f;
+    cfg.vectorOnlyPenalty = 0.65f;
+    cfg.semanticRescueSlots = 1;
+    cfg.semanticRescueMinVectorScore = 0.30f;
+
+    ResultFusion fusion(cfg);
+
+    ComponentResult lexical;
+    lexical.documentHash = "doc-lexical";
+    lexical.filePath = "doc-lexical";
+    lexical.score = 0.6f;
+    lexical.source = ComponentResult::Source::Text;
+    lexical.rank = 0;
+
+    ComponentResult rescued;
+    rescued.documentHash = "doc-semantic";
+    rescued.filePath = "doc-semantic";
+    rescued.score = 0.80f;
+    rescued.source = ComponentResult::Source::Vector;
+    rescued.rank = 150;
+
+    auto results = fusion.fuse({lexical, rescued});
+    REQUIRE(results.size() == 1U);
+    CHECK(results[0].document.sha256Hash == "doc-semantic");
+}

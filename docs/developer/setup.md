@@ -145,6 +145,22 @@ mkdir -p $HOME/yams-data
 docker run --rm -it -v $HOME/yams-data:/var/lib/yams ghcr.io/trvon/yams:latest yams init --non-interactive
 ```
 
+### Packaging smoke checks
+
+```bash
+# Linux runtime packaging/install validation via Docker
+docker build --target runtime-test -t yams-runtime-test .
+
+# macOS staged install validation from an existing release build
+scripts/dev/run_macos_install_smoke.sh build/release
+```
+
+The Docker `runtime-test` target fails if the installed ONNX plugin, ONNX runtime libraries, or
+`yams doctor plugin onnx --no-daemon` check are broken. The macOS smoke script stages a local
+install using the build's actual Meson prefix, checks installed ONNX artifacts, verifies the
+plugin does not directly link `libonnxruntime`, and runs the same doctor check against the staged
+install.
+
 ## GPU Acceleration
 
 The ONNX plugin supports GPU acceleration for embedding generation. GPU support is **auto-detected** during build based on platform and available hardware.

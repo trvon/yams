@@ -645,6 +645,10 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
             acc.filePath = comp.filePath;
         }
 
+        if (acc.snippet.empty() && comp.snippet.has_value()) {
+            acc.snippet = comp.snippet.value();
+        }
+
         if (comp.source == ComponentResult::Source::Text) {
             acc.bestTextRank = std::min(acc.bestTextRank, comp.rank);
         }
@@ -697,8 +701,14 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
 
     std::vector<SearchResult> fusedResults;
     fusedResults.reserve(accumMap.size());
+    std::vector<std::pair<double, SearchResult>> semanticRescueReserve;
+    semanticRescueReserve.reserve(std::min(config_.semanticRescueSlots, accumMap.size()));
+    std::unordered_map<std::string, double> rawVectorScoreByDedupKey;
+    rawVectorScoreByDedupKey.reserve(accumMap.size());
 
     for (auto& entry : accumMap) {
+        rawVectorScoreByDedupKey[entry.first] = entry.second.maxVectorRaw;
+
         SearchResult r;
         r.document.sha256Hash = std::move(entry.second.documentHash);
         r.document.filePath = std::move(entry.second.filePath);
@@ -744,17 +754,22 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
                 std::clamp(static_cast<double>(config_.vectorOnlyNearMissSlack), 0.0, 1.0);
             const double nearMissPenalty =
                 std::clamp(static_cast<double>(config_.vectorOnlyNearMissPenalty), 0.0, 1.0);
+            const double semanticRescueMinVector =
+                std::max(0.0, static_cast<double>(config_.semanticRescueMinVectorScore));
             const bool strongRelief = strongVectorOnlyReliefEligible(
                 config_, entry.second.maxVectorRaw, entry.second.bestVectorRank);
             const double effectivePenalty = effectiveVectorOnlyPenalty(
                 config_, entry.second.maxVectorRaw, entry.second.bestVectorRank);
+            const bool semanticRescueEligible =
+                config_.semanticRescueSlots > 0 &&
+                entry.second.maxVectorRaw >= semanticRescueMinVector;
 
             if (entry.second.maxVectorRaw < vectorOnlyThreshold) {
                 const bool reserveEnabled = config_.vectorOnlyNearMissReserve > 0;
                 const bool isNearMiss =
                     reserveEnabled && vectorOnlyThreshold > 0.0 &&
                     entry.second.maxVectorRaw + nearMissSlack >= vectorOnlyThreshold;
-                if (!isNearMiss && !strongRelief) {
+                if (!isNearMiss && !strongRelief && !semanticRescueEligible) {
                     continue;
                 }
 
@@ -767,6 +782,11 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
                             : std::clamp(entry.second.maxVectorRaw, 0.0, 1.0);
                     r.score = static_cast<float>(r.score * effectivePenalty * nearMissPenalty *
                                                  thresholdRatio);
+
+                    if (semanticRescueEligible && !isNearMiss) {
+                        semanticRescueReserve.emplace_back(entry.second.maxVectorRaw, std::move(r));
+                        continue;
+                    }
                 }
             } else {
                 r.score = static_cast<float>(r.score * effectivePenalty);
@@ -777,15 +797,51 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         fusedResults.push_back(std::move(r));
     }
 
+    if (!semanticRescueReserve.empty()) {
+        std::sort(semanticRescueReserve.begin(), semanticRescueReserve.end(),
+                  [](const auto& a, const auto& b) {
+                      if (a.first != b.first) {
+                          return a.first > b.first;
+                      }
+                      return a.second.score > b.second.score;
+                  });
+
+        for (auto& [_, result] : semanticRescueReserve) {
+            fusedResults.push_back(std::move(result));
+        }
+    }
+
+    const auto dedupKeyForSearchResult = [this](const SearchResult& r) {
+        if (config_.enablePathDedupInFusion && !r.document.filePath.empty()) {
+            return std::string("path:") + r.document.filePath;
+        }
+        if (!r.document.sha256Hash.empty()) {
+            return std::string("hash:") + r.document.sha256Hash;
+        }
+        if (!r.document.filePath.empty()) {
+            return std::string("path:") + r.document.filePath;
+        }
+        return std::string("unknown:");
+    };
+
+    const auto rawVectorScoreForResult = [&rawVectorScoreByDedupKey,
+                                          &dedupKeyForSearchResult](const SearchResult& r) {
+        if (auto it = rawVectorScoreByDedupKey.find(dedupKeyForSearchResult(r));
+            it != rawVectorScoreByDedupKey.end()) {
+            return it->second;
+        }
+        return 0.0;
+    };
+
     const auto lexicalAnchorScore = [](const SearchResult& r) {
         return r.keywordScore.value_or(0.0) + r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) +
                r.symbolScore.value_or(0.0);
     };
 
-    const auto isVectorOnlyRescueCandidate = [this,
-                                              &lexicalAnchorScore](const SearchResult& r) -> bool {
+    const auto isVectorOnlyRescueCandidate =
+        [this, &lexicalAnchorScore, &rawVectorScoreForResult](const SearchResult& r) -> bool {
         const double lexical = lexicalAnchorScore(r);
-        const double vector = r.vectorScore.value_or(0.0);
+        const double vector = rawVectorScoreForResult(r);
         return lexical <= 0.0 &&
                vector >= std::max(0.0, static_cast<double>(config_.semanticRescueMinVectorScore));
     };
@@ -826,6 +882,16 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         return a.document.sha256Hash < b.document.sha256Hash;
     };
 
+    const auto semanticRescueBetter = [&rawVectorScoreForResult, &lexicalAwareLess](
+                                          const SearchResult& a, const SearchResult& b) {
+        const double rawVectorA = rawVectorScoreForResult(a);
+        const double rawVectorB = rawVectorScoreForResult(b);
+        if (rawVectorA != rawVectorB) {
+            return rawVectorA > rawVectorB;
+        }
+        return lexicalAwareLess(a, b);
+    };
+
     if (fusedResults.size() > config_.maxResults) {
         std::partial_sort(fusedResults.begin(),
                           fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
@@ -848,7 +914,7 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
                         continue;
                     }
                     if (bestTailIndex >= fusedResults.size() ||
-                        lexicalAwareLess(fusedResults[i], fusedResults[bestTailIndex])) {
+                        semanticRescueBetter(fusedResults[i], fusedResults[bestTailIndex])) {
                         bestTailIndex = i;
                     }
                 }
@@ -2209,7 +2275,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     preFusionDocIds = collectUniqueComponentDocIds(allComponentResults);
-    if (stageTraceEnabled) {
+    if (stageTraceEnabled || workingConfig.semanticRescueSlots > 0) {
         preFusionSignals = buildPreFusionSignalMap(allComponentResults);
     }
 
@@ -2948,13 +3014,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     };
 
     size_t semanticRescueFinalCount = 0;
+    std::vector<std::string> semanticRescueFinalDocIds;
     if (workingConfig.semanticRescueSlots > 0 && !response.results.empty()) {
         const double minVectorScore =
             std::max(0.0, static_cast<double>(workingConfig.semanticRescueMinVectorScore));
         for (const auto& result : response.results) {
-            if (lexicalAnchorScore(result) <= 0.0 &&
-                result.vectorScore.value_or(0.0) >= minVectorScore) {
+            const std::string docId =
+                documentIdForTrace(result.document.filePath, result.document.sha256Hash);
+            auto signalIt = preFusionSignals.find(docId);
+            if (signalIt != preFusionSignals.end() && !signalIt->second.hasAnchoring &&
+                signalIt->second.hasVector && signalIt->second.maxVectorRaw >= minVectorScore &&
+                lexicalAnchorScore(result) <= 0.0) {
                 semanticRescueFinalCount++;
+                semanticRescueFinalDocIds.push_back(docId);
             }
         }
     }
@@ -2971,6 +3043,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(workingConfig.semanticRescueSlots);
     response.debugStats["semantic_rescue_target"] = std::to_string(semanticRescueTarget);
     response.debugStats["semantic_rescue_final_count"] = std::to_string(semanticRescueFinalCount);
+    response.debugStats["semantic_rescue_final_doc_ids"] = joinWithTab(semanticRescueFinalDocIds);
     response.debugStats["semantic_rescue_rate"] = fmt::format("{:.3f}", semanticRescueRate);
     response.debugStats["multi_vector_generated_phrases"] =
         std::to_string(multiVectorGeneratedPhrases);

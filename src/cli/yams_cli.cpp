@@ -208,7 +208,35 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
 }
 
 YamsCLI::~YamsCLI() {
-    // Cleanup will be handled by smart pointers
+    {
+        std::lock_guard<std::mutex> lock(appContextMutex_);
+        appContext_.reset();
+    }
+
+    embeddingGenerator_.reset();
+    vectorDatabase_.reset();
+    kgStore_.reset();
+    metadataRepo_.reset();
+
+    if (connectionPool_) {
+        try {
+            connectionPool_->shutdown();
+        } catch (...) {
+        }
+        connectionPool_.reset();
+    }
+
+    if (database_) {
+        try {
+            database_->close();
+        } catch (...) {
+        }
+        database_.reset();
+    }
+
+    contentStore_.reset();
+    commands_.clear();
+    app_.reset();
 }
 
 bool YamsCLI::hasExplicitDataDir() const {

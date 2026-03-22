@@ -279,12 +279,12 @@ public:
                 unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
             }
 
-            // Shutdown all connection pools BEFORE resetting GlobalIOContext
-            // This ensures all client-side connections are properly closed while
-            // the io_context is still running, preventing stale connections in
-            // subsequent test sections that create new daemons
-            yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
-            spdlog::info("[DaemonHarness] Connection pools shut down");
+            // Reset the global client IO state BEFORE restarting threads.
+            // This closes ConnectionRegistry sockets and clears pools while the
+            // existing io_context is still alive, preventing stale client FDs
+            // from accumulating across harness cycles.
+            yams::daemon::GlobalIOContext::reset();
+            spdlog::info("[DaemonHarness] GlobalIOContext reset complete");
 
             // Windows needs additional time before GlobalIOContext::reset()
             // Windows thread cleanup is slower than Unix
@@ -294,11 +294,7 @@ public:
             // The io_context threads will be cleaned up when the process exits
             spdlog::info("[DaemonHarness] Skipping GlobalIOContext::restart() on Windows");
 #else
-            // Use safe_restart() instead of restart() to handle teardown race conditions.
-            // safe_restart() checks is_destroyed() before attempting restart, avoiding
-            // SIGSEGV when static destruction is in progress.
-            yams::daemon::GlobalIOContext::safe_restart();
-            spdlog::info("[DaemonHarness] GlobalIOContext safe_restart complete");
+            spdlog::info("[DaemonHarness] GlobalIOContext restart deferred");
 #endif
 
             // Restore environment variables
