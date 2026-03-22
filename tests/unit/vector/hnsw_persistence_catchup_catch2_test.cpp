@@ -66,6 +66,18 @@ size_t countRows(sqlite3* db, const char* sql) {
     return value;
 }
 
+bool tableExists(sqlite3* db, const std::string& tableName) {
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(db,
+                               "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                               -1, &stmt, nullptr) == SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, tableName.c_str(), -1, SQLITE_TRANSIENT);
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    bool exists = sqlite3_column_int64(stmt, 0) > 0;
+    sqlite3_finalize(stmt);
+    return exists;
+}
+
 } // namespace
 
 TEST_CASE_METHOD(HnswPersistenceFixture,
@@ -162,4 +174,61 @@ TEST_CASE_METHOD(HnswPersistenceFixture,
     CHECK(countRows(db, "SELECT COUNT(*) FROM vectors_64_hnsw_meta") > 0);
     CHECK(countRows(db, "SELECT COUNT(*) FROM vectors_64_hnsw_nodes") > 0);
     sqlite3_close(db);
+}
+
+TEST_CASE_METHOD(HnswPersistenceFixture,
+                 "SqliteVecBackend optimize persists HNSW for vector-only warm cache",
+                 "[vector][hnsw][persistence][optimize][catch2]") {
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+
+    const std::string dbPath = createTempDbPath();
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(64).has_value());
+
+        std::vector<VectorRecord> seedRecords;
+        for (int i = 0; i < 64; ++i) {
+            seedRecords.push_back(
+                createRecord("seed_optimize_" + std::to_string(i), createEmbedding(64, 50.0f + i)));
+        }
+        REQUIRE(backend.insertVectorsBatch(seedRecords).has_value());
+        REQUIRE(backend.optimize().has_value());
+    }
+
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(dbPath.c_str(), &db) == SQLITE_OK);
+    CHECK(countRows(db, "SELECT COUNT(*) FROM vectors_64_hnsw_meta") > 0);
+    CHECK(countRows(db, "SELECT COUNT(*) FROM vectors_64_hnsw_nodes") > 0);
+    sqlite3_close(db);
+}
+
+TEST_CASE_METHOD(HnswPersistenceFixture,
+                 "SqliteVecBackend reports reusable persisted HNSW only after save",
+                 "[vector][hnsw][persistence][reusable][catch2]") {
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+
+    const std::string dbPath = createTempDbPath();
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(64).has_value());
+
+        std::vector<VectorRecord> seedRecords;
+        for (int i = 0; i < 32; ++i) {
+            seedRecords.push_back(
+                createRecord("seed_reusable_" + std::to_string(i), createEmbedding(64, 80.0f + i)));
+        }
+        for (const auto& record : seedRecords) {
+            REQUIRE(backend.insertVector(record).has_value());
+        }
+        CHECK(backend.hasReusablePersistedSearchIndex().value() == false);
+
+        REQUIRE(backend.optimize().has_value());
+        CHECK(backend.hasReusablePersistedSearchIndex().value() == true);
+    }
 }

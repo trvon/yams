@@ -104,3 +104,27 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     args: ['--allow-running-no-tests'],
   )
 endif
+
+# Catch2 migration: UI/CLI expectations service tests
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+  catch2_ui_cli_expectations_exe = executable('catch2_ui_cli_expectations',
+    files('ui_cli_expectations_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: ['-DYAMS_TESTING=1'],
+    install: false,
+  )
+
+  test('ui_cli_expectations_catch2', catch2_ui_cli_expectations_exe,
+    suite: ['catch2', 'integration', 'services', 'ui'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_STRESS_ITERS': services_stress_iters,
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'TSAN_OPTIONS': _test_tsan_options,
+    },
+    is_parallel: false,
+    timeout: get_option('integration-ui-timeout'),
+    args: ['--allow-running-no-tests'],
+  )
+endif

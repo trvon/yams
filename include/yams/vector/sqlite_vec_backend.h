@@ -100,6 +100,7 @@ public:
 
     Result<void> buildIndex() override;
     Result<void> prepareSearchIndex() override;
+    Result<bool> hasReusablePersistedSearchIndex() override;
     Result<void> optimize() override;
 
     Result<void> beginTransaction() override;

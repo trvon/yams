@@ -6,10 +6,13 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/plugins/model_provider_v1.h>
 
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <random>
 #include <string>
@@ -260,6 +263,28 @@ TEST_CASE_METHOD(AbiModelProviderDimensionFixture,
     size_t dim = adapter_->getEmbeddingDim("test-model");
 
     CHECK(dim == 384);
+}
+
+TEST_CASE("ConfigResolver prefers embeddinggemma from preload list", "[daemon][config]") {
+    namespace fs = std::filesystem;
+
+    const fs::path configPath =
+        fs::temp_directory_path() / "yams_config_resolver_embeddinggemma_test.toml";
+    {
+        std::ofstream out(configPath, std::ios::trunc);
+        REQUIRE(out.is_open());
+        out << "[daemon.models]\n";
+        out << "preload_models = [\"embeddinggemma-300m\"]\n";
+    }
+
+    yams::daemon::DaemonConfig cfg;
+    cfg.configFilePath = configPath;
+
+    const auto preferred = yams::daemon::ConfigResolver::resolvePreferredModel(cfg, {});
+    CHECK(preferred == "embeddinggemma-300m");
+
+    std::error_code ec;
+    fs::remove(configPath, ec);
 }
 
 TEST_CASE_METHOD(AbiModelProviderDimensionFixture,

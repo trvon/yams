@@ -43,6 +43,7 @@
   ./builddir/tests/benchmarks/retrieval_quality_bench
 */
 
+#include <sqlite3.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <benchmark/benchmark.h>
@@ -1520,6 +1521,17 @@ struct BenchCacheMetadata {
     std::string status = "priming";
     int embeddedDocs = 0;
     std::uintmax_t vectorCount = 0;
+    bool vectorIndexReady = false;
+    std::uintmax_t persistedHnswNodes = 0;
+    std::uintmax_t persistedHnswMetaRows = 0;
+};
+
+struct PersistedHnswState {
+    bool vectorsDbPresent = false;
+    std::uintmax_t nodeRows = 0;
+    std::uintmax_t metaRows = 0;
+
+    bool reusable() const { return nodeRows > 0 && metaRows > 0; }
 };
 
 static bool envTruthy(const char* value) {
@@ -1604,6 +1616,70 @@ static std::uintmax_t computePathFingerprint(const fs::path& path) {
     return fingerprint;
 }
 
+static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
+    PersistedHnswState state;
+    const fs::path vectorsDbPath = dataDir / "vectors.db";
+    if (!fs::exists(vectorsDbPath)) {
+        return state;
+    }
+
+    state.vectorsDbPresent = true;
+
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(vectorsDbPath.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) !=
+        SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return state;
+    }
+
+    auto closeDb = [&]() {
+        if (db) {
+            sqlite3_close(db);
+            db = nullptr;
+        }
+    };
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* tableSql = "SELECT name FROM sqlite_master WHERE type='table' AND "
+                           "(name='vectors_hnsw_meta' OR name='vectors_hnsw_nodes' OR "
+                           " name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes')";
+    if (sqlite3_prepare_v2(db, tableSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        closeDb();
+        return state;
+    }
+
+    std::vector<std::string> tables;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (text && *text) {
+            tables.emplace_back(text);
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    for (const auto& table : tables) {
+        const std::string countSql = "SELECT COUNT(*) FROM \"" + table + "\"";
+        if (sqlite3_prepare_v2(db, countSql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            continue;
+        }
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const auto count = static_cast<std::uintmax_t>(sqlite3_column_int64(stmt, 0));
+            if (table.find("_hnsw_nodes") != std::string::npos) {
+                state.nodeRows += count;
+            } else if (table.find("_hnsw_meta") != std::string::npos) {
+                state.metaRows += count;
+            }
+        }
+        sqlite3_finalize(stmt);
+        stmt = nullptr;
+    }
+
+    closeDb();
+    return state;
+}
+
 static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
     return {
         {"dataset", metadata.dataset},
@@ -1621,6 +1697,9 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
         {"status", metadata.status},
         {"embedded_docs", metadata.embeddedDocs},
         {"vector_count", std::to_string(metadata.vectorCount)},
+        {"vector_index_ready", metadata.vectorIndexReady},
+        {"persisted_hnsw_nodes", std::to_string(metadata.persistedHnswNodes)},
+        {"persisted_hnsw_meta_rows", std::to_string(metadata.persistedHnswMetaRows)},
     };
 }
 
@@ -1643,6 +1722,7 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
     metadata.expectedQueries = j.value("expected_queries", 0);
     metadata.status = j.value("status", std::string("priming"));
     metadata.embeddedDocs = j.value("embedded_docs", 0);
+    metadata.vectorIndexReady = j.value("vector_index_ready", false);
 
     const auto fingerprintString = j.value("corpus_fingerprint", std::string("0"));
     try {
@@ -1656,6 +1736,22 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
         metadata.vectorCount = static_cast<std::uintmax_t>(std::stoull(vectorCountString));
     } catch (...) {
         metadata.vectorCount = 0;
+    }
+
+    const auto persistedNodesString = j.value("persisted_hnsw_nodes", std::string("0"));
+    try {
+        metadata.persistedHnswNodes =
+            static_cast<std::uintmax_t>(std::stoull(persistedNodesString));
+    } catch (...) {
+        metadata.persistedHnswNodes = 0;
+    }
+
+    const auto persistedMetaString = j.value("persisted_hnsw_meta_rows", std::string("0"));
+    try {
+        metadata.persistedHnswMetaRows =
+            static_cast<std::uintmax_t>(std::stoull(persistedMetaString));
+    } catch (...) {
+        metadata.persistedHnswMetaRows = 0;
     }
 
     return metadata;
@@ -1750,6 +1846,12 @@ static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCac
         return mismatch("cache status not reusable");
     }
 
+    if (!expected.vectorsDisabled && actual.status == "primed" &&
+        (!actual.vectorIndexReady || actual.persistedHnswNodes == 0 ||
+         actual.persistedHnswMetaRows == 0)) {
+        return mismatch("vector index not reusable");
+    }
+
     return true;
 }
 
@@ -1806,20 +1908,29 @@ static std::string canonicalPathOrEmpty(const fs::path& path) {
 }
 
 static BenchCacheMetadata currentBenchCacheMetadata(const BenchCacheMetadata& base,
-                                                    const yams::daemon::StatusResponse& status) {
+                                                    const yams::daemon::StatusResponse& status,
+                                                    const fs::path& dataDir) {
     BenchCacheMetadata metadata = base;
     const auto getCount = [&status](const std::string& key) -> uint64_t {
         auto it = status.requestCounts.find(key);
         return (it == status.requestCounts.end()) ? 0ULL : it->second;
     };
 
-    metadata.embeddedDocs = static_cast<int>(getCount("documents_embedded"));
-    metadata.vectorCount = static_cast<std::uintmax_t>(getCount("vector_count"));
+    metadata.embeddedDocs =
+        std::max(metadata.embeddedDocs, static_cast<int>(getCount("documents_embedded")));
+    metadata.vectorCount =
+        std::max(metadata.vectorCount, static_cast<std::uintmax_t>(getCount("vector_count")));
+
+    const auto persistedHnsw = inspectPersistedHnswState(dataDir);
+    metadata.vectorIndexReady = persistedHnsw.reusable();
+    metadata.persistedHnswNodes = persistedHnsw.nodeRows;
+    metadata.persistedHnswMetaRows = persistedHnsw.metaRows;
 
     const bool queueDrained = getCount("embed_svc_queued") == 0 && getCount("embed_in_flight") == 0;
     const bool fullCoverage =
         metadata.embeddedDocs >= metadata.expectedDocs && metadata.expectedDocs > 0;
-    metadata.status = (queueDrained && fullCoverage) ? "primed" : "partial";
+    const bool cacheIndexReady = metadata.vectorsDisabled || metadata.vectorIndexReady;
+    metadata.status = (queueDrained && fullCoverage && cacheIndexReady) ? "primed" : "partial";
     return metadata;
 }
 
@@ -4016,6 +4127,11 @@ struct BenchFixture {
                                  configPath.string());
                 } else {
                     configOut << "# Isolated benchmark config\n";
+                    configOut << "[embeddings]\n";
+                    configOut << "preferred_model = \"embeddinggemma-300m\"\n";
+                    configOut << "embedding_dim = 768\n\n";
+                    configOut << "[daemon.models]\n";
+                    configOut << "preload_models = [\"embeddinggemma-300m\"]\n";
                     configOut.close();
                     harnessOptions.configPath = configPath;
                     spdlog::info("Using isolated benchmark config: {}", configPath.string());
@@ -4185,6 +4301,9 @@ struct BenchFixture {
             warmCacheMetadataReusable ? 0 : getInitialCount("embed_svc_queued");
         const uint64_t initialEmbedInFlight =
             warmCacheMetadataReusable ? 0 : getInitialCount("embed_in_flight");
+        const PersistedHnswState initialPersistedHnsw =
+            usingExternalBenchDataDir ? inspectPersistedHnswState(*harnessOptions.dataDir)
+                                      : PersistedHnswState{};
         const bool cacheHasIndexedCorpus =
             usingExternalBenchDataDir &&
             initialIndexedDocCount >= static_cast<uint64_t>(corpusSize);
@@ -4192,16 +4311,21 @@ struct BenchFixture {
             usingExternalBenchDataDir && !vectorsDisabled &&
             initialDocsEmbedded >= static_cast<uint64_t>(corpusSize) && initialEmbedQueued == 0 &&
             initialEmbedInFlight == 0;
+        const bool cacheHasReusableVectorIndex =
+            vectorsDisabled || (usingExternalBenchDataDir && initialPersistedHnsw.reusable());
 
         if (usingExternalBenchDataDir) {
             spdlog::info("[Bench] External data dir status: indexed_docs={} embedded_docs={} "
-                         "vector_count={} embed_queue={} embed_in_flight={}{}",
+                         "vector_count={} embed_queue={} embed_in_flight={} vector_index_ready={} "
+                         "persisted_hnsw_nodes={} persisted_hnsw_meta={}{}",
                          initialIndexedDocCount, initialDocsEmbedded, initialVectorCount,
                          initialEmbedQueued, initialEmbedInFlight,
+                         (cacheHasReusableVectorIndex ? "true" : "false"),
+                         initialPersistedHnsw.nodeRows, initialPersistedHnsw.metaRows,
                          warmCacheMetadataReusable ? " (trusted metadata)" : "");
         }
 
-        if (!cacheHasFullEmbeddings) {
+        if (!(cacheHasFullEmbeddings && cacheHasReusableVectorIndex)) {
             if (cacheHasIndexedCorpus) {
                 spdlog::info("[Bench] Reusing indexed corpus from external data dir; skipping "
                              "directory ingest");
@@ -5014,15 +5138,89 @@ struct BenchFixture {
             }
 
         } else {
-            spdlog::info("[Bench] Warm data dir: skipping ingestion + embedding wait");
+            spdlog::info("[Bench] Warm data dir: skipping ingestion + embedding wait (usable "
+                         "vector index already present)");
         } // end if (!warmDataDir) / else
 
+        auto finalizeWarmCacheVectorIndex = [&]() -> bool {
+            if (warmDataDirPath.empty() || vectorsDisabled) {
+                return true;
+            }
+
+            auto persisted = inspectPersistedHnswState(warmDataDirPath);
+            if (persisted.reusable()) {
+                return true;
+            }
+
+            auto* daemon = harness ? harness->daemon() : nullptr;
+            auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+            auto vectorDb = serviceManager ? serviceManager->getVectorDatabase() : nullptr;
+            if (!vectorDb || !vectorDb->isInitialized()) {
+                spdlog::warn(
+                    "[Bench] Cannot finalize warm-cache vector index: vector DB unavailable");
+                return false;
+            }
+
+            const auto vectorRows = vectorDb->getVectorCount();
+            if (vectorRows == 0) {
+                spdlog::warn("[Bench] Cannot finalize warm-cache vector index: vector DB is empty");
+                return false;
+            }
+
+            spdlog::info(
+                "[Bench] Finalizing warm-cache vector index (vectors={} persisted_nodes={} "
+                "persisted_meta={})",
+                vectorRows, persisted.nodeRows, persisted.metaRows);
+            const auto start = std::chrono::steady_clock::now();
+            const bool optimized = vectorDb->optimizeIndex();
+            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - start)
+                                       .count();
+
+            if (!optimized) {
+                spdlog::warn("[Bench] Warm-cache vector index finalize failed after {} ms: {}",
+                             elapsedMs, vectorDb->getLastError());
+                return false;
+            }
+
+            persisted = inspectPersistedHnswState(warmDataDirPath);
+            const bool reusable = persisted.reusable();
+            daemon->state_.readiness.vectorIndexReady.store(reusable, std::memory_order_relaxed);
+            daemon->state_.readiness.vectorIndexProgress.store(
+                reusable
+                    ? 100
+                    : (daemon->state_.readiness.vectorDbReady.load(std::memory_order_relaxed) ? 50
+                                                                                              : 0),
+                std::memory_order_relaxed);
+
+            if (reusable) {
+                spdlog::info("[Bench] Warm-cache vector index finalized in {} ms "
+                             "(persisted_nodes={} persisted_meta={})",
+                             elapsedMs, persisted.nodeRows, persisted.metaRows);
+            } else {
+                spdlog::warn("[Bench] Warm-cache vector index finalize completed in {} ms but "
+                             "persisted HNSW is still unusable (persisted_nodes={} "
+                             "persisted_meta={})",
+                             elapsedMs, persisted.nodeRows, persisted.metaRows);
+            }
+
+            return reusable;
+        };
+
+        if (!finalizeWarmCacheVectorIndex()) {
+            throw std::runtime_error("Warm-cache vector index finalization failed; benchmark would "
+                                     "not produce a reusable vector cache.");
+        }
+
         if (!warmDataDirPath.empty()) {
-            auto finalCacheMetadata = expectedCacheMetadata;
+            auto finalCacheMetadata =
+                warmCacheMetadata.has_value()
+                    ? preferStrongerBenchCacheMetadata(expectedCacheMetadata, warmCacheMetadata)
+                    : expectedCacheMetadata;
             auto finalStatusForCache = yams::cli::run_sync(client->status(true), 5s);
             if (finalStatusForCache) {
-                finalCacheMetadata =
-                    currentBenchCacheMetadata(expectedCacheMetadata, finalStatusForCache.value());
+                finalCacheMetadata = currentBenchCacheMetadata(
+                    finalCacheMetadata, finalStatusForCache.value(), warmDataDirPath);
             }
             finalCacheMetadata =
                 preferStrongerBenchCacheMetadata(finalCacheMetadata, warmCacheMetadata);
@@ -5087,6 +5285,7 @@ struct BenchFixture {
             int stableReadyChecks = 0;
             bool kgReady = false;
             bool acceptedStickyInflight = false;
+            bool acceptedWarmReuseIdle = false;
             bool lastHasKg = false;
             uint32_t lastQueueDepth = 0;
             uint64_t lastPostQueued = 0;
@@ -5173,12 +5372,22 @@ struct BenchFixture {
                     stickyInflightValue = 0;
                 }
 
+                const bool reusedWarmCacheWithoutIngest =
+                    usingExternalBenchDataDir && cacheHasIndexedCorpus && cacheHasFullEmbeddings &&
+                    cacheHasReusableVectorIndex;
+                const bool warmReuseIdleReady =
+                    reusedWarmCacheWithoutIngest && queuesDrained && lastPostInflight == 0;
+
                 if (queuesDrained && kgSignalReady) {
                     stableReadyChecks++;
                     if (stableReadyChecks >= 4) {
                         kgReady = true;
                         break;
                     }
+                } else if (warmReuseIdleReady) {
+                    kgReady = true;
+                    acceptedWarmReuseIdle = true;
+                    break;
                 } else if (stickyInflightReady) {
                     kgReady = true;
                     acceptedStickyInflight = true;
@@ -5208,15 +5417,27 @@ struct BenchFixture {
             }
 
             if (!lastHasKg) {
-                spdlog::warn(
-                    "KG readiness satisfied via kg_consumed={}, but corpus_stats.has_kg=false "
-                    "(low symbol_density). Graph signals may still be weak.",
-                    lastKgConsumed);
+                if (acceptedWarmReuseIdle) {
+                    spdlog::warn(
+                        "KG readiness accepted for reused warm cache with drained queues and no "
+                        "active KG work, but corpus_stats.has_kg=false and kg_consumed={} in this "
+                        "process. Graph signals may still be weak.",
+                        lastKgConsumed);
+                } else {
+                    spdlog::warn(
+                        "KG readiness satisfied via kg_consumed={}, but corpus_stats.has_kg=false "
+                        "(low symbol_density). Graph signals may still be weak.",
+                        lastKgConsumed);
+                }
             } else if (acceptedStickyInflight) {
                 spdlog::warn(
                     "KG readiness accepted with sticky post_ingest_inflight={} after {}s grace "
                     "(queues drained + stage inflight idle + corpus_stats.has_kg=true).",
                     lastPostInflight, stickyInflightGraceSec);
+            } else if (acceptedWarmReuseIdle) {
+                spdlog::info(
+                    "KG readiness accepted for reused warm cache with drained queues and no "
+                    "active KG work");
             } else {
                 spdlog::info("KG readiness satisfied (queues drained + corpus_stats.has_kg=true)");
             }

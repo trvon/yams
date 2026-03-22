@@ -550,7 +550,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
             auto preload = kv.find("daemon.models.preload_models");
             if (preload != kv.end()) {
                 const auto& v = preload->second;
-                if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
+                if (v.find("embeddinggemma-300m") != std::string::npos) {
+                    preferred = "embeddinggemma-300m";
+                } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
                     preferred = "all-MiniLM-L6-v2";
                 } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
                     preferred = "all-mpnet-base-v2";
@@ -599,7 +601,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                     if (eq != std::string::npos) {
                         std::string v = l.substr(eq + 1);
                         trim(v);
-                        if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
+                        if (v.find("embeddinggemma-300m") != std::string::npos) {
+                            preferred = "embeddinggemma-300m";
+                        } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
                             preferred = "all-MiniLM-L6-v2";
                         } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
                             preferred = "all-mpnet-base-v2";

@@ -42,6 +42,16 @@ namespace fs = std::filesystem;
 
 namespace {
 
+size_t countOpenFds() {
+    std::error_code ec;
+    size_t count = 0;
+    for (const auto& entry : fs::directory_iterator("/dev/fd", ec)) {
+        (void)entry;
+        ++count;
+    }
+    return count;
+}
+
 class ScopedEnvVar {
 public:
     ScopedEnvVar(std::string key, std::string value) : key_(std::move(key)) {
@@ -102,8 +112,8 @@ int runCliCommand(const std::vector<std::string>& args) {
         }
         rc = cli.run(static_cast<int>(argv.size()), argv.data());
     }
-    yams::daemon::GlobalIOContext::reset();
     yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+    yams::daemon::GlobalIOContext::reset();
     return rc;
 }
 
@@ -151,12 +161,14 @@ protected:
         if (!canBindUnixSocketHere()) {
             GTEST_SKIP() << "Skipping: AF_UNIX not available in this environment.";
         }
+        GTEST_LOG_(INFO) << "UiCliExpectationsIT SetUp fds(before)=" << countOpenFds();
         sessionEnvOverride_ = std::make_unique<ScopedEnvVar>("YAMS_SESSION_CURRENT", "");
         yams::test::DaemonHarnessOptions options;
         options.isolateState = true;
         harness_ = std::make_unique<yams::test::DaemonHarness>(options);
         // Use 15s timeout for CI environments which can be slower
         ASSERT_TRUE(harness_->start(15s)) << "Failed to start daemon";
+        GTEST_LOG_(INFO) << "UiCliExpectationsIT SetUp fds(after)=" << countOpenFds();
         storageDir_ = harness_->dataDir();
         socketPath_ = harness_->socketPath();
         root_ = storageDir_.parent_path();
@@ -166,10 +178,10 @@ protected:
     }
 
     void TearDown() override {
+        GTEST_LOG_(INFO) << "UiCliExpectationsIT TearDown fds(before)=" << countOpenFds();
         harness_.reset();
-        yams::daemon::GlobalIOContext::reset();
-        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
         sessionEnvOverride_.reset();
+        GTEST_LOG_(INFO) << "UiCliExpectationsIT TearDown fds(after)=" << countOpenFds();
     }
 
     yams::daemon::ServiceManager* serviceManager() const {
@@ -1624,26 +1636,8 @@ TEST_F(UiCliExpectationsIT, HashSearchPrefixTooShortIsRejected) {
 // 5b) Search — degraded fallback structure when forced
 TEST_F(UiCliExpectationsIT, SearchDegradedFallbackStructure) {
     // Force degraded mode via environment (read by ServiceManager/SearchService)
-#if defined(_WIN32)
-    _putenv_s("YAMS_SEARCH_DEGRADED", "1");
-    _putenv_s("YAMS_SEARCH_DEGRADED_REASON", "maintenance");
-#else
-    setenv("YAMS_SEARCH_DEGRADED", "1", 1);
-    setenv("YAMS_SEARCH_DEGRADED_REASON", "maintenance", 1);
-#endif
-
-    // Scope guard to ensure cleanup happens even if test fails
-    struct EnvCleanup {
-        ~EnvCleanup() {
-#if defined(_WIN32)
-            _putenv_s("YAMS_SEARCH_DEGRADED", "");
-            _putenv_s("YAMS_SEARCH_DEGRADED_REASON", "");
-#else
-            unsetenv("YAMS_SEARCH_DEGRADED");
-            unsetenv("YAMS_SEARCH_DEGRADED_REASON");
-#endif
-        }
-    } cleanup;
+    ScopedEnvVar degradedEnv("YAMS_SEARCH_DEGRADED", "1");
+    ScopedEnvVar degradedReasonEnv("YAMS_SEARCH_DEGRADED_REASON", "maintenance");
 
     // Arrange: basic ingest
     fs::create_directories(root_ / "ingest" / "deg");

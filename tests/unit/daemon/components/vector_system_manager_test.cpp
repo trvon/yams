@@ -20,6 +20,18 @@ using namespace yams::daemon;
 
 namespace {
 
+bool tableExists(sqlite3* db, const std::string& tableName) {
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(db,
+                               "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                               -1, &stmt, nullptr) == SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, tableName.c_str(), -1, SQLITE_TRANSIENT);
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    bool exists = sqlite3_column_int64(stmt, 0) > 0;
+    sqlite3_finalize(stmt);
+    return exists;
+}
+
 struct VectorSystemManagerFixture {
     std::filesystem::path tempDir;
     std::unique_ptr<StateComponent> stateComponent;
@@ -149,6 +161,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
                 record.content = "content";
                 REQUIRE(db.insertVector(record));
             }
+            REQUIRE(db.optimizeIndex());
         }
 
         auto result = warmMgr.initializeOnce(tempDir);
@@ -160,6 +173,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
 
         sqlite3* rawDb = nullptr;
         REQUIRE(sqlite3_open((tempDir / "vectors.db").string().c_str(), &rawDb) == SQLITE_OK);
+        REQUIRE(tableExists(rawDb, "vectors_64_hnsw_nodes"));
 
         sqlite3_stmt* stmt = nullptr;
         REQUIRE(sqlite3_prepare_v2(rawDb, "SELECT COUNT(*) FROM vectors_64_hnsw_nodes", -1, &stmt,
@@ -167,6 +181,47 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
         CHECK(sqlite3_column_int64(stmt, 0) > 0);
         sqlite3_finalize(stmt);
+        sqlite3_close(rawDb);
+    }
+
+    SECTION("initializeOnce does not block on rebuilding missing persisted search index") {
+        auto warmDeps = makeDeps();
+        warmDeps.getEmbeddingDimension = []() { return static_cast<size_t>(64); };
+        VectorSystemManager warmMgr(warmDeps);
+
+        yams::vector::VectorDatabaseConfig cfg;
+        cfg.database_path = (tempDir / "vectors.db").string();
+        cfg.embedding_dim = 64;
+
+        {
+            yams::vector::VectorDatabase db(cfg);
+            REQUIRE(db.initialize());
+
+            std::vector<float> embedding(64, 0.0f);
+            embedding[0] = 1.0f;
+
+            for (int i = 0; i < 64; ++i) {
+                yams::vector::VectorRecord record;
+                record.chunk_id = "chunk_unpersisted_" + std::to_string(i);
+                record.document_hash = "doc_unpersisted_" + std::to_string(i);
+                record.embedding = embedding;
+                record.content = "content";
+                REQUIRE(db.insertVector(record));
+            }
+            CHECK_FALSE(db.hasReusablePersistedSearchIndex());
+        }
+
+        auto result = warmMgr.initializeOnce(tempDir);
+        REQUIRE(result.has_value());
+        REQUIRE(warmMgr.getVectorDatabase() != nullptr);
+        CHECK(stateComponent->readiness.vectorDbReady.load());
+        CHECK_FALSE(stateComponent->readiness.vectorIndexReady.load());
+        CHECK(stateComponent->readiness.vectorIndexProgress.load() == 50);
+
+        sqlite3* rawDb = nullptr;
+        REQUIRE(sqlite3_open((tempDir / "vectors.db").string().c_str(), &rawDb) == SQLITE_OK);
+        CHECK_FALSE(tableExists(rawDb, "vectors_64_hnsw_nodes"));
+
         sqlite3_close(rawDb);
     }
 }

@@ -40,6 +40,18 @@
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
+namespace {
+size_t countOpenFds() {
+    std::error_code ec;
+    size_t count = 0;
+    for (const auto& entry : fs::directory_iterator("/dev/fd", ec)) {
+        (void)entry;
+        ++count;
+    }
+    return count;
+}
+} // namespace
+
 /**
  * @brief Test harness for content extraction integration tests
  */
@@ -52,6 +64,10 @@ protected:
     void SetUp() override {
         // Skip on Windows - daemon IPC tests are unstable there
         SKIP_DAEMON_TEST_ON_WINDOWS();
+
+        GTEST_LOG_(INFO) << "ContentExtractionIT SetUp fds(before)=" << countOpenFds();
+        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+        yams::daemon::GlobalIOContext::reset();
 
         // Start daemon
         yams::test::DaemonHarnessOptions options;
@@ -68,18 +84,19 @@ protected:
         cfg.socketPath = harness_->socketPath();
         cfg.autoStart = false;
         client_ = std::make_unique<yams::daemon::DaemonClient>(cfg);
+        GTEST_LOG_(INFO) << "ContentExtractionIT SetUp fds(after)=" << countOpenFds();
     }
 
     void TearDown() override {
+        GTEST_LOG_(INFO) << "ContentExtractionIT TearDown fds(before)=" << countOpenFds();
         client_.reset();
         harness_.reset();
-        yams::daemon::GlobalIOContext::reset();
-        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
         // Cleanup test files
         if (fs::exists(testFilesDir_)) {
             std::error_code ec;
             fs::remove_all(testFilesDir_, ec);
         }
+        GTEST_LOG_(INFO) << "ContentExtractionIT TearDown fds(after)=" << countOpenFds();
     }
 
     /**

@@ -305,10 +305,15 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     const auto rows = vdb->getVectorCount();
                     vectorDbReady = (rows > 0);
                     if (vectorDbReady) {
-                        vectorIndexReady = vdb->prepareSearchIndex();
-                        if (!vectorIndexReady) {
-                            spdlog::warn("[VectorInit] prepareSearchIndex failed: {}",
-                                         vdb->getLastError());
+                        if (vdb->hasReusablePersistedSearchIndex()) {
+                            vectorIndexReady = vdb->prepareSearchIndex();
+                            if (!vectorIndexReady) {
+                                spdlog::warn("[VectorInit] prepareSearchIndex failed: {}",
+                                             vdb->getLastError());
+                            }
+                        } else {
+                            spdlog::info("[VectorInit] persisted HNSW absent; deferring index "
+                                         "build until checkpoint/query path");
                         }
                     }
                 } catch (...) {

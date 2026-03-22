@@ -154,6 +154,11 @@ public:
     virtual Result<void> prepareSearchIndex() = 0;
 
     /**
+     * @brief Check whether a reusable persisted search index already exists.
+     */
+    virtual Result<bool> hasReusablePersistedSearchIndex() = 0;
+
+    /**
      * @brief Optimize storage and indices
      */
     virtual Result<void> optimize() = 0;

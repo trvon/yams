@@ -229,11 +229,7 @@ public:
         fixtures_ = std::make_unique<yams::test::FixtureManager>(testRoot_ / "fixtures");
 
         // Ensure test daemon never kills any existing user/system daemon
-#if defined(_WIN32)
-        _putenv_s("YAMS_DAEMON_KILL_OTHERS", "0");
-#else
-        setenv("YAMS_DAEMON_KILL_OTHERS", "0", 1);
-#endif
+        killOthersEnv_.emplace("YAMS_DAEMON_KILL_OTHERS", "0");
 
         harness_ = std::make_unique<yams::test::DaemonHarness>();
     }
@@ -245,9 +241,6 @@ public:
             harness_->stop();
             harness_.reset();
         }
-
-        yams::daemon::GlobalIOContext::reset();
-        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
 
         fixtures_.reset();
 
@@ -273,6 +266,7 @@ public:
     fs::path testRoot_;
     fs::path socketPath_;
     fs::path storageDir_;
+    std::optional<EnvGuard> killOthersEnv_;
     std::unique_ptr<yams::test::DaemonHarness> harness_;
     std::unique_ptr<yams::test::FixtureManager> fixtures_;
 };

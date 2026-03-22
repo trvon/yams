@@ -1603,6 +1603,23 @@ public:
         return Result<void>{};
     }
 
+    Result<bool> hasReusablePersistedSearchIndex() {
+        std::shared_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        const auto persistedDims = discoverPersistedHnswDimsUnlocked();
+        for (size_t dim : persistedDims) {
+            if (hasPersistedHnswNodesUnlocked(dim)) {
+                return Result<bool>(true);
+            }
+        }
+
+        return Result<bool>(false);
+    }
+
     HnswMaintenanceMode testingLastHnswMaintenanceMode() const {
         std::shared_lock lock(mutex_);
         return last_hnsw_maintenance_mode_;
@@ -1623,6 +1640,21 @@ public:
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        size_t totalVectors = 0;
+        if (stmt_count_) {
+            sqlite3_reset(stmt_count_);
+            StmtResetGuard guard(stmt_count_);
+            if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
+                totalVectors = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
+            }
+        }
+
+        if (!anyHnswHasData() && (totalVectors > 0 || hasCatchUpSourceUnlocked())) {
+            spdlog::info("[HNSW] optimize preparing search index before checkpoint (vectors={})",
+                         totalVectors);
+            ensureHnswLoadedUnlocked();
         }
 
         // Compact all HNSW indices if needed (lower threshold for explicit optimize)
@@ -3638,6 +3670,10 @@ Result<void> SqliteVecBackend::buildIndex() {
 
 Result<void> SqliteVecBackend::prepareSearchIndex() {
     return impl_->prepareSearchIndex();
+}
+
+Result<bool> SqliteVecBackend::hasReusablePersistedSearchIndex() {
+    return impl_->hasReusablePersistedSearchIndex();
 }
 
 Result<void> SqliteVecBackend::optimize() {

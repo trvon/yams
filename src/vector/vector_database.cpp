@@ -762,6 +762,21 @@ public:
         }
     }
 
+    bool hasReusablePersistedSearchIndex() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return false;
+        }
+
+        try {
+            auto result = backend_->hasReusablePersistedSearchIndex();
+            return result && result.value();
+        } catch (...) {
+            return false;
+        }
+    }
+
     bool optimizeIndex() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
@@ -1039,6 +1054,10 @@ bool VectorDatabase::buildIndex() {
 bool VectorDatabase::prepareSearchIndex() {
     YAMS_ZONE_SCOPED_N("VectorDB::prepareSearchIndex");
     return pImpl->prepareSearchIndex();
+}
+
+bool VectorDatabase::hasReusablePersistedSearchIndex() const {
+    return pImpl->hasReusablePersistedSearchIndex();
 }
 
 bool VectorDatabase::optimizeIndex() {

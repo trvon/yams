@@ -37,6 +37,18 @@
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
+namespace {
+size_t countOpenFds() {
+    std::error_code ec;
+    size_t count = 0;
+    for (const auto& entry : fs::directory_iterator("/dev/fd", ec)) {
+        (void)entry;
+        ++count;
+    }
+    return count;
+}
+} // namespace
+
 class GrepServiceExpectationsIT : public ::testing::Test {
 protected:
     fs::path root_;
@@ -68,6 +80,9 @@ protected:
         if (!canBindUnixSocketHere()) {
             GTEST_SKIP() << "Skipping: AF_UNIX not available in this environment.";
         }
+        GTEST_LOG_(INFO) << "GrepServiceExpectationsIT SetUp fds(before)=" << countOpenFds();
+        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+        yams::daemon::GlobalIOContext::reset();
         auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         root_ = fs::temp_directory_path() / ("yams_grep_it_" + unique);
         storageDir_ = root_ / "storage";
@@ -100,9 +115,11 @@ protected:
         }
         // Additional settling time
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        GTEST_LOG_(INFO) << "GrepServiceExpectationsIT SetUp fds(after)=" << countOpenFds();
     }
 
     void TearDown() override {
+        GTEST_LOG_(INFO) << "GrepServiceExpectationsIT TearDown fds(before)=" << countOpenFds();
         if (daemon_) {
             daemon_->stop();
             if (runLoopThread_.joinable()) {
@@ -111,10 +128,11 @@ protected:
         }
         // Ensure global client pools are torn down between tests to avoid FD leaks across
         // long integration runs.
-        yams::daemon::GlobalIOContext::reset();
         yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+        yams::daemon::GlobalIOContext::reset();
         std::error_code ec;
         fs::remove_all(root_, ec);
+        GTEST_LOG_(INFO) << "GrepServiceExpectationsIT TearDown fds(after)=" << countOpenFds();
     }
 };
 

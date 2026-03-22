@@ -207,6 +207,7 @@ public:
     // Index management
     bool buildIndex();
     bool prepareSearchIndex();
+    bool hasReusablePersistedSearchIndex() const;
     bool optimizeIndex();
     void compactDatabase();
     bool rebuildIndex();

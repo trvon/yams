@@ -70,8 +70,8 @@ public:
     ~SyncIndexingFixture() {
         client_.reset();
         harness_.reset();
-        yams::daemon::GlobalIOContext::reset();
         yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+        yams::daemon::GlobalIOContext::reset();
     }
 
     // Helper: create a test file with content
