@@ -7,55 +7,7 @@ if get_option('enable-tsan')
   services_stress_iters = '20'
 endif
 
-# GTest-based services integration suite (multi-test binary)
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and gtest_dep.found()
-  services_integration_srcs = files(
-    'ipc_conformance_test.cpp',
-    'ui_cli_expectations_test.cpp',
-    'grep_service_expectations_test.cpp',
-    'sync_indexing_test.cpp',
-    'content_extraction_test.cpp',
-  )
-
-  services_integ_exe = executable('yams_integration_services_tests', services_integration_srcs + files('../../test_main.cpp'),
-    include_directories: incs,
-    dependencies: [gtest_dep, test_deps],
-    cpp_args: ['-DYAMS_TESTING=1'],
-    install: false,
-  )
-
-  test('integration_services', services_integ_exe,
-    suite: ['integration', 'isolated'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_STRESS_ITERS': services_stress_iters,
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'TSAN_OPTIONS': _test_tsan_options,
-    },
-    is_parallel: false,
-    timeout: get_option('integration-timeout'),
-  )
-
-  # Custom shard for UI/CLI expectations at the services layer
-  test('integration_ui', services_integ_exe,
-    suite: ['integration', 'ui'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_STRESS_ITERS': services_stress_iters,
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'TSAN_OPTIONS': _test_tsan_options,
-    },
-    is_parallel: false,
-    timeout: get_option('integration-ui-timeout'),
-    args: ['--gtest_filter=UiCliExpectationsIT.*:GrepServiceExpectationsIT.*']
-  )
-elif get_option('enable-integration-tests')
-  if not gtest_dep.found()
-    message('integration_services suite disabled (GTest not found).')
-  else
-    message('integration_services suite disabled (enable with -Denable-integration-services=true).')
-  endif
-endif
+# integration_services is now Catch2-only; legacy GTest suite removed.
 
 # Catch2 migration: Retrieval and Ingestion service tests (uses DaemonHarness)
 if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
@@ -115,18 +67,20 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     install: false,
   )
 
-  test('ui_cli_expectations_catch2', catch2_ui_cli_expectations_exe,
-    suite: ['catch2', 'integration', 'services', 'ui'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_STRESS_ITERS': services_stress_iters,
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'TSAN_OPTIONS': _test_tsan_options,
-    },
-    is_parallel: false,
-    timeout: get_option('integration-ui-timeout'),
-    args: ['--allow-running-no-tests'],
-  )
+  foreach ui_batch : ['batch1', 'batch2', 'batch3a', 'batch3b', 'batch3c', 'batch3d']
+    test('ui_cli_expectations_catch2_' + ui_batch, catch2_ui_cli_expectations_exe,
+      suite: ['catch2', 'integration', 'services', 'ui'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_STRESS_ITERS': services_stress_iters,
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'TSAN_OPTIONS': _test_tsan_options,
+      },
+      is_parallel: false,
+      timeout: get_option('integration-ui-timeout'),
+      args: ['[ui-cli][' + ui_batch + ']', '--allow-running-no-tests'],
+    )
+  endforeach
 endif
 
 # Catch2 migration: grep service expectations
@@ -141,6 +95,54 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
 
   test('grep_service_expectations_catch2', catch2_grep_service_expectations_exe,
     suite: ['catch2', 'integration', 'services', 'grep'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_STRESS_ITERS': services_stress_iters,
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'TSAN_OPTIONS': _test_tsan_options,
+    },
+    is_parallel: false,
+    timeout: get_option('integration-ui-timeout'),
+    args: ['--allow-running-no-tests'],
+  )
+endif
+
+# Catch2 migration: content extraction service tests
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+  catch2_content_extraction_exe = executable('catch2_content_extraction',
+    files('content_extraction_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: ['-DYAMS_TESTING=1'],
+    install: false,
+  )
+
+  test('content_extraction_catch2', catch2_content_extraction_exe,
+    suite: ['catch2', 'integration', 'services', 'content'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_STRESS_ITERS': services_stress_iters,
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'TSAN_OPTIONS': _test_tsan_options,
+    },
+    is_parallel: false,
+    timeout: get_option('integration-ui-timeout'),
+    args: ['--allow-running-no-tests'],
+  )
+endif
+
+# Catch2 migration: IPC conformance service tests
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+  catch2_ipc_conformance_exe = executable('catch2_ipc_conformance',
+    files('ipc_conformance_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: ['-DYAMS_TESTING=1'],
+    install: false,
+  )
+
+  test('ipc_conformance_catch2', catch2_ipc_conformance_exe,
+    suite: ['catch2', 'integration', 'services', 'ipc'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_STRESS_ITERS': services_stress_iters,

@@ -1258,8 +1258,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     const size_t userLimit =
         params.limit > 0 ? static_cast<size_t>(params.limit) : workingConfig.maxResults;
-    const size_t autoFusionLimit =
-        std::max(userLimit, std::max(workingConfig.rerankTopK, workingConfig.graphRerankTopN));
+    const size_t semanticRescueProbeWindow =
+        workingConfig.semanticRescueSlots > 0
+            ? std::max<size_t>(200, workingConfig.semanticRescueSlots * 100)
+            : size_t(0);
+    const size_t autoFusionLimit = std::max(
+        userLimit, std::max(std::max(workingConfig.rerankTopK, workingConfig.graphRerankTopN),
+                            workingConfig.rerankTopK + semanticRescueProbeWindow));
     const size_t fusionCandidateLimit = workingConfig.fusionCandidateLimit > 0
                                             ? workingConfig.fusionCandidateLimit
                                             : autoFusionLimit;
@@ -2634,7 +2639,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("reranking");
         traceCollector.markStageAttempted("reranker");
         const auto rerankStart = std::chrono::steady_clock::now();
-        const size_t rerankWindow = std::min(workingConfig.rerankTopK, response.results.size());
+        const size_t rerankProbeWindow =
+            workingConfig.semanticRescueSlots > 0
+                ? std::max(workingConfig.rerankTopK,
+                           workingConfig.rerankTopK +
+                               std::max<size_t>(200, workingConfig.semanticRescueSlots * 100))
+                : workingConfig.rerankTopK;
+        const size_t rerankWindow = std::min(rerankProbeWindow, response.results.size());
 
         if (workingConfig.useScoreBasedReranking && rerankWindow > 1) {
             std::stable_sort(response.results.begin(),
@@ -2682,15 +2693,92 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
 
             // Extract document snippets for reranking.
-            // Fallback: if snippet is empty (e.g. BEIR/benchmark data where
-            // VectorRecord::content is not populated), read from the source file.
+            // Fallback order: fused snippet -> metadata content preview -> source file.
+            // Metadata preview is preferred because benchmark/warm-cache file paths may
+            // point at transient ingestion paths that no longer exist.
             std::vector<std::string> snippets;
-            std::vector<size_t> rerankIndices;
+            std::vector<size_t> rerankEligibleIndices;
             snippets.reserve(rerankWindow);
-            rerankIndices.reserve(rerankWindow);
+            rerankEligibleIndices.reserve(rerankWindow);
+
+            std::unordered_map<size_t, std::string> metadataPreviewByIndex;
+            if (metadataRepo_ && rerankWindow > 0) {
+                std::unordered_map<std::string, std::vector<size_t>> hashToIndices;
+                hashToIndices.reserve(rerankWindow);
+                for (size_t i = 0; i < rerankWindow; ++i) {
+                    const bool snippetLooksLikePath =
+                        !response.results[i].snippet.empty() &&
+                        response.results[i].snippet == response.results[i].document.filePath;
+                    if (!response.results[i].snippet.empty() && !snippetLooksLikePath) {
+                        continue;
+                    }
+                    const std::string& hash = response.results[i].document.sha256Hash;
+                    if (!hash.empty()) {
+                        hashToIndices[hash].push_back(i);
+                    }
+                }
+
+                if (!hashToIndices.empty()) {
+                    std::vector<std::string> hashes;
+                    hashes.reserve(hashToIndices.size());
+                    for (const auto& [hash, _] : hashToIndices) {
+                        hashes.push_back(hash);
+                    }
+
+                    auto docMapResult = metadataRepo_->batchGetDocumentsByHash(hashes);
+                    if (docMapResult) {
+                        const size_t previewLimit = workingConfig.rerankSnippetMaxChars + 64;
+                        std::vector<int64_t> docIds;
+                        std::unordered_map<int64_t, std::vector<size_t>> docIdToIndices;
+                        docIds.reserve(docMapResult.value().size());
+                        docIdToIndices.reserve(docMapResult.value().size());
+
+                        for (const auto& [hash, docInfo] : docMapResult.value()) {
+                            if (docInfo.id <= 0) {
+                                continue;
+                            }
+                            auto it = hashToIndices.find(hash);
+                            if (it == hashToIndices.end()) {
+                                continue;
+                            }
+                            docIds.push_back(docInfo.id);
+                            docIdToIndices.emplace(docInfo.id, it->second);
+                        }
+
+                        if (!docIds.empty()) {
+                            auto previewResult = metadataRepo_->batchGetContentPreview(
+                                docIds, static_cast<int>(previewLimit), 0);
+                            if (previewResult) {
+                                metadataPreviewByIndex.reserve(rerankWindow);
+                                for (const auto& [docId, preview] : previewResult.value()) {
+                                    if (preview.empty()) {
+                                        continue;
+                                    }
+                                    auto indicesIt = docIdToIndices.find(docId);
+                                    if (indicesIt == docIdToIndices.end()) {
+                                        continue;
+                                    }
+                                    for (size_t idx : indicesIt->second) {
+                                        metadataPreviewByIndex[idx] = preview;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             for (size_t i = 0; i < rerankWindow; ++i) {
                 std::string text;
-                if (!response.results[i].snippet.empty()) {
+                const bool snippetLooksLikePath =
+                    !response.results[i].snippet.empty() &&
+                    response.results[i].snippet == response.results[i].document.filePath;
+                if (!response.results[i].snippet.empty() && !snippetLooksLikePath) {
+                    text = response.results[i].snippet;
+                } else if (auto it = metadataPreviewByIndex.find(i);
+                           it != metadataPreviewByIndex.end()) {
+                    text = it->second;
+                } else if (!response.results[i].snippet.empty()) {
                     text = response.results[i].snippet;
                 } else if (!response.results[i].document.filePath.empty()) {
                     // Fallback: read content from source file on disk
@@ -2711,7 +2799,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
                 if (!text.empty()) {
                     snippets.push_back(truncateSnippet(text, workingConfig.rerankSnippetMaxChars));
-                    rerankIndices.push_back(i);
+                    rerankEligibleIndices.push_back(i);
                 } else {
                     spdlog::debug("[reranker] Skipping doc {} (no snippet or file content)", i);
                 }
@@ -2752,8 +2840,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                       maxRerankScore, effectiveWeight, workingConfig.rerankWeight);
                     }
 
-                    for (size_t i = 0; i < scores.size() && i < rerankIndices.size(); ++i) {
-                        const size_t idx = rerankIndices[i];
+                    for (size_t i = 0; i < scores.size() && i < rerankEligibleIndices.size(); ++i) {
+                        const size_t idx = rerankEligibleIndices[i];
                         double originalScore = response.results[idx].score;
                         double rerankScore = static_cast<double>(scores[i]);
 
@@ -2999,34 +3087,147 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
+    const auto lexicalAnchorScore = [](const SearchResult& r) {
+        return r.keywordScore.value_or(0.0) + r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) +
+               r.symbolScore.value_or(0.0);
+    };
+
+    const auto docIdForResult = [](const SearchResult& result) {
+        return documentIdForTrace(result.document.filePath, result.document.sha256Hash);
+    };
+
+    const double semanticRescueMinVectorScore =
+        std::max(0.0, static_cast<double>(workingConfig.semanticRescueMinVectorScore));
+
+    const auto semanticRescueSignalForResult =
+        [&preFusionSignals,
+         &docIdForResult](const SearchResult& result) -> const PreFusionDocSignal* {
+        const std::string docId = docIdForResult(result);
+        if (docId.empty()) {
+            return nullptr;
+        }
+        auto it = preFusionSignals.find(docId);
+        return it != preFusionSignals.end() ? &it->second : nullptr;
+    };
+
+    const auto isFinalSemanticRescueCandidate =
+        [&lexicalAnchorScore, &semanticRescueSignalForResult,
+         semanticRescueMinVectorScore](const SearchResult& result) {
+            const auto* signal = semanticRescueSignalForResult(result);
+            return signal != nullptr && !signal->hasAnchoring && signal->hasVector &&
+                   signal->maxVectorRaw >= semanticRescueMinVectorScore &&
+                   lexicalAnchorScore(result) <= 0.0;
+        };
+
+    const auto finalSemanticRescueBetter = [&semanticRescueSignalForResult, &docIdForResult](
+                                               const SearchResult& a, const SearchResult& b) {
+        const bool rerankCoveredA = a.rerankerScore.has_value();
+        const bool rerankCoveredB = b.rerankerScore.has_value();
+        if (rerankCoveredA != rerankCoveredB) {
+            return rerankCoveredA;
+        }
+
+        const double rerankA = a.rerankerScore.value_or(-1.0);
+        const double rerankB = b.rerankerScore.value_or(-1.0);
+        if (rerankA != rerankB) {
+            return rerankA > rerankB;
+        }
+
+        const auto* signalA = semanticRescueSignalForResult(a);
+        const auto* signalB = semanticRescueSignalForResult(b);
+        const double rawVectorA = signalA != nullptr ? signalA->maxVectorRaw : 0.0;
+        const double rawVectorB = signalB != nullptr ? signalB->maxVectorRaw : 0.0;
+        if (rawVectorA != rawVectorB) {
+            return rawVectorA > rawVectorB;
+        }
+
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+
+        return docIdForResult(a) < docIdForResult(b);
+    };
+
+    std::vector<std::string> semanticRescuePromotedDocIds;
+    std::vector<std::string> semanticRescueDisplacedDocIds;
+
     // Enforce user-visible limit after all post-fusion stages have had a chance to reorder/boost.
     if (response.results.size() > userLimit) {
         std::partial_sort(
             response.results.begin(), response.results.begin() + static_cast<ptrdiff_t>(userLimit),
             response.results.end(),
             [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+
+        if (workingConfig.semanticRescueSlots > 0 && userLimit > 0) {
+            const size_t finalWindow = std::min(userLimit, response.results.size());
+            const size_t rescueTarget = std::min(workingConfig.semanticRescueSlots, finalWindow);
+            size_t rescuePresent = 0;
+            for (size_t i = 0; i < finalWindow; ++i) {
+                if (isFinalSemanticRescueCandidate(response.results[i])) {
+                    rescuePresent++;
+                }
+            }
+
+            while (rescuePresent < rescueTarget) {
+                size_t bestTailIndex = response.results.size();
+                for (size_t i = finalWindow; i < response.results.size(); ++i) {
+                    if (!isFinalSemanticRescueCandidate(response.results[i])) {
+                        continue;
+                    }
+                    if (bestTailIndex >= response.results.size() ||
+                        finalSemanticRescueBetter(response.results[i],
+                                                  response.results[bestTailIndex])) {
+                        bestTailIndex = i;
+                    }
+                }
+                if (bestTailIndex >= response.results.size()) {
+                    break;
+                }
+
+                size_t victimIndex = finalWindow;
+                for (size_t i = finalWindow; i > 0; --i) {
+                    const size_t idx = i - 1;
+                    if (!isFinalSemanticRescueCandidate(response.results[idx])) {
+                        victimIndex = idx;
+                        break;
+                    }
+                }
+                if (victimIndex >= finalWindow) {
+                    break;
+                }
+
+                const std::string promotedId = docIdForResult(response.results[bestTailIndex]);
+                const std::string displacedId = docIdForResult(response.results[victimIndex]);
+                if (!promotedId.empty()) {
+                    semanticRescuePromotedDocIds.push_back(promotedId);
+                }
+                if (!displacedId.empty()) {
+                    semanticRescueDisplacedDocIds.push_back(displacedId);
+                }
+
+                std::swap(response.results[victimIndex], response.results[bestTailIndex]);
+                rescuePresent++;
+            }
+
+            std::sort(
+                response.results.begin(),
+                response.results.begin() + static_cast<ptrdiff_t>(finalWindow),
+                [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+        }
+
         response.results.resize(userLimit);
     }
-
-    const auto lexicalAnchorScore = [](const SearchResult& r) {
-        return r.keywordScore.value_or(0.0) + r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) +
-               r.symbolScore.value_or(0.0);
-    };
 
     size_t semanticRescueFinalCount = 0;
     std::vector<std::string> semanticRescueFinalDocIds;
     if (workingConfig.semanticRescueSlots > 0 && !response.results.empty()) {
-        const double minVectorScore =
-            std::max(0.0, static_cast<double>(workingConfig.semanticRescueMinVectorScore));
         for (const auto& result : response.results) {
-            const std::string docId =
-                documentIdForTrace(result.document.filePath, result.document.sha256Hash);
-            auto signalIt = preFusionSignals.find(docId);
-            if (signalIt != preFusionSignals.end() && !signalIt->second.hasAnchoring &&
-                signalIt->second.hasVector && signalIt->second.maxVectorRaw >= minVectorScore &&
-                lexicalAnchorScore(result) <= 0.0) {
+            if (isFinalSemanticRescueCandidate(result)) {
                 semanticRescueFinalCount++;
-                semanticRescueFinalDocIds.push_back(docId);
+                const std::string docId = docIdForResult(result);
+                if (!docId.empty()) {
+                    semanticRescueFinalDocIds.push_back(docId);
+                }
             }
         }
     }
@@ -3044,6 +3245,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["semantic_rescue_target"] = std::to_string(semanticRescueTarget);
     response.debugStats["semantic_rescue_final_count"] = std::to_string(semanticRescueFinalCount);
     response.debugStats["semantic_rescue_final_doc_ids"] = joinWithTab(semanticRescueFinalDocIds);
+    response.debugStats["semantic_rescue_promoted_doc_ids"] =
+        joinWithTab(semanticRescuePromotedDocIds);
+    response.debugStats["semantic_rescue_displaced_doc_ids"] =
+        joinWithTab(semanticRescueDisplacedDocIds);
     response.debugStats["semantic_rescue_rate"] = fmt::format("{:.3f}", semanticRescueRate);
     response.debugStats["multi_vector_generated_phrases"] =
         std::to_string(multiVectorGeneratedPhrases);

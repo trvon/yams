@@ -1232,10 +1232,20 @@ void ServiceManager::shutdown() {
         spdlog::warn("[ServiceManager] Phase 6.9: Exception during plugin unloading");
     }
 
-    // Release repo/content holders before pool shutdown so outstanding shared_ptr owners do not
+    // Release DB-owning service graph before pool shutdown so outstanding shared_ptr owners do not
     // keep old SQLite handles alive across daemon cycles.
     spdlog::info("[ServiceManager] Phase 6.9.5: Releasing repo/content holders before DB shutdown");
     storeMetadataRepo(std::shared_ptr<metadata::MetadataRepository>{});
+    storeKgStore(std::shared_ptr<metadata::KnowledgeGraphStore>{});
+    storeGraphComponent(std::shared_ptr<GraphComponent>{});
+    {
+        std::unique_lock lk(searchEngineMutex_);
+        std::atomic_store_explicit(&searchEngine_, std::shared_ptr<search::SearchEngine>{},
+                                   std::memory_order_release);
+    }
+    searchEngineManager_.clearEngine();
+    std::atomic_store_explicit(&vectorDatabase_, std::shared_ptr<vector::VectorDatabase>{},
+                               std::memory_order_release);
     std::atomic_store_explicit(&contentStore_, std::shared_ptr<api::IContentStore>{},
                                std::memory_order_release);
     searchComponent_.reset();

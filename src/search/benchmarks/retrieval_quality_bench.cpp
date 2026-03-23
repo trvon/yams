@@ -4107,8 +4107,8 @@ struct BenchFixture {
         }
 
         if (!vectorsDisabled) {
-            bool resetPluginTrustFile = false;
-            bool useIsolatedBenchmarkConfig = false;
+            bool resetPluginTrustFile = harnessOptions.dataDir.has_value();
+            bool useIsolatedBenchmarkConfig = true;
             const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");
             if (envPluginDir) {
                 harnessOptions.pluginDir = fs::path(envPluginDir);
@@ -4121,7 +4121,7 @@ struct BenchFixture {
                 const fs::path localOnnxPlugin =
                     localPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
 
-                const fs::path root = cwd.parent_path();
+                const fs::path root = cwd;
                 const fs::path nosanPluginDir = root / "builddir-nosan" / "plugins";
                 const fs::path nosanOnnxPlugin =
                     nosanPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
@@ -4129,7 +4129,13 @@ struct BenchFixture {
                 const fs::path defaultOnnxPlugin =
                     defaultPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
 
-                if (fs::exists(installedOnnxPlugin)) {
+                if (fs::exists(localOnnxPlugin)) {
+                    harnessOptions.pluginDir = localOnnxPlugin.parent_path();
+                } else if (fs::exists(defaultOnnxPlugin)) {
+                    harnessOptions.pluginDir = defaultOnnxPlugin.parent_path();
+                } else if (fs::exists(nosanOnnxPlugin)) {
+                    harnessOptions.pluginDir = nosanOnnxPlugin.parent_path();
+                } else if (fs::exists(installedOnnxPlugin)) {
                     const fs::path stagedPluginDir =
                         fs::temp_directory_path() / "yams_retrieval_bench_plugins";
                     const fs::path stagedOnnxPlugin =
@@ -4157,18 +4163,10 @@ struct BenchFixture {
                             harnessOptions.pluginDir = installedPluginDir;
                         } else {
                             harnessOptions.pluginDir = stagedPluginDir;
-                            resetPluginTrustFile = true;
-                            useIsolatedBenchmarkConfig = true;
                             spdlog::info("Using isolated installed ONNX plugin dir: {}",
                                          stagedPluginDir.string());
                         }
                     }
-                } else if (fs::exists(localOnnxPlugin)) {
-                    harnessOptions.pluginDir = localOnnxPlugin.parent_path();
-                } else if (fs::exists(nosanOnnxPlugin)) {
-                    harnessOptions.pluginDir = nosanOnnxPlugin.parent_path();
-                } else if (fs::exists(defaultOnnxPlugin)) {
-                    harnessOptions.pluginDir = defaultOnnxPlugin.parent_path();
                 } else if (fs::exists(localPluginDir)) {
                     harnessOptions.pluginDir = localPluginDir;
                 } else if (fs::exists(nosanPluginDir)) {
@@ -4203,13 +4201,17 @@ struct BenchFixture {
 
             if (resetPluginTrustFile && harnessOptions.dataDir) {
                 const fs::path trustFile = *harnessOptions.dataDir / "plugins.trust";
-                std::error_code ec;
-                fs::remove(trustFile, ec);
-                if (ec && ec != std::errc::no_such_file_or_directory) {
-                    spdlog::warn("Failed to reset plugin trust file {}: {}", trustFile.string(),
-                                 ec.message());
-                } else if (!ec) {
-                    spdlog::info("Reset plugin trust file for isolated benchmark plugins: {}",
+                std::ofstream trustOut(trustFile, std::ios::trunc);
+                if (!trustOut) {
+                    spdlog::warn("Failed to rewrite plugin trust file {}", trustFile.string());
+                } else {
+                    trustOut << "# YAMS Plugin Trust List\n";
+                    trustOut << "# One plugin path per line\n";
+                    if (harnessOptions.pluginDir) {
+                        trustOut << harnessOptions.pluginDir->string() << "\n";
+                    }
+                    trustOut.close();
+                    spdlog::info("Rewrote plugin trust file for isolated benchmark plugins: {}",
                                  trustFile.string());
                 }
             }
@@ -4223,6 +4225,14 @@ struct BenchFixture {
                                  configPath.string());
                 } else {
                     configOut << "# Isolated benchmark config\n";
+                    if (harnessOptions.dataDir) {
+                        configOut << "[core]\n";
+                        configOut << "data_dir = \"" << harnessOptions.dataDir->string()
+                                  << "\"\n\n";
+                        configOut << "[storage]\n";
+                        configOut << "base_path = \"" << harnessOptions.dataDir->string()
+                                  << "\"\n\n";
+                    }
                     configOut << "[embeddings]\n";
                     configOut << "preferred_model = \"embeddinggemma-300m\"\n";
                     configOut << "embedding_dim = 768\n\n";

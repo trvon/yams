@@ -411,6 +411,17 @@ public:
             throw std::runtime_error("Failed to insert test document");
         }
 
+        yams::metadata::DocumentContent storedContent;
+        storedContent.documentId = idRes.value();
+        storedContent.contentText = content;
+        storedContent.contentLength = static_cast<int64_t>(content.size());
+        storedContent.extractionMethod = "test";
+        storedContent.language = "en";
+        auto contentRes = repo_->insertContent(storedContent);
+        if (!contentRes) {
+            throw std::runtime_error("Failed to insert test document content");
+        }
+
         auto indexRes = repo_->indexDocumentContent(idRes.value(), title, content, "text/plain");
         if (!indexRes) {
             throw std::runtime_error("Failed to index test document content");
@@ -470,6 +481,49 @@ TEST_CASE("SearchEngine: reranker not-implemented errors enter cooldown",
     CHECK(std::find(second.value().skippedComponents.begin(),
                     second.value().skippedComponents.end(),
                     "reranker") != second.value().skippedComponents.end());
+}
+
+TEST_CASE("SearchEngine: reranker falls back to metadata content preview",
+          "[search][reranker][metadata-preview]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string filePath = "/tmp/reranker_preview_doc.md";
+    const std::string hash = "HASH_RERANK_PREVIEW_DOC";
+    const std::string content =
+        "0-dimensional biomaterials show inductive properties in scaffold studies.";
+    fixture.addIndexedDocument(filePath, hash, "Biomaterials note", content);
+
+    SearchEngineConfig config;
+    config.textWeight = 0.0f;
+    config.pathTreeWeight = 1.0f;
+    config.kgWeight = 0.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableReranking = true;
+    config.rerankTopK = 5;
+    config.rerankScoreGapThreshold = 0.0f;
+    config.rerankSnippetMaxChars = 48;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, nullptr, config);
+    REQUIRE(engine != nullptr);
+
+    auto reranker = std::make_shared<MockReranker>();
+    reranker->setScores({0.8f});
+    engine->setReranker(reranker);
+
+    auto response = engine->searchWithResponse(filePath, {});
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() == 1);
+    REQUIRE(reranker->getCallCount() == 1);
+    REQUIRE(reranker->getLastDocuments().size() == 1);
+
+    CHECK(reranker->getLastDocuments()[0].find("0-dimensional biomaterials") != std::string::npos);
+    CHECK(reranker->getLastDocuments()[0].size() <= config.rerankSnippetMaxChars + 3);
+    REQUIRE(response.value().results[0].rerankerScore.has_value());
+    CHECK_THAT(response.value().results[0].rerankerScore.value(),
+               Catch::Matchers::WithinAbs(0.8, 0.001));
 }
 
 } // namespace yams::search

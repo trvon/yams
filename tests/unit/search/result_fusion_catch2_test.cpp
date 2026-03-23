@@ -169,3 +169,51 @@ TEST_CASE("ResultFusion COMB_MNZ semantic rescue can retain below-threshold vect
     REQUIRE(results.size() == 1U);
     CHECK(results[0].document.sha256Hash == "doc-semantic");
 }
+
+TEST_CASE("ResultFusion COMB_MNZ prefers stronger raw vector docs for semantic rescue",
+          "[search][fusion][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.maxResults = 2;
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
+    cfg.textWeight = 1.0f;
+    cfg.vectorWeight = 1.0f;
+    cfg.vectorOnlyThreshold = 0.92f;
+    cfg.vectorOnlyPenalty = 0.65f;
+    cfg.semanticRescueSlots = 1;
+    cfg.semanticRescueMinVectorScore = 0.30f;
+
+    ResultFusion fusion(cfg);
+
+    ComponentResult lexicalA;
+    lexicalA.documentHash = "doc-lexical-a";
+    lexicalA.filePath = "doc-lexical-a";
+    lexicalA.score = 0.8f;
+    lexicalA.source = ComponentResult::Source::Text;
+    lexicalA.rank = 0;
+
+    ComponentResult lexicalB;
+    lexicalB.documentHash = "doc-lexical-b";
+    lexicalB.filePath = "doc-lexical-b";
+    lexicalB.score = 0.7f;
+    lexicalB.source = ComponentResult::Source::Text;
+    lexicalB.rank = 1;
+
+    ComponentResult rescueStrong;
+    rescueStrong.documentHash = "doc-semantic-strong";
+    rescueStrong.filePath = "doc-semantic-strong";
+    rescueStrong.score = 0.88f;
+    rescueStrong.source = ComponentResult::Source::Vector;
+    rescueStrong.rank = 80;
+
+    ComponentResult rescueWeak;
+    rescueWeak.documentHash = "doc-semantic-weak";
+    rescueWeak.filePath = "doc-semantic-weak";
+    rescueWeak.score = 0.82f;
+    rescueWeak.source = ComponentResult::Source::Vector;
+    rescueWeak.rank = 10;
+
+    auto results = fusion.fuse({lexicalA, lexicalB, rescueStrong, rescueWeak});
+    REQUIRE(results.size() == 2U);
+    CHECK(results[0].document.sha256Hash == "doc-lexical-a");
+    CHECK(results[1].document.sha256Hash == "doc-semantic-strong");
+}

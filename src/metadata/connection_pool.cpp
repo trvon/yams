@@ -159,7 +159,23 @@ void ConnectionPool::shutdown() {
         available_.pop();
         // Mark connection as returned to prevent callback
         conn->returned_ = true;
+        if (conn->db_) {
+            conn->db_->close();
+            conn->db_.reset();
+        }
     }
+
+    for (auto* conn : leased_) {
+        if (conn == nullptr) {
+            continue;
+        }
+        conn->returned_ = true;
+        if (conn->db_) {
+            conn->db_->close();
+            conn->db_.reset();
+        }
+    }
+    leased_.clear();
 
     // Reset counters immediately - don't wait for active connections
     // They will handle shutdown state in their destructors
@@ -251,6 +267,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
                 totalConnections_++;
                 activeConnections_++;
                 totalAcquired_++;
+                leased_.insert(pooledConn.get());
 
                 return pooledConn;
             } else {
@@ -335,6 +352,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
     conn->touch();
     activeConnections_++;
     totalAcquired_++;
+    leased_.insert(conn.get());
 
     waitingGuard.finish();
 
@@ -610,6 +628,7 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     bool valid = isConnectionValid(**conn);
 
     std::lock_guard<std::mutex> lock(mutex_);
+    leased_.erase(conn);
 
     // If we're shut down, just discard the connection
     if (shutdown_) {

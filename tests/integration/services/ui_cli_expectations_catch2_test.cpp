@@ -22,6 +22,7 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/compression/compression_header.h>
 #include <yams/daemon/client/asio_connection_pool.h>
@@ -151,6 +152,17 @@ int runCliCommand(const std::vector<std::string>& args) {
     std::optional<std::string> yamsSafe =
         yamsSafeEnv ? std::make_optional(std::string(yamsSafeEnv)) : std::nullopt;
 
+    if (yamsTesting) {
+        unsetenv("YAMS_TESTING");
+    }
+    if (yamsSafe) {
+        unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
+    }
+
+#if defined(YAMS_TESTING)
+    yams::cli::cli_pool_reset_for_test();
+#endif
+
     int rc = 0;
     {
         yams::cli::YamsCLI cli;
@@ -162,13 +174,10 @@ int runCliCommand(const std::vector<std::string>& args) {
         rc = cli.run(static_cast<int>(argv.size()), argv.data());
     }
 
+#if defined(YAMS_TESTING)
+    yams::cli::cli_pool_reset_for_test();
+#endif
     yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
-    if (yamsTesting) {
-        unsetenv("YAMS_TESTING");
-    }
-    if (yamsSafe) {
-        unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-    }
     yams::daemon::GlobalIOContext::reset();
     if (yamsTesting) {
         setenv("YAMS_TESTING", yamsTesting->c_str(), 1);
@@ -293,7 +302,7 @@ waitForDocumentByExactPath(MetadataRepo& repo, const fs::path& path,
 } // namespace
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: grep paths-only honors include and tags",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch1]") {
     start();
 
     fs::create_directories(root() / "ingest" / "dirA" / "dirB");
@@ -346,7 +355,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: grep paths-only honors includ
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: get by hash metadata-only has no content",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch1]") {
     start();
 
     std::ofstream(root() / "ingest" / "hello.txt") << "hello yams";
@@ -384,7 +393,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: get by hash metadata-only has
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: get honors acceptCompressed flag",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch1]") {
     start();
 
     const std::string payload = "payload with enough entropy to compress";
@@ -493,7 +502,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: get honors acceptCompressed f
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: list limit and namePattern",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch1]") {
     start();
 
     fs::create_directories(root() / "ingest" / "docs");
@@ -549,7 +558,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: list limit and namePattern",
 
 TEST_CASE_METHOD(UiCliExpectationsFixture,
                  "UiCli: CLI list wildcard and directory inputs stay in list mode",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch1]") {
     start();
 
     fs::create_directories(root() / "ingest" / "listmode" / "nested");
@@ -639,7 +648,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture,
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: update metadata then delete by name",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch1]") {
     start();
 
     std::ofstream(root() / "ingest" / "ud.txt") << "update/delete shape";
@@ -729,7 +738,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: update metadata then delete b
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: fuzzy search paths-only",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch1]") {
     start();
 
     std::ofstream(root() / "ingest" / "alpha.txt") << "functional programming in yams";
@@ -795,7 +804,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: fuzzy search paths-only",
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: verbose hybrid includes result structure",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch1]") {
     start();
 
     std::ofstream(root() / "ingest" / "note1.txt") << "semantic vector keyword";
@@ -840,7 +849,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: verbose hybrid includes resul
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: paths-only with pattern and tags",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch1]") {
     start();
 
     fs::create_directories(root() / "ingest" / "d");
@@ -887,7 +896,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: paths-only with pattern and t
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: negative no-match paths-only search",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch2]") {
     start();
 
     auto* sm = serviceManager();
@@ -909,7 +918,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: negative no-match paths-only 
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: hash search normalization",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch2]") {
     start();
 
     fs::create_directories(root() / "ingest" / "hash");
@@ -964,7 +973,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: hash search normalization",
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: short hash prefix is rejected",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch2]") {
     start();
 
     fs::create_directories(root() / "ingest" / "hash2");
@@ -1001,7 +1010,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: short hash prefix is rejected
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: degraded fallback structure",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch2]") {
     start();
 
     ScopedEnvVar degradedEnv("YAMS_SEARCH_DEGRADED", "1");
@@ -1045,7 +1054,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: degraded fallback structure",
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: fuzzy bounds similarity zero and one",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch2]") {
     start();
 
     fs::create_directories(root() / "ingest" / "fuzzy");
@@ -1078,12 +1087,8 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: fuzzy bounds similarity zero 
     yams::app::services::SearchRequest highReq = lowReq;
     highReq.similarity = 1.0f;
 
-    auto lowRes = yams::test_async::res(searchSvc->search(lowReq), 2s);
-    REQUIRE(lowRes);
     auto highRes = yams::test_async::res(searchSvc->search(highReq), 2s);
     REQUIRE(highRes);
-
-    CHECK(lowRes.value().paths.size() >= highRes.value().paths.size());
 
     auto hasExactPath = [](const std::vector<std::string>& paths) {
         for (const auto& path : paths) {
@@ -1106,10 +1111,16 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: fuzzy bounds similarity zero 
         REQUIRE(highRes);
     }
     CHECK(highHasExact);
+
+    auto lowRes = yams::test_async::res(searchSvc->search(lowReq), 2s);
+    REQUIRE(lowRes);
+    highRes = yams::test_async::res(searchSvc->search(highReq), 2s);
+    REQUIRE(highRes);
+    CHECK(lowRes.value().paths.size() >= highRes.value().paths.size());
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: retrieve by name success shape",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch2]") {
     start();
 
     std::ofstream(root() / "ingest" / "shape.txt") << "shape content";
@@ -1167,7 +1178,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: retrieve by name success shap
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: stress tail remains stable",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch2]") {
     start();
 
     fs::create_directories(root() / "stress");
@@ -1211,7 +1222,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: stress tail remains stable",
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: json output structure paths-only",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch2]") {
     start();
 
     std::ofstream(root() / "json.txt") << "json test content";
@@ -1262,7 +1273,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: json output structure paths-o
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: unreachable hints include socket or env",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch2]") {
     start();
 
     yams::app::services::RetrievalService retrieval;
@@ -1278,7 +1289,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: unreachable hints include soc
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: negative tag mismatch paths-only",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch3a]") {
     start();
 
     fs::create_directories(root() / "ingest" / "neg");
@@ -1316,7 +1327,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: negative tag mismatch paths-o
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: filename path queries prefer metadata",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch3a]") {
     start();
 
     fs::create_directories(root() / "ingest" / ".github" / "workflows");
@@ -1372,7 +1383,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: filename path queries prefer 
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: path wildcard matches",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch3a]") {
     start();
 
     fs::create_directories(root() / "ingest" / "a" / "b");
@@ -1412,7 +1423,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: path wildcard matches",
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search json includes relation metadata",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch3b]") {
     start();
 
     fs::create_directories(root() / "ingest");
@@ -1529,7 +1540,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search json includes rela
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search human includes relation hint",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch3b]") {
     start();
 
     fs::create_directories(root() / "ingest");
@@ -1618,7 +1629,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search human includes rel
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: graph traversal shows via and path columns",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch3c]") {
     start();
 
     fs::create_directories(root() / "ingest" / "graph");
@@ -1667,7 +1678,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: graph traversal shows via and
 
 TEST_CASE_METHOD(UiCliExpectationsFixture,
                  "UiCli: graph traversal ranks semantic edges before structural peers",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch3c]") {
     start();
 
     fs::create_directories(root() / "ingest" / "graph_order");
@@ -1735,7 +1746,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture,
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: tag filter matchAny vs matchAll",
-                 "[integration][services][ui-cli]") {
+                 "[integration][services][ui-cli][batch3d]") {
     start();
 
     fs::create_directories(root() / "ingest" / "tags");
@@ -1771,10 +1782,17 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: tag filter matchAny vs matchA
     auto* sm = serviceManager();
     REQUIRE(sm != nullptr);
     auto ctx = sm->getAppContext();
-    auto doc1 = waitForDocumentByExactPath(*ctx.metadataRepo, add1.value().path, 10000ms);
-    auto doc2 = waitForDocumentByExactPath(*ctx.metadataRepo, add2.value().path, 10000ms);
-    REQUIRE(doc1.has_value());
-    REQUIRE(doc2.has_value());
+    REQUIRE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, add1.value().hash, 10000ms));
+    REQUIRE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, add2.value().hash, 10000ms));
+
+    auto doc1Res = ctx.metadataRepo->getDocumentByHash(add1.value().hash);
+    REQUIRE(doc1Res);
+    auto doc2Res = ctx.metadataRepo->getDocumentByHash(add2.value().hash);
+    REQUIRE(doc2Res);
+    REQUIRE(doc1Res.value().has_value());
+    REQUIRE(doc2Res.value().has_value());
+    auto doc1 = doc1Res.value();
+    auto doc2 = doc2Res.value();
 
     auto searchSvc = yams::app::services::makeSearchService(ctx);
     (void)searchSvc->lightIndexForHash(doc1->sha256Hash);

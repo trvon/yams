@@ -223,7 +223,10 @@ struct ProviderCtx {
         try {
             namespace fs = std::filesystem;
             fs::path cfgPath;
-            if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+            if (const char* explicitConfig = std::getenv("YAMS_CONFIG");
+                explicitConfig && *explicitConfig) {
+                cfgPath = explicitConfig;
+            } else if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
                 cfgPath = fs::path(xdg) / "yams" / "config.toml";
             } else if (const char* home = std::getenv("HOME")) {
                 cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
@@ -1701,8 +1704,13 @@ struct ProviderSingleton {
                         }
 
                         if (!initialized && !c->rerankerModelName.empty()) {
-                            fs::path onnxPath =
-                                fs::path(modelsRoot) / c->rerankerModelName / "model.onnx";
+                            fs::path onnxPath;
+                            if (c->pool) {
+                                onnxPath = c->pool->resolveModelPath(c->rerankerModelName);
+                            } else {
+                                onnxPath =
+                                    fs::path(modelsRoot) / c->rerankerModelName / "model.onnx";
+                            }
                             initialized = tryInitReranker(onnxPath, c->rerankerModelName);
                         }
 

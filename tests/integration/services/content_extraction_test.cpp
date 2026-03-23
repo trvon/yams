@@ -20,6 +20,7 @@
 #include <thread>
 #include <gtest/gtest.h>
 
+#include "../../common/test_helpers.h"
 #include "../daemon/test_async_helpers.h"
 #include "../daemon/test_daemon_harness.h"
 #include <yams/app/services/document_ingestion_service.h>
@@ -60,6 +61,7 @@ protected:
     std::unique_ptr<yams::test::DaemonHarness> harness_;
     std::unique_ptr<yams::daemon::DaemonClient> client_;
     fs::path testFilesDir_;
+    std::vector<yams::test::ScopedEnvVar> envGuards_;
 
     void SetUp() override {
         // Skip on Windows - daemon IPC tests are unstable there
@@ -69,8 +71,14 @@ protected:
         yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
         yams::daemon::GlobalIOContext::reset();
 
+        envGuards_.clear();
+        envGuards_.emplace_back("YAMS_DB_DUAL_POOL", std::make_optional<std::string>("0"));
+        envGuards_.emplace_back("YAMS_DB_POOL_MIN", std::make_optional<std::string>("1"));
+        envGuards_.emplace_back("YAMS_DB_POOL_MAX", std::make_optional<std::string>("4"));
+
         // Start daemon
         yams::test::DaemonHarnessOptions options;
+        options.isolateState = true;
         options.skipSocketVerificationOnReady = true;
         harness_ = std::make_unique<yams::test::DaemonHarness>(options);
         ASSERT_TRUE(harness_->start(5s)) << "Failed to start daemon";
@@ -96,6 +104,7 @@ protected:
             std::error_code ec;
             fs::remove_all(testFilesDir_, ec);
         }
+        envGuards_.clear();
         GTEST_LOG_(INFO) << "ContentExtractionIT TearDown fds(after)=" << countOpenFds();
     }
 
@@ -121,6 +130,8 @@ protected:
         opts.path = path.string();
         opts.noEmbeddings = true; // Faster tests
         opts.explicitDataDir = harness_->dataDir();
+        opts.waitForProcessing = true;
+        opts.waitTimeoutSeconds = 10;
 
         auto result = ing.addViaDaemon(opts);
         EXPECT_TRUE(result) << "Failed to add file: " << result.error().message;
@@ -130,25 +141,25 @@ protected:
         return result.value().hash;
     }
 
-    /**
-     * @brief List documents and find one by name
-     */
-    std::optional<yams::daemon::ListEntry> findDocument(const std::string& name) {
-        yams::daemon::ListRequest req;
-        req.limit = 1000;
-        req.showSnippets = true;
-        req.snippetLength = 200;
+    std::optional<yams::daemon::GetResponse> getDocument(const std::string& name,
+                                                         bool requireContent = true,
+                                                         std::chrono::milliseconds timeout = 10s) {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
 
-        auto result = yams::cli::run_sync(client_->list(req), 3s);
-        if (!result) {
-            ADD_FAILURE() << "List request failed: " << result.error().message;
-            return std::nullopt;
-        }
+        yams::daemon::GetRequest req;
+        req.name = name;
+        req.byName = true;
+        req.metadataOnly = false;
 
-        for (const auto& entry : result.value().items) {
-            if (entry.name == name || entry.name.find(name) != std::string::npos) {
-                return entry;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto result = yams::cli::run_sync(client_->get(req), 3s);
+            if (result && !result.value().name.empty()) {
+                if (!requireContent ||
+                    (result.value().hasContent && !result.value().content.empty())) {
+                    return result.value();
+                }
             }
+            std::this_thread::sleep_for(100ms);
         }
         return std::nullopt;
     }
@@ -157,7 +168,7 @@ protected:
      * @brief Search for content using grep
      */
     bool grepFindsContent(const std::string& pattern, size_t minMatches = 1,
-                          std::chrono::milliseconds timeout = 3s) {
+                          std::chrono::milliseconds timeout = 8s) {
         auto deadline = std::chrono::steady_clock::now() + timeout;
 
         yams::daemon::GrepRequest req;
@@ -181,7 +192,7 @@ protected:
      * @brief Search for content using hybrid search
      */
     bool searchFindsContent(const std::string& query, size_t minMatches = 1,
-                            std::chrono::milliseconds timeout = 3s) {
+                            std::chrono::milliseconds timeout = 8s) {
         auto deadline = std::chrono::steady_clock::now() + timeout;
 
         yams::daemon::SearchRequest req;
@@ -231,11 +242,10 @@ Unique marker: MARKDOWN_EXTRACTION_TEST_12345
     std::this_thread::sleep_for(500ms);
 
     // Verify content in list output
-    auto doc = findDocument("test_doc.md");
-    ASSERT_TRUE(doc.has_value()) << "Document not found in list output";
-    EXPECT_FALSE(doc->snippet.empty()) << "Snippet is empty";
-    EXPECT_NE(doc->snippet, "[Content not available]") << "Content not extracted for markdown file";
-    EXPECT_NE(doc->snippet, "[No text content]") << "Content marked as empty";
+    auto doc = getDocument("test_doc.md");
+    ASSERT_TRUE(doc.has_value()) << "Document content not available";
+    EXPECT_NE(doc->content.find("MARKDOWN_EXTRACTION_TEST_12345"), std::string::npos)
+        << "Content not extracted for markdown file";
 
     // Verify FTS5 searchability
     EXPECT_TRUE(grepFindsContent("MARKDOWN_EXTRACTION_TEST"))
@@ -275,10 +285,10 @@ public:
 
     std::this_thread::sleep_for(500ms);
 
-    auto doc = findDocument("test_source.cpp");
+    auto doc = getDocument("test_source.cpp");
     ASSERT_TRUE(doc.has_value());
-    EXPECT_FALSE(doc->snippet.empty());
-    EXPECT_NE(doc->snippet, "[Content not available]") << "Content not extracted for C++ file";
+    EXPECT_NE(doc->content.find("CPP_EXTRACTION_MARKER_98765"), std::string::npos)
+        << "Content not extracted for C++ file";
 
     EXPECT_TRUE(grepFindsContent("CPP_EXTRACTION_MARKER")) << "Grep did not find C++ content";
     EXPECT_TRUE(searchFindsContent("testFunction")) << "Search did not find C++ content";
@@ -314,9 +324,10 @@ public:
 
     std::this_thread::sleep_for(500ms);
 
-    auto doc = findDocument("test_header.hpp");
+    auto doc = getDocument("test_header.hpp");
     ASSERT_TRUE(doc.has_value());
-    EXPECT_NE(doc->snippet, "[Content not available]") << "Content not extracted for HPP file";
+    EXPECT_NE(doc->content.find("HPP_HEADER_MARKER_11223"), std::string::npos)
+        << "Content not extracted for HPP file";
 
     EXPECT_TRUE(grepFindsContent("HPP_HEADER_MARKER")) << "Grep did not find HPP content";
 }
@@ -347,9 +358,10 @@ class TestClass:
 
     std::this_thread::sleep_for(500ms);
 
-    auto doc = findDocument("test_script.py");
+    auto doc = getDocument("test_script.py");
     ASSERT_TRUE(doc.has_value());
-    EXPECT_NE(doc->snippet, "[Content not available]") << "Content not extracted for Python file";
+    EXPECT_NE(doc->content.find("PYTHON_EXTRACTION_MARKER_44556"), std::string::npos)
+        << "Content not extracted for Python file";
 
     EXPECT_TRUE(grepFindsContent("PYTHON_EXTRACTION_MARKER")) << "Grep did not find Python content";
 }
@@ -385,9 +397,9 @@ export { testFunction, TestClass };
 
     std::this_thread::sleep_for(500ms);
 
-    auto doc = findDocument("test_module.js");
+    auto doc = getDocument("test_module.js");
     ASSERT_TRUE(doc.has_value());
-    EXPECT_NE(doc->snippet, "[Content not available]")
+    EXPECT_NE(doc->content.find("JAVASCRIPT_EXTRACTION_MARKER_77889"), std::string::npos)
         << "Content not extracted for JavaScript file";
 
     EXPECT_TRUE(grepFindsContent("JAVASCRIPT_EXTRACTION_MARKER"))
@@ -417,9 +429,10 @@ TEST_F(ContentExtractionIT, JsonFileExtraction) {
 
     std::this_thread::sleep_for(500ms);
 
-    auto doc = findDocument("package.json");
+    auto doc = getDocument("package.json");
     ASSERT_TRUE(doc.has_value());
-    EXPECT_NE(doc->snippet, "[Content not available]") << "Content not extracted for JSON file";
+    EXPECT_NE(doc->content.find("JSON_EXTRACTION_MARKER_33221"), std::string::npos)
+        << "Content not extracted for JSON file";
 
     EXPECT_TRUE(grepFindsContent("JSON_EXTRACTION_MARKER")) << "Grep did not find JSON content";
 }
@@ -448,9 +461,10 @@ criterion = "0.5"
 
     std::this_thread::sleep_for(500ms);
 
-    auto doc = findDocument("Cargo.toml");
+    auto doc = getDocument("Cargo.toml");
     ASSERT_TRUE(doc.has_value());
-    EXPECT_NE(doc->snippet, "[Content not available]") << "Content not extracted for TOML file";
+    EXPECT_NE(doc->content.find("TOML_EXTRACTION_MARKER_55443"), std::string::npos)
+        << "Content not extracted for TOML file";
 
     EXPECT_TRUE(grepFindsContent("TOML_EXTRACTION_MARKER")) << "Grep did not find TOML content";
 }
@@ -480,9 +494,10 @@ jobs:
 
     std::this_thread::sleep_for(500ms);
 
-    auto doc = findDocument("workflow.yml");
+    auto doc = getDocument("workflow.yml");
     ASSERT_TRUE(doc.has_value());
-    EXPECT_NE(doc->snippet, "[Content not available]") << "Content not extracted for YAML file";
+    EXPECT_NE(doc->content.find("YAML_EXTRACTION_MARKER_66778"), std::string::npos)
+        << "Content not extracted for YAML file";
 
     EXPECT_TRUE(grepFindsContent("YAML_EXTRACTION_MARKER")) << "Grep did not find YAML content";
 }
@@ -519,10 +534,9 @@ TEST_F(ContentExtractionIT, MultipleFileTypesBatch) {
 
     // Verify all files have content in list
     for (size_t i = 0; i < paths.size(); ++i) {
-        auto doc = findDocument(paths[i].filename().string());
+        auto doc = getDocument(paths[i].filename().string());
         ASSERT_TRUE(doc.has_value()) << "Document not found: " << paths[i].filename();
-        EXPECT_NE(doc->snippet, "[Content not available]")
-            << "Content missing for: " << paths[i].filename();
+        EXPECT_FALSE(doc->content.empty()) << "Content missing for: " << paths[i].filename();
     }
 }
 
@@ -564,11 +578,9 @@ TEST_F(ContentExtractionIT, EmptyFileHandling) {
 
     std::this_thread::sleep_for(500ms);
 
-    auto doc = findDocument("empty.txt");
+    auto doc = getDocument("empty.txt", false);
     ASSERT_TRUE(doc.has_value());
-    // Empty files show "[Content not available]" since blob is empty
-    // This is acceptable as it correctly indicates no content to display
-    EXPECT_TRUE(doc->snippet == "[Content not available]" || doc->snippet == "[No text content]");
+    EXPECT_FALSE(doc->hasContent);
 }
 
 /**
@@ -591,9 +603,10 @@ TEST_F(ContentExtractionIT, LargeFileExtraction) {
 
     std::this_thread::sleep_for(1s);
 
-    auto doc = findDocument("large.txt");
+    auto doc = getDocument("large.txt");
     ASSERT_TRUE(doc.has_value());
-    EXPECT_NE(doc->snippet, "[Content not available]") << "Large file content not extracted";
+    EXPECT_NE(doc->content.find("LARGE_FILE_MARKER"), std::string::npos)
+        << "Large file content not extracted";
 
     EXPECT_TRUE(grepFindsContent("LARGE_FILE_MARKER")) << "Large file not searchable";
 }
@@ -627,9 +640,9 @@ export { TestInterface, TestClass };
 
     std::this_thread::sleep_for(500ms);
 
-    auto doc = findDocument("test_module.ts");
+    auto doc = getDocument("test_module.ts");
     ASSERT_TRUE(doc.has_value());
-    EXPECT_NE(doc->snippet, "[Content not available]")
+    EXPECT_NE(doc->content.find("TYPESCRIPT_EXTRACTION_MARKER_88990"), std::string::npos)
         << "Content not extracted for TypeScript file";
 
     EXPECT_TRUE(grepFindsContent("TYPESCRIPT_EXTRACTION_MARKER"))

@@ -14,6 +14,7 @@
 #include <mutex>
 #include <queue>
 #include <type_traits>
+#include <unordered_set>
 #include <yams/metadata/database.h>
 
 namespace yams::metadata {
@@ -197,6 +198,7 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::queue<std::unique_ptr<PooledConnection>> available_;
+    std::unordered_set<PooledConnection*> leased_;
     std::atomic<size_t> totalConnections_{0};
     std::atomic<size_t> activeConnections_{0};
     std::atomic<size_t> waitingRequests_{0};

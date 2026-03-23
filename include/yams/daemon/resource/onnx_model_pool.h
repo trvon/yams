@@ -216,6 +216,7 @@ public:
     // Get the configured models root directory
     const std::string& getModelsRoot() const { return config_.modelsRoot; }
     bool isAsyncLoadingEnabled() const { return config_.asyncLoading; }
+    std::string resolveModelPath(const std::string& modelName) const;
 
 private:
     // Model registry entry
@@ -227,9 +228,6 @@ private:
         size_t accessCount = 0;
         bool isHot = false; // Part of hot pool (always loaded)
     };
-
-    // Find model path from name
-    std::string resolveModelPath(const std::string& modelName) const;
 
     // Create a new model session
     Result<ModelSessionPtr> createModelSession(const std::string& modelName);
