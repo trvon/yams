@@ -1,5 +1,3 @@
-fs = import('fs')
-
 yams_cli_sources = [
   'yams_cli.cpp',
   'command_registry.cpp',
@@ -47,78 +45,7 @@ if get_option('build-mcp-server')
   yams_cli_sources += 'commands/serve_command.cpp'
 endif
 
-# Resolve CLI11 dependency; prefer system/pkg-config, fall back to Conan generators dir.
-# Normalize to lower-case pkg-config name when available
-cli11_dep = dependency('cli11', required: false)
-if not cli11_dep.found()
-  # Some Conan/PkgConfigDeps setups expose CLI11 as 'CLI11' (uppercase)
-  cli11_dep = dependency('CLI11', required: false, method: 'pkg-config')
-endif
-
-if not cli11_dep.found()
-  conan_gen_opt = get_option('conan-generators-dir')
-  conan_candidate_dirs = []
-  if conan_gen_opt != ''
-    conan_candidate_dirs += [join_paths(meson.project_source_root(), conan_gen_opt)]
-  endif
-
-  base_build = meson.project_build_root()
-  default_candidates = [
-    base_build,
-    join_paths(base_build, 'conan'),
-    join_paths(base_build, 'conan', 'generators'),
-    join_paths(base_build, 'generators'),
-    # Also check Conan 2 default generators dir
-    join_paths(base_build, 'build-release', 'conan', 'generators'),
-    join_paths(base_build, 'build-debug', 'conan', 'generators'),
-  ]
-
-  foreach variant : ['build-debug', 'build-release', 'debug', 'release']
-    variant_path = join_paths(base_build, variant)
-    if fs.exists(variant_path)
-      default_candidates += [variant_path]
-      default_candidates += [join_paths(variant_path, 'conan')]
-      default_candidates += [join_paths(variant_path, 'conan', 'generators')]
-      default_candidates += [join_paths(variant_path, 'generators')]
-    endif
-  endforeach
-
-  foreach cand : default_candidates
-    if fs.exists(cand)
-      conan_candidate_dirs += [cand]
-    endif
-  endforeach
-
-  cli11_paths = []
-  foreach base : conan_candidate_dirs
-    if fs.exists(base)
-      cli11_paths += base
-      foreach sub : ['CLI11', 'cli11']
-        cand = join_paths(base, sub)
-        if fs.exists(cand)
-          cli11_paths += cand
-        endif
-      endforeach
-    endif
-  endforeach
-
-  # Allow explicit override from project option (Homebrew or custom install)
-  cli11_opt = get_option('cli11-cmake-path')
-  if cli11_opt != ''
-    cli11_paths += cli11_opt
-  endif
-
-  if cli11_paths.length() > 0
-    cli11_dep = dependency('cli11', method: 'cmake', cmake_module_path: cli11_paths, required: false)
-    if not cli11_dep.found()
-      cli11_dep = dependency('CLI11', method: 'cmake', cmake_module_path: cli11_paths, required: false)
-    endif
-  endif
-endif
-
-if not cli11_dep.found()
-  cli11_dep = dependency('CLI11', method: 'cmake', required: false)
-endif
+cli11_dep = cli11_resolved_dep
 
 if not cli11_dep.found()
   if get_option('build-cli')

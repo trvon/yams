@@ -1,62 +1,6 @@
 fs = import('fs')
-conan_gen_opt = get_option('conan-generators-dir')
-conan_candidate_dirs = []
-if conan_gen_opt != ''
-  conan_candidate_dirs += [join_paths(meson.project_source_root(), conan_gen_opt)]
-endif
 
-base_build = meson.project_build_root()
-default_candidates = [
-  base_build,
-  join_paths(base_build, 'conan'),
-  join_paths(base_build, 'conan', 'generators'),
-  join_paths(base_build, 'generators'),
-]
-
-foreach variant : ['build-debug', 'build-release', 'debug', 'release']
-  variant_path = join_paths(base_build, variant)
-  if fs.exists(variant_path)
-    default_candidates += [variant_path]
-    default_candidates += [join_paths(variant_path, 'conan')]
-    default_candidates += [join_paths(variant_path, 'conan', 'generators')]
-    default_candidates += [join_paths(variant_path, 'generators')]
-  endif
-endforeach
-
-foreach cand : default_candidates
-  if fs.exists(cand)
-    conan_candidate_dirs += [cand]
-  endif
-endforeach
-
-onnx_cmake_paths = []
-foreach base : conan_candidate_dirs
-  if fs.exists(base)
-    onnx_cmake_paths += base
-    foreach sub : ['onnxruntime', 'onnxruntime/Release', 'onnxruntime/Debug']
-      cand = join_paths(base, sub)
-      if fs.exists(cand)
-        onnx_cmake_paths += cand
-      endif
-    endforeach
-  endif
-endforeach
-
-# Allow explicit override from project option
-onnx_opt_path = get_option('onnxruntime-cmake-path')
-if onnx_opt_path != ''
-  onnx_cmake_paths += onnx_opt_path
-endif
-
-# Try pkg-config first to get compile definitions (like YAMS_ONNX_COREML_ENABLED),
-# then fall back to CMake if not found
-onnx_dep = dependency('onnxruntime', method: 'pkg-config', required: false)
-if not onnx_dep.found()
-  onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
-endif
-if not onnx_dep.found()
-  onnx_dep = dependency('onnxruntime', required: false)
-endif
+onnx_dep = onnxruntime_resolved_dep
 spdlog_dep = dependency('spdlog', required: false)
 json_dep = dependency('nlohmann_json', required: false)
 yams_core = dependency('yams_core', required: false)

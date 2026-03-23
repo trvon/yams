@@ -421,22 +421,20 @@ if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
   CONAN_ARGS+=(-c "tools.cmake.cmaketoolchain:user_toolchain+=${POLICY_TC}")
 fi
 
-# Enable tests and benchmarks for Debug builds in Conan (needed for Catch2/gtest/benchmark dependencies)
+# Enable tests for Debug builds in Conan (needed for Catch2/gtest dependencies)
 if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
   CONAN_ARGS+=(-o "&:build_tests=True")
-  CONAN_ARGS+=(-o "&:build_benchmarks=True")
 fi
 
-# Optionally enable tests/benchmarks dependencies in Conan for Release builds.
-# This is required to build standalone benchmark executables under tests/benchmarks.
+# Optionally enable tests in Conan for Release builds.
 if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
   CONAN_ARGS+=(-o "&:build_tests=True")
-  CONAN_ARGS+=(-o "&:build_benchmarks=True")
 fi
 
 # Enable Tracy profiling for profiling builds
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
   echo "Tracy profiling enabled"
+  CONAN_ARGS+=(-o "yams/*:enable_profiling=True")
   CONAN_ARGS+=(-o "tracy/*:enable=True")
 fi
 
@@ -620,11 +618,6 @@ if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
   CONAN_ARGS+=(-o "yams/*:enable_symbol_extraction=False")
 fi
 
-if [[ "${YAMS_DISABLE_PDF:-}" == "true" ]]; then
-  echo "PDF support disabled (YAMS_DISABLE_PDF=true)"
-  CONAN_ARGS+=(-o "yams/*:enable_pdf=False")
-fi
-
 # Force building missing packages to ensure ABI compatibility
 # This is especially important for C++23 with Clang + libstdc++
 CONAN_ARGS+=(--build=missing)
@@ -712,12 +705,7 @@ if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
 fi
 
 if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
-  MESON_OPTIONS+=("-Denable-symbol-extraction=false")
   MESON_OPTIONS+=("-Dplugin-symbols=false")
-fi
-
-if [[ "${YAMS_DISABLE_PDF:-}" == "true" ]]; then
-  MESON_OPTIONS+=("-Dplugin-pdf=false")
 fi
 
 # libSQL backend: default to libsql but fall back to sqlite on Linux when unavailable
@@ -824,6 +812,12 @@ MESON_OPTIONS+=("-Denable-asan=${ENABLE_ASAN}")
 
 if [[ "${ENABLE_TSAN}" == "true" ]]; then
   MESON_OPTIONS+=("-Db_sanitize=thread")
+  cc_tool="${CC##* }"
+  cxx_tool="${CXX##* }"
+  if [[ "${cc_tool}" == clang* ]] || [[ "${cxx_tool}" == clang++* ]]; then
+    MESON_OPTIONS+=("-Db_lundef=false")
+    echo "ThreadSanitizer on Clang: forcing b_lundef=false to avoid Meson link warnings"
+  fi
   echo "ThreadSanitizer enabled (race detection)"
 elif [[ "${ENABLE_ASAN}" == "true" ]]; then
   MESON_OPTIONS+=("-Db_sanitize=address,undefined")

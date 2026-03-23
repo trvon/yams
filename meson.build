@@ -9,7 +9,6 @@ project('yams', ['cpp', 'c'],
 )
 
 fs = import('fs')
-pkg = import('pkgconfig')
 
 cpp = meson.get_compiler('cpp')
 
@@ -143,31 +142,111 @@ install_prefix_escaped = install_prefix.replace('\\', '\\\\')
 add_project_arguments('-DYAMS_INSTALL_PREFIX="' + install_prefix_escaped + '"', language: 'cpp')
 message('YAMS install prefix: ' + install_prefix)
 
+# --- Shared Conan/CMake discovery paths ---
+conan_candidate_dirs = []
+conan_gen_opt = get_option('conan-generators-dir')
+if conan_gen_opt != ''
+  conan_candidate_dirs += [join_paths(meson.project_source_root(), conan_gen_opt)]
+endif
+
 base_build = meson.project_build_root()
-onnx_cmake_paths = []
-onnx_candidate_dirs = [base_build, join_paths(base_build, 'conan'), join_paths(base_build, 'conan', 'generators'), join_paths(base_build, 'generators')]
+default_candidates = [
+  base_build,
+  join_paths(base_build, 'conan'),
+  join_paths(base_build, 'conan', 'generators'),
+  join_paths(base_build, 'generators'),
+  join_paths(base_build, 'build-release', 'conan', 'generators'),
+  join_paths(base_build, 'build-debug', 'conan', 'generators'),
+]
 
 foreach variant : ['build-debug', 'build-release', 'debug', 'release']
   variant_path = join_paths(base_build, variant)
   if fs.exists(variant_path)
-    onnx_candidate_dirs += [variant_path]
-    onnx_candidate_dirs += [join_paths(variant_path, 'conan')]
-    onnx_candidate_dirs += [join_paths(variant_path, 'conan', 'generators')]
-    onnx_candidate_dirs += [join_paths(variant_path, 'generators')]
+    default_candidates += [variant_path]
+    default_candidates += [join_paths(variant_path, 'conan')]
+    default_candidates += [join_paths(variant_path, 'conan', 'generators')]
+    default_candidates += [join_paths(variant_path, 'generators')]
   endif
 endforeach
 
-foreach cand : onnx_candidate_dirs
+foreach cand : default_candidates
   if fs.exists(cand)
-    onnx_cmake_paths += cand
-    foreach sub : ['onnxruntime', 'onnxruntime/Release', 'onnxruntime/Debug']
-      subdir = join_paths(cand, sub)
-      if fs.exists(subdir)
-        onnx_cmake_paths += subdir
+    conan_candidate_dirs += [cand]
+  endif
+endforeach
+
+cli11_cmake_paths = []
+foreach base : conan_candidate_dirs
+  if fs.exists(base)
+    cli11_cmake_paths += base
+    foreach sub : ['CLI11', 'cli11']
+      cand = join_paths(base, sub)
+      if fs.exists(cand)
+        cli11_cmake_paths += cand
       endif
     endforeach
   endif
 endforeach
+
+cli11_opt = get_option('cli11-cmake-path')
+if cli11_opt != ''
+  cli11_cmake_paths += cli11_opt
+endif
+
+onnx_cmake_paths = []
+foreach base : conan_candidate_dirs
+  if fs.exists(base)
+    onnx_cmake_paths += base
+    foreach sub : ['onnxruntime', 'onnxruntime/Release', 'onnxruntime/Debug']
+      cand = join_paths(base, sub)
+      if fs.exists(cand)
+        onnx_cmake_paths += cand
+      endif
+    endforeach
+  endif
+endforeach
+
+onnx_opt_path = get_option('onnxruntime-cmake-path')
+if onnx_opt_path != ''
+  onnx_cmake_paths += onnx_opt_path
+endif
+
+# --- Shared dependency resolution ---
+cli11_resolved_dep = dependency('cli11', required: false, method: 'pkg-config')
+if not cli11_resolved_dep.found()
+  cli11_resolved_dep = dependency('CLI11', required: false, method: 'pkg-config')
+endif
+if not cli11_resolved_dep.found() and cli11_cmake_paths.length() > 0
+  cli11_resolved_dep = dependency('cli11', method: 'cmake', cmake_module_path: cli11_cmake_paths, required: false)
+  if not cli11_resolved_dep.found()
+    cli11_resolved_dep = dependency('CLI11', method: 'cmake', cmake_module_path: cli11_cmake_paths, required: false)
+  endif
+endif
+if not cli11_resolved_dep.found()
+  cli11_resolved_dep = dependency('CLI11', method: 'cmake', required: false)
+endif
+
+onnxruntime_resolved_dep = dependency('onnxruntime', method: 'pkg-config', required: false)
+if not onnxruntime_resolved_dep.found()
+  onnxruntime_resolved_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+endif
+if not onnxruntime_resolved_dep.found()
+  onnxruntime_resolved_dep = dependency('onnxruntime', required: false)
+endif
+if not onnxruntime_resolved_dep.found()
+  onnxruntime_resolved_dep = dependency('libonnxruntime', required: false)
+endif
+
+tbb_resolved_dep = dependency('tbb', required: false, method: 'pkg-config')
+if not tbb_resolved_dep.found()
+  tbb_resolved_dep = dependency('onetbb', required: false, method: 'pkg-config')
+endif
+if not tbb_resolved_dep.found()
+  tbb_resolved_dep = dependency('tbb', required: false)
+endif
+if not tbb_resolved_dep.found()
+  tbb_resolved_dep = dependency('onetbb', required: false)
+endif
 
 # --- Windows DLL deployment ---
 # On Windows, DLLs must be in the same directory as the executable or in PATH.
@@ -178,7 +257,7 @@ endforeach
 windows_runtime_dlls = []  # List of [dll_name, dll_full_path] tuples
 if host_machine.system() == 'windows'
   # Get TBB dependency and extract bindir
-  tbb_dep = dependency('tbb', required: false)
+  tbb_dep = tbb_resolved_dep
   if tbb_dep.found()
     tbb_prefix = tbb_dep.get_variable(pkgconfig: 'prefix', default_value: '')
     tbb_bindir = tbb_dep.get_variable(pkgconfig: 'bindir', default_value: '')
@@ -195,10 +274,7 @@ if host_machine.system() == 'windows'
   endif
 
   # Get ONNX Runtime dependency and extract bindir (prefer Conan CMake config)
-  onnx_dep_check = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
-  if not onnx_dep_check.found()
-    onnx_dep_check = dependency('onnxruntime', required: false)
-  endif
+  onnx_dep_check = onnxruntime_resolved_dep
 
   onnx_bindir_candidates = []
   if onnx_dep_check.found()
@@ -275,8 +351,6 @@ print(";".join(dirs))'''], check: false)
     message('Found runtime DLL: ' + dll_info[0] + ' at ' + dll_info[1])
   endforeach
 endif
-
-onnx_opt = get_option('enable-onnx')
 
 if not wasi_enabled
   # Database backend selection (libsql or sqlite)

@@ -215,7 +215,7 @@ Examples:
 | `build-mcp-server` | Build MCP server |
 | `enable-tests` / `enable-benchmarks` | Test/benchmark builds |
 | `enable-onnx` | Enable ONNX vector/GenAI paths |
-| `enable-pdf` | PDF extraction support |
+| `plugin-symbols` | Tree-sitter symbol extraction plugin |
 | `enable-sanitizers` | Debug ASan/UBSan toggle |
 
 Configure options:

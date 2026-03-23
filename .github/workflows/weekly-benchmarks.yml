@@ -107,9 +107,9 @@ jobs:
           # Use setup.sh with CI environment variables for consistent configuration
           export YAMS_CONAN_HOST_PROFILE="./conan/profiles/host-linux-clang"
           export YAMS_CONAN_ARCH="x86_64"
-          # Ensure Conan pulls test/bench deps when build-tests is enabled in Meson
+          # Ensure Conan and Meson both opt into benchmark targets.
           export YAMS_CONAN_EXTRA_OPTIONS="-o build_tests=True -o build_benchmarks=True"
-          export YAMS_EXTRA_MESON_FLAGS="-Dbuild-tests=true -Denable-onnx=disabled"
+          export YAMS_EXTRA_MESON_FLAGS="-Dbuild-tests=true -Dbuild-benchmarks=true -Denable-onnx=disabled"
           export YAMS_ENABLE_MOBILE_BINDINGS=false
           
           ./setup.sh Debug

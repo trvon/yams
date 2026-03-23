@@ -1,5 +1,4 @@
 from conan import ConanFile
-import os  # noqa: F401
 from conan.tools.layout import basic_layout
 from conan.tools.build import check_min_cppstd
 
@@ -18,27 +17,20 @@ class YamsConan(ConanFile):
 
     settings = "os", "compiler", "build_type", "arch"
     options = {
-        "build_cli": [True, False],
-        "build_mcp_server": [True, False],
         "build_tests": [True, False],
         "build_benchmarks": [True, False],
-        "enable_pdf": [True, False],
+        "enable_profiling": [True, False],
         "enable_onnx": [True, False],  # Gate ONNX Runtime and its
         # transitive graph
-        "enable_wasmtime": [True, False],  # Gate WASM host
-        # (wasmtime-cpp integration)
         "enable_symbol_extraction": [True, False],  # Gate symbol extraction
         # features and deps
         "enable_re2": [True, False],  # Gate RE2 regex engine for grep
     }
     default_options = {
-        "build_cli": True,
-        "build_mcp_server": True,  # Enabled by default for v0.0.4
         "build_tests": False,
         "build_benchmarks": False,
-        "enable_pdf": True,  # PDF support enabled by default
+        "enable_profiling": False,
         "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
-        "enable_wasmtime": True,  # WASM host enabled by default (bring your own wasmtime-cpp)
         "enable_symbol_extraction": True,  # Enabled by default; disable to drop extractors
         "enable_re2": True,  # RE2 regex engine for grep (10-50x faster than std::regex)
     }
@@ -105,11 +97,6 @@ class YamsConan(ConanFile):
         if self.options.enable_re2:  # type: ignore
             self.requires("re2/20251105")
 
-        if self.options.enable_pdf:  # type: ignore
-            # qpdf removed - PDF plugin will be updated in separate PBI
-            # self.requires("qpdf/11.9.0")  # Custom recipe in conan/qpdf/
-            self.requires("libmediainfo/22.03")
-
     def build_requirements(self):
         self.tool_requires("pkgconf/2.1.0")
         self.tool_requires("meson/[>=1.2.2 <2]")
@@ -117,7 +104,7 @@ class YamsConan(ConanFile):
 
         if self.options.build_benchmarks:  # type: ignore
             self.requires("benchmark/1.8.3")
-        if self.settings.build_type == "Debug":  # type: ignore
+        if self.options.enable_profiling:  # type: ignore
             self.requires("tracy/0.13.1")
 
     def configure(self):

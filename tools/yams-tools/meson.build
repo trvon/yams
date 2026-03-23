@@ -5,6 +5,11 @@ srcs = files(
   'src/commands/verify_command.cpp',
 )
 
+if not cli11_resolved_dep.found()
+  message('CLI11 not found; skipping yams-tools target')
+  subdir_done()
+endif
+
 deps = [
   dependency('yams_core'),
   dependency('yams_cli'),            # for CLI helpers (daemon)
@@ -17,7 +22,7 @@ deps = [
   dependency('spdlog'),
   dependency('nlohmann_json'),
   dependency('sqlite3'),
-  dependency('CLI11'),
+  cli11_resolved_dep,
 ]
 
 inc = [

@@ -10,64 +10,7 @@ fs = import('fs')
 
 onnx_opt = get_option('enable-onnx')
 
-# Try to locate onnxruntime via Conan generator directories
-conan_gen_opt = get_option('conan-generators-dir')
-conan_candidate_dirs = []
-if conan_gen_opt != ''
-  conan_candidate_dirs += [join_paths(meson.project_source_root(), conan_gen_opt)]
-endif
-
-base_build = meson.project_build_root()
-default_candidates = [
-  base_build,
-  join_paths(base_build, 'conan'),
-  join_paths(base_build, 'conan', 'generators'),
-  join_paths(base_build, 'generators'),
-]
-
-variant_dirs = ['build-debug', 'build-release', 'debug', 'release']
-foreach variant : variant_dirs
-  variant_path = join_paths(base_build, variant)
-  if fs.exists(variant_path)
-    default_candidates += [variant_path]
-    default_candidates += [join_paths(variant_path, 'conan')]
-    default_candidates += [join_paths(variant_path, 'conan', 'generators')]
-    default_candidates += [join_paths(variant_path, 'generators')]
-  endif
-endforeach
-
-foreach cand : default_candidates
-  if fs.exists(cand)
-    conan_candidate_dirs += [cand]
-  endif
-endforeach
-
-onnx_cmake_paths = []
-foreach base : conan_candidate_dirs
-  if fs.exists(base)
-    onnx_cmake_paths += base
-
-    foreach sub : ['onnxruntime', 'onnxruntime/Release', 'onnxruntime/Debug']
-      cand = join_paths(base, sub)
-      if fs.exists(cand)
-        onnx_cmake_paths += cand
-      endif
-    endforeach
-
-  endif
-endforeach
-
-# Allow explicit override (Homebrew/custom installs)
-onnx_opt_path = get_option('onnxruntime-cmake-path')
-if onnx_opt_path != ''
-  onnx_cmake_paths += onnx_opt_path
-endif
-
-# Prefer Conan CMake config (generator dirs) before falling back to system discovery
-onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
-if not onnx_dep.found()
-  onnx_dep = dependency('onnxruntime', required: false)
-endif
+onnx_dep = onnxruntime_resolved_dep
 
 onnx_feature_requested = not onnx_opt.disabled()
 onnx_runtime_link = false

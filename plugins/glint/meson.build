@@ -9,11 +9,7 @@ nlohmann_json_dep = dependency('nlohmann_json', required: true)
 yams_config_dep = dependency('yams_config', required: true)
 
 # ONNX Runtime is optional - Glint works in mock mode without it
-# Try 'onnxruntime' first (pkg-config name), then 'libonnxruntime' as fallback
-onnxruntime_dep = dependency('onnxruntime', required: false)
-if not onnxruntime_dep.found()
-  onnxruntime_dep = dependency('libonnxruntime', required: false)
-endif
+onnxruntime_dep = onnxruntime_resolved_dep
 
 yams_onnx_resource_dep = dependency('yams_onnx_resource', required: true)
 glint_deps = [spdlog_dep, nlohmann_json_dep, yams_config_dep, yams_onnx_resource_dep]

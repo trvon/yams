@@ -31,6 +31,22 @@ using namespace yams::extraction;
 using namespace yams::detection;
 namespace fs = std::filesystem;
 
+namespace {
+#if defined(__SANITIZE_THREAD__)
+constexpr bool kThreadSanitizerEnabled = true;
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+constexpr bool kThreadSanitizerEnabled = true;
+#else
+constexpr bool kThreadSanitizerEnabled = false;
+#endif
+#else
+constexpr bool kThreadSanitizerEnabled = false;
+#endif
+
+constexpr int kSanitizerTimeoutMultiplier = kThreadSanitizerEnabled ? 3 : 1;
+} // namespace
+
 // ===========================================================================
 // Test Fixtures & Helpers
 // ===========================================================================
@@ -351,7 +367,7 @@ TEST_CASE("TextContentHandler: Large file performance", "[content][text][perform
 
     // Processing should complete in reasonable time
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-    REQUIRE(elapsedMs < 2000); // 2 seconds max
+    REQUIRE(elapsedMs < 2000 * kSanitizerTimeoutMultiplier); // 2 seconds max, scaled for TSAN
 
     // Processing time should be recorded
     REQUIRE(result.value().processingTimeMs > 0);

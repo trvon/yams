@@ -442,7 +442,7 @@ public:
         // model provider: print active backend and default/preferred model
         auto* sub_provider =
             cmd->add_subcommand("provider", "Show active model provider and preferred model");
-        sub_provider->callback([this]() {
+        sub_provider->callback([]() {
             auto printPreferredModel = []() {
                 std::string preferred;
                 auto cfgp = yams::config::get_config_path();

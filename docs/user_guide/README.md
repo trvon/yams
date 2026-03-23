@@ -71,7 +71,6 @@ yams doctor
 | `build-cli` | `true` | Build CLI binary |
 | `build-mcp-server` | `true` | Build MCP server |
 | `build-tests` | `false` | Build test suite |
-| `plugin-pdf` | `false` | PDF text extraction |
 | `plugin-onnx` | `true` | ONNX embedding models |
 | `plugin-symbols` | `true` | Tree-sitter symbol extraction |
 | `plugin-s3` | `true` | S3 object storage |

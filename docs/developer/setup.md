@@ -104,7 +104,7 @@ meson setup build/asan --buildtype debug -Denable-asan=true -Db_sanitize=address
 meson compile -C build/asan
 meson test -C build/asan
 
-meson setup builddir --buildtype debug -Denable-tsan=true -Db_sanitize=thread
+meson setup builddir --buildtype debug -Denable-tsan=true -Db_sanitize=thread -Db_lundef=false
 meson compile -C builddir
 meson test -C builddir
 ```

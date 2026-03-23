@@ -74,7 +74,7 @@ brew install cmake meson ninja pkg-config openssl sqlite protobuf
 | `YAMS_COMPILER` | auto | Force `gcc` or `clang` |
 | `YAMS_CPPSTD` | 20 | C++ standard (20 or 23) |
 | `YAMS_DISABLE_ONNX` | false | Disable ONNX embeddings |
-| `YAMS_DISABLE_PDF` | false | Disable PDF extraction |
+| `YAMS_DISABLE_SYMBOL_EXTRACTION` | false | Disable Tree-sitter symbol extraction |
 | `YAMS_INSTALL_PREFIX` | /usr/local | Install location |
 
 ### Meson Options
@@ -84,8 +84,8 @@ brew install cmake meson ninja pkg-config openssl sqlite protobuf
 | `build-cli` | true | Build CLI binary |
 | `build-mcp-server` | true | Build MCP server |
 | `build-tests` | false | Build test suite |
-| `enable-pdf` | enabled | PDF extraction plugin |
 | `enable-onnx` | enabled | ONNX embedding models |
+| `plugin-symbols` | true | Tree-sitter symbol extraction plugin |
 
 Configure after setup:
 ```bash

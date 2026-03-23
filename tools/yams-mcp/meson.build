@@ -1,5 +1,10 @@
 fs = import('fs')
 
+if not cli11_resolved_dep.found()
+  message('CLI11 not found; skipping yams-mcp-server target')
+  subdir_done()
+endif
+
 deps = [
   dependency('yams_mcp'),
   dependency('yams_api'),
@@ -11,7 +16,7 @@ deps = [
   dependency('spdlog'),
   dependency('boost'),
   dependency('threads'),
-  dependency('CLI11'),
+  cli11_resolved_dep,
 ]
 
 if not get_option('wasi')

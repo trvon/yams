@@ -41,9 +41,11 @@ yams_cli_exe_deps = [
   dependency('boost'),
   dependency('spdlog'),
   dependency('fmt'),
-  # CLI11 may be brought in via yams_cli; keep optional here to avoid hard failure
-  dependency('cli11', required: false),
 ]
+
+if cli11_resolved_dep.found()
+  yams_cli_exe_deps += cli11_resolved_dep
+endif
 
 if get_option('build-mcp-server')
   yams_cli_exe_deps += dependency('yams_mcp')
@@ -83,61 +85,7 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
 endif
 
 # Install shared libraries from conan dependencies
-conan_gen_opt = get_option('conan-generators-dir')
-onnx_candidate_dirs = []
-if conan_gen_opt != ''
-  onnx_candidate_dirs += [join_paths(meson.project_source_root(), conan_gen_opt)]
-endif
-
-base_build = meson.project_build_root()
-default_candidates = [
-  base_build,
-  join_paths(base_build, 'conan'),
-  join_paths(base_build, 'conan', 'generators'),
-  join_paths(base_build, 'generators'),
-]
-
-foreach variant : ['build-debug', 'build-release', 'debug', 'release']
-  variant_path = join_paths(base_build, variant)
-  if fs.exists(variant_path)
-    default_candidates += [variant_path]
-    default_candidates += [join_paths(variant_path, 'conan')]
-    default_candidates += [join_paths(variant_path, 'conan', 'generators')]
-    default_candidates += [join_paths(variant_path, 'generators')]
-  endif
-endforeach
-
-foreach cand : default_candidates
-  if fs.exists(cand)
-    onnx_candidate_dirs += [cand]
-  endif
-endforeach
-
-onnx_cmake_paths = []
-foreach base : onnx_candidate_dirs
-  if fs.exists(base)
-    onnx_cmake_paths += [base]
-    foreach sub : ['onnxruntime', 'onnxruntime/Release', 'onnxruntime/Debug']
-      cand = join_paths(base, sub)
-      if fs.exists(cand)
-        onnx_cmake_paths += [cand]
-      endif
-    endforeach
-  endif
-endforeach
-
-onnx_opt_path = get_option('onnxruntime-cmake-path')
-if onnx_opt_path != ''
-  onnx_cmake_paths += [onnx_opt_path]
-endif
-
-onnx_dep = dependency('onnxruntime', method: 'pkg-config', required: false)
-if not onnx_dep.found()
-  onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
-endif
-if not onnx_dep.found()
-  onnx_dep = dependency('onnxruntime', required: false)
-endif
+onnx_dep = onnxruntime_resolved_dep
 if onnx_dep.found() and host_machine.system() != 'windows'
   onnx_libdir = onnx_dep.get_variable('libdir', default_value: '')
   if onnx_libdir != ''
