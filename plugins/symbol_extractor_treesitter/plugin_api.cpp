@@ -1,4 +1,7 @@
 #include <algorithm>
+#include <cctype>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -17,6 +20,30 @@
 #include "symbol_extractor.h"
 
 namespace {
+
+bool symbolExtractorDebugEnabled() {
+    static const bool enabled = [] {
+        const char* raw = std::getenv("YAMS_SYMBOL_EXTRACTOR_DEBUG");
+        if (!raw || !*raw) {
+            return false;
+        }
+        std::string_view value(raw);
+        return value != "0" && value != "false" && value != "FALSE";
+    }();
+    return enabled;
+}
+
+void debugLog(const char* fmt, ...) {
+    if (!symbolExtractorDebugEnabled()) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(stderr, fmt, args);
+    va_end(args);
+}
+
 static char* dup_cstr(const std::string& s) {
     if (s.empty())
         return nullptr;
@@ -62,13 +89,11 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
         return YAMS_PLUGIN_ERR_INVALID;
     }
 
-    std::fprintf(stderr, "[yams] extract_symbols_abi entry (lang=%s)\n", language);
     using yams::plugins::treesitter::GrammarLoader;
-    std::fprintf(stderr, "[yams] constructing GrammarLoader...\n");
     GrammarLoader loader;
-    std::fprintf(stderr, "[yams] GrammarLoader constructed\n");
+    debugLog("[yams] extract_symbols_abi entry (lang=%s)\n", language);
     auto lg = loader.loadGrammar(language);
-    std::fprintf(stderr, "[yams] loadGrammar returned (ok=%d)\n", lg.has_value());
+    debugLog("[yams] loadGrammar returned (ok=%d)\n", lg.has_value());
     std::string dl_err;
     if (!lg) {
         // Check if auto-download is enabled (default: disabled to prevent process spawning)
@@ -89,9 +114,8 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
                 s_download_attempted.insert(language);
             }
 
-            std::fprintf(stderr,
-                         "[yams] auto-installing tree-sitter grammar for '%s' into datadir...\n",
-                         language);
+            debugLog("[yams] auto-installing tree-sitter grammar for '%s' into datadir...\n",
+                     language);
             auto dl = yams::plugins::treesitter::GrammarDownloader::downloadGrammar(language);
             if (dl.has_value()) {
                 lg = loader.loadGrammar(language);
@@ -99,9 +123,8 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
                 dl_err = dl.error();
             }
         } else if (!should_auto_download) {
-            std::fprintf(stderr,
-                         "[yams] auto-download disabled, skipping grammar install for '%s'\n",
-                         language);
+            debugLog("[yams] auto-download disabled, skipping grammar install for '%s'\n",
+                     language);
             dl_err =
                 "Grammar not found. Set YAMS_AUTO_DOWNLOAD_GRAMMARS=1 to enable auto-download.";
         } else {
@@ -117,12 +140,13 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
         *out = r;
         return YAMS_PLUGIN_ERR_NOT_FOUND;
     }
-    auto [handle, tslang] = *lg;
-    std::fprintf(stderr, "[yams] grammar loaded: handle=%p lang=%p for '%s'\n", handle,
-                 (void*)tslang, language);
+    auto& grammar = lg.value();
+    TSLanguage* tslang = grammar.language;
+    debugLog("[yams] grammar loaded: handle=%p lang=%p for '%s'\n", grammar.library_handle,
+             (void*)tslang, language);
     // Validate language version compatibility (support versions 13-15)
     uint32_t ver = ts_language_abi_version(tslang);
-    std::fprintf(stderr, "[yams] ts_language_abi_version=%u\n", ver);
+    debugLog("[yams] ts_language_abi_version=%u\n", ver);
     if (ver == 0 || ver < TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION ||
         ver > TREE_SITTER_LANGUAGE_VERSION) {
         auto* r = (yams_symbol_extraction_result_v1*)std::calloc(
@@ -131,19 +155,17 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
             return YAMS_PLUGIN_ERR_INVALID;
         r->error = dup_cstr("Incompatible tree-sitter language version");
         *out = r;
-        dlclose(handle);
         return YAMS_PLUGIN_ERR_INVALID;
     }
 
     using yams::plugins::treesitter::SymbolExtractor;
-    std::fprintf(stderr, "[yams] starting extraction (len=%zu, path=%s, lang=%s)\n", content_len,
-                 file_path ? file_path : "", language);
+    debugLog("[yams] starting extraction (len=%zu, path=%s, lang=%s)\n", content_len,
+             file_path ? file_path : "", language);
     SymbolExtractor extractor(tslang);
     auto res = extractor.extract(std::string_view(content, content_len), language,
                                  file_path ? file_path : "", true);
 
-    (void)handle; // managed by loader
-    std::fprintf(stderr, "[yams] extraction finished (ok=%d)\n", res.has_value());
+    debugLog("[yams] extraction finished (ok=%d)\n", res.has_value());
 
     auto* r =
         (yams_symbol_extraction_result_v1*)std::calloc(1, sizeof(yams_symbol_extraction_result_v1));

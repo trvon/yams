@@ -6,7 +6,7 @@ namespace yams::app::services {
 struct AppContext;
 }
 
-// These functions are implemented in plugin_host_services.cpp
+// These functions are implemented by the daemon host-services bridge.
 yams_plugin_host_context_v1*
 yams_create_host_context(const yams::app::services::AppContext& app_ctx);
 void yams_free_host_context(void* host_ctx);

@@ -33,6 +33,19 @@ struct GrammarLoadError {
  */
 class GrammarLoader {
 public:
+    struct GrammarHandle {
+        void* library_handle = nullptr;
+        TSLanguage* language = nullptr;
+
+        GrammarHandle() = default;
+        GrammarHandle(void* handle, TSLanguage* lang) noexcept;
+        GrammarHandle(const GrammarHandle&) = delete;
+        GrammarHandle& operator=(const GrammarHandle&) = delete;
+        GrammarHandle(GrammarHandle&& other) noexcept;
+        GrammarHandle& operator=(GrammarHandle&& other) noexcept;
+        ~GrammarHandle();
+    };
+
     GrammarLoader();
 
     /**
@@ -44,7 +57,6 @@ public:
      * @brief Load grammar library for a language
      * @return Language factory function or error
      */
-    using GrammarHandle = std::pair<void*, TSLanguage*>;
     tl::expected<GrammarHandle, GrammarLoadError> loadGrammar(std::string_view language);
 
     /**

@@ -13,19 +13,12 @@ endif
 
 # dlopen for loading grammar at runtime
 libdl_dep = cpp.find_library('dl', required: host_machine.system() != 'windows')
-# filesystem for C++20
-filesystem_dep = dependency('threads', required: false) # Most compilers have filesystem built-in
 
 # C++20/23 symbol extractor sources - modular architecture
 extractor_sources = files(
   'plugin_api.cpp',
   'symbol_extractor.cpp',
   'grammar_loader.cpp',
-)
-
-extractor_headers = files(
-  'grammar_loader.h',
-  'symbol_extractor.h',
 )
 
 tl_expected_dep = dependency('tl-expected', required: true)

@@ -1,9 +1,9 @@
 #include "grammar_loader.h"
 
+#include <cstdarg>
 #include <cstdio>
 #include <expected>
 #include <fstream>
-#include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -24,6 +24,62 @@ extern "C" {
 
 namespace yams::plugins::treesitter {
 
+namespace {
+
+bool symbolExtractorDebugEnabled() {
+    static const bool enabled = [] {
+        const char* raw = std::getenv("YAMS_SYMBOL_EXTRACTOR_DEBUG");
+        if (!raw || !*raw) {
+            return false;
+        }
+        std::string_view value(raw);
+        return value != "0" && value != "false" && value != "FALSE";
+    }();
+    return enabled;
+}
+
+void debugLog(const char* fmt, ...) {
+    if (!symbolExtractorDebugEnabled()) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(stderr, fmt, args);
+    va_end(args);
+}
+
+} // namespace
+
+GrammarLoader::GrammarHandle::GrammarHandle(void* handle, TSLanguage* lang) noexcept
+    : library_handle(handle), language(lang) {}
+
+GrammarLoader::GrammarHandle::GrammarHandle(GrammarLoader::GrammarHandle&& other) noexcept
+    : library_handle(other.library_handle), language(other.language) {
+    other.library_handle = nullptr;
+    other.language = nullptr;
+}
+
+GrammarLoader::GrammarHandle&
+GrammarLoader::GrammarHandle::operator=(GrammarLoader::GrammarHandle&& other) noexcept {
+    if (this != &other) {
+        if (library_handle) {
+            dlclose(library_handle);
+        }
+        library_handle = other.library_handle;
+        language = other.language;
+        other.library_handle = nullptr;
+        other.language = nullptr;
+    }
+    return *this;
+}
+
+GrammarLoader::GrammarHandle::~GrammarHandle() {
+    if (library_handle) {
+        dlclose(library_handle);
+    }
+}
+
 // GrammarLoader Implementation
 GrammarLoader::GrammarLoader() {
     // Initialize default search paths
@@ -34,6 +90,8 @@ GrammarLoader::GrammarLoader() {
 
 void GrammarLoader::addGrammarPath(std::string_view language, std::string_view path) {
     grammar_paths_[std::string(language)] = std::string(path);
+    cached_search_paths_.clear();
+    search_paths_cached_ = false;
 }
 
 const GrammarLoader::GrammarSpec* GrammarLoader::findSpec(std::string_view language) const {
@@ -89,7 +147,9 @@ std::vector<std::filesystem::path> GrammarLoader::getGrammarSearchPaths() const 
     paths.emplace_back("/usr/share/yams/grammars");
 #endif
 
-    return paths;
+    cached_search_paths_ = paths;
+    search_paths_cached_ = true;
+    return cached_search_paths_;
 }
 
 std::vector<std::string> GrammarLoader::getLibraryCandidates(std::string_view language) const {
@@ -195,10 +255,10 @@ GrammarLoader::loadGrammar(std::string_view language) {
         }
         tried_join += candidate;
 
-        std::fprintf(stderr, "[yams] trying grammar candidate: %s\n", candidate.c_str());
+        debugLog("[yams] trying grammar candidate: %s\n", candidate.c_str());
         void* handle = dlopen(candidate.c_str(), RTLD_LAZY | RTLD_LOCAL);
         if (!handle) {
-            std::fprintf(stderr, "[yams] dlopen failed: %s\n", dlerror());
+            debugLog("[yams] dlopen failed: %s\n", dlerror());
             continue; // Try next candidate
         }
 
@@ -208,7 +268,7 @@ GrammarLoader::loadGrammar(std::string_view language) {
             // Success! Create language and return
             TSLanguage* lang = factory_fn();
             if (lang) {
-                return std::make_pair(handle, lang);
+                return GrammarHandle(handle, lang);
             }
         }
 
@@ -283,7 +343,8 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
             fmt::format("cd {} && git clone --depth 1 https://github.com/{} tree-sitter-{}",
                         temp_dir.string(), repo_info->repo, language);
 
-        std::cout << "🔄 Cloning grammar repository..." << std::endl;
+        debugLog("[yams] cloning grammar repository for '%.*s'\n",
+                 static_cast<int>(language.size()), language.data());
         if (std::system(clone_cmd.c_str()) != 0) {
             cleanup();
             return tl::unexpected(std::string{"Failed to clone grammar repository"});
@@ -373,13 +434,13 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
             auto ts_header = std::filesystem::path(path) / "tree_sitter" / "api.h";
             if (std::filesystem::exists(ts_header)) {
                 ts_include = " -I" + path;
-                std::fprintf(stderr, "[yams] Found tree-sitter headers at: %s\n", path.c_str());
+                debugLog("[yams] found tree-sitter headers at: %s\n", path.c_str());
                 break;
             }
         }
 
         if (ts_include.empty()) {
-            std::fprintf(stderr, "[yams] Warning: tree-sitter headers not found, build may fail\n");
+            debugLog("[yams] tree-sitter headers not found, build may fail\n");
         }
 
         std::ostringstream cmd;
@@ -392,9 +453,10 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         }
         cmd << "-o " << lib_name;
 
-        std::fprintf(stderr, "[yams] Build command: %s\n", cmd.str().c_str());
+        debugLog("[yams] build command: %s\n", cmd.str().c_str());
 
-        std::cout << "🛠️  Building grammar..." << std::endl;
+        debugLog("[yams] building grammar for '%.*s'\n", static_cast<int>(language.size()),
+                 language.data());
         if (std::system(cmd.str().c_str()) != 0) {
             cleanup();
             return tl::unexpected(std::string{"Failed to build grammar"});
@@ -421,7 +483,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
 
         cleanup();
 
-        std::cout << "✅ Grammar downloaded successfully to: " << final_path << std::endl;
+        debugLog("[yams] grammar downloaded successfully to: %s\n", final_path.c_str());
         return final_path;
 
     } catch (const std::exception& e) {
