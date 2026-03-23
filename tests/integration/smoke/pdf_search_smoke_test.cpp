@@ -35,7 +35,7 @@ protected:
         fs::create_directories(runtimeRoot_);
         fixtures_ = std::make_unique<yams::test::FixtureManager>(root_ / "fixtures");
 
-        yams::tests::harnesses::DaemonPreflight::ensure_environment({
+        yams::test::harnesses::DaemonPreflight::ensure_environment({
             .runtime_dir = runtimeRoot_,
             .socket_name_prefix = "yams-daemon-smoke-",
             .kill_others = false,
@@ -44,7 +44,7 @@ protected:
 
     void TearDown() override {
         fixtures_.reset();
-        yams::tests::harnesses::DaemonPreflight::post_test_cleanup(runtimeRoot_);
+        yams::test::harnesses::DaemonPreflight::post_test_cleanup(runtimeRoot_);
         std::error_code ec;
         fs::remove_all(root_, ec);
     }

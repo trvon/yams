@@ -51,7 +51,7 @@ protected:
         fixtures_ = std::make_unique<FixtureManager>(root_ / "fixtures");
 
         // Setup daemon environment with preflight
-        yams::tests::harnesses::DaemonPreflight::ensure_environment({
+        yams::test::harnesses::DaemonPreflight::ensure_environment({
             .runtime_dir = runtimeRoot_,
             .socket_name_prefix = "yams-test-",
             .kill_others = false,
@@ -80,7 +80,7 @@ protected:
         fixtures_.reset();
 
         // Cleanup runtime and temp directories
-        yams::tests::harnesses::DaemonPreflight::post_test_cleanup(runtimeRoot_);
+        yams::test::harnesses::DaemonPreflight::post_test_cleanup(runtimeRoot_);
 
         std::error_code ec;
         std::filesystem::remove_all(root_, ec);

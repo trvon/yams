@@ -12,7 +12,6 @@
 #include <yams/daemon/daemon.h>
 #include <yams/mcp/mcp_server.h>
 
-#include "common/daemon_preflight.h"
 #include "common/daemon_test_fixture.h"
 #include "../../common/env_compat.h"
 
@@ -140,7 +139,7 @@ TEST(MCPDoctorPositiveSmoke, DoctorReportsReadyWithLiveDaemon) {
     fs::create_directories(runtimeRoot, ec);
 
     // Ensure a short socket path to avoid AF_UNIX sun_path limits
-    yams::tests::harnesses::DaemonPreflight::ensure_environment({
+    yams::test::harnesses::DaemonPreflight::ensure_environment({
         .runtime_dir = runtimeRoot,
         .socket_name_prefix = "yams-daemon-smoke-",
         .kill_others = false,

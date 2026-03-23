@@ -5,7 +5,7 @@
 #include <string>
 #include <yams/compat/unistd.h>
 
-namespace yams::tests::harnesses {
+namespace yams::test::harnesses {
 struct DaemonPreflightConfig {
     std::filesystem::path runtime_dir; // directory for pid/socket
     std::string socket_name_prefix{"yams-test-sock-"};
@@ -53,4 +53,4 @@ struct DaemonPreflight {
         std::filesystem::remove_all(runtime_root, ec);
     }
 };
-} // namespace yams::tests::harnesses
+} // namespace yams::test::harnesses

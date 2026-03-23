@@ -2,7 +2,6 @@
 #include <filesystem>
 #include <future>
 #include <thread>
-#include "common/daemon_preflight.h"
 #include <gtest/gtest.h>
 // Local-socket bind probe for sandboxed environments
 #include <boost/asio/local/stream_protocol.hpp>
@@ -11,6 +10,7 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/daemon.h>
 
+#include "common/daemon_preflight.h"
 #include "common/fixture_manager.h"
 #include "common/test_data_generator.h"
 
@@ -37,7 +37,7 @@ protected:
         fixtures_ = std::make_unique<yams::test::FixtureManager>(root_ / "fixtures");
 
         // Standardize daemon test environment (no external daemon kills; unique paths)
-        yams::tests::harnesses::DaemonPreflight::ensure_environment({
+        yams::test::harnesses::DaemonPreflight::ensure_environment({
             .runtime_dir = runtimeRoot_,
             .socket_name_prefix = "yams-daemon-smoke-",
             .kill_others = false,
@@ -47,7 +47,7 @@ protected:
     void TearDown() override {
         fixtures_.reset();
         // Best-effort cleanup of runtime paths
-        yams::tests::harnesses::DaemonPreflight::post_test_cleanup(runtimeRoot_);
+        yams::test::harnesses::DaemonPreflight::post_test_cleanup(runtimeRoot_);
         std::error_code ec;
         fs::remove_all(root_, ec);
     }
