@@ -449,12 +449,13 @@ void Database::close() {
     if (db_) {
         sqlite3* db = db_;
         db_ = nullptr;
+        const int liveStatementsBeforeClose = count_live_statements(db);
         int rc = sqlite3_close_v2(db);
         if (rc != SQLITE_OK) {
             spdlog::warn("Database::close_v2 deferred/failed for '{}': {}", path_,
                          sqlite3_errstr(rc));
         }
-        trace_db_lifetime("close.sqlite", this, path_, db, 0, rc, count_live_statements(db));
+        trace_db_lifetime("close.sqlite", this, path_, db, 0, rc, liveStatementsBeforeClose);
     }
     path_.clear();
     inTransaction_ = false;

@@ -778,7 +778,6 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: fuzzy search paths-only",
     yams::app::services::AddOptions opts;
     opts.socketPath = socketPath();
     opts.explicitDataDir = storageDir();
-    opts.path = root() / "ingest";
     opts.path = (root() / "ingest").string();
     opts.recursive = true;
     opts.noEmbeddings = true;

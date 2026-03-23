@@ -565,13 +565,14 @@ public:
 
         if (db_) {
             sqlite3* db = db_;
+            const int liveStatementsBeforeClose = count_live_statements(db);
             int rc = sqlite3_close_v2(db);
             if (rc != SQLITE_OK) {
                 spdlog::warn("[VectorDB] close_v2 deferred/failed for '{}': {}", db_path_,
                              sqlite3_errstr(rc));
             }
             trace_vector_db_lifetime("close.sqlite", this, db_path_, db, rc,
-                                     count_live_statements(db));
+                                     liveStatementsBeforeClose);
             db_ = nullptr;
         }
 

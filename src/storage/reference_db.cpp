@@ -10,8 +10,8 @@ namespace yamsfmt = fmt;
 #include <yams/core/types.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
-#include <chrono>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -251,13 +251,14 @@ public:
         if (db_) {
             // Finalize all cached statements before closing
             sqlite3* db = db_;
+            const int liveStatementsBeforeClose = count_live_statements(db);
             int rc = sqlite3_close_v2(db); // v2 allows cleanup of lingering statements
             if (rc != SQLITE_OK) {
                 spdlog::warn("ReferenceDB close_v2 deferred/failed for '{}': {}", path_,
                              sqlite3_errstr(rc));
             }
             trace_reference_db_lifetime("close.sqlite", this, path_, db, rc,
-                                        count_live_statements(db));
+                                        liveStatementsBeforeClose);
             db_ = nullptr;
         }
         trace_reference_db_lifetime("close.end", this, path_, db_);

@@ -3346,6 +3346,30 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const double semanticRescueMinVectorScore =
         std::max(0.0, static_cast<double>(workingConfig.semanticRescueMinVectorScore));
 
+    std::unordered_map<std::string, size_t> currentScoreRankByDoc;
+    if (workingConfig.semanticRescueSlots > 0 && !response.results.empty()) {
+        std::vector<size_t> rankOrder(response.results.size());
+        std::iota(rankOrder.begin(), rankOrder.end(), 0);
+        std::sort(rankOrder.begin(), rankOrder.end(), [&](size_t lhs, size_t rhs) {
+            const auto& a = response.results[lhs];
+            const auto& b = response.results[rhs];
+            if (a.score != b.score) {
+                return a.score > b.score;
+            }
+            return documentIdForTrace(a.document.filePath, a.document.sha256Hash) <
+                   documentIdForTrace(b.document.filePath, b.document.sha256Hash);
+        });
+
+        for (size_t i = 0; i < rankOrder.size(); ++i) {
+            const auto& result = response.results[rankOrder[i]];
+            const std::string docId =
+                documentIdForTrace(result.document.filePath, result.document.sha256Hash);
+            if (!docId.empty()) {
+                currentScoreRankByDoc.emplace(docId, i + 1);
+            }
+        }
+    }
+
     const auto semanticRescueSignalForResult =
         [&preFusionSignals,
          &docIdForResult](const SearchResult& result) -> const PreFusionDocSignal* {
@@ -3371,15 +3395,31 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
          workingConfig.rerankTopK > 0)
             ? std::max<size_t>(150, workingConfig.rerankTopK * 3)
             : std::numeric_limits<size_t>::max();
+    const size_t buriedScoreRankThreshold =
+        buriedVectorRankThreshold != std::numeric_limits<size_t>::max() &&
+                buriedVectorRankThreshold > 10
+            ? buriedVectorRankThreshold - 10
+            : std::numeric_limits<size_t>::max();
 
     const auto isBuriedFinalSemanticRescueCandidate =
-        [&isFinalSemanticRescueCandidate, &semanticRescueSignalForResult,
-         buriedVectorRankThreshold](const SearchResult& result) {
+        [&isFinalSemanticRescueCandidate, &semanticRescueSignalForResult, &docIdForResult,
+         &currentScoreRankByDoc, buriedVectorRankThreshold,
+         buriedScoreRankThreshold](const SearchResult& result) {
             if (!isFinalSemanticRescueCandidate(result)) {
                 return false;
             }
             const auto* signal = semanticRescueSignalForResult(result);
-            return signal != nullptr &&
+            if (signal == nullptr || result.rerankerScore.value_or(0.0) < 9e-4 ||
+                signal->maxVectorRaw < 0.79) {
+                return false;
+            }
+
+            const std::string docId = docIdForResult(result);
+            const auto rankIt = currentScoreRankByDoc.find(docId);
+            const size_t currentScoreRank =
+                rankIt != currentScoreRankByDoc.end() ? rankIt->second : 0;
+
+            return currentScoreRank >= buriedScoreRankThreshold &&
                    signal->bestVectorRank != std::numeric_limits<size_t>::max() &&
                    signal->bestVectorRank >= buriedVectorRankThreshold;
         };
@@ -3422,7 +3462,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
 
         constexpr double kBuriedRerankCap = 1e-3;
-        constexpr double kBuriedRerankTieEpsilon = 1e-4;
+        constexpr double kBuriedRerankTieEpsilon = 2e-4;
         const double rerankA = std::min(a.rerankerScore.value_or(-1.0), kBuriedRerankCap);
         const double rerankB = std::min(b.rerankerScore.value_or(-1.0), kBuriedRerankCap);
         if (std::abs(rerankA - rerankB) > kBuriedRerankTieEpsilon) {

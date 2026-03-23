@@ -264,14 +264,15 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
 
         // Now send shutdown while ingestion is happening
         auto start = std::chrono::steady_clock::now();
-        auto shutdownResult = yams::cli::run_sync(client.shutdown(true), 5s);
+        auto shutdownResult = yams::cli::run_sync(
+            client.shutdown(true), std::chrono::seconds(5 * kSanitizerTimeoutMultiplier));
         auto elapsed = std::chrono::steady_clock::now() - start;
 
         INFO("Shutdown responded in "
              << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << "ms");
 
-        // Shutdown should be acknowledged quickly (within 3 seconds)
-        REQUIRE(elapsed < 3s);
+        // Shutdown should be acknowledged quickly, allowing for sanitizer slowdown.
+        REQUIRE(elapsed < std::chrono::seconds(3 * kSanitizerTimeoutMultiplier));
 
         stopIngesting.store(true);
         for (auto& t : ingestThreads) {

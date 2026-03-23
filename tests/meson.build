@@ -2659,10 +2659,12 @@ if catch2_dep.found()
     is_parallel: false
   )
 
+  daemon_metrics_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 180 : 60
+
   test('daemon_metrics_status', catch2_daemon_metrics_exe,
     suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
+    timeout: daemon_metrics_timeout,
     is_parallel: false
   )
 
