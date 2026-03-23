@@ -54,6 +54,23 @@ TEST_CASE("query_expansion generates anchored subphrases from salient terms",
     }));
 }
 
+TEST_CASE("query_expansion drops weak numeric windows and keeps content phrases",
+          "[search][helpers][query_expansion][catch2]") {
+    auto phrases = generateAnchoredSubPhrases(
+        "0-dimensional biomaterials show inductive properties.", 4, nullptr);
+
+    REQUIRE_FALSE(phrases.empty());
+    CHECK(std::none_of(phrases.begin(), phrases.end(), [](const auto& phrase) {
+        return phrase.find("0 dimensional") != std::string::npos ||
+               phrase.find("show") != std::string::npos;
+    }));
+    CHECK(std::any_of(phrases.begin(), phrases.end(), [](const auto& phrase) {
+        return phrase.find("inductive properties") != std::string::npos ||
+               phrase.find("biomaterials inductive properties") != std::string::npos ||
+               phrase.find("dimensional biomaterials inductive properties") != std::string::npos;
+    }));
+}
+
 TEST_CASE("query_expansion creates fallback concepts without extractor output",
           "[search][helpers][query_expansion][catch2]") {
     std::unordered_map<std::string, float> idf = {

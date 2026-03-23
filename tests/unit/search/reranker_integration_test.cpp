@@ -519,11 +519,63 @@ TEST_CASE("SearchEngine: reranker falls back to metadata content preview",
     REQUIRE(reranker->getCallCount() == 1);
     REQUIRE(reranker->getLastDocuments().size() == 1);
 
-    CHECK(reranker->getLastDocuments()[0].find("0-dimensional biomaterials") != std::string::npos);
+    CHECK(reranker->getLastDocuments()[0].find("0-dimensional") != std::string::npos);
     CHECK(reranker->getLastDocuments()[0].size() <= config.rerankSnippetMaxChars + 3);
     REQUIRE(response.value().results[0].rerankerScore.has_value());
     CHECK_THAT(response.value().results[0].rerankerScore.value(),
                Catch::Matchers::WithinAbs(0.8, 0.001));
+}
+
+TEST_CASE("SearchEngine: reranker preview preserves tail evidence for long metadata content",
+          "[search][reranker][metadata-preview]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string filePath = "/tmp/reranker_preview_tail_doc.md";
+    const std::string hash = "HASH_RERANK_PREVIEW_TAIL_DOC";
+    const std::string content =
+        "New opportunities: the use of nanotechnologies to manipulate and track stem cells. "
+        "Nanotechnologies are emerging platforms that could be useful in measuring and "
+        "manipulating stem cells. Examples include magnetic nanoparticles and quantum dots "
+        "for stem cell labeling and in vivo tracking; engineered nanometer-scale scaffolds "
+        "for stem cell differentiation and transplantation demonstrate biomaterial inductive "
+        "properties.";
+    fixture.addIndexedDocument(filePath, hash, "Biomaterials note", content);
+
+    SearchEngineConfig config;
+    config.textWeight = 0.0f;
+    config.pathTreeWeight = 1.0f;
+    config.kgWeight = 0.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableReranking = true;
+    config.rerankTopK = 5;
+    config.rerankScoreGapThreshold = 0.0f;
+    config.rerankSnippetMaxChars = 96;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, nullptr, config);
+    REQUIRE(engine != nullptr);
+
+    auto reranker = std::make_shared<MockReranker>();
+    reranker->setScores({0.8f});
+    engine->setReranker(reranker);
+
+    auto response = engine->searchWithResponse(filePath, {});
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() == 1);
+    REQUIRE(reranker->getCallCount() == 1);
+    REQUIRE(reranker->getLastDocuments().size() >= 1);
+
+    const bool hasTailEvidence =
+        std::any_of(reranker->getLastDocuments().begin(), reranker->getLastDocuments().end(),
+                    [](const std::string& doc) {
+                        return doc.find("inductive properties") != std::string::npos;
+                    });
+    CHECK(hasTailEvidence);
+    CHECK(std::all_of(
+        reranker->getLastDocuments().begin(), reranker->getLastDocuments().end(),
+        [&](const std::string& doc) { return doc.size() <= config.rerankSnippetMaxChars + 3; }));
 }
 
 } // namespace yams::search

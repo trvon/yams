@@ -170,12 +170,22 @@ public:
             preRunLoopCallback(daemon_.get());
         }
 
-        // Start runLoop in background thread - this triggers async initialization
-        // Without runLoop(), ServiceManager::startAsyncInit() is never called
-        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
-        // Give runLoop time to enter and trigger async init
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        spdlog::info("[DaemonHarness] runLoop thread started, polling for daemon Ready state...");
+#ifdef YAMS_TESTING
+        if (!preRunLoopCallback && !options_.enableAutoRepair) {
+            daemon_->testingStartAsyncInitWithoutRunLoop();
+            spdlog::info("[DaemonHarness] Async init triggered without runLoop thread, polling for "
+                         "daemon Ready state...");
+        } else
+#endif
+        {
+            // Start runLoop in background thread - this triggers async initialization
+            // Without runLoop(), ServiceManager::startAsyncInit() is never called
+            runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
+            // Give runLoop time to enter and trigger async init
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            spdlog::info(
+                "[DaemonHarness] runLoop thread started, polling for daemon Ready state...");
+        }
 
         // Poll for daemon to reach a usable lifecycle state in lifecycle FSM.
         // Ready or Degraded both indicate initialization completed enough for IPC tests.

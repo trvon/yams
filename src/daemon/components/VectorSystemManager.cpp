@@ -44,6 +44,13 @@ void VectorSystemManager::shutdown() {
     auto existing = std::atomic_load_explicit(&vectorDatabase_, std::memory_order_acquire);
     if (existing) {
         spdlog::debug("[VectorSystemManager] Shutting down vector database");
+        try {
+            existing->close();
+        } catch (const std::exception& e) {
+            spdlog::debug("[VectorSystemManager] Vector database close failed: {}", e.what());
+        } catch (...) {
+            spdlog::debug("[VectorSystemManager] Vector database close failed: unknown exception");
+        }
         std::atomic_store_explicit(&vectorDatabase_, std::shared_ptr<vector::VectorDatabase>{},
                                    std::memory_order_release);
     }

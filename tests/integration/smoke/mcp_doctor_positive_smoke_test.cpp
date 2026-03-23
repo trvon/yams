@@ -94,6 +94,34 @@ bool contains_subpath(const std::vector<std::string>& values, const std::string&
     return std::any_of(values.begin(), values.end(),
                        [&](const auto& value) { return value.find(needle) != std::string::npos; });
 }
+
+bool wait_for_list_tag_match(MCPServer& server, const std::vector<std::string>& tags,
+                             bool matchAllTags, const std::string& expectedName,
+                             std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    using namespace std::chrono_literals;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto res = server.callToolPublic("list", json{{"tags", tags},
+                                                      {"match_all_tags", matchAllTags},
+                                                      {"paths_only", false},
+                                                      {"limit", 20}});
+        if (res.is_object() && !res.contains("error")) {
+            auto data = extract_tool_data(res);
+            if (data.has_value() && data->contains("documents") &&
+                (*data)["documents"].is_array()) {
+                std::vector<std::string> listedNames;
+                for (const auto& doc : (*data)["documents"]) {
+                    listedNames.push_back(doc.value("name", std::string{}));
+                }
+                if (contains_subpath(listedNames, expectedName)) {
+                    return true;
+                }
+            }
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    return false;
+}
 } // namespace
 
 // Linux-only: relies on AF_UNIX socket semantics and short XDG_RUNTIME_DIR
@@ -340,6 +368,11 @@ TEST_F(MCPDocOpsFixture, SearchAndListTagFiltering) {
                                              {"tags", json::array({"team-blue", "group-a"})}});
     ASSERT_TRUE(tagBlue.is_object()) << tagBlue.dump();
     ASSERT_FALSE(tagBlue.contains("error")) << tagBlue.dump();
+
+    ASSERT_TRUE(wait_for_list_tag_match(server, {"team-red"}, true, redName))
+        << "tag visibility wait failed for " << redName;
+    ASSERT_TRUE(wait_for_list_tag_match(server, {"team-blue"}, true, blueName))
+        << "tag visibility wait failed for " << blueName;
 
     auto listRedOnly = server.callToolPublic("list", json{{"tags", json::array({"team-red"})},
                                                           {"match_all_tags", true},

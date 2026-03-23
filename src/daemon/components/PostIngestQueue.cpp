@@ -534,8 +534,21 @@ void PostIngestQueue::setEntityProviders(
 }
 
 void PostIngestQueue::setTitleExtractor(search::EntityExtractionFunc extractor) {
-    titleExtractor_ = std::move(extractor);
+    {
+        std::lock_guard<std::mutex> lock(titleExtractorMutex_);
+        titleExtractor_ = std::move(extractor);
+    }
     refreshStageAvailability();
+}
+
+search::EntityExtractionFunc PostIngestQueue::getTitleExtractor() const {
+    std::lock_guard<std::mutex> lock(titleExtractorMutex_);
+    return titleExtractor_;
+}
+
+bool PostIngestQueue::hasTitleExtractor() const {
+    std::lock_guard<std::mutex> lock(titleExtractorMutex_);
+    return static_cast<bool>(titleExtractor_);
 }
 
 void PostIngestQueue::refreshStageAvailability() {
@@ -564,7 +577,7 @@ void PostIngestQueue::refreshStageAvailability() {
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, entityActive);
 
     const bool titleActive =
-        (titleExtractor_ != nullptr) && !stagePaused_[4].load(std::memory_order_acquire);
+        hasTitleExtractor() && !stagePaused_[4].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, titleActive);
 }
 
@@ -588,7 +601,7 @@ void PostIngestQueue::logStageAvailabilitySnapshot() const {
         graphComponent_ != nullptr && !stagePaused_[1].load(std::memory_order_acquire),
         symbolCapable && !stagePaused_[2].load(std::memory_order_acquire),
         entityCapable && !stagePaused_[3].load(std::memory_order_acquire),
-        titleExtractor_ != nullptr && !stagePaused_[4].load(std::memory_order_acquire),
+        hasTitleExtractor() && !stagePaused_[4].load(std::memory_order_acquire),
         stagePaused_[0].load(std::memory_order_acquire),
         stagePaused_[1].load(std::memory_order_acquire),
         stagePaused_[2].load(std::memory_order_acquire),
@@ -994,7 +1007,7 @@ PostIngestQueue::prepareMetadataEntry(
                                  prepared.extension);
 
     // Title+NL extraction: single GLiNER call for both title and NL entities
-    if (titleExtractor_ && !isGlinerTitleExtractionDisabled()) {
+    if (hasTitleExtractor() && !isGlinerTitleExtractionDisabled()) {
         prepared.shouldDispatchTitle = true;
         // Store snippet for GLiNER inference
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
@@ -1752,7 +1765,7 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     cfg.getHashFn = [](const InternalEventBus::TitleExtractionJob& j) -> std::string {
         return j.hash;
     };
-    cfg.isCapableFn = [this]() -> bool { return titleExtractor_ != nullptr; };
+    cfg.isCapableFn = [this]() -> bool { return hasTitleExtractor(); };
     cfg.batchMode = true;
     cfg.batchSizeFn = [this]() -> std::size_t {
         const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
@@ -1783,7 +1796,8 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                                                   const std::string& language,
                                                   const std::string& /*mimeType*/) {
     titleNlDocsProcessed_.fetch_add(1, std::memory_order_relaxed);
-    if (!titleExtractor_) {
+    auto titleExtractor = getTitleExtractor();
+    if (!titleExtractor) {
         spdlog::debug("[PostIngestQueue] Title+NL extraction skipped for {} - no titleExtractor",
                       hash);
         return;
@@ -1809,7 +1823,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
         static const std::unordered_set<std::string> kTitleTypes = {
             "title", "heading", "function", "class", "method", "module", "file", "symbol"};
 
-        auto result = titleExtractor_(textSnippet, kCombinedEntityTypes);
+        auto result = titleExtractor(textSnippet, kCombinedEntityTypes);
         if (!result || !result.value().usedGliner || result.value().concepts.empty()) {
             spdlog::debug("[PostIngestQueue] GLiNER returned no concepts for {}",
                           hash.substr(0, 12));

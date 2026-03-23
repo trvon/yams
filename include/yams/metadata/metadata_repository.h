@@ -476,6 +476,7 @@ public:
     explicit MetadataRepository(ConnectionPool& pool, ConnectionPool* readPool = nullptr);
     ~MetadataRepository()
         override; // Defined in cpp to allow unique_ptr<CorpusStats> with forward decl
+    void shutdown();
 
     // Document operations
     Result<int64_t> insertDocument(const DocumentInfo& info) override;

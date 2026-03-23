@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -12,6 +13,33 @@
 namespace yams::metadata {
 
 namespace {
+
+bool db_lifetime_trace_enabled() {
+    static std::atomic<int> cached{-1};
+    int cachedValue = cached.load(std::memory_order_relaxed);
+    if (cachedValue >= 0) {
+        return cachedValue == 1;
+    }
+
+    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME");
+    bool enabled = env && *env && std::string_view(env) != "0";
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
+}
+
+void trace_pool_lifetime(const char* event, const ConnectionPool* pool, std::string_view dbPath,
+                         size_t availableCount, size_t leasedCount, size_t totalConnections,
+                         size_t activeConnections) {
+    if (!db_lifetime_trace_enabled()) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "[ConnectionPool:%s] this=%p path=%.*s available=%zu leased=%zu total=%zu "
+                 "active=%zu\n",
+                 event, static_cast<const void*>(pool), static_cast<int>(dbPath.size()),
+                 dbPath.data(), availableCount, leasedCount, totalConnections, activeConnections);
+    std::fflush(stderr);
+}
 
 bool sqlite_profile_trace_enabled() {
     static std::atomic<int> cached{-1};
@@ -103,10 +131,14 @@ PooledConnection& PooledConnection::operator=(PooledConnection&& other) noexcept
 
 // ConnectionPool implementation
 ConnectionPool::ConnectionPool(const std::string& dbPath, const ConnectionPoolConfig& config)
-    : dbPath_(dbPath), config_(config) {}
+    : dbPath_(dbPath), config_(config) {
+    trace_pool_lifetime("ctor", this, dbPath_, 0, 0, 0, 0);
+}
 
 ConnectionPool::~ConnectionPool() {
     shutdown();
+    trace_pool_lifetime("dtor", this, dbPath_, 0, 0, totalConnections_.load(),
+                        activeConnections_.load());
 }
 
 Result<void> ConnectionPool::initialize() {
@@ -131,6 +163,7 @@ Result<void> ConnectionPool::initialize() {
         auto pooledConn = std::make_unique<PooledConnection>(
             std::move(connResult).value(),
             [this](PooledConnection* conn) { returnConnection(conn); }, currentGeneration_.load());
+        pooledConn->returned_ = true;
 
         available_.push(std::move(pooledConn));
         totalConnections_++;
@@ -149,6 +182,9 @@ void ConnectionPool::shutdown() {
     if (shutdown_) {
         return; // Already shut down
     }
+
+    trace_pool_lifetime("shutdown.begin", this, dbPath_, available_.size(), leased_.size(),
+                        totalConnections_.load(), activeConnections_.load());
 
     shutdown_ = true;
     cv_.notify_all();
@@ -186,6 +222,8 @@ void ConnectionPool::shutdown() {
         maintenanceThread_.request_stop();
     }
 #endif
+
+    trace_pool_lifetime("shutdown.end", this, dbPath_, available_.size(), leased_.size(), 0, 0);
 }
 
 Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::milliseconds timeout,
@@ -304,6 +342,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
         }
         conn = std::move(available_.front());
         available_.pop();
+        conn->returned_ = false;
 
         // PBI-079: Check if connection is from an old generation (stale) - cheap check under lock
         if (conn->generation_ < currentGen) {
@@ -407,6 +446,7 @@ Result<void> ConnectionPool::healthCheck() {
         for (auto& db : newConns) {
             auto pooledConn = std::make_unique<PooledConnection>(
                 std::move(db), [this](PooledConnection* conn) { returnConnection(conn); }, gen);
+            pooledConn->returned_ = true;
             available_.push(std::move(pooledConn));
             totalConnections_++;
         }
@@ -653,6 +693,7 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
         std::move(db), [this](PooledConnection* c) { returnConnection(c); }, conn->generation_);
 
     newConn->touch();
+    newConn->returned_ = true;
     available_.push(std::move(newConn));
     activeConnections_--;
     totalReleased_++;

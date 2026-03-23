@@ -3091,7 +3091,7 @@ if catch2_dep.found()
     timeout: 60
   )
 
-  heavy_submodule_timeout = get_option('enable-tsan') ? 600 : 300
+  heavy_submodule_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 600 : 300
 
   test('compression_submodule', catch2_compression_submodule_exe,
     suite: ['catch2', 'unit', 'compression', 'yams-pmf'],

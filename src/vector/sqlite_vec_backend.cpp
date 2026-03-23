@@ -5,13 +5,16 @@
 
 #include <sqlite3.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <shared_mutex>
 #include <span>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -32,6 +35,43 @@ using DistanceMetric = sqlite_vec_cpp::distances::CosineMetric<float>;
 using HNSWIndex = sqlite_vec_cpp::index::HNSWIndex<float, DistanceMetric>;
 
 namespace {
+
+bool db_lifetime_trace_enabled() {
+    static std::atomic<int> cached{-1};
+    int cachedValue = cached.load(std::memory_order_relaxed);
+    if (cachedValue >= 0) {
+        return cachedValue == 1;
+    }
+
+    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME");
+    bool enabled = env && *env && std::string_view(env) != "0";
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
+}
+
+void trace_vector_db_lifetime(const char* event, const void* self, std::string_view path,
+                              sqlite3* db, int rc = SQLITE_OK, int liveStatements = -1) {
+    if (!db_lifetime_trace_enabled()) {
+        return;
+    }
+    std::fprintf(stderr, "[VectorDB:%s] this=%p sqlite=%p rc=%d stmts=%d path=%.*s\n", event, self,
+                 static_cast<void*>(db), rc, liveStatements, static_cast<int>(path.size()),
+                 path.data());
+    std::fflush(stderr);
+}
+
+int count_live_statements(sqlite3* db) {
+    if (!db) {
+        return 0;
+    }
+    int count = 0;
+    sqlite3_stmt* stmt = sqlite3_next_stmt(db, nullptr);
+    while (stmt) {
+        ++count;
+        stmt = sqlite3_next_stmt(db, stmt);
+    }
+    return count;
+}
 
 // Helper to safely get string from sqlite column (avoids GNU ?: extension)
 inline std::string safeColumnText(sqlite3_stmt* stmt, int col) {
@@ -487,6 +527,8 @@ public:
         db_path_ = db_path;
         initialized_ = true;
         refreshQueryDimCountsUnlocked();
+        trace_vector_db_lifetime("open", this, db_path_, db_, SQLITE_OK,
+                                 count_live_statements(db_));
 
         // If tables already exist, prepare statements for immediate use
         // (inline check to avoid lock contention - we already hold the lock)
@@ -508,6 +550,8 @@ public:
 
     void close() {
         std::unique_lock lock(mutex_);
+        trace_vector_db_lifetime("close.begin", this, db_path_, db_, SQLITE_OK,
+                                 count_live_statements(db_));
 
         background_seed_cancel_requested_ = true;
 
@@ -520,7 +564,14 @@ public:
         finalizeStatements();
 
         if (db_) {
-            sqlite3_close(db_);
+            sqlite3* db = db_;
+            int rc = sqlite3_close_v2(db);
+            if (rc != SQLITE_OK) {
+                spdlog::warn("[VectorDB] close_v2 deferred/failed for '{}': {}", db_path_,
+                             sqlite3_errstr(rc));
+            }
+            trace_vector_db_lifetime("close.sqlite", this, db_path_, db, rc,
+                                     count_live_statements(db));
             db_ = nullptr;
         }
 
@@ -531,6 +582,7 @@ public:
         background_seed_running_ = false;
         background_seed_scheduled_ = false;
         query_dim_counts_.clear();
+        trace_vector_db_lifetime("close.end", this, db_path_, db_);
     }
 
     bool isInitialized() const {

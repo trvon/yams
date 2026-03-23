@@ -9,6 +9,24 @@
 
 namespace yams::search {
 
+namespace {
+
+bool isNumericOnlyToken(std::string_view token) {
+    return !token.empty() && std::all_of(token.begin(), token.end(),
+                                         [](unsigned char c) { return std::isdigit(c) != 0; });
+}
+
+bool isWeakExpansionToken(std::string_view token) {
+    static constexpr std::array<std::string_view, 14> kWeakTokens = {
+        "show",         "shows",        "showing",  "shown",     "demonstrate",
+        "demonstrates", "demonstrated", "indicate", "indicates", "indicated",
+        "suggest",      "suggests",     "reveals",  "revealed",
+    };
+    return std::find(kWeakTokens.begin(), kWeakTokens.end(), token) != kWeakTokens.end();
+}
+
+} // namespace
+
 float tokenFallbackSalience(const QueryToken& token) {
     const bool hasDigit = std::any_of(token.original.begin(), token.original.end(),
                                       [](unsigned char c) { return std::isdigit(c) != 0; });
@@ -62,6 +80,9 @@ generateAnchoredSubPhrases(const std::string& query, size_t maxPhrases,
     for (size_t i = 0; i < tokens.size(); ++i) {
         const auto& token = tokens[i];
         if (token.normalized.size() < 2) {
+            continue;
+        }
+        if (isNumericOnlyToken(token.normalized) || isWeakExpansionToken(token.normalized)) {
             continue;
         }
 
@@ -134,7 +155,16 @@ generateAnchoredSubPhrases(const std::string& query, size_t maxPhrases,
                     if (!normalizedPhrase.empty()) {
                         normalizedPhrase.push_back(' ');
                     }
+                    if (isNumericOnlyToken(tokens[i].normalized) ||
+                        isWeakExpansionToken(tokens[i].normalized)) {
+                        normalizedPhrase.clear();
+                        break;
+                    }
                     normalizedPhrase += tokens[i].normalized;
+                }
+
+                if (normalizedPhrase.empty()) {
+                    continue;
                 }
 
                 if (normalizedPhrase == fullNormalized || !seen.insert(normalizedPhrase).second) {
@@ -143,6 +173,33 @@ generateAnchoredSubPhrases(const std::string& query, size_t maxPhrases,
 
                 phrases.push_back(joinQueryWindow(tokens, start, length));
             }
+        }
+    }
+
+    if (phrases.size() < maxPhrases) {
+        std::string compressedNormalized;
+        std::string compressedOriginal;
+        size_t retained = 0;
+        for (const auto& token : tokens) {
+            if (token.normalized.size() < 2 || isNumericOnlyToken(token.normalized) ||
+                isWeakExpansionToken(token.normalized)) {
+                continue;
+            }
+            if (!compressedNormalized.empty()) {
+                compressedNormalized.push_back(' ');
+                compressedOriginal.push_back(' ');
+            }
+            compressedNormalized += token.normalized;
+            compressedOriginal += token.original;
+            retained++;
+            if (retained >= 4) {
+                break;
+            }
+        }
+
+        if (retained >= 2 && compressedNormalized != fullNormalized &&
+            seen.insert(compressedNormalized).second) {
+            phrases.push_back(std::move(compressedOriginal));
         }
     }
 

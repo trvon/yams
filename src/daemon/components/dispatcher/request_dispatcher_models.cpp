@@ -189,7 +189,7 @@ RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
         "model_status", [this, req]() -> boost::asio::awaitable<Response> {
             auto provider = serviceManager_ ? serviceManager_->getModelProvider() : nullptr;
-            ModelStatusResponse resp;
+            ModelStatusResponse resp{};
             if (!provider || !provider->isAvailable()) {
                 co_return resp;
             }

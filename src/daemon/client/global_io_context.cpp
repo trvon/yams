@@ -125,10 +125,17 @@ void GlobalIOContext::reset() {
         }
     }
 
+    auto& ctx = instance();
+    std::unique_lock<std::shared_mutex> op_lock(ctx.operation_mutex_);
+
     // Close all connections and clear pools
     // Don't restart io_context - strands hold executor references that would become invalid
     ConnectionRegistry::instance().closeAll();
     AsioConnectionPool::shutdown_all();
+}
+
+std::shared_lock<std::shared_mutex> GlobalIOContext::acquire_operation_guard() {
+    return std::shared_lock<std::shared_mutex>(operation_mutex_);
 }
 
 void GlobalIOContext::restart() {

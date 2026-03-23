@@ -556,6 +556,10 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool, ConnectionPool* rea
 
 // Destructor must be defined in cpp file because of forward-declared CorpusStats in unique_ptr
 MetadataRepository::~MetadataRepository() {
+    shutdown();
+}
+
+void MetadataRepository::shutdown() {
     std::lock_guard<std::mutex> lock(symspellInitMutex_);
     symspellIndex_.reset();
     symspellConn_.reset();

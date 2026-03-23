@@ -137,7 +137,6 @@ public:
     void clear();
 
 private:
-    std::unique_ptr<symspell::SQLiteStore> store_;
     std::unique_ptr<symspell::SymSpell> symspell_;
     mutable std::shared_mutex mutex_;
     int maxEditDistance_;

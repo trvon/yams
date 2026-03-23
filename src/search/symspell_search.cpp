@@ -7,7 +7,6 @@ namespace yams::search {
 
 SymSpellSearch::SymSpellSearch(sqlite3* db, int maxEditDistance, int prefixLength)
     : maxEditDistance_(maxEditDistance), prefixLength_(prefixLength) {
-    store_ = std::make_unique<symspell::SQLiteStore>(db, maxEditDistance, prefixLength);
     symspell_ = std::make_unique<symspell::SymSpell>(
         std::make_unique<symspell::SQLiteStore>(db, maxEditDistance, prefixLength), maxEditDistance,
         prefixLength);
@@ -32,14 +31,14 @@ void SymSpellSearch::addTermsBatch(const std::vector<std::pair<std::string, int6
     std::unique_lock lock(mutex_);
 
     // Use transaction for batch performance
-    store_->beginTransaction();
+    symspell_->beginTransaction();
     try {
         for (const auto& [term, freq] : terms) {
             symspell_->createDictionaryEntry(term, freq);
         }
-        store_->commitTransaction();
+        symspell_->commitTransaction();
     } catch (...) {
-        store_->rollbackTransaction();
+        symspell_->rollbackTransaction();
         throw;
     }
 }
@@ -81,7 +80,7 @@ SymSpellSearch::search(const std::string& query, const SearchOptions& options) c
 
 bool SymSpellSearch::hasExactMatch(std::string_view term) const {
     std::shared_lock lock(mutex_);
-    return store_->termExists(term);
+    return symspell_->termExists(term);
 }
 
 SymSpellSearch::IndexStats SymSpellSearch::getStats() const {

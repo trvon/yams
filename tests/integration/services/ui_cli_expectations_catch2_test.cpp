@@ -37,6 +37,11 @@ namespace fs = std::filesystem;
 
 namespace {
 
+bool uiCliFdTraceEnabled() {
+    const char* env = std::getenv("YAMS_TRACE_TEST_FDS");
+    return env && *env && std::string_view(env) != "0";
+}
+
 size_t countOpenFds() {
     std::error_code ec;
     size_t count = 0;
@@ -48,6 +53,9 @@ size_t countOpenFds() {
 }
 
 void dumpOpenFdSummary(const char* label) {
+    if (!uiCliFdTraceEnabled()) {
+        return;
+    }
     std::error_code ec;
     std::map<std::string, size_t> counts;
     for (const auto& entry : fs::directory_iterator("/dev/fd", ec)) {
@@ -200,15 +208,22 @@ int runCliCommand(const std::vector<std::string>& args,
 class UiCliExpectationsFixture {
 public:
     ~UiCliExpectationsFixture() {
-        std::cerr << "[ui-cli-catch2] teardown fds(before)=" << countOpenFds() << "\n";
-        if (countOpenFds() >= 40) {
+        if (uiCliFdTraceEnabled()) {
+            std::cerr << "[ui-cli-catch2] teardown fds(before)=" << countOpenFds() << "\n";
+        }
+        if (uiCliFdTraceEnabled() && countOpenFds() >= 40) {
             dumpOpenFdSummary("before");
+        }
+        if (harness_) {
+            harness_->stop();
         }
         harness_.reset();
         dbEnvGuards_.clear();
         sessionEnvOverride_.reset();
-        std::cerr << "[ui-cli-catch2] teardown fds(after)=" << countOpenFds() << "\n";
-        if (countOpenFds() >= 40) {
+        if (uiCliFdTraceEnabled()) {
+            std::cerr << "[ui-cli-catch2] teardown fds(after)=" << countOpenFds() << "\n";
+        }
+        if (uiCliFdTraceEnabled() && countOpenFds() >= 40) {
             dumpOpenFdSummary("after");
         }
     }
@@ -219,7 +234,9 @@ public:
             SKIP("AF_UNIX not available in this environment");
         }
 
-        std::cerr << "[ui-cli-catch2] setup fds(before)=" << countOpenFds() << "\n";
+        if (uiCliFdTraceEnabled()) {
+            std::cerr << "[ui-cli-catch2] setup fds(before)=" << countOpenFds() << "\n";
+        }
 
         sessionEnvOverride_ = std::make_unique<ScopedEnvVar>("YAMS_SESSION_CURRENT", "");
         dbEnvGuards_.clear();
@@ -236,7 +253,9 @@ public:
         root_ = storageDir_.parent_path();
         fs::create_directories(root_ / "ingest");
         std::this_thread::sleep_for(100ms);
-        std::cerr << "[ui-cli-catch2] setup fds(after)=" << countOpenFds() << "\n";
+        if (uiCliFdTraceEnabled()) {
+            std::cerr << "[ui-cli-catch2] setup fds(after)=" << countOpenFds() << "\n";
+        }
     }
 
     yams::daemon::ServiceManager* serviceManager() const {

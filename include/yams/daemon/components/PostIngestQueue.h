@@ -432,6 +432,8 @@ private:
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
                             const std::string& mimeType, const std::string& extension) const;
+    [[nodiscard]] search::EntityExtractionFunc getTitleExtractor() const;
+    [[nodiscard]] bool hasTitleExtractor() const;
     void refreshStageAvailability();
     void logStageAvailabilitySnapshot() const;
 
@@ -488,6 +490,7 @@ private:
     mutable std::mutex drainCallbackMutex_;
     DrainCallback drainCallback_;
 
+    mutable std::mutex titleExtractorMutex_;
     search::EntityExtractionFunc titleExtractor_;
     KGWriteQueue* kgWriteQueue_{nullptr};
 

@@ -11,17 +11,62 @@ namespace yamsfmt = fmt;
 #include <yams/daemon/components/TuneAdvisor.h>
 
 #include <chrono>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace yams::storage {
+
+namespace {
+
+bool db_lifetime_trace_enabled() {
+    static std::atomic<int> cached{-1};
+    int cachedValue = cached.load(std::memory_order_relaxed);
+    if (cachedValue >= 0) {
+        return cachedValue == 1;
+    }
+
+    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME");
+    bool enabled = env && *env && std::string_view(env) != "0";
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
+}
+
+void trace_reference_db_lifetime(const char* event, const void* self, std::string_view path,
+                                 sqlite3* db, int rc = SQLITE_OK, int liveStatements = -1) {
+    if (!db_lifetime_trace_enabled()) {
+        return;
+    }
+    std::fprintf(stderr, "[ReferenceDB:%s] this=%p sqlite=%p rc=%d stmts=%d path=%.*s\n", event,
+                 self, static_cast<void*>(db), rc, liveStatements, static_cast<int>(path.size()),
+                 path.data());
+    std::fflush(stderr);
+}
+
+int count_live_statements(sqlite3* db) {
+    if (!db) {
+        return 0;
+    }
+    int count = 0;
+    sqlite3_stmt* stmt = sqlite3_next_stmt(db, nullptr);
+    while (stmt) {
+        ++count;
+        stmt = sqlite3_next_stmt(db, stmt);
+    }
+    return count;
+}
+
+} // namespace
 
 // Retry parameters vary by backend:
 // - libsql MVCC: fewer retries needed since concurrent writers don't block
@@ -165,7 +210,7 @@ private:
 // Simple database wrapper with proper thread safety
 class Database {
 public:
-    explicit Database(const std::filesystem::path& path) {
+    explicit Database(const std::filesystem::path& path) : path_(path.string()) {
         // Use FULLMUTEX for proper thread safety - SQLite will handle internal locking
         int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
 
@@ -195,13 +240,27 @@ public:
         } else {
             execute("PRAGMA journal_mode = WAL");
         }
+
+        trace_reference_db_lifetime("open", this, path_, db_, SQLITE_OK,
+                                    count_live_statements(db_));
     }
 
     ~Database() {
+        trace_reference_db_lifetime("close.begin", this, path_, db_, SQLITE_OK,
+                                    count_live_statements(db_));
         if (db_) {
             // Finalize all cached statements before closing
-            sqlite3_close_v2(db_); // v2 allows cleanup of lingering statements
+            sqlite3* db = db_;
+            int rc = sqlite3_close_v2(db); // v2 allows cleanup of lingering statements
+            if (rc != SQLITE_OK) {
+                spdlog::warn("ReferenceDB close_v2 deferred/failed for '{}': {}", path_,
+                             sqlite3_errstr(rc));
+            }
+            trace_reference_db_lifetime("close.sqlite", this, path_, db, rc,
+                                        count_live_statements(db));
+            db_ = nullptr;
         }
+        trace_reference_db_lifetime("close.end", this, path_, db_);
     }
 
     // Delete copy
@@ -337,6 +396,7 @@ public:
 
 private:
     sqlite3* db_ = nullptr;
+    std::string path_;
 };
 
 // Statement cache for prepared statements

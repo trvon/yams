@@ -955,6 +955,7 @@ void ServiceManager::shutdown() {
     if (backgroundTaskManager_) {
         try {
             backgroundTaskManager_->stop();
+            backgroundTaskManager_.reset();
             auto phase1Duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - phase1Start);
             spdlog::info("[ServiceManager] Phase 1: Background task manager stopped ({}ms)",
@@ -1128,6 +1129,11 @@ void ServiceManager::shutdown() {
         }
     }
 
+    if (checkpointManagerHold) {
+        checkpointManagerHold.reset();
+        spdlog::info("[ServiceManager] Phase 5.1: CheckpointManager destroyed");
+    }
+
     // Phase 6: Stop services in reverse dependency order
     spdlog::info("[ServiceManager] Phase 6: Shutting down daemon services");
 
@@ -1269,9 +1275,26 @@ void ServiceManager::shutdown() {
     // Release DB-owning service graph before pool shutdown so outstanding shared_ptr owners do not
     // keep old SQLite handles alive across daemon cycles.
     spdlog::info("[ServiceManager] Phase 6.9.5: Releasing repo/content holders before DB shutdown");
+    if (auto metadataRepo = loadMetadataRepo()) {
+        try {
+            metadataRepo->shutdown();
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 6.9.5: MetadataRepository shutdown failed: {}",
+                         e.what());
+        } catch (...) {
+            spdlog::warn(
+                "[ServiceManager] Phase 6.9.5: MetadataRepository shutdown failed: unknown");
+        }
+    }
     storeMetadataRepo(std::shared_ptr<metadata::MetadataRepository>{});
     storeKgStore(std::shared_ptr<metadata::KnowledgeGraphStore>{});
     storeGraphComponent(std::shared_ptr<GraphComponent>{});
+    graphQueryServiceOverride_.reset();
+    rerankerAdapter_.reset();
+    repairManager_.reset();
+    contentExtractors_.clear();
+    symbolExtractors_.clear();
+    cachedQueryConceptExtractor_ = {};
     {
         std::unique_lock lk(searchEngineMutex_);
         std::atomic_store_explicit(&searchEngine_, std::shared_ptr<search::SearchEngine>{},
@@ -1329,6 +1352,12 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 8.4: Content store reset");
     searchComponent_.reset();
     spdlog::info("[ServiceManager] Phase 8.4.1: Search component reset");
+    graphQueryServiceOverride_.reset();
+    rerankerAdapter_.reset();
+    repairManager_.reset();
+    contentExtractors_.clear();
+    symbolExtractors_.clear();
+    cachedQueryConceptExtractor_ = {};
 
     spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
     initStrand_.reset();

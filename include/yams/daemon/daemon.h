@@ -106,6 +106,9 @@ public:
     /// Run the daemon main loop on the calling thread. Call after start().
     /// Returns when stopRequested_ becomes true or requestStop() is called.
     void runLoop();
+    /// Test helper: trigger deferred async initialization and the init waiter
+    /// without entering the long-lived runLoop wait loop.
+    void testingStartAsyncInitWithoutRunLoop();
     void requestStop() {
         stopRequested_.store(true, std::memory_order_release);
         stop_cv_.notify_all();

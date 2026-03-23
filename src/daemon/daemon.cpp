@@ -264,10 +264,19 @@ Result<void> YamsDaemon::start() {
     spdlog::info("[Startup] Phase: FSM Reset");
     lifecycleFsm_.reset();
 
-    // Recreate ServiceManager and dependent components if they were destroyed during stop()
-    if (serviceManager_ && serviceManager_->getWorkCoordinator()) {
+    // Recreate ServiceManager and any objects that captured raw pointers into the prior service
+    // graph when the previous stop cycle tore WorkCoordinator-backed state down.
+    const bool needsFreshServiceManager =
+        !serviceManager_ || serviceManager_->getWorkCoordinator() == nullptr;
+    if (!needsFreshServiceManager) {
         serviceManager_->prepareForRestart();
     } else {
+        requestDispatcher_.reset();
+        tuningManager_.reset();
+        {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            metrics_.reset();
+        }
         serviceManager_ = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
     }
 
@@ -858,6 +867,103 @@ void YamsDaemon::runLoop() {
 #endif
     }
     spdlog::debug("Daemon main loop exiting.");
+}
+
+void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
+    if (!serviceManager_) {
+        initHandled_.store(true, std::memory_order_release);
+        lifecycleFsm_.tick();
+        return;
+    }
+
+    spdlog::info("Triggering deferred service initialization (test helper)...");
+    serviceManager_->startAsyncInit(&asyncInitStartedPromise_, &asyncInitBarrierSet_);
+
+    if (asyncInitBarrierSet_.load(std::memory_order_acquire)) {
+        spdlog::info("testingStartAsyncInitWithoutRunLoop: waiting for async init barrier...");
+        try {
+            asyncInitStartedFuture_.wait();
+            spdlog::info("testingStartAsyncInitWithoutRunLoop: async init barrier passed");
+        } catch (const std::exception& e) {
+            spdlog::warn("testingStartAsyncInitWithoutRunLoop: barrier wait failed: {}", e.what());
+        }
+    }
+
+    if (!initWaiterThread_.joinable()) {
+        initWaiterThread_ = std::thread([this]() {
+            set_current_thread_name("yams-init-waiter");
+            spdlog::info(
+                "[InitWaiter] Thread started, waiting for ServiceManager terminal state...");
+
+            auto snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
+
+            if (stopRequested_.load()) {
+                spdlog::info("[InitWaiter] Stop requested, exiting without dispatching events");
+                return;
+            }
+
+            initHandled_.store(true, std::memory_order_release);
+
+            if (snapshot.state == ServiceManagerState::Ready) {
+                const bool providerExpected = config_.enableModelProvider;
+                const bool providerReady =
+                    state_.readiness.modelProviderReady.load(std::memory_order_acquire);
+                if (providerExpected && !providerReady) {
+                    const std::string reason =
+                        "Model provider unavailable; embeddings disabled until provider recovery";
+                    spdlog::warn("[InitWaiter] ServiceManager ready but model provider missing; "
+                                 "dispatching DegradedEvent");
+                    lifecycleFsm_.setSubsystemDegraded("model_provider", true, reason);
+                    lifecycleFsm_.dispatch(DegradedEvent{});
+                } else {
+                    lifecycleFsm_.setSubsystemDegraded("model_provider", false);
+                    spdlog::info("[InitWaiter] ServiceManager reached Ready state, dispatching "
+                                 "HealthyEvent");
+                    lifecycleFsm_.dispatch(HealthyEvent{});
+                }
+                try {
+                    std::shared_ptr<DaemonMetrics> m;
+                    {
+                        std::lock_guard<std::mutex> lk(metricsMutex_);
+                        m = metrics_;
+                    }
+                    if (m) {
+                        m->startPolling();
+                        spdlog::info("[InitWaiter] DaemonMetrics polling confirmed active");
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[InitWaiter] Failed to start metrics polling: {}", e.what());
+                }
+                try {
+                    auto rs = serviceManager_->getRepairServiceShared();
+                    if (config_.enableAutoRepair && !rs) {
+                        spdlog::info(
+                            "[InitWaiter] Starting RepairService (no-runLoop test path)...");
+                        auto activeFn = [this]() -> size_t {
+                            return static_cast<size_t>(state_.stats.activeConnections.load());
+                        };
+                        serviceManager_->startRepairService(std::move(activeFn));
+                    }
+                    if (!modelPreloadSkipped_) {
+                        modelPreloadSkipped_ = true;
+                        spdlog::info("Model preload disabled - models will load on first use");
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[InitWaiter] Failed to start deferred services: {}", e.what());
+                }
+            } else if (snapshot.state == ServiceManagerState::Failed) {
+                spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
+                lifecycleFsm_.dispatch(FailureEvent{snapshot.lastError});
+            } else {
+                spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
+                             static_cast<int>(snapshot.state));
+            }
+            spdlog::info("[InitWaiter] Thread exiting");
+        });
+        spdlog::info("testingStartAsyncInitWithoutRunLoop: init waiter thread spawned");
+    }
+
+    lifecycleFsm_.tick();
 }
 
 Result<void> YamsDaemon::stop() {

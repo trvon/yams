@@ -633,6 +633,7 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_connection() {
     YAMS_ZONE_SCOPED_N("ConnectionPool::create_connection");
     const auto create_start = std::chrono::steady_clock::now();
+    auto io_guard = GlobalIOContext::instance().acquire_operation_guard();
     // Check shutdown before starting
     if (shutdown_.load(std::memory_order_acquire)) {
         co_return Error{ErrorCode::SystemShutdown, "Connection pool is shut down"};

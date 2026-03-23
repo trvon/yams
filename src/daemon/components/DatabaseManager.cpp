@@ -39,8 +39,27 @@ void DatabaseManager::shutdown() {
     spdlog::debug("[DatabaseManager] Shutting down");
 
     kgStore_.reset();
+    if (metadataRepo_) {
+        try {
+            metadataRepo_->shutdown();
+        } catch (const std::exception& e) {
+            spdlog::debug("[DatabaseManager] MetadataRepository shutdown failed: {}", e.what());
+        } catch (...) {
+            spdlog::debug(
+                "[DatabaseManager] MetadataRepository shutdown failed: unknown exception");
+        }
+    }
     metadataRepo_.reset();
-    connectionPool_.reset();
+    if (connectionPool_) {
+        try {
+            connectionPool_->shutdown();
+        } catch (const std::exception& e) {
+            spdlog::debug("[DatabaseManager] ConnectionPool shutdown failed: {}", e.what());
+        } catch (...) {
+            spdlog::debug("[DatabaseManager] ConnectionPool shutdown failed: unknown exception");
+        }
+        connectionPool_.reset();
+    }
 
     if (database_) {
         try {

@@ -885,6 +885,14 @@ inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
     plan.allowLocalServiceFallback = false;
     plan.allowSocketAutoStart = requireSocket;
 
+    // Respect explicit CLI no-autostart intent even on socket-required paths.
+    // This is especially important for test and pinned-socket flows where the caller
+    // provides a concrete daemon endpoint and wants request execution to surface
+    // connectivity errors directly, without a separate readiness/autostart phase.
+    if (detail::explicit_socket_without_autostart()) {
+        plan.config.autoStart = false;
+    }
+
     if (!requireSocket) {
         // For normal CLI flows, avoid daemon auto-start storms and prefer in-process fallback.
         plan.config.autoStart = false;

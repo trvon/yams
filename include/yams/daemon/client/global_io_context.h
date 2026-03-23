@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <vector>
 #include <boost/asio/any_io_executor.hpp>
@@ -22,6 +23,8 @@ public:
     }
 
     static void reset();
+
+    std::shared_lock<std::shared_mutex> acquire_operation_guard();
 
     /// Fully restart the io_context threads.
     /// Use this after stopping a daemon to ensure the io_context is ready for new connections.
@@ -45,6 +48,7 @@ private:
         work_guard_;
     std::vector<std::thread> io_threads_;
     std::mutex restart_mutex_;
+    std::shared_mutex operation_mutex_;
     std::once_flag init_flag_;
     std::atomic<bool> destroyed_{false};
 

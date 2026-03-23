@@ -1,13 +1,59 @@
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/database.h>
 
 namespace yams::metadata {
+
+namespace {
+
+bool db_lifetime_trace_enabled() {
+    static std::atomic<int> cached{-1};
+    int cachedValue = cached.load(std::memory_order_relaxed);
+    if (cachedValue >= 0) {
+        return cachedValue == 1;
+    }
+
+    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME");
+    bool enabled = env && *env && std::string_view(env) != "0";
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
+}
+
+void trace_db_lifetime(const char* event, const Database* db, std::string_view path,
+                       sqlite3* sqliteDb, size_t cacheSize, int rc = SQLITE_OK,
+                       int liveStatements = -1) {
+    if (!db_lifetime_trace_enabled()) {
+        return;
+    }
+    std::fprintf(stderr, "[Database:%s] this=%p sqlite=%p rc=%d stmts=%d path=%.*s cache=%zu\n",
+                 event, static_cast<const void*>(db), static_cast<void*>(sqliteDb), rc,
+                 liveStatements, static_cast<int>(path.size()), path.data(), cacheSize);
+    std::fflush(stderr);
+}
+
+int count_live_statements(sqlite3* db) {
+    if (!db) {
+        return 0;
+    }
+    int count = 0;
+    sqlite3_stmt* stmt = sqlite3_next_stmt(db, nullptr);
+    while (stmt) {
+        ++count;
+        stmt = sqlite3_next_stmt(db, stmt);
+    }
+    return count;
+}
+
+} // namespace
 
 // Statement implementation
 Statement::Statement(sqlite3* db, const std::string& sql) {
@@ -322,7 +368,10 @@ Result<void> Statement::clearBindings() {
 
 // Database implementation
 Database::~Database() {
+    trace_db_lifetime("dtor.begin", this, path_, db_, statementCache_.size(), SQLITE_OK,
+                      count_live_statements(db_));
     close();
+    trace_db_lifetime("dtor.end", this, path_, db_, statementCache_.size());
 }
 
 Database::Database(Database&& other) noexcept
@@ -383,10 +432,14 @@ Result<void> Database::open(const std::string& path, ConnectionMode mode) {
     sqlite3_busy_timeout(db_, 5000); // 5 second timeout
 
     path_ = path;
+    trace_db_lifetime("open", this, path_, db_, statementCache_.size(), SQLITE_OK,
+                      count_live_statements(db_));
     return {};
 }
 
 void Database::close() {
+    trace_db_lifetime("close.begin", this, path_, db_, statementCache_.size(), SQLITE_OK,
+                      count_live_statements(db_));
     // Clear statement cache before closing (statements must be finalized before db close)
     // Lock to prevent concurrent returnToCache() calls from accessing invalidated cache
     {
@@ -401,9 +454,11 @@ void Database::close() {
             spdlog::warn("Database::close_v2 deferred/failed for '{}': {}", path_,
                          sqlite3_errstr(rc));
         }
+        trace_db_lifetime("close.sqlite", this, path_, db, 0, rc, count_live_statements(db));
     }
     path_.clear();
     inTransaction_ = false;
+    trace_db_lifetime("close.end", this, path_, db_, statementCache_.size());
 }
 
 Result<Statement> Database::prepare(const std::string& sql) {
