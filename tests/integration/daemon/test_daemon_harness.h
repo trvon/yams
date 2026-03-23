@@ -2,6 +2,7 @@
 #pragma once
 
 #include <spdlog/spdlog.h>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <map>
@@ -229,26 +230,27 @@ public:
     }
 
     void stop() {
-        // Join runLoop thread first (daemon->stop() will cause runLoop() to return)
-        if (runLoopThread_.joinable()) {
-            spdlog::info("[DaemonHarness] Stopping runLoop thread...");
+        if (std::getenv("YAMS_TRACE_HARNESS_LIFETIME")) {
+            std::fprintf(stderr, "[DaemonHarness::stop] enter daemon=%p runLoopJoinable=%d\n",
+                         static_cast<void*>(daemon_.get()), runLoopThread_.joinable() ? 1 : 0);
+            std::fflush(stderr);
         }
-
         if (daemon_) {
             spdlog::info("[DaemonHarness] Stopping daemon (running={})...", daemon_->isRunning());
+
+            if (runLoopThread_.joinable()) {
+                spdlog::info("[DaemonHarness] Requesting runLoop stop before join...");
+                daemon_->requestStop();
+                spdlog::info("[DaemonHarness] Joining runLoop thread...");
+                runLoopThread_.join();
+                spdlog::info("[DaemonHarness] runLoop thread joined");
+            }
 
             // Wait for daemon to fully stop - it handles GlobalIOContext::reset() internally
             auto stopResult = daemon_->stop();
             if (!stopResult) {
                 spdlog::warn("[DaemonHarness] Daemon stop returned error: {}",
                              stopResult.error().message);
-            }
-
-            // Join runLoop thread after stop() - daemon->stop() causes runLoop() to return
-            if (runLoopThread_.joinable()) {
-                spdlog::info("[DaemonHarness] Joining runLoop thread...");
-                runLoopThread_.join();
-                spdlog::info("[DaemonHarness] runLoop thread joined");
             }
 
             // Wait for daemon to report it's no longer running
@@ -331,6 +333,12 @@ public:
 
             // Reset daemon so it can be recreated on next start()
             daemon_.reset();
+
+            if (std::getenv("YAMS_TRACE_HARNESS_LIFETIME")) {
+                std::fprintf(stderr, "[DaemonHarness::stop] exit daemon=%p runLoopJoinable=%d\n",
+                             static_cast<void*>(daemon_.get()), runLoopThread_.joinable() ? 1 : 0);
+                std::fflush(stderr);
+            }
 
             // CRITICAL: Allow OS to fully release thread resources (macOS needs this)
             // Each daemon creates ~48 threads (32 SocketServer + 16 ServiceManager).

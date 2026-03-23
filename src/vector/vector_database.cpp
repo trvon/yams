@@ -901,7 +901,11 @@ private:
 VectorDatabase::VectorDatabase(const VectorDatabaseConfig& config)
     : pImpl(std::make_unique<Impl>(config)) {}
 
-VectorDatabase::~VectorDatabase() = default;
+VectorDatabase::~VectorDatabase() {
+    if (pImpl) {
+        pImpl->close();
+    }
+}
 
 VectorDatabase::VectorDatabase(VectorDatabase&&) noexcept = default;
 VectorDatabase& VectorDatabase::operator=(VectorDatabase&&) noexcept = default;

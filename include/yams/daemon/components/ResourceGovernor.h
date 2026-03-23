@@ -332,9 +332,6 @@ private:
         PoolStats stats{};
     };
 
-    PoolEntry& poolEntryFor(const std::string& component);
-    const PoolEntry* poolEntryForConst(const std::string& component) const;
-
     // Thread safety
     mutable std::shared_mutex mutex_;
 

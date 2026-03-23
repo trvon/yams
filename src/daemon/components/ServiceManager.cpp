@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <fcntl.h>
@@ -882,6 +883,39 @@ void ServiceManager::shutdown() {
 
     spdlog::info("[ServiceManager] Shutdown initiated");
     auto shutdownStart = std::chrono::steady_clock::now();
+
+    if (std::getenv("YAMS_TRACE_SERVICE_LIFETIME")) {
+        auto tracedContentStore =
+            std::atomic_load_explicit(&contentStore_, std::memory_order_acquire);
+        auto tracedMetadataRepo = loadMetadataRepo();
+        auto tracedKgStore = loadKgStore();
+        auto tracedGraphComponent = loadGraphComponent();
+        auto tracedVectorDb = loadVectorDatabase();
+        auto tracedSearchEngine =
+            std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
+        std::shared_ptr<metadata::ConnectionPool> tracedReadPool;
+        std::shared_ptr<metadata::ConnectionPool> tracedWritePool;
+        {
+            std::lock_guard<std::mutex> lk(poolMutex_);
+            tracedReadPool = readConnectionPool_;
+            tracedWritePool = connectionPool_;
+        }
+        std::fprintf(stderr,
+                     "[ServiceManager::shutdown] contentStore=%ld metadataRepo=%ld kgStore=%ld "
+                     "graphComponent=%ld vectorDb=%ld searchEngine=%ld database=%ld "
+                     "readPool=%ld writePool=%ld\n",
+                     tracedContentStore ? static_cast<long>(tracedContentStore.use_count()) : 0L,
+                     tracedMetadataRepo ? static_cast<long>(tracedMetadataRepo.use_count()) : 0L,
+                     tracedKgStore ? static_cast<long>(tracedKgStore.use_count()) : 0L,
+                     tracedGraphComponent ? static_cast<long>(tracedGraphComponent.use_count())
+                                          : 0L,
+                     tracedVectorDb ? static_cast<long>(tracedVectorDb.use_count()) : 0L,
+                     tracedSearchEngine ? static_cast<long>(tracedSearchEngine.use_count()) : 0L,
+                     database_ ? static_cast<long>(database_.use_count()) : 0L,
+                     tracedReadPool ? static_cast<long>(tracedReadPool.use_count()) : 0L,
+                     tracedWritePool ? static_cast<long>(tracedWritePool.use_count()) : 0L);
+        std::fflush(stderr);
+    }
 
     // Signal plugin providers to fast-fail long acquire paths while shutdown drains work.
     setOnnxShutdownMarker(true);

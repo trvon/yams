@@ -1082,13 +1082,31 @@ void ResourceGovernor::recordEviction() {
 }
 
 void ResourceGovernor::configurePool(const std::string& component, const PoolConfig& cfg) {
-    auto& entry = poolEntryFor(component);
+    std::unique_lock lock(mutex_);
+    auto it = std::find_if(pools_.begin(), pools_.end(),
+                           [&](const auto& pool) { return pool.first == component; });
+    if (it == pools_.end()) {
+        pools_.push_back({component, PoolEntry{}});
+        it = std::prev(pools_.end());
+        it->second.size = it->second.cfg.min_size;
+        it->second.last_resize_ns = 0;
+    }
+    auto& entry = it->second;
     entry.cfg = cfg;
     entry.size = std::clamp(entry.size, cfg.min_size, cfg.max_size);
 }
 
 std::uint32_t ResourceGovernor::applyPoolDelta(const PoolDelta& delta) {
-    auto& entry = poolEntryFor(delta.component);
+    std::unique_lock lock(mutex_);
+    auto it = std::find_if(pools_.begin(), pools_.end(),
+                           [&](const auto& pool) { return pool.first == delta.component; });
+    if (it == pools_.end()) {
+        pools_.push_back({delta.component, PoolEntry{}});
+        it = std::prev(pools_.end());
+        it->second.size = it->second.cfg.min_size;
+        it->second.last_resize_ns = 0;
+    }
+    auto& entry = it->second;
     const auto now = now_ns();
     const auto cooldown =
         (delta.cooldown_ms ? delta.cooldown_ms : entry.cfg.cooldown_ms) * 1'000'000ull;
@@ -1121,9 +1139,12 @@ std::uint32_t ResourceGovernor::applyPoolDelta(const PoolDelta& delta) {
 }
 
 ResourceGovernor::PoolStats ResourceGovernor::poolStats(const std::string& component) const {
-    if (auto* entry = poolEntryForConst(component)) {
-        auto stats = entry->stats;
-        stats.current_size = entry->size;
+    std::shared_lock lock(mutex_);
+    auto it = std::find_if(pools_.begin(), pools_.end(),
+                           [&](const auto& pool) { return pool.first == component; });
+    if (it != pools_.end()) {
+        auto stats = it->second.stats;
+        stats.current_size = it->second.size;
         return stats;
     }
     return {};
@@ -1145,32 +1166,6 @@ std::size_t ResourceGovernor::shrinkAllPools() {
     }
 
     return shrunkCount;
-}
-
-ResourceGovernor::PoolEntry& ResourceGovernor::poolEntryFor(const std::string& component) {
-    std::unique_lock lock(mutex_);
-    for (auto& [name, entry] : pools_) {
-        if (name == component) {
-            return entry;
-        }
-    }
-
-    pools_.push_back({component, PoolEntry{}});
-    auto& entry = pools_.back().second;
-    entry.size = entry.cfg.min_size;
-    entry.last_resize_ns = 0;
-    return entry;
-}
-
-const ResourceGovernor::PoolEntry*
-ResourceGovernor::poolEntryForConst(const std::string& component) const {
-    std::shared_lock lock(mutex_);
-    for (const auto& [name, entry] : pools_) {
-        if (name == component) {
-            return &entry;
-        }
-    }
-    return nullptr;
 }
 
 } // namespace yams::daemon

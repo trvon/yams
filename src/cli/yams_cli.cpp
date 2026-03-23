@@ -81,6 +81,7 @@ namespace fs = std::filesystem;
 #include <spdlog/sinks/null_sink.h>
 #endif
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -208,13 +209,36 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
 }
 
 YamsCLI::~YamsCLI() {
+    if (std::getenv("YAMS_TRACE_CLI_LIFETIME")) {
+        std::fprintf(stderr,
+                     "[YamsCLI::~YamsCLI] appContext=%ld contentStore=%ld connectionPool=%ld "
+                     "database=%ld metadataRepo=%ld kgStore=%ld vectorDatabase=%ld\n",
+                     appContext_ ? static_cast<long>(appContext_.use_count()) : 0L,
+                     contentStore_ ? static_cast<long>(contentStore_.use_count()) : 0L,
+                     connectionPool_ ? static_cast<long>(connectionPool_.use_count()) : 0L,
+                     database_ ? static_cast<long>(database_.use_count()) : 0L,
+                     metadataRepo_ ? static_cast<long>(metadataRepo_.use_count()) : 0L,
+                     kgStore_ ? static_cast<long>(kgStore_.use_count()) : 0L,
+                     vectorDatabase_ ? static_cast<long>(vectorDatabase_.use_count()) : 0L);
+        std::fflush(stderr);
+    }
+    commands_.clear();
+    app_.reset();
+
     {
         std::lock_guard<std::mutex> lock(appContextMutex_);
         appContext_.reset();
     }
 
+    contentStore_.reset();
     embeddingGenerator_.reset();
-    vectorDatabase_.reset();
+    if (vectorDatabase_) {
+        try {
+            vectorDatabase_->close();
+        } catch (...) {
+        }
+        vectorDatabase_.reset();
+    }
     kgStore_.reset();
     metadataRepo_.reset();
 
@@ -233,10 +257,6 @@ YamsCLI::~YamsCLI() {
         }
         database_.reset();
     }
-
-    contentStore_.reset();
-    commands_.clear();
-    app_.reset();
 }
 
 bool YamsCLI::hasExplicitDataDir() const {

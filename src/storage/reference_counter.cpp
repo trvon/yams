@@ -62,7 +62,14 @@ ReferenceCounter::ReferenceCounter(Config config)
 }
 
 // Destructor
-ReferenceCounter::~ReferenceCounter() = default;
+ReferenceCounter::~ReferenceCounter() {
+    if (!pImpl) {
+        return;
+    }
+    std::unique_lock lock(pImpl->dbMutex);
+    pImpl->stmtCache.reset();
+    pImpl->db.reset();
+}
 
 // Move constructor
 ReferenceCounter::ReferenceCounter(ReferenceCounter&&) noexcept = default;

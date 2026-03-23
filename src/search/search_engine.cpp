@@ -776,17 +776,18 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
                 if (strongRelief) {
                     r.score = static_cast<float>(r.score * effectivePenalty);
                 } else {
+                    if (semanticRescueEligible && !isNearMiss) {
+                        r.score = static_cast<float>(r.score * effectivePenalty);
+                        semanticRescueReserve.emplace_back(entry.second.maxVectorRaw, std::move(r));
+                        continue;
+                    }
+
                     const double thresholdRatio =
                         vectorOnlyThreshold > 0.0
                             ? std::clamp(entry.second.maxVectorRaw / vectorOnlyThreshold, 0.0, 1.0)
                             : std::clamp(entry.second.maxVectorRaw, 0.0, 1.0);
                     r.score = static_cast<float>(r.score * effectivePenalty * nearMissPenalty *
                                                  thresholdRatio);
-
-                    if (semanticRescueEligible && !isNearMiss) {
-                        semanticRescueReserve.emplace_back(entry.second.maxVectorRaw, std::move(r));
-                        continue;
-                    }
                 }
             } else {
                 r.score = static_cast<float>(r.score * effectivePenalty);
@@ -892,59 +893,72 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         return lexicalAwareLess(a, b);
     };
 
+    const auto applySemanticRescueWindow = [&]() {
+        if (config_.semanticRescueSlots == 0 || fusedResults.empty()) {
+            return;
+        }
+
+        const size_t topK = std::min((config_.enableReranking && config_.rerankTopK > 0)
+                                         ? std::min(config_.maxResults, config_.rerankTopK)
+                                         : config_.maxResults,
+                                     fusedResults.size());
+        if (topK == 0 || topK >= fusedResults.size()) {
+            return;
+        }
+
+        const size_t rescueTarget = std::min(config_.semanticRescueSlots, topK);
+        size_t rescuePresent = 0;
+        for (size_t i = 0; i < topK; ++i) {
+            if (isVectorOnlyRescueCandidate(fusedResults[i])) {
+                rescuePresent++;
+            }
+        }
+
+        while (rescuePresent < rescueTarget) {
+            size_t bestTailIndex = fusedResults.size();
+            for (size_t i = topK; i < fusedResults.size(); ++i) {
+                if (!isVectorOnlyRescueCandidate(fusedResults[i])) {
+                    continue;
+                }
+                if (bestTailIndex >= fusedResults.size() ||
+                    semanticRescueBetter(fusedResults[i], fusedResults[bestTailIndex])) {
+                    bestTailIndex = i;
+                }
+            }
+            if (bestTailIndex >= fusedResults.size()) {
+                break;
+            }
+
+            size_t victimIndex = topK;
+            for (size_t i = topK; i > 0; --i) {
+                const size_t idx = i - 1;
+                if (!isVectorOnlyRescueCandidate(fusedResults[idx])) {
+                    victimIndex = idx;
+                    break;
+                }
+            }
+            if (victimIndex >= topK) {
+                break;
+            }
+
+            std::swap(fusedResults[victimIndex], fusedResults[bestTailIndex]);
+            rescuePresent++;
+        }
+
+        std::sort(fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(topK),
+                  lexicalAwareLess);
+    };
+
     if (fusedResults.size() > config_.maxResults) {
         std::partial_sort(fusedResults.begin(),
                           fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
                           fusedResults.end(), lexicalAwareLess);
-
-        if (config_.semanticRescueSlots > 0) {
-            const size_t topK = config_.maxResults;
-            const size_t rescueTarget = std::min(config_.semanticRescueSlots, topK);
-            size_t rescuePresent = 0;
-            for (size_t i = 0; i < topK; ++i) {
-                if (isVectorOnlyRescueCandidate(fusedResults[i])) {
-                    rescuePresent++;
-                }
-            }
-
-            while (rescuePresent < rescueTarget) {
-                size_t bestTailIndex = fusedResults.size();
-                for (size_t i = topK; i < fusedResults.size(); ++i) {
-                    if (!isVectorOnlyRescueCandidate(fusedResults[i])) {
-                        continue;
-                    }
-                    if (bestTailIndex >= fusedResults.size() ||
-                        semanticRescueBetter(fusedResults[i], fusedResults[bestTailIndex])) {
-                        bestTailIndex = i;
-                    }
-                }
-                if (bestTailIndex >= fusedResults.size()) {
-                    break;
-                }
-
-                size_t victimIndex = topK;
-                for (size_t i = topK; i > 0; --i) {
-                    const size_t idx = i - 1;
-                    if (!isVectorOnlyRescueCandidate(fusedResults[idx])) {
-                        victimIndex = idx;
-                        break;
-                    }
-                }
-                if (victimIndex >= topK) {
-                    break;
-                }
-
-                std::swap(fusedResults[victimIndex], fusedResults[bestTailIndex]);
-                rescuePresent++;
-            }
-
-            std::sort(fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(topK),
-                      lexicalAwareLess);
-        }
+        applySemanticRescueWindow();
 
         fusedResults.resize(config_.maxResults);
     } else {
         std::sort(fusedResults.begin(), fusedResults.end(), lexicalAwareLess);
+        applySemanticRescueWindow();
     }
 
     return fusedResults;

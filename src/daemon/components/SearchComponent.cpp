@@ -165,13 +165,14 @@ bool SearchComponent::forceRebuild() {
 
     try {
         auto executor = serviceManager_.getWorkerExecutor();
-
-        // IMPORTANT: Use shared_from_this() for ServiceManager to ensure proper lifetime.
-        // ServiceManager inherits from std::enable_shared_from_this<ServiceManager>.
-        auto smPtr = serviceManager_.shared_from_this();
+        auto weakSm = serviceManager_.weak_from_this();
         boost::asio::co_spawn(
             executor,
-            [smPtr]() -> boost::asio::awaitable<void> {
+            [weakSm]() -> boost::asio::awaitable<void> {
+                auto smPtr = weakSm.lock();
+                if (!smPtr) {
+                    co_return;
+                }
                 co_await smPtr->co_enableEmbeddingsAndRebuild();
             },
             boost::asio::detached);

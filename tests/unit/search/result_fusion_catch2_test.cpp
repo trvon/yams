@@ -217,3 +217,34 @@ TEST_CASE("ResultFusion COMB_MNZ prefers stronger raw vector docs for semantic r
     CHECK(results[0].document.sha256Hash == "doc-lexical-a");
     CHECK(results[1].document.sha256Hash == "doc-semantic-strong");
 }
+
+TEST_CASE("ResultFusion semantic rescue keeps rescued docs competitive for rerank window",
+          "[search][fusion][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.maxResults = 3;
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
+    cfg.textWeight = 1.0f;
+    cfg.vectorWeight = 1.0f;
+    cfg.vectorOnlyThreshold = 0.92f;
+    cfg.vectorOnlyPenalty = 0.65f;
+    cfg.semanticRescueSlots = 1;
+    cfg.semanticRescueMinVectorScore = 0.30f;
+    cfg.enableReranking = true;
+    cfg.rerankTopK = 2;
+
+    ResultFusion fusion(cfg);
+
+    ComponentResult lexicalA =
+        makeComponent("doc-lexical-a", 0.9f, ComponentResult::Source::Text, 0);
+    ComponentResult lexicalB =
+        makeComponent("doc-lexical-b", 0.85f, ComponentResult::Source::Text, 1);
+    ComponentResult lexicalC =
+        makeComponent("doc-lexical-c", 0.8f, ComponentResult::Source::Text, 2);
+    ComponentResult rescued =
+        makeComponent("doc-semantic", 0.80f, ComponentResult::Source::Vector, 150);
+
+    auto results = fusion.fuse({lexicalA, lexicalB, lexicalC, rescued});
+    REQUIRE(results.size() == 3U);
+    CHECK(results[0].document.sha256Hash == "doc-lexical-a");
+    CHECK(results[1].document.sha256Hash == "doc-semantic");
+}

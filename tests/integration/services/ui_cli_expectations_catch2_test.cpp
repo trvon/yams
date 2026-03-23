@@ -144,19 +144,28 @@ private:
     std::streambuf* old_{nullptr};
 };
 
-int runCliCommand(const std::vector<std::string>& args) {
+int runCliCommand(const std::vector<std::string>& args,
+                  const std::optional<std::filesystem::path>& socketPath = std::nullopt) {
     const char* yamsTestingEnv = std::getenv("YAMS_TESTING");
     const char* yamsSafeEnv = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
     std::optional<std::string> yamsTesting =
         yamsTestingEnv ? std::make_optional(std::string(yamsTestingEnv)) : std::nullopt;
     std::optional<std::string> yamsSafe =
         yamsSafeEnv ? std::make_optional(std::string(yamsSafeEnv)) : std::nullopt;
+    std::optional<ScopedEnvVar> socketPathEnv;
+    std::optional<ScopedEnvVar> disableAutoStartEnv;
+    std::optional<ScopedEnvVar> embeddedSocketEnv;
 
     if (yamsTesting) {
         unsetenv("YAMS_TESTING");
     }
     if (yamsSafe) {
         unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
+    }
+    if (socketPath) {
+        socketPathEnv.emplace("YAMS_DAEMON_SOCKET_PATH", socketPath->string());
+        disableAutoStartEnv.emplace("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
+        embeddedSocketEnv.emplace("YAMS_EMBEDDED", "socket");
     }
 
 #if defined(YAMS_TESTING)
@@ -602,7 +611,8 @@ TEST_CASE_METHOD(UiCliExpectationsFixture,
         CaptureStdout capture;
         int rc =
             runCliCommand({"yams", "--data-dir", storageDir().string(), "list", "--json", "--limit",
-                           "5", "--name", (root() / "ingest" / "listmode" / "*").string()});
+                           "5", "--name", (root() / "ingest" / "listmode" / "*").string()},
+                          socketPath());
         CHECK(rc == 0);
 
         auto parsed = nlohmann::json::parse(capture.str(), nullptr, false);
@@ -626,7 +636,8 @@ TEST_CASE_METHOD(UiCliExpectationsFixture,
         CaptureStdout capture;
         int rc =
             runCliCommand({"yams", "--data-dir", storageDir().string(), "list", "--json", "--limit",
-                           "5", "--name", (root() / "ingest" / "listmode").string()});
+                           "5", "--name", (root() / "ingest" / "listmode").string()},
+                          socketPath());
         CHECK(rc == 0);
 
         auto parsed = nlohmann::json::parse(capture.str(), nullptr, false);
@@ -1516,7 +1527,8 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search json includes rela
     CaptureStdout capture;
     int rc =
         runCliCommand({"yams", "--data-dir", storageDir().string(), "search", "--type", "keyword",
-                       "--no-group-versions", "--json", "--limit", "5", "json sentinel"});
+                       "--no-group-versions", "--json", "--limit", "5", "json sentinel"},
+                      socketPath());
     CHECK(rc == 0);
 
     auto parsed = nlohmann::json::parse(capture.str(), nullptr, false);
@@ -1619,7 +1631,8 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search human includes rel
     ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
     CaptureStdout capture;
     int rc = runCliCommand({"yams", "--data-dir", storageDir().string(), "search", "--type",
-                            "keyword", "--no-group-versions", "--limit", "5", "human sentinel"});
+                            "keyword", "--no-group-versions", "--limit", "5", "human sentinel"},
+                           socketPath());
     CHECK(rc == 0);
 
     const std::string output = capture.str();
@@ -1665,7 +1678,8 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: graph traversal shows via and
     ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
     CaptureStdout capture;
     int rc = runCliCommand({"yams", "--data-dir", storageDir().string(), "graph", "--node-key",
-                            dirNode.nodeKey, "--depth", "1", "--limit", "10", "--verbose"});
+                            dirNode.nodeKey, "--depth", "1", "--limit", "10", "--verbose"},
+                           socketPath());
     CHECK(rc == 0);
 
     const std::string output = capture.str();
@@ -1731,7 +1745,8 @@ TEST_CASE_METHOD(UiCliExpectationsFixture,
     ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
     CaptureStdout capture;
     int rc = runCliCommand({"yams", "--data-dir", storageDir().string(), "graph", "--node-key",
-                            originNode.nodeKey, "--depth", "1", "--limit", "10", "--verbose"});
+                            originNode.nodeKey, "--depth", "1", "--limit", "10", "--verbose"},
+                           socketPath());
     CHECK(rc == 0);
 
     const std::string output = capture.str();
