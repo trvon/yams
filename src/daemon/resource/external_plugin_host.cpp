@@ -342,7 +342,7 @@ struct ExternalPluginHost::Impl {
 
     auto trustAdd(const std::filesystem::path& path) -> Result<void> {
         std::lock_guard<std::mutex> lock(mutex);
-        auto canonical = fs::weakly_canonical(path);
+        auto canonical = plugin_trust::normalizePath(path);
         trusted.insert(canonical);
         saveTrust();
         return {};
@@ -350,7 +350,7 @@ struct ExternalPluginHost::Impl {
 
     auto trustRemove(const std::filesystem::path& path) -> Result<void> {
         std::lock_guard<std::mutex> lock(mutex);
-        auto canonical = fs::weakly_canonical(path);
+        auto canonical = plugin_trust::normalizePath(path);
         trusted.erase(canonical);
         saveTrust();
         return {};
@@ -898,59 +898,15 @@ private:
         }
 
         std::lock_guard<std::mutex> lock(mutex);
-        trusted.clear();
-
-        auto loadPath = [this](const fs::path& path) {
-            std::ifstream file(path);
-            if (!file) {
-                return false;
-            }
-
-            std::string content((std::istreambuf_iterator<char>(file)),
-                                std::istreambuf_iterator<char>());
-            auto parsed = plugin_trust::parseTrustList(content);
-            for (const auto& raw : parsed) {
-                std::error_code ec;
-                auto canon = fs::weakly_canonical(raw, ec);
-                if (ec) {
-                    canon = raw.lexically_normal();
-                }
-                trusted.insert(std::move(canon));
-            }
-            return true;
-        };
-
-        if (fs::exists(trust_file)) {
-            (void)loadPath(trust_file);
-            return;
-        }
-
-        auto canonicalTrust = yams::config::get_daemon_plugin_trust_file();
-        auto normalizeForCompare = [](const fs::path& p) {
-            std::error_code ec;
-            auto canon = fs::weakly_canonical(p, ec);
-            if (ec) {
-                canon = p.lexically_normal();
-            }
-            return canon;
-        };
-
-        auto trustNorm = normalizeForCompare(trust_file);
-        auto canonicalNorm = normalizeForCompare(canonicalTrust);
-        if (trustNorm != canonicalNorm) {
-            return;
-        }
-
-        auto legacyTrust = yams::config::get_legacy_plugin_trust_file();
-        if (!legacyTrust.empty() && normalizeForCompare(legacyTrust) != trustNorm) {
-            std::error_code ec;
-            if (fs::exists(legacyTrust, ec) && !ec) {
-                if (loadPath(legacyTrust)) {
-                    spdlog::warn("Migrating legacy plugin trust file '{}' -> '{}'",
-                                 legacyTrust.string(), trust_file.string());
-                    saveTrust();
-                }
-            }
+        const auto loadResult =
+            plugin_trust::loadTrustStore(trust_file, yams::config::get_daemon_plugin_trust_file(),
+                                         yams::config::get_legacy_plugin_trust_file());
+        trusted = loadResult.entries;
+        if (loadResult.migrated) {
+            spdlog::warn("Migrating legacy plugin trust file '{}' -> '{}'",
+                         yams::config::get_legacy_plugin_trust_file().string(),
+                         trust_file.string());
+            saveTrust();
         }
     }
 
@@ -959,84 +915,10 @@ private:
             return;
         }
 
-        // Create parent directories if needed
-        auto parent = trust_file.parent_path();
-        if (!parent.empty()) {
-            std::error_code ec;
-            fs::create_directories(parent, ec);
-            if (ec) {
-                spdlog::warn("ExternalPluginHost: failed to create trust dir '{}': {}",
-                             parent.string(), ec.message());
-                return;
-            }
+        if (!plugin_trust::writeTrustStore(trust_file, trusted)) {
+            spdlog::warn("ExternalPluginHost: failed to persist trust file '{}'",
+                         trust_file.string());
         }
-
-        auto tempPath = trust_file;
-        tempPath += ".tmp";
-
-        std::ofstream file(tempPath, std::ios::trunc);
-        if (!file) {
-            spdlog::warn("ExternalPluginHost: failed to open temp trust file '{}'",
-                         tempPath.string());
-            return;
-        }
-
-        file << "# YAMS Plugin Trust List\n";
-        file << "# One plugin path per line\n";
-        for (const auto& path : trusted) {
-            file << path.string() << "\n";
-        }
-        file.close();
-        if (!file) {
-            std::error_code cleanupEc;
-            fs::remove(tempPath, cleanupEc);
-            spdlog::warn("ExternalPluginHost: failed while writing trust file '{}'",
-                         tempPath.string());
-            return;
-        }
-
-#if !defined(_WIN32)
-        {
-            std::error_code ec;
-            fs::permissions(tempPath, fs::perms::owner_read | fs::perms::owner_write,
-                            fs::perm_options::replace, ec);
-            if (ec) {
-                spdlog::warn(
-                    "ExternalPluginHost: failed to set temp trust file permissions '{}': {}",
-                    tempPath.string(), ec.message());
-            }
-        }
-#endif
-
-        std::error_code renameEc;
-        fs::rename(tempPath, trust_file, renameEc);
-#if defined(_WIN32)
-        if (renameEc) {
-            std::error_code removeEc;
-            fs::remove(trust_file, removeEc);
-            renameEc.clear();
-            fs::rename(tempPath, trust_file, renameEc);
-        }
-#endif
-        if (renameEc) {
-            std::error_code cleanupEc;
-            fs::remove(tempPath, cleanupEc);
-            spdlog::warn("ExternalPluginHost: failed to atomically replace trust file '{}': {}",
-                         trust_file.string(), renameEc.message());
-            return;
-        }
-
-#if !defined(_WIN32)
-        {
-            std::error_code ec;
-            fs::permissions(trust_file, fs::perms::owner_read | fs::perms::owner_write,
-                            fs::perm_options::replace, ec);
-            if (ec) {
-                spdlog::warn("ExternalPluginHost: failed to set trust file permissions '{}': {}",
-                             trust_file.string(), ec.message());
-            }
-        }
-#endif
     }
 
     bool isTrusted(const std::filesystem::path& path) const {

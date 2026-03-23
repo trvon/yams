@@ -1,5 +1,5 @@
 /*
- * yams/src/downloader/integrity_verifier.cpp
+ * yams/src/downloader/download_integrity_verifier.cpp
  *
  * IntegrityVerifier MVP (SHA-256 via OpenSSL EVP)
  *

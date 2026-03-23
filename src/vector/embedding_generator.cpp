@@ -28,7 +28,7 @@
 
 #ifdef YAMS_USE_ONNX_RUNTIME
 #include <onnxruntime_cxx_api.h>
-#include <yams/vector/onnx_genai_adapter.h>
+#include <yams/genai/onnx_genai_adapter.h>
 #endif
 
 // Include daemon client for DaemonBackend
@@ -37,6 +37,10 @@
 #include <yams/ml/provider.h>
 
 namespace yams::vector {
+
+#ifdef YAMS_USE_ONNX_RUNTIME
+using yams::genai::OnnxGenAIAdapter;
+#endif
 
 // Forward declarations
 class LocalOnnxBackend;

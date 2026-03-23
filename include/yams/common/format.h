@@ -1,6 +1,6 @@
-// Lightweight formatting compatibility header.
+// Unified formatting compatibility header.
 // Chooses std::format when reliably available, otherwise falls back to {fmt}.
-// Provides a single helper: yams::fmt_format(fmt, args...)
+// Exposes both yams::format(...) and yams::fmt_format(...) for compatibility.
 
 #pragma once
 
@@ -12,7 +12,9 @@
 // This avoids false-positives on platforms like Ubuntu 22.04 (GCC 11) where
 // <format> is incomplete or unavailable.
 #ifndef YAMS_STD_FORMAT_AVAILABLE
-#if defined(__cpp_lib_format) && (__cpp_lib_format >= 201907)
+#if defined(YAMS_HAS_STD_FORMAT)
+#define YAMS_STD_FORMAT_AVAILABLE YAMS_HAS_STD_FORMAT
+#elif defined(__cpp_lib_format) && (__cpp_lib_format >= 201907)
 #define YAMS_STD_FORMAT_AVAILABLE 1
 #else
 #define YAMS_STD_FORMAT_AVAILABLE 0
@@ -23,13 +25,26 @@
 #include <chrono>
 #include <format>
 namespace yams {
-// Constrain the first parameter to std::format_string to avoid calling the
-// consteval constructor with non-constant expressions through a perfect-forwarding pack.
+using std::format_args;
+using std::format_error;
+using std::format_to;
+using std::format_to_n;
+using std::formatted_size;
+using std::make_format_args;
+using std::vformat;
+using std::vformat_to;
+
+template <typename... Args>
+inline std::string format(std::format_string<Args...> fmt, Args&&... args) {
+    return std::format(fmt, std::forward<Args>(args)...);
+}
+
 template <typename... Args>
 inline std::string fmt_format(std::format_string<Args...> fmt, Args&&... args) {
     return std::format(fmt, std::forward<Args>(args)...);
 }
 } // namespace yams
+#define YAMS_FORMAT_NAMESPACE std
 #else
 // Using {fmt}. If spdlog bundles fmt (SPDLOG_FMT_EXTERNAL=0), include from spdlog path
 #if defined(SPDLOG_FMT_EXTERNAL)
@@ -42,10 +57,24 @@ inline std::string fmt_format(std::format_string<Args...> fmt, Args&&... args) {
 #include <spdlog/fmt/bundled/ostream.h>
 #endif
 namespace yams {
-// Mirror std::format_signature using fmt::format_string for compile-time checking when available.
+using fmt::format_args;
+using fmt::format_error;
+using fmt::format_to;
+using fmt::format_to_n;
+using fmt::formatted_size;
+using fmt::make_format_args;
+using fmt::vformat;
+using fmt::vformat_to;
+
+template <typename... Args>
+inline std::string format(fmt::format_string<Args...> fmt, Args&&... args) {
+    return fmt::format(fmt, std::forward<Args>(args)...);
+}
+
 template <typename... Args>
 inline std::string fmt_format(fmt::format_string<Args...> fmt, Args&&... args) {
     return fmt::format(fmt, std::forward<Args>(args)...);
 }
 } // namespace yams
+#define YAMS_FORMAT_NAMESPACE fmt
 #endif

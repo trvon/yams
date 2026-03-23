@@ -50,29 +50,10 @@ namespace fs = std::filesystem;
 // ============================================================================
 
 std::set<fs::path> readTrustedRoots() {
-    std::set<fs::path> roots;
-
-    auto loadTrustFile = [&roots](const fs::path& trustFile) {
-        std::ifstream in(trustFile);
-        if (!in) {
-            return false;
-        }
-
-        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        auto parsed = yams::daemon::plugin_trust::parseTrustList(content);
-        roots.insert(parsed.begin(), parsed.end());
-        return true;
-    };
-
     const fs::path canonicalTrust = yams::config::get_daemon_plugin_trust_file();
-    if (loadTrustFile(canonicalTrust)) {
-        return roots;
-    }
-
-    // Fallback for legacy installations that still have ~/.config/yams/plugins_trust.txt
-    (void)loadTrustFile(yams::config::get_legacy_plugin_trust_file());
-
-    return roots;
+    return yams::daemon::plugin_trust::loadTrustStore(canonicalTrust, canonicalTrust,
+                                                      yams::config::get_legacy_plugin_trust_file())
+        .entries;
 }
 
 bool isPathTrusted(const fs::path& pluginPath, const std::set<fs::path>& trustedRoots) {

@@ -54,6 +54,7 @@
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/resource/plugin_trust.h>
 
 #include <algorithm>
 #include <cctype>
@@ -4201,16 +4202,14 @@ struct BenchFixture {
 
             if (resetPluginTrustFile && harnessOptions.dataDir) {
                 const fs::path trustFile = *harnessOptions.dataDir / "plugins.trust";
-                std::ofstream trustOut(trustFile, std::ios::trunc);
-                if (!trustOut) {
+                std::set<fs::path> trusted;
+                if (harnessOptions.pluginDir) {
+                    trusted.insert(
+                        yams::daemon::plugin_trust::normalizePath(*harnessOptions.pluginDir));
+                }
+                if (!yams::daemon::plugin_trust::writeTrustStore(trustFile, trusted)) {
                     spdlog::warn("Failed to rewrite plugin trust file {}", trustFile.string());
                 } else {
-                    trustOut << "# YAMS Plugin Trust List\n";
-                    trustOut << "# One plugin path per line\n";
-                    if (harnessOptions.pluginDir) {
-                        trustOut << harnessOptions.pluginDir->string() << "\n";
-                    }
-                    trustOut.close();
                     spdlog::info("Rewrote plugin trust file for isolated benchmark plugins: {}",
                                  trustFile.string());
                 }

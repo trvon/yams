@@ -9,7 +9,7 @@ yams_downloader = static_library('yams_downloader',
   [
     'http_adapter_curl.cpp',
     'disk_writer.cpp',
-    'integrity_verifier.cpp',
+    'download_integrity_verifier.cpp',
     'resume_store.cpp',
     'rate_limiter.cpp',
     'download_manager.cpp',
@@ -31,4 +31,3 @@ yams_downloader_dep = declare_dependency(
   include_directories: include_directories('../../include'),
 )
 meson.override_dependency('yams_downloader', yams_downloader_dep)
-

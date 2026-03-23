@@ -117,9 +117,7 @@ std::vector<std::filesystem::path> AbiPluginLoader::trustList() const {
 Result<void> AbiPluginLoader::trustAdd(const std::filesystem::path& p) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::path canon = fs::weakly_canonical(p, ec);
-    if (ec)
-        canon = p;
+    fs::path canon = plugin_trust::normalizePath(p);
 
     // Refuse world-writable paths (and immediate parent)
     // NOTE: On Windows, std::filesystem::permissions() returns synthetic values (all bits set)
@@ -145,11 +143,7 @@ Result<void> AbiPluginLoader::trustAdd(const std::filesystem::path& p) {
 }
 
 Result<void> AbiPluginLoader::trustRemove(const std::filesystem::path& p) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    fs::path canon = fs::weakly_canonical(p, ec);
-    if (ec)
-        canon = p;
+    std::filesystem::path canon = plugin_trust::normalizePath(p);
     trusted_.erase(canon);
     saveTrust();
     return Result<void>();
@@ -446,139 +440,34 @@ void AbiPluginLoader::loadTrust() {
     if (trustFile_.empty())
         return;
 
-    auto normalizeForCompare = [](const std::filesystem::path& p) {
-        std::error_code ec;
-        auto canon = std::filesystem::weakly_canonical(p, ec);
-        if (ec) {
-            canon = p.lexically_normal();
-        }
-        return canon;
-    };
+    const auto loadResult =
+        plugin_trust::loadTrustStore(trustFile_, yams::config::get_daemon_plugin_trust_file(),
+                                     yams::config::get_legacy_plugin_trust_file());
+    trusted_ = loadResult.entries;
 
-    auto loadPath = [this](const std::filesystem::path& path) {
-        std::ifstream in(path);
-        if (!in)
-            return false;
-
-        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        auto parsed = plugin_trust::parseTrustList(content);
-        for (const auto& raw : parsed) {
-            std::error_code ec;
-            auto canon = std::filesystem::weakly_canonical(raw, ec);
-            if (ec) {
-                canon = raw.lexically_normal();
-            }
-            trusted_.insert(std::move(canon));
-        }
-        return true;
-    };
-
-    std::ifstream in(trustFile_);
-    if (!in) {
-        auto canonicalTrust = yams::config::get_daemon_plugin_trust_file();
-        auto trustNorm = normalizeForCompare(trustFile_);
-        auto canonicalNorm = normalizeForCompare(canonicalTrust);
-        if (trustNorm != canonicalNorm) {
-            return;
-        }
-
-        auto legacyTrust = yams::config::get_legacy_plugin_trust_file();
-        if (!legacyTrust.empty() && normalizeForCompare(legacyTrust) != trustNorm) {
-            std::error_code ec;
-            if (std::filesystem::exists(legacyTrust, ec) && !ec) {
-                if (loadPath(legacyTrust)) {
-                    spdlog::warn("Migrating legacy plugin trust file '{}' -> '{}'",
-                                 legacyTrust.string(), trustFile_.string());
-                    saveTrust();
-                    spdlog::debug("AbiPluginLoader::loadTrust loaded {} entries (from legacy)",
-                                  trusted_.size());
-                    return;
-                }
-            }
-        }
+    if (!loadResult.loaded) {
         return;
     }
 
-    spdlog::debug("AbiPluginLoader::loadTrust reading file: {}", trustFile_.string());
-    (void)loadPath(trustFile_);
+    if (loadResult.migrated) {
+        spdlog::warn("Migrating legacy plugin trust file '{}' -> '{}'",
+                     yams::config::get_legacy_plugin_trust_file().string(), trustFile_.string());
+        saveTrust();
+        spdlog::debug("AbiPluginLoader::loadTrust loaded {} entries (from legacy)",
+                      trusted_.size());
+        return;
+    }
+
     spdlog::debug("AbiPluginLoader::loadTrust loaded {} entries", trusted_.size());
 }
 
 void AbiPluginLoader::saveTrust() const {
-    namespace fs = std::filesystem;
     if (trustFile_.empty())
         return;
 
-    std::error_code ec;
-    auto parent = trustFile_.parent_path();
-    if (!parent.empty()) {
-        fs::create_directories(parent, ec);
-        if (ec) {
-            spdlog::warn("AbiPluginLoader::saveTrust failed to create trust directory '{}': {}",
-                         parent.string(), ec.message());
-            return;
-        }
+    if (!plugin_trust::writeTrustStore(trustFile_, trusted_)) {
+        spdlog::warn("AbiPluginLoader::saveTrust failed to persist '{}'", trustFile_.string());
     }
-
-    auto tempPath = trustFile_;
-    tempPath += ".tmp";
-
-    std::ofstream out(tempPath, std::ios::trunc);
-    if (!out) {
-        spdlog::warn("AbiPluginLoader::saveTrust failed to create temp trust file '{}'",
-                     tempPath.string());
-        return;
-    }
-
-    out << "# YAMS Plugin Trust List\n";
-    out << "# One plugin path per line\n";
-    for (const auto& p : trusted_)
-        out << p.string() << "\n";
-    out.close();
-    if (!out) {
-        std::error_code cleanupEc;
-        fs::remove(tempPath, cleanupEc);
-        spdlog::warn("AbiPluginLoader::saveTrust failed while writing '{}'", tempPath.string());
-        return;
-    }
-
-#if !defined(_WIN32)
-    ec.clear();
-    fs::permissions(tempPath, fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace, ec);
-    if (ec) {
-        spdlog::warn("AbiPluginLoader::saveTrust failed to set temp file permissions '{}': {}",
-                     tempPath.string(), ec.message());
-    }
-#endif
-
-    ec.clear();
-    fs::rename(tempPath, trustFile_, ec);
-#if defined(_WIN32)
-    if (ec) {
-        std::error_code removeEc;
-        fs::remove(trustFile_, removeEc);
-        ec.clear();
-        fs::rename(tempPath, trustFile_, ec);
-    }
-#endif
-    if (ec) {
-        std::error_code cleanupEc;
-        fs::remove(tempPath, cleanupEc);
-        spdlog::warn("AbiPluginLoader::saveTrust failed to atomically replace '{}': {}",
-                     trustFile_.string(), ec.message());
-        return;
-    }
-
-#if !defined(_WIN32)
-    ec.clear();
-    fs::permissions(trustFile_, fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace, ec);
-    if (ec) {
-        spdlog::warn("AbiPluginLoader::saveTrust failed to set trust file permissions '{}': {}",
-                     trustFile_.string(), ec.message());
-    }
-#endif
 }
 
 bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {

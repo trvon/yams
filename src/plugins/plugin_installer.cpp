@@ -4,6 +4,7 @@
  */
 
 #include <yams/config/config_helpers.h>
+#include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/plugin_installer.hpp>
 
 #include <chrono>
@@ -107,101 +108,6 @@ std::string computeSha256(const fs::path& filepath) {
         oss << std::setw(2) << static_cast<int>(hash[i]);
     }
     return "sha256:" + oss.str();
-}
-
-constexpr fs::perms kTrustFilePerms = fs::perms::owner_read | fs::perms::owner_write;
-
-void enforcePrivateFilePermissions(const fs::path& path) {
-#if !defined(_WIN32)
-    std::error_code ec;
-    fs::permissions(path, kTrustFilePerms, fs::perm_options::replace, ec);
-    if (ec) {
-        spdlog::warn("Failed to set strict permissions on trust file '{}': {}", path.string(),
-                     ec.message());
-    }
-#else
-    (void)path;
-#endif
-}
-
-bool replaceFileAtomic(const fs::path& from, const fs::path& to) {
-    std::error_code ec;
-    fs::rename(from, to, ec);
-#if defined(_WIN32)
-    if (ec) {
-        std::error_code removeEc;
-        fs::remove(to, removeEc);
-        ec.clear();
-        fs::rename(from, to, ec);
-    }
-#endif
-    if (ec) {
-        std::error_code cleanupEc;
-        fs::remove(from, cleanupEc);
-        spdlog::warn("Failed to atomically replace trust file '{}' : {}", to.string(),
-                     ec.message());
-        return false;
-    }
-    return true;
-}
-
-std::set<std::string> readTrustEntries(const fs::path& trustFile) {
-    std::set<std::string> trusted;
-    std::ifstream inFile(trustFile);
-    if (!inFile) {
-        return trusted;
-    }
-
-    std::string line;
-    while (std::getline(inFile, line)) {
-        if (!line.empty() && line[0] != '#') {
-            trusted.insert(line);
-        }
-    }
-    return trusted;
-}
-
-bool writeTrustEntriesAtomic(const fs::path& trustFile, const std::set<std::string>& trusted) {
-    std::error_code ec;
-    auto parent = trustFile.parent_path();
-    if (!parent.empty()) {
-        fs::create_directories(parent, ec);
-        if (ec) {
-            spdlog::warn("Failed to create trust directory '{}': {}", parent.string(),
-                         ec.message());
-            return false;
-        }
-    }
-
-    fs::path tempFile = trustFile;
-    tempFile +=
-        ".tmp." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-
-    std::ofstream outFile(tempFile, std::ios::trunc);
-    if (!outFile) {
-        spdlog::warn("Failed to create temp trust file: {}", tempFile.string());
-        return false;
-    }
-
-    outFile << "# YAMS Plugin Trust List\n";
-    outFile << "# Plugins at these paths are trusted for automatic loading\n";
-    for (const auto& path : trusted) {
-        outFile << path << "\n";
-    }
-    outFile.close();
-    if (!outFile) {
-        std::error_code cleanupEc;
-        fs::remove(tempFile, cleanupEc);
-        spdlog::warn("Failed while writing trust file: {}", tempFile.string());
-        return false;
-    }
-
-    enforcePrivateFilePermissions(tempFile);
-    if (!replaceFileAtomic(tempFile, trustFile)) {
-        return false;
-    }
-    enforcePrivateFilePermissions(trustFile);
-    return true;
 }
 
 // Extract tar.gz archive
@@ -593,35 +499,29 @@ private:
     }
 
     void addToTrustList(const fs::path& pluginPath) {
-        std::error_code ec;
-        auto trusted = readTrustEntries(trustFile_);
+        auto loadResult = yams::daemon::plugin_trust::loadTrustStore(
+            trustFile_, yams::config::get_daemon_plugin_trust_file(),
+            yams::config::get_legacy_plugin_trust_file());
+        auto trusted = std::move(loadResult.entries);
+        trusted.insert(yams::daemon::plugin_trust::normalizePath(pluginPath));
 
-        // Add plugin path (use canonical path if possible)
-        std::string pathStr;
-        auto canonical = fs::weakly_canonical(pluginPath, ec);
-        pathStr = ec ? pluginPath.string() : canonical.string();
-        trusted.insert(pathStr);
-
-        if (!writeTrustEntriesAtomic(trustFile_, trusted)) {
+        if (!yams::daemon::plugin_trust::writeTrustStore(trustFile_, trusted)) {
             spdlog::warn("Failed to persist plugin trust list '{}'.", trustFile_.string());
         }
     }
 
     void removeFromTrustList(const fs::path& pluginPath) {
-        if (!fs::exists(trustFile_)) {
+        auto loadResult = yams::daemon::plugin_trust::loadTrustStore(
+            trustFile_, yams::config::get_daemon_plugin_trust_file(),
+            yams::config::get_legacy_plugin_trust_file());
+        if (!loadResult.loaded && !fs::exists(trustFile_)) {
             return;
         }
 
-        std::error_code ec;
-        std::string pathStr;
-        auto canonical = fs::weakly_canonical(pluginPath, ec);
-        pathStr = ec ? pluginPath.string() : canonical.string();
+        auto trusted = std::move(loadResult.entries);
+        trusted.erase(yams::daemon::plugin_trust::normalizePath(pluginPath));
 
-        auto trusted = readTrustEntries(trustFile_);
-        trusted.erase(pathStr);
-        trusted.erase(pluginPath.string());
-
-        if (!writeTrustEntriesAtomic(trustFile_, trusted)) {
+        if (!yams::daemon::plugin_trust::writeTrustStore(trustFile_, trusted)) {
             spdlog::warn("Failed to update plugin trust list '{}' during removal.",
                          trustFile_.string());
         }

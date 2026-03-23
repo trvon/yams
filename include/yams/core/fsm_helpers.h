@@ -5,20 +5,21 @@
 #include <stdexcept>
 #include <thread>
 #include <yams/daemon/ipc/connection_fsm.h>
+#include <yams/daemon/ipc/fsm_helpers.h>
 
 namespace yams {
 namespace core {
 
 // Lightweight guard helpers to keep client code simple and consistent
 inline void require_can_read(const std::shared_ptr<daemon::ConnectionFsm>& fsm) {
-    if (fsm && !fsm->can_read()) {
-        throw std::runtime_error("Invalid read in current state");
+    if (fsm) {
+        daemon::fsm_helpers::require_can_read(*fsm);
     }
 }
 
 inline void require_can_write(const std::shared_ptr<daemon::ConnectionFsm>& fsm) {
-    if (fsm && !fsm->can_write()) {
-        throw std::runtime_error("Invalid write in current state");
+    if (fsm) {
+        daemon::fsm_helpers::require_can_write(*fsm);
     }
 }
 
@@ -26,7 +27,7 @@ inline void validate_op(const std::shared_ptr<daemon::ConnectionFsm>& fsm,
                         daemon::ConnectionFsm::Operation op) {
     if (!fsm)
         return;
-    fsm->validate_operation(op);
+    daemon::fsm_helpers::validate_op(*fsm, op);
 }
 
 namespace fsm {
