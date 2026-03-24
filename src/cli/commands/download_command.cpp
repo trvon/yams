@@ -13,6 +13,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/common/fs_utils.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
@@ -275,7 +276,7 @@ public:
         if (exportDir_) {
             // Ensure directory exists; service will validate writes
             std::error_code ec;
-            fs::create_directories(*exportDir_, ec);
+            yams::common::ensureDirectories(*exportDir_);
         }
         if (overwritePolicy_ == "never") {
             serviceReq.overwrite = downloader::OverwritePolicy::Never;

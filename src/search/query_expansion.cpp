@@ -4,7 +4,9 @@
 #include <yams/search/query_expansion.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <string_view>
 #include <unordered_set>
 
 namespace yams::search {

@@ -1,6 +1,7 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/daemon.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -222,7 +223,7 @@ void ConfigResolver::writeVectorSentinel(const std::filesystem::path& dataDir, s
                                          const std::string& /*tableName*/, int schemaVersion) {
     try {
         namespace fs = std::filesystem;
-        fs::create_directories(dataDir);
+        yams::common::ensureDirectories(dataDir);
         nlohmann::json j;
         j["embedding_dim"] = dim;
         j["schema_version"] = schemaVersion;

@@ -1,3 +1,4 @@
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/daemon.h>
 #include <yams/platform/windows_init.h>
 
@@ -1022,7 +1023,7 @@ int main(int argc, char* argv[]) {
 
     // Create log directory if needed
     try {
-        std::filesystem::create_directories(config.logFile.parent_path());
+        yams::common::ensureDirectories(config.logFile.parent_path());
     } catch (const std::exception& e) {
         // Best effort - log may go to fallback location
         std::cerr << "Warning: could not create log directory: " << e.what() << "\n";
@@ -1048,7 +1049,7 @@ int main(int argc, char* argv[]) {
             auto fallback = yams::daemon::YamsDaemon::resolveSystemPath(
                 yams::daemon::YamsDaemon::PathType::LogFile);
             std::error_code ec;
-            std::filesystem::create_directories(fallback.parent_path(), ec);
+            yams::common::ensureDirectories(fallback.parent_path());
             auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                 fallback.string(), max_size, max_files);
             auto logger = std::make_shared<spdlog::logger>("yams-daemon", rotating_sink);

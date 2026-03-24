@@ -2,6 +2,7 @@
 #include <yams/api/content_store_error.h>
 #include <yams/api/progress_reporter.h>
 #include <yams/chunking/chunker.h>
+#include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
 #include <yams/profiling.h>
@@ -270,7 +271,7 @@ public:
         // Create temporary file for streaming
         auto tempPath = config_.storagePath / "temp" /
                         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-        std::filesystem::create_directories(tempPath.parent_path());
+        yams::common::ensureDirectories(tempPath.parent_path());
 
         // Write stream to temporary file
         std::ofstream tempFile(tempPath, std::ios::binary);
@@ -299,7 +300,7 @@ public:
             config_.storagePath / "temp" /
             (hash + "_" +
              std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(tempPath.parent_path());
+        yams::common::ensureDirectories(tempPath.parent_path());
 
         // Retrieve to temporary file
         auto result = retrieve(hash, tempPath, progress);

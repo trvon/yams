@@ -2,6 +2,7 @@
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/client_transport.h>
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/in_process_transport.h>
@@ -278,7 +279,7 @@ std::filesystem::path resolveDataDirCached() {
 
         auto read_cached_data_dir = [&](const fs::path& p) -> std::optional<fs::path> {
             try {
-                fs::create_directories(p.parent_path());
+                yams::common::ensureDirectories(p.parent_path());
                 int fd = ::open(p.string().c_str(), O_RDONLY | O_CLOEXEC);
                 if (fd < 0)
                     return std::nullopt;
@@ -313,7 +314,7 @@ std::filesystem::path resolveDataDirCached() {
 
         auto write_cached_data_dir = [&](const fs::path& p, const fs::path& value) {
             try {
-                fs::create_directories(p.parent_path());
+                yams::common::ensureDirectories(p.parent_path());
                 int fd = ::open(p.string().c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
                 if (fd < 0)
                     return;

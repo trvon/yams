@@ -30,6 +30,7 @@
 #endif
 #include <yams/core/uuid.h>
 #include <yams/mcp/error_handling.h>
+#include <yams/common/fs_utils.h>
 #include <yams/mcp/mcp_server.h>
 #if !defined(YAMS_WASI)
 #include <yams/metadata/connection_pool.h>
@@ -1902,7 +1903,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             if (p.empty())
                 return false;
             std::error_code ec;
-            fs::create_directories(p, ec);
+            yams::common::ensureDirectories(p);
             return !ec && fs::exists(p);
         };
 
@@ -5305,7 +5306,7 @@ void MCPServer::initializeToolRegistry() {
                 std::filesystem::path outputDir(req.outputDirectory);
                 if (!req.dryRun && req.createDirs) {
                     std::error_code ec;
-                    std::filesystem::create_directories(outputDir, ec);
+                    yams::common::ensureDirectories(outputDir);
                     if (ec) {
                         co_return Error{ErrorCode::IOError,
                                         "Failed to create output directory: " + ec.message()};
@@ -5413,7 +5414,7 @@ void MCPServer::initializeToolRegistry() {
 
                         // Create parent directories
                         std::error_code ec;
-                        std::filesystem::create_directories(fullOutputPath.parent_path(), ec);
+                        yams::common::ensureDirectories(fullOutputPath.parent_path());
                         if (ec) {
                             spdlog::error("MCP handleRestoreCollection: failed to create directory "
                                           "for '{}': {}",

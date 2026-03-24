@@ -395,10 +395,10 @@ std::filesystem::path make_temp_directory() {
     for (int i = 0; i < 8; ++i) {
         candidate = base / ("yams_mobile_" + std::to_string(pid) + "_" + std::to_string(dist(gen)));
         std::error_code ec;
-        if (std::filesystem::create_directories(candidate, ec))
+        if (yams::common::ensureDirectories(candidate))
             return candidate;
     }
-    std::filesystem::create_directories(base / "yams_mobile_fallback");
+    yams::common::ensureDirectories(base / "yams_mobile_fallback");
     return base / "yams_mobile_fallback";
 }
 
@@ -649,10 +649,10 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
         }
 
         std::error_code ec;
-        std::filesystem::create_directories(ctx->state.config.working_directory, ec);
-        std::filesystem::create_directories(ctx->state.config.cache_directory, ec);
+        yams::common::ensureDirectories(ctx->state.config.working_directory);
+        yams::common::ensureDirectories(ctx->state.config.cache_directory);
         if (ctx->state.config.backend_mode == YAMS_MOBILE_BACKEND_EMBEDDED) {
-            std::filesystem::create_directories(ctx->state.config.storage_directory, ec);
+            yams::common::ensureDirectories(ctx->state.config.storage_directory);
         }
 
         // Thread pool / executor

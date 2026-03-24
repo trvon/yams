@@ -10,6 +10,7 @@
 #include <sstream>
 #include <yams/cli/command.h>
 #include <yams/cli/result_helpers.h>
+#include <yams/common/fs_utils.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
@@ -1884,7 +1885,7 @@ private:
             }
 
             auto grammarPath = getGrammarPath();
-            fs::create_directories(grammarPath);
+            yams::common::ensureDirectories(grammarPath);
 
             std::cout << "Downloading tree-sitter grammar for " << grammarLanguage_ << "...\n";
             std::cout << "Repository: " << grammarRepos[grammarLanguage_] << "\n";

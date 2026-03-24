@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/common/fs_utils.h>
 #include <yams/core/uuid.h>
 
 namespace yams::app::services {
@@ -22,9 +23,7 @@ static std::filesystem::path state_root() {
 }
 static std::filesystem::path sessions_dir() {
     auto d = state_root() / "sessions";
-    std::error_code ec;
-    std::filesystem::create_directories(d, ec);
-    (void)ec;
+    yams::common::ensureDirectories(d);
     return d;
 }
 static std::filesystem::path index_path() {

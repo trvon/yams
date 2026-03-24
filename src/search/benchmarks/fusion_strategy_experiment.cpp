@@ -167,7 +167,7 @@ struct BEIRCorpusLoader {
     BEIRCorpusLoader(const BEIRDataset& ds, const fs::path& dir) : dataset(ds), corpusDir(dir) {}
 
     void writeDocumentsAsFiles() {
-        fs::create_directories(corpusDir);
+        yams::common::ensureDirectories(corpusDir);
         for (const auto& [id, doc] : dataset.documents) {
             fs::path filePath = corpusDir / (id + ".txt");
             std::ofstream outFile(filePath);

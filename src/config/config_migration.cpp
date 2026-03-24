@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <set>
 #include <sstream>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_migration.h>
 
 namespace yams::config {
@@ -162,7 +163,7 @@ Result<void> ConfigMigrator::createDefaultLatestConfig(const fs::path& configPat
     spdlog::info("Creating default v{} config at: {}", kLatestConfigVersion, configPath.string());
 
     // Ensure parent directory exists
-    fs::create_directories(configPath.parent_path());
+    yams::common::ensureDirectories(configPath.parent_path());
 
     // Get latest defaults
     auto latestDefaults = getLatestConfigDefaults();

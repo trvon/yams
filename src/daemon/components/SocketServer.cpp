@@ -11,6 +11,7 @@
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/ipc/request_handler.h>
+#include <yams/common/fs_utils.h>
 #include <yams/profiling.h>
 
 namespace {
@@ -142,7 +143,7 @@ Result<void> SocketServer::start() {
 
         auto parent = sockPath.parent_path();
         if (!parent.empty() && !std::filesystem::exists(parent)) {
-            std::filesystem::create_directories(parent);
+            yams::common::ensureDirectories(parent);
         }
 
 #ifndef _WIN32
@@ -251,7 +252,7 @@ Result<void> SocketServer::start() {
             std::filesystem::remove(proxySockPath, proxy_ec);
             auto proxyParent = proxySockPath.parent_path();
             if (!proxyParent.empty() && !std::filesystem::exists(proxyParent)) {
-                std::filesystem::create_directories(proxyParent);
+                yams::common::ensureDirectories(proxyParent);
             }
 
 #ifndef _WIN32

@@ -3,6 +3,7 @@
  * @brief Implementation of the plugin installer
  */
 
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/plugin_installer.hpp>
@@ -132,12 +133,10 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
     }
 
     // Create destination directory
-    std::error_code ec;
-    fs::create_directories(destDir, ec);
-    if (ec) {
+    if (!yams::common::ensureDirectories(destDir)) {
         archive_read_free(a);
         archive_write_free(ext);
-        return Error{ErrorCode::IOError, "Failed to create destination directory: " + ec.message()};
+        return Error{ErrorCode::IOError, "Failed to create destination directory"};
     }
 
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
@@ -268,7 +267,10 @@ public:
         fs::path tempDir =
             fs::temp_directory_path() / ("yams-plugin-" + info.name + "-" + info.version);
         std::error_code ec;
-        fs::create_directories(tempDir, ec);
+        if (!yams::common::ensureDirectories(tempDir)) {
+            fs::remove_all(tempDir, ec);
+            return Error{ErrorCode::IOError, "Failed to create temp directory"};
+        }
         fs::path archivePath = tempDir / (info.name + "-" + info.version + ".tar.gz");
 
         // Download
@@ -312,7 +314,9 @@ public:
             fs::remove_all(pluginDir, ec);
         }
 
-        fs::create_directories(targetDir, ec);
+        if (!yams::common::ensureDirectories(targetDir)) {
+            return Error{ErrorCode::IOError, "Failed to create plugin directory"};
+        }
 
         // Find the actual plugin content (may be in a subdirectory)
         fs::path sourceDir = extractDir;

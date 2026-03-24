@@ -1,5 +1,6 @@
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/vector/dim_resolver.h>
 
@@ -347,7 +348,7 @@ Result<void> ensureDbFile(const fs::path& dbPath) {
     try {
         if (!fs::exists(dbPath)) {
             // Create parent directories if needed
-            fs::create_directories(dbPath.parent_path());
+            yams::common::ensureDirectories(dbPath.parent_path());
 
             // Create empty file
             std::ofstream file(dbPath);

@@ -24,6 +24,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/common/fs_utils.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
@@ -253,7 +254,7 @@ private:
             if (props.dim > 0)
                 vidx["dimension"] = std::to_string(props.dim);
             // Write back
-            fs::create_directories(cfgPath.parent_path());
+            yams::common::ensureDirectories(cfgPath.parent_path());
             std::ofstream out(cfgPath);
             if (!out.good())
                 return Error{ErrorCode::WriteError,
@@ -770,7 +771,7 @@ private:
         output_path = cli_->getDataPath() / "models" / model.name;
 
         // Create directory if needed
-        fs::create_directories(output_path);
+        yams::common::ensureDirectories(output_path);
 
         // Full path to model file
         fs::path model_file = output_path / "model.onnx";

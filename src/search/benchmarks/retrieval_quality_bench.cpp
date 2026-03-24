@@ -511,7 +511,9 @@ struct CorpusGenerator {
     std::vector<std::string> createdFiles;
     std::mt19937 rng{42};
 
-    CorpusGenerator(const fs::path& dir) : corpusDir(dir) { fs::create_directories(corpusDir); }
+    CorpusGenerator(const fs::path& dir) : corpusDir(dir) {
+        yams::common::ensureDirectories(corpusDir);
+    }
 
     void generateDocuments(int count) {
         std::uniform_int_distribution<int> topicDist(0, static_cast<int>(topics.size()) - 1);
@@ -557,7 +559,7 @@ struct BEIRCorpusLoader {
     BEIRCorpusLoader(const BEIRDataset& ds, const fs::path& dir) : dataset(ds), corpusDir(dir) {}
 
     void writeDocumentsAsFiles() {
-        fs::create_directories(corpusDir);
+        yams::common::ensureDirectories(corpusDir);
         for (const auto& [id, doc] : dataset.documents) {
             fs::path filePath = corpusDir / (id + ".txt");
             std::ofstream outFile(filePath);
@@ -1855,7 +1857,7 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
 static Result<void> writeBenchCacheMetadata(const fs::path& warmDataDir,
                                             const BenchCacheMetadata& metadata) {
     std::error_code ec;
-    fs::create_directories(warmDataDir, ec);
+    yams::common::ensureDirectories(warmDataDir);
     if (ec) {
         return Error{ErrorCode::IOError, "Failed to create warm data dir '" + warmDataDir.string() +
                                              "': " + ec.message()};
@@ -4147,7 +4149,7 @@ struct BenchFixture {
                         ec.clear();
                         installedOnnxSource = installedOnnxPlugin;
                     }
-                    fs::create_directories(stagedPluginDir, ec);
+                    yams::common::ensureDirectories(stagedPluginDir);
                     if (ec) {
                         spdlog::warn("Failed to create staged plugin dir {}: {}",
                                      stagedPluginDir.string(), ec.message());

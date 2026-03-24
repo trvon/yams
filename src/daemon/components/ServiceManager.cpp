@@ -17,6 +17,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 
@@ -51,6 +52,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
@@ -639,7 +641,7 @@ yams::Result<void> ServiceManager::initialize() {
         }
     }
     std::error_code ec;
-    fs::create_directories(dataDir, ec);
+    yams::common::ensureDirectories(dataDir);
     spdlog::info("ServiceManager: resolved data directory: {}", dataDir.string());
     if (isEphemeralDataDir(dataDir)) {
         spdlog::warn("ServiceManager: resolved data directory appears ephemeral: {}. "
@@ -1471,7 +1473,7 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
         fs::path dir = yams::daemon::YamsDaemon::getXDGRuntimeDir();
         if (dir.empty())
             return;
-        fs::create_directories(dir);
+        yams::common::ensureDirectories(dir);
         fs::path path = dir / "yams-daemon.status.json";
         nlohmann::json j;
         j["ready"] = state.readiness.fullyReady();
@@ -1681,7 +1683,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     {
         std::error_code ec;
-        fs::create_directories(dataDir, ec);
+        yams::common::ensureDirectories(dataDir);
         resolvedDataDir_ = dataDir;
     }
 
@@ -1696,7 +1698,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     if (storageDecision.value().activeDataDir != dataDir) {
         dataDir = storageDecision.value().activeDataDir;
         std::error_code ec;
-        fs::create_directories(dataDir, ec);
+        yams::common::ensureDirectories(dataDir);
         resolvedDataDir_ = dataDir;
     }
 

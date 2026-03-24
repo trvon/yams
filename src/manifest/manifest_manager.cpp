@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
@@ -608,7 +609,7 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
                   outputPath.string());
 
     // Create output directory if needed
-    std::filesystem::create_directories(outputPath.parent_path());
+    yams::common::ensureDirectories(outputPath.parent_path());
 
     // Open output file
     std::ofstream file(outputPath, std::ios::binary);

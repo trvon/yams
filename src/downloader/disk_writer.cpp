@@ -10,6 +10,7 @@
  * This is an MVP implementation focused on correctness and portability.
  */
 
+#include <yams/common/fs_utils.h>
 #include <yams/downloader/downloader.hpp>
 
 #include <spdlog/spdlog.h>
@@ -198,7 +199,7 @@ public:
         // Create staging directory: data/staging/downloader
         fs::path stagingRoot = storage.stagingDir;
         fs::path stagingDir = stagingRoot / "downloader";
-        fs::create_directories(stagingDir, ec);
+        yams::common::ensureDirectories(stagingDir);
         if (ec) {
             return Error{ErrorCode::IoError,
                          "Failed to create staging dir: " + stagingDir.string()};
@@ -246,7 +247,7 @@ public:
         // Ensure staging directory exists with restrictive permissions
         fs::path stagingRoot = storage.stagingDir;
         fs::path stagingDir = stagingRoot / "downloader";
-        fs::create_directories(stagingDir, ec);
+        yams::common::ensureDirectories(stagingDir);
         ensure_dir_perms(stagingDir, /*private_dir=*/true);
 
         // Deterministic file name for resume: "<sessionId>.part" (or custom extension)
@@ -330,7 +331,7 @@ public:
 
         // Ensure parent directory exists
         std::error_code ec;
-        fs::create_directories(finalPath.parent_path(), ec);
+        yams::common::ensureDirectories(finalPath.parent_path());
         if (ec) {
             return Error{ErrorCode::IoError,
                          "Failed to create CAS dir: " + finalPath.parent_path().string()};

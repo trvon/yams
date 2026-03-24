@@ -1,4 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
+#include <yams/common/fs_utils.h>
 #include <yams/api/content_store_builder.h>
 #include <yams/api/content_store_error.h>
 #include <yams/chunking/streaming_chunker.h>
@@ -439,8 +440,8 @@ Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::build() {
 
     // Ensure storage directories exist (may have been created previously).
     try {
-        std::filesystem::create_directories(pImpl->config.storagePath);
-        std::filesystem::create_directories(pImpl->config.storagePath / "temp");
+        yams::common::ensureDirectories(pImpl->config.storagePath);
+        yams::common::ensureDirectories(pImpl->config.storagePath / "temp");
     } catch (const std::exception& e) {
         spdlog::error("Failed to create storage directory: {}", e.what());
         return Result<std::unique_ptr<IContentStore>>(ErrorCode::PermissionDenied);

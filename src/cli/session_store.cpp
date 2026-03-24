@@ -1,3 +1,4 @@
+#include <yams/common/fs_utils.h>
 #include <yams/cli/session_store.h>
 
 #include <nlohmann/json.hpp>
@@ -22,7 +23,7 @@ static std::filesystem::path state_root() {
 std::filesystem::path sessions_dir() {
     auto dir = state_root() / "sessions";
     std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
+    yams::common::ensureDirectories(dir);
     (void)ec;
     return dir;
 }

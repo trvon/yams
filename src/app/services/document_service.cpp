@@ -1,4 +1,5 @@
 #include <yams/app/services/services.hpp>
+#include <yams/common/fs_utils.h>
 #include <yams/core/uuid.h>
 // Hot/Cold mode helpers (env-driven)
 #include "../../cli/hot_cold_utils.h"
@@ -570,7 +571,10 @@ public:
             usePath = makeTempFilePathFor(req.name);
             tmpToRemove = std::filesystem::path(usePath);
             std::error_code ec;
-            std::filesystem::create_directories(tmpToRemove->parent_path(), ec);
+            if (!yams::common::ensureDirectories(tmpToRemove->parent_path())) {
+                return Error{ErrorCode::WriteError,
+                             "Failed to create directory for temporary file"};
+            }
             std::ofstream ofs(usePath, std::ios::binary);
             if (!ofs.good()) {
                 return Error{ErrorCode::WriteError, "Failed to create temporary file for content"};

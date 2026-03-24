@@ -1,3 +1,4 @@
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/ipc/socket_utils.h>
 
 #include <algorithm>
@@ -47,7 +48,7 @@ std::filesystem::path resolve_socket_path() {
     if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
         auto yamDir = fs::path(localAppData) / "yams";
         std::error_code ec;
-        fs::create_directories(yamDir, ec);
+        yams::common::ensureDirectories(yamDir);
         if (can_write_dir(yamDir))
             return yamDir / "yams-daemon.sock";
     }

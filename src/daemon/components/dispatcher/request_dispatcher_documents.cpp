@@ -18,6 +18,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/common/fs_utils.h>
 #include <yams/app/services/session_service.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -526,7 +527,7 @@ private:
         }
 
         try {
-            std::filesystem::create_directories(currentStorePath_.parent_path());
+            yams::common::ensureDirectories(currentStorePath_.parent_path());
             nlohmann::json root;
             root["next_id"] = nextId_;
             root["jobs"] = nlohmann::json::array();

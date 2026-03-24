@@ -8,6 +8,7 @@
 #include <yams/cli/session_store.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -46,7 +47,7 @@ static std::filesystem::path resolveStateFile() {
         base = std::filesystem::current_path() / ".yams_state";
     }
     std::error_code ec;
-    std::filesystem::create_directories(base, ec);
+    yams::common::ensureDirectories(base);
     (void)ec;
     return base / "pinned.json";
 }

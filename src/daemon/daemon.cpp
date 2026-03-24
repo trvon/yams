@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cstdio>
+#include <yams/common/fs_utils.h>
 #include <fstream>
 #include <future>
 #include <mutex>
@@ -1170,7 +1171,7 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
             if (auto xdg = getXDGStateHome(); !xdg.empty()) {
                 auto logDir = xdg / "yams";
                 std::error_code ec;
-                fs::create_directories(logDir, ec);
+                yams::common::ensureDirectories(logDir);
                 if (canWriteToDirectory(logDir))
                     return logDir / "daemon.log";
             }
@@ -1181,7 +1182,7 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
             if (auto xdg = getXDGStateHome(); !xdg.empty()) {
                 auto logDir = xdg / "yams";
                 std::error_code ec;
-                fs::create_directories(logDir, ec);
+                yams::common::ensureDirectories(logDir);
                 if (canWriteToDirectory(logDir))
                     return logDir / "daemon.log";
             }
@@ -1217,7 +1218,7 @@ std::filesystem::path YamsDaemon::getXDGRuntimeDir() {
     if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
         auto yamDir = std::filesystem::path(localAppData) / "yams";
         std::error_code ec;
-        std::filesystem::create_directories(yamDir, ec);
+        yams::common::ensureDirectories(yamDir);
         return yamDir;
     }
     return std::filesystem::temp_directory_path();

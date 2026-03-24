@@ -1,3 +1,4 @@
+#include <yams/common/fs_utils.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 
@@ -161,7 +162,7 @@ static std::filesystem::path findReferenceSchemaSql() {
 Result<void> ReferenceCounter::initializeDatabase() {
     try {
         // Create database directory if needed
-        std::filesystem::create_directories(pImpl->config.databasePath.parent_path());
+        yams::common::ensureDirectories(pImpl->config.databasePath.parent_path());
 
         // Open database
         pImpl->db = std::make_unique<Database>(pImpl->config.databasePath);

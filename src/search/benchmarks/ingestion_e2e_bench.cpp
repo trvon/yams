@@ -63,9 +63,9 @@ public:
     SimpleDaemonHarness() {
         auto id = randomId();
         root_ = fs::temp_directory_path() / ("yams_e2e_bench_" + id);
-        fs::create_directories(root_);
+        yams::common::ensureDirectories(root_);
         data_ = root_ / "data";
-        fs::create_directories(data_);
+        yams::common::ensureDirectories(data_);
         sock_ = fs::path("/tmp") / ("e2e_bench_" + id + ".sock");
         pid_ = root_ / "bench.pid";
         log_ = root_ / "bench.log";
@@ -85,7 +85,7 @@ public:
         // Also isolate session state to prevent global session watch from triggering
         originalXdgState_ = std::getenv("XDG_STATE_HOME") ? std::getenv("XDG_STATE_HOME") : "";
         setenv("XDG_STATE_HOME", (root_ / "state").string().c_str(), 1);
-        fs::create_directories(root_ / "state" / "yams" / "sessions");
+        yams::common::ensureDirectories(root_ / "state" / "yams" / "sessions");
 
         yams::daemon::DaemonConfig cfg;
         cfg.dataDir = data_;
@@ -256,7 +256,7 @@ struct CorpusGenerator {
     size_t docSize;
 
     CorpusGenerator(const fs::path& dir, size_t size) : corpusDir(dir), docSize(size) {
-        fs::create_directories(corpusDir);
+        yams::common::ensureDirectories(corpusDir);
     }
 
     void generateDocuments(int count) {

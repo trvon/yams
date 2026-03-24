@@ -17,6 +17,7 @@
 #include <string_view>
 #include <vector>
 
+#include <yams/common/fs_utils.h>
 #include <yams/compression/compressor_interface.h>
 #include <yams/core/atomic_utils.h>
 
@@ -487,9 +488,7 @@ WALManager& WALManager::operator=(WALManager&&) noexcept = default;
 Result<void> WALManager::initialize() {
     // Create WAL directory if needed
     if (!std::filesystem::exists(pImpl->config.walDirectory)) {
-        std::error_code ec;
-        std::filesystem::create_directories(pImpl->config.walDirectory, ec);
-        if (ec) {
+        if (!yams::common::ensureDirectories(pImpl->config.walDirectory)) {
             return Result<void>(ErrorCode::PermissionDenied);
         }
     }

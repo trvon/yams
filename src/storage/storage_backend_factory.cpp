@@ -1,3 +1,4 @@
+#include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
 #include <yams/profiling.h>
 #include <yams/storage/object_storage_plugin_loader.h>
@@ -201,13 +202,13 @@ Result<void> FilesystemBackend::initialize(const BackendConfig& config) {
 
     // Create storage directories
     std::error_code ec;
-    std::filesystem::create_directories(basePath_ / "objects", ec);
+    yams::common::ensureDirectories(basePath_ / "objects");
     if (ec) {
         return Result<void>(Error{ErrorCode::PermissionDenied,
                                   "Failed to create storage directory: " + ec.message()});
     }
 
-    std::filesystem::create_directories(basePath_ / "temp", ec);
+    yams::common::ensureDirectories(basePath_ / "temp");
     if (ec) {
         return Result<void>(
             Error{ErrorCode::PermissionDenied, "Failed to create temp directory: " + ec.message()});
@@ -239,7 +240,7 @@ std::filesystem::path FilesystemBackend::getObjectPath(std::string_view key) con
 
 Result<void> FilesystemBackend::ensureDirectoryExists(const std::filesystem::path& path) const {
     std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
+    yams::common::ensureDirectories(path.parent_path());
 
     if (ec) {
         return Result<void>(

@@ -11,6 +11,7 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/daemon/client/daemon_client.h>
@@ -3964,7 +3965,7 @@ void DoctorCommand::runVectorsFix() {
         }
 
         // Write config
-        fs::create_directories(configPath.parent_path());
+        yams::common::ensureDirectories(configPath.parent_path());
         std::ofstream out(configPath, std::ios::trunc);
         for (const auto& l : lines) {
             out << l << "\n";

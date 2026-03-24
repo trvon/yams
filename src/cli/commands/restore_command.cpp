@@ -8,6 +8,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 #include <yams/common/pattern_utils.h>
 
 namespace yams::cli {
@@ -112,7 +113,7 @@ public:
 
             // Create output directory if needed
             if (createDirs_ && !std::filesystem::exists(outputDir_)) {
-                std::filesystem::create_directories(outputDir_);
+                yams::common::ensureDirectories(outputDir_);
             }
 
             // Restore documents
@@ -321,7 +322,7 @@ private:
 
             // Create parent directories if needed
             if (createDirs_) {
-                std::filesystem::create_directories(outputPath.parent_path());
+                yams::common::ensureDirectories(outputPath.parent_path());
             }
 
             // Retrieve document

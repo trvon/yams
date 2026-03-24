@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <utility>
+#include <yams/common/fs_utils.h>
 
 namespace yams::wal {
 namespace {
@@ -31,7 +32,7 @@ Result<WALManager::RecoveryStats> recoverFromLogs(const RecoveryOptions& options
     std::error_code fsError;
     if (!std::filesystem::exists(walDir, fsError)) {
         if (options.createDirectoryIfMissing) {
-            if (!std::filesystem::create_directories(walDir, fsError) && fsError) {
+            if (!yams::common::ensureDirectories(walDir)) {
                 return Result<WALManager::RecoveryStats>(
                     Error{ErrorCode::PermissionDenied,
                           "Unable to create WAL directory: " + walDir.string()});

@@ -15,6 +15,7 @@
  * - ETag/Last-Modified are not captured by the current Http adapter MVP; fields will remain empty.
  */
 
+#include <yams/common/fs_utils.h>
 #include <yams/downloader/downloader.hpp>
 
 #include <nlohmann/json.hpp>
@@ -142,7 +143,7 @@ void writeExportMetadata(const std::filesystem::path& exportPath, const std::str
 
     auto metaPath = exportMetaPath(exportPath);
     std::error_code ec;
-    std::filesystem::create_directories(metaPath.parent_path(), ec);
+    yams::common::ensureDirectories(metaPath.parent_path());
     std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
     if (!out)
         return;
@@ -195,7 +196,7 @@ public:
     explicit JsonResumeStore(const StorageConfig& storage)
         : path_(fs::path(storage.stagingDir) / "downloader" / "resume.json") {
         std::error_code ec;
-        fs::create_directories(path_.parent_path(), ec);
+        yams::common::ensureDirectories(path_.parent_path());
         (void)ec;
         (void)loadFile(); // best-effort
     }
@@ -656,7 +657,7 @@ public:
                     if (exists && request.overwrite != OverwritePolicy::Never) {
                         copyOpts |= std::filesystem::copy_options::overwrite_existing;
                     }
-                    std::filesystem::create_directories(exportPath.parent_path(), fec);
+                    yams::common::ensureDirectories(exportPath.parent_path());
                     std::filesystem::copy_file(finalRes.value(), exportPath, copyOpts, fec);
                     if (fec) {
                         disk_->cleanup(stagingFile);

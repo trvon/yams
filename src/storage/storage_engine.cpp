@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/core/atomic_utils.h>
+#include <yams/common/fs_utils.h>
 #include <yams/storage/storage_engine.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -50,13 +51,13 @@ struct StorageEngine::Impl {
         : config(std::move(cfg)), writeMutexPool(config.mutexPoolSize) {
         // Initialize storage directory
         std::error_code ec;
-        std::filesystem::create_directories(config.basePath / "objects", ec);
+        yams::common::ensureDirectories(config.basePath / "objects");
         if (ec) {
             throw std::runtime_error(
                 yamsfmt::format("Failed to create storage directory: {}", ec.message()));
         }
 
-        std::filesystem::create_directories(config.basePath / "temp", ec);
+        yams::common::ensureDirectories(config.basePath / "temp");
         if (ec) {
             throw std::runtime_error(
                 yamsfmt::format("Failed to create temp directory: {}", ec.message()));
@@ -103,7 +104,7 @@ std::filesystem::path StorageEngine::getTempPath() const {
     // Ensure temp directory exists (can be removed by external cleanup).
     {
         std::error_code ec;
-        std::filesystem::create_directories(pImpl->config.basePath / "temp", ec);
+        yams::common::ensureDirectories(pImpl->config.basePath / "temp");
     }
 
     // Generate random temp filename
@@ -123,7 +124,7 @@ std::filesystem::path StorageEngine::getTempPath() const {
 
 Result<void> StorageEngine::ensureDirectoryExists(const std::filesystem::path& path) const {
     std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
+    yams::common::ensureDirectories(path.parent_path());
 
     if (ec) {
         spdlog::error("Failed to create directory {}: {}", path.parent_path().string(),
@@ -565,17 +566,17 @@ auto initializeStorage(const std::filesystem::path& basePath) -> Result<void> {
         std::error_code errorCode;
 
         // Create directory structure
-        std::filesystem::create_directories(basePath / "objects", errorCode);
+        yams::common::ensureDirectories(basePath / "objects");
         if (errorCode) {
             return {ErrorCode::PermissionDenied};
         }
 
-        std::filesystem::create_directories(basePath / "temp", errorCode);
+        yams::common::ensureDirectories(basePath / "temp");
         if (errorCode) {
             return {ErrorCode::PermissionDenied};
         }
 
-        std::filesystem::create_directories(basePath / "manifests", errorCode);
+        yams::common::ensureDirectories(basePath / "manifests");
         if (errorCode) {
             return {ErrorCode::PermissionDenied};
         }

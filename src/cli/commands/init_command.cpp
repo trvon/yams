@@ -5,6 +5,7 @@
 #include <yams/cli/prompt_util.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/uuid.h>
@@ -445,7 +446,7 @@ private:
 
     static void createDirectoryIfMissing(const fs::path& p) {
         if (!fs::exists(p)) {
-            fs::create_directories(p);
+            yams::common::ensureDirectories(p);
         }
     }
 
@@ -850,10 +851,10 @@ private:
 
             // Ensure parent dirs
             if (privateKeyPath.has_parent_path()) {
-                fs::create_directories(privateKeyPath.parent_path());
+                yams::common::ensureDirectories(privateKeyPath.parent_path());
             }
             if (publicKeyPath.has_parent_path()) {
-                fs::create_directories(publicKeyPath.parent_path());
+                yams::common::ensureDirectories(publicKeyPath.parent_path());
             }
 
             // Write private key (PKCS#8 PEM, unencrypted)
@@ -929,7 +930,7 @@ private:
             // Determine user plugin directory: ~/.local/lib/yams/plugins
             fs::path userPlugins = fs::path(std::getenv("HOME") ? std::getenv("HOME") : "") /
                                    ".local" / "lib" / "yams" / "plugins";
-            fs::create_directories(userPlugins);
+            yams::common::ensureDirectories(userPlugins);
             spdlog::info("Plugins directory: {}", userPlugins.string());
 
             // Write trust file entry so daemon will load from here by default.
@@ -938,7 +939,7 @@ private:
             fs::path trustFile = yams::config::get_daemon_plugin_trust_file();
             auto trustParent = trustFile.parent_path();
             if (!trustParent.empty()) {
-                fs::create_directories(trustParent);
+                yams::common::ensureDirectories(trustParent);
             }
 
             auto loadResult = yams::daemon::plugin_trust::loadTrustStore(
@@ -1036,7 +1037,7 @@ private:
 
     // Download model using the unified downloader
     Result<void> downloadModelFiles(const EmbeddingModel& model, const fs::path& outputDir) {
-        fs::create_directories(outputDir);
+        yams::common::ensureDirectories(outputDir);
         fs::path modelFile = outputDir / "model.onnx";
 
         // Check if already downloaded
@@ -1252,7 +1253,7 @@ private:
 
     // Download GLiNER model files using the unified downloader
     Result<void> downloadGlinerModelFiles(const GlinerModel& model, const fs::path& outputDir) {
-        fs::create_directories(outputDir);
+        yams::common::ensureDirectories(outputDir);
         fs::path modelFile = outputDir / "model.onnx";
 
         // Check if already downloaded
@@ -1548,7 +1549,7 @@ private:
      * @brief Download reranker model files using the unified downloader.
      */
     Result<void> downloadRerankerModelFiles(const RerankerModel& model, const fs::path& outputDir) {
-        fs::create_directories(outputDir);
+        yams::common::ensureDirectories(outputDir);
         fs::path modelFile = outputDir / "model.onnx";
 
         // Check if already downloaded
@@ -1927,7 +1928,7 @@ private:
     void downloadGrammars([[maybe_unused]] const fs::path& dataPath, bool useDefaults) {
         // Determine grammar output directory (platform-aware via config helper)
         fs::path grammarDir = yams::config::get_data_dir() / "grammars";
-        fs::create_directories(grammarDir);
+        yams::common::ensureDirectories(grammarDir);
         const auto& supportedGrammars = init_assets::supportedGrammars();
 
         std::vector<std::string> selectedLanguages;
@@ -2115,7 +2116,7 @@ private:
 
         // Create temp directory for build
         auto tempDir = fs::temp_directory_path() / ("yams-grammar-" + language);
-        fs::create_directories(tempDir);
+        yams::common::ensureDirectories(tempDir);
 
         // Cleanup helper
         auto cleanup = [&tempDir]() {
@@ -2485,7 +2486,7 @@ private:
 
         for (const auto& [name, skillPath] : targets) {
             try {
-                fs::create_directories(skillPath.parent_path());
+                yams::common::ensureDirectories(skillPath.parent_path());
 
                 // Check if already exists
                 if (fs::exists(skillPath) && !force_) {

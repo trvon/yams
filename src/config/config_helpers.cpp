@@ -1,6 +1,7 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 
 #ifdef _WIN32
@@ -470,7 +471,9 @@ bool write_config_values(const std::filesystem::path& config_path,
                          const std::map<std::string, std::string>& values) {
     try {
         // Ensure parent directories exist
-        std::filesystem::create_directories(config_path.parent_path());
+        if (!yams::common::ensureDirectories(config_path.parent_path())) {
+            return false;
+        }
 
         // Read existing config
         auto config = parse_simple_toml(config_path);

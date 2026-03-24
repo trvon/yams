@@ -6,6 +6,7 @@
 #include <boost/asio/use_future.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/common/fs_utils.h>
 #include <yams/cli/error_hints.h>
 #include <yams/cli/pipeline_stage_render.h>
 #include <yams/cli/result_helpers.h>
@@ -1505,7 +1506,7 @@ private:
             std::error_code ec;
             if (parent.empty())
                 parent = ".";
-            fs::create_directories(parent, ec); // best effort
+            yams::common::ensureDirectories(parent); // best effort
             fs::path probe = parent / ".yams-doctor-probe";
             std::ofstream f(probe);
             if (f.good()) {

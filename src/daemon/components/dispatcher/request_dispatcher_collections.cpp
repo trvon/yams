@@ -3,6 +3,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 
@@ -95,7 +96,7 @@ RequestDispatcher::handleRestoreCollectionRequest(const RestoreCollectionRequest
     std::filesystem::path outputDir(req.outputDirectory);
     if (!req.dryRun && req.createDirs) {
         std::error_code ec;
-        std::filesystem::create_directories(outputDir, ec);
+        yams::common::ensureDirectories(outputDir);
         if (ec) {
             co_return ErrorResponse{.code = ErrorCode::IOError,
                                     .message =
@@ -217,7 +218,7 @@ RequestDispatcher::handleRestoreCollectionRequest(const RestoreCollectionRequest
             std::filesystem::path targetFilePath(targetPath);
             if (targetFilePath.has_parent_path()) {
                 std::error_code ec;
-                std::filesystem::create_directories(targetFilePath.parent_path(), ec);
+                yams::common::ensureDirectories(targetFilePath.parent_path());
                 if (ec) {
                     RestoredFile fail;
                     fail.path = targetPath;
@@ -333,7 +334,7 @@ RequestDispatcher::handleRestoreSnapshotRequest(const RestoreSnapshotRequest& re
     std::filesystem::path outputDir(req.outputDirectory);
     if (!req.dryRun && req.createDirs) {
         std::error_code ec;
-        std::filesystem::create_directories(outputDir, ec);
+        yams::common::ensureDirectories(outputDir);
         if (ec) {
             co_return ErrorResponse{.code = ErrorCode::IOError,
                                     .message =
@@ -443,7 +444,7 @@ RequestDispatcher::handleRestoreSnapshotRequest(const RestoreSnapshotRequest& re
             std::filesystem::path targetFilePath(targetPath);
             if (targetFilePath.has_parent_path()) {
                 std::error_code ec;
-                std::filesystem::create_directories(targetFilePath.parent_path(), ec);
+                yams::common::ensureDirectories(targetFilePath.parent_path());
                 if (ec) {
                     RestoredFile fail;
                     fail.path = targetPath;

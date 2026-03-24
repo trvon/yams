@@ -7,6 +7,7 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -781,7 +782,7 @@ Result<void> YamsCLI::initializeStorage() {
 
         // Create data directory if it doesn't exist
         if (!std::filesystem::exists(dataPath_)) {
-            std::filesystem::create_directories(dataPath_);
+            yams::common::ensureDirectories(dataPath_);
         }
 
         // Initialize database and connection pool

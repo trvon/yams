@@ -2,6 +2,7 @@
 #include <chrono>
 #include <filesystem>
 #include <yams/app/services/services.hpp>
+#include <yams/common/fs_utils.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/extraction/extraction_util.h>
@@ -33,8 +34,8 @@ public:
         storageCfg_.stagingDir = storagePath / "storage" / "staging";
 
         // Ensure directories exist
-        fs::create_directories(storageCfg_.objectsDir);
-        fs::create_directories(storageCfg_.stagingDir);
+        yams::common::ensureDirectories(storageCfg_.objectsDir);
+        yams::common::ensureDirectories(storageCfg_.stagingDir);
 
         spdlog::debug("DownloadService initialized with storage path: {}", storagePath.string());
         spdlog::debug("Objects directory: {}", storageCfg_.objectsDir.string());
