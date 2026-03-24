@@ -1390,6 +1390,22 @@ jobs:
             SHA256_X86_64="PLACEHOLDER_X86_64_SHA256"
           fi
 
+          validate_homebrew_archive() {
+            local archive="$1"
+            local label="$2"
+
+            if [ ! -f "$archive" ]; then
+              echo "Skipping ${label} Homebrew archive validation; file not found: $archive" >&2
+              return 0
+            fi
+
+            python_script=$'import sys\nimport zipfile\n\narchive, label = sys.argv[1], sys.argv[2]\n\nwith zipfile.ZipFile(archive) as zf:\n    names = zf.namelist()\n\ndef has_suffix(suffix: str) -> bool:\n    suffix = suffix.rstrip("/")\n    return any(name.rstrip("/").endswith(suffix) for name in names)\n\nhas_plugin_payload = any(\n    "lib/yams/plugins/" in name and not name.endswith("/")\n    for name in names\n)\n\nmissing = []\nif not has_suffix("bin/yams"):\n    missing.append("bin/yams")\nif not has_suffix("lib/yams/plugins/libyams_onnx_plugin.dylib"):\n    missing.append("lib/yams/plugins/libyams_onnx_plugin.dylib")\nif not has_plugin_payload:\n    missing.append("lib/yams/plugins/*")\nif not has_suffix("share/yams/sql/reference_schema.sql"):\n    missing.append("share/yams/sql/reference_schema.sql")\n\nif missing:\n    joined = ", ".join(missing)\n    raise SystemExit(f"{label} archive {archive} is missing required Homebrew paths: {joined}")\n\nprint(f"Validated {label} Homebrew archive layout: {archive}")'
+            python3 -c "$python_script" "$archive" "$label"
+          }
+
+          validate_homebrew_archive "$ARM64_FILE" "arm64"
+          validate_homebrew_archive "$X86_64_FILE" "x86_64"
+
           # Release assets are published later in this job; defer URL checks until post-publish.
           echo "Deferring Homebrew URL validation until after release publish" >&2
           
@@ -1601,6 +1617,22 @@ jobs:
             SHA256_X86_64="PLACEHOLDER_X86_64_SHA256"
           fi
 
+          validate_homebrew_archive() {
+            local archive="$1"
+            local label="$2"
+
+            if [ ! -f "$archive" ]; then
+              echo "Skipping ${label} Homebrew archive validation; file not found: $archive" >&2
+              return 0
+            fi
+
+            python_script=$'import sys\nimport zipfile\n\narchive, label = sys.argv[1], sys.argv[2]\n\nwith zipfile.ZipFile(archive) as zf:\n    names = zf.namelist()\n\ndef has_suffix(suffix: str) -> bool:\n    suffix = suffix.rstrip("/")\n    return any(name.rstrip("/").endswith(suffix) for name in names)\n\nhas_plugin_payload = any(\n    "lib/yams/plugins/" in name and not name.endswith("/")\n    for name in names\n)\n\nmissing = []\nif not has_suffix("bin/yams"):\n    missing.append("bin/yams")\nif not has_suffix("lib/yams/plugins/libyams_onnx_plugin.dylib"):\n    missing.append("lib/yams/plugins/libyams_onnx_plugin.dylib")\nif not has_plugin_payload:\n    missing.append("lib/yams/plugins/*")\nif not has_suffix("share/yams/sql/reference_schema.sql"):\n    missing.append("share/yams/sql/reference_schema.sql")\n\nif missing:\n    joined = ", ".join(missing)\n    raise SystemExit(f"{label} archive {archive} is missing required Homebrew paths: {joined}")\n\nprint(f"Validated {label} Homebrew archive layout: {archive}")'
+            python3 -c "$python_script" "$archive" "$label"
+          }
+
+          validate_homebrew_archive "$ARM64_FILE" "arm64"
+          validate_homebrew_archive "$X86_64_FILE" "x86_64"
+
           # Release assets are published later in this job; defer URL checks until post-publish.
           echo "Deferring Homebrew URL validation until after release publish" >&2
           
@@ -1615,8 +1647,8 @@ jobs:
           mkdir -p "$TAP_PATH/Formula"
           cp "$TEMPLATE_PATH" "$NIGHTLY_FORMULA"
 
-          # Maintain compatibility formula for users still installing yams@nightly
-          mkdir -p "$TAP_PATH/Aliases"
+          # Remove deprecated nightly formula names now that yams-nightly is canonical
+          rm -f "$TAP_PATH/Formula/yams@nightly.rb"
           rm -f "$TAP_PATH/Aliases/yams@nightly"
           
           # Replace placeholders
@@ -1632,13 +1664,6 @@ jobs:
             "$NIGHTLY_FORMULA"
           rm -f "${NIGHTLY_FORMULA}.bak"
 
-          AT_NIGHTLY_FORMULA="$TAP_PATH/Formula/yams@nightly.rb"
-          cp "$NIGHTLY_FORMULA" "$AT_NIGHTLY_FORMULA"
-          sed -i.bak \
-            -e 's/^class YamsNightly < Formula/class YamsATNightly < Formula/' \
-            "$AT_NIGHTLY_FORMULA"
-          rm -f "${AT_NIGHTLY_FORMULA}.bak"
-          
           pushd "$TAP_PATH" >/dev/null
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

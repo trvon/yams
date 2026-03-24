@@ -34,6 +34,13 @@ else
   _plugin_std = 'c++23'
 endif
 
+glint_plugin_install_rpath = ''
+if host_machine.system() == 'darwin'
+  glint_plugin_install_rpath = '@loader_path/../..'
+elif host_machine.system() == 'linux'
+  glint_plugin_install_rpath = '$ORIGIN/../..'
+endif
+
 shared_module(
   'yams_glint',
   glint_sources,
@@ -44,5 +51,6 @@ shared_module(
   build_by_default: true,
   install: true,
   install_dir: plugins_dir,
+  install_rpath: glint_plugin_install_rpath,
   name_prefix: '',
 )

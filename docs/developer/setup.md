@@ -119,6 +119,13 @@ can be problematic with `-fsanitize=address`.
 find src include -name '*.[ch]pp' -o -name '*.cc' -o -name '*.hh' | xargs clang-format -i
 
 # clang-tidy (requires compile_commands.json; check-quality.sh audits availability)
+scripts/check-quality.sh --clang-tidy --git
+
+# quick whole-repo cppcheck report (production translation units only)
+scripts/check-quality.sh --profile quick --format json --output tmp-quality/full-quick
+
+# dead-code candidate scan (report-only)
+scripts/check-quality.sh --dead-code-only
 ```
 
 ## CCache (optional)
