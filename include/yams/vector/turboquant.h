@@ -1,18 +1,22 @@
 #pragma once
 
 /**
- * TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate
+ * TurboQuant: Vector Quantization via Signed Hadamard Transform
  *
- * Paper: arXiv:2504.19874
+ * Paper reference: arXiv:2504.19874 (approximation)
  * Implements:
- *   - TurboQuant_MSE: MSE-optimal quantization via random rotation + Lloyd-Max
- *   - TurboQuant_Prod: Inner product quantization via two-stage MSE + QJL
+ *   - TurboQuant_MSE: Vector quantization via signed Hadamard + Lloyd-Max
+ *   - TurboQuant_Prod: Inner product approximation via two-stage MSE + QJL
  *
- * Key properties:
- *   - Near-optimal distortion (within ~2.7x of theoretical lower bound)
- *   - Data-oblivious (online capable, no fitting required)
+ * This implementation uses a signed Hadamard transform (O(d log d)) instead of
+ * the paper's full random orthogonal rotation (O(d²)). This is an engineering
+ * approximation that preserves the l2-norm but does not provide the same
+ * theoretical distortion guarantees.
+ *
+ * Current limitations:
+ *   - TurboQuant_Prod QJL correction term is NOT yet applied in estimation
+ *   - No persistent packed storage path (backend persists float embeddings)
  *   - Variable bit-width: 1-4 bits per channel
- *   - Unbiased inner product estimation (TurboQuant_Prod)
  */
 
 #include <yams/core/types.h>
@@ -44,22 +48,25 @@ struct TurboQuantConfig {
     /** Number of QJL hash functions for inner product (m parameter) */
     size_t qjl_m = 128;
 
-    /** Cache rotation matrix (saves recomputation but uses memory) */
-    bool cache_rotation = true;
+    /** Reserved for future rotation matrix caching; currently unused */
+    bool cache_rotation = false;
 };
 
 /**
- * TurboQuant MSE-Optimal Vector Quantizer
+ * TurboQuant MSE Vector Quantizer
  *
- * Algorithm:
- *  1. Generate random orthogonal matrix Π (d×d)
- *  2. Rotate: y = Π · x
+ * Algorithm (Approximation of arXiv:2504.19874):
+ *  1. Apply signed Hadamard transform with random diagonal signs: y = D · H · x
+ *     (Note: This is an O(d log d) approximation to full random orthogonal rotation.
+ *      Full rotation would be O(d²). The signed Hadamard preserves l2-norm and
+ *      approximates the rotational property needed for quantization quality.)
+ *  2. Scale coordinates by 1/√d (coordinates become approximately N(0,1) for unit vectors)
  *  3. Quantize each coordinate with Lloyd-Max scalar quantizer (b bits)
  *  4. Store index vector idx ∈ [2^b]^d
  *
  * Reconstruction:
  *  - Lookup centroids for each index
- *  - Inverse rotate: x̃ = Π^T · ỹ
+ *  - Undo scale, apply diagonal signs, inverse Hadamard: x̃ = H · D · y
  */
 class TurboQuantMSE {
 public:
@@ -104,6 +111,7 @@ public:
 
     /**
      * Get storage size in bytes for a vector
+     * @note Must match the byte length returned by packedEncode()
      */
     size_t storageSize() const {
         // Each coordinate needs bits_per_channel bits
@@ -111,6 +119,20 @@ public:
         size_t total_bits = config_.dimension * config_.bits_per_channel;
         return (total_bits + 7) / 8; // Round up to bytes
     }
+
+    /**
+     * Encode a vector and return packed bytes for storage
+     * @param vector Input vector (must be unit sphere, dim=config.dimension)
+     * @return Packed bytes (bit-packed indices, length = storageSize())
+     */
+    std::vector<uint8_t> packedEncode(const std::vector<float>& vector);
+
+    /**
+     * Decode from packed bytes
+     * @param packed Packed bytes from packedEncode() (length = storageSize())
+     * @return Reconstructed vector (on unit sphere)
+     */
+    std::vector<float> packedDecode(const std::vector<uint8_t>& packed);
 
 private:
     TurboQuantConfig config_;
@@ -152,7 +174,10 @@ private:
 };
 
 /**
- * TurboQuant Inner Product Quantizer (Two-Stage)
+ * TurboQuant Inner Product Quantizer (Two-Stage) [EXPERIMENTAL]
+ *
+ * WARNING: This class is experimental. The inner product estimation is approximate
+ * and does NOT provide the unbiasedness guarantee described in the paper.
  *
  * Algorithm:
  *  1. Apply TurboQuant_MSE with (b-1) bits → x̃
@@ -160,7 +185,10 @@ private:
  *  3. Apply 1-bit QJL: s = sign(S · r) where S ∈ R^{m×d}
  *  4. Store: (idx_mse, s)
  *
- * Inner product estimation: E[⟨s, S·x⟩] ∝ ⟨x, y⟩
+ * Inner product estimation: Currently returns MSE-decoded dot product only.
+ * The QJL residual term is encoded but NOT applied in estimation.
+ *
+ * Do NOT use this for production ranking/scoring until QJL correction is implemented.
  */
 class TurboQuantProd {
 public:
@@ -181,7 +209,7 @@ public:
      * Estimate inner product between two vectors (both encoded)
      * @param enc1 Encoded vector 1 (from encode)
      * @param enc2 Encoded vector 2 (from encode)
-     * @return Estimated inner product (unbiased)
+     * @return Approximate inner product (QJL correction NOT applied)
      */
     float estimateInnerProduct(const std::pair<std::vector<uint8_t>, std::vector<int8_t>>& enc1,
                                const std::pair<std::vector<uint8_t>, std::vector<int8_t>>& enc2);

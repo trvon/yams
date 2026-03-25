@@ -6,6 +6,8 @@
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_backend.h>
 #include <yams/vector/vector_database.h>
+#include <yams/vector/vector_index_manager.h>
+#include <yams/vector/turboquant.h>
 
 #include <algorithm>
 #include <cmath>
@@ -279,7 +281,23 @@ public:
         }
 
         try {
-            auto result = backend_->insertVector(record);
+            // TurboQuant compression if enabled
+            VectorRecord to_insert = record;
+            if (config_.enable_turboquant_storage &&
+                record.quantized.format == VectorRecord::QuantizedFormat::NONE &&
+                record.embedding.size() == config_.embedding_dim) {
+                // Get owned TurboQuantMSE (creates/configures on first call)
+                TurboQuantMSE* tq = ensureTurboQuant();
+
+                // Use packed format for storage
+                to_insert.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+                to_insert.quantized.bits_per_channel = config_.turboquant_bits;
+                to_insert.quantized.seed = config_.turboquant_seed;
+                to_insert.quantized.packed_codes =
+                    vector_utils::packedQuantizeVector(record.embedding, tq);
+            }
+
+            auto result = backend_->insertVector(to_insert);
             if (!result) {
                 setError("Insert failed: " + result.error().message);
                 return false;
@@ -366,12 +384,42 @@ public:
         }
 
         try {
-            // Don't hold our mutex while calling backend to avoid potential deadlock
-            auto result = backend_->insertVectorsBatch(records);
-            if (!result) {
-                std::unique_lock<std::shared_mutex> lock(mutex_);
-                setError("Batch insert failed: " + result.error().message);
-                return false;
+            // Apply TurboQuant compression if enabled
+            if (config_.enable_turboquant_storage) {
+                // Get owned TurboQuantMSE (creates/configures on first call)
+                TurboQuantMSE* tq = ensureTurboQuant();
+
+                std::vector<VectorRecord> compressed_records;
+                compressed_records.reserve(records.size());
+
+                for (const auto& record : records) {
+                    VectorRecord compressed = record;
+                    if (record.quantized.format == VectorRecord::QuantizedFormat::NONE &&
+                        record.embedding.size() == config_.embedding_dim) {
+                        compressed.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+                        compressed.quantized.bits_per_channel = config_.turboquant_bits;
+                        compressed.quantized.seed = config_.turboquant_seed;
+                        compressed.quantized.packed_codes =
+                            vector_utils::packedQuantizeVector(record.embedding, tq);
+                    }
+                    compressed_records.push_back(std::move(compressed));
+                }
+
+                // Don't hold our mutex while calling backend to avoid potential deadlock
+                auto result = backend_->insertVectorsBatch(compressed_records);
+                if (!result) {
+                    std::unique_lock<std::shared_mutex> lock(mutex_);
+                    setError("Batch insert failed: " + result.error().message);
+                    return false;
+                }
+            } else {
+                // Don't hold our mutex while calling backend to avoid potential deadlock
+                auto result = backend_->insertVectorsBatch(records);
+                if (!result) {
+                    std::unique_lock<std::shared_mutex> lock(mutex_);
+                    setError("Batch insert failed: " + result.error().message);
+                    return false;
+                }
             }
 
             // Update component-owned metrics
@@ -402,7 +450,20 @@ public:
         }
 
         try {
-            auto result = backend_->updateVector(chunk_id, record);
+            // Apply TurboQuant compression if enabled
+            VectorRecord to_update = record;
+            if (config_.enable_turboquant_storage &&
+                record.quantized.format == VectorRecord::QuantizedFormat::NONE &&
+                record.embedding.size() == config_.embedding_dim) {
+                TurboQuantMSE* tq = ensureTurboQuant();
+                to_update.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+                to_update.quantized.bits_per_channel = config_.turboquant_bits;
+                to_update.quantized.seed = config_.turboquant_seed;
+                to_update.quantized.packed_codes =
+                    vector_utils::packedQuantizeVector(record.embedding, tq);
+            }
+
+            auto result = backend_->updateVector(chunk_id, to_update);
             if (!result) {
                 setError("Update failed: " + result.error().message);
                 return false;
@@ -508,15 +569,30 @@ public:
         }
     }
 
-    std::optional<VectorRecord> getVector(const std::string& chunk_id) const {
+    Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
         auto result = backend_->getVector(chunk_id);
         if (!result) {
-            return std::nullopt;
+            return result;
         }
 
-        return result.value();
+        auto& opt_record = result.value();
+        if (!opt_record.has_value()) {
+            return result;
+        }
+
+        // TurboQuant decompression if enabled and record is compressed
+        if (config_.enable_turboquant_storage &&
+            opt_record->quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
+            !opt_record->quantized.packed_codes.empty()) {
+            // Dequantize from packed storage using owned quantizer
+            TurboQuantMSE* tq = ensureTurboQuant();
+            opt_record->embedding = vector_utils::packedDequantizeVector(
+                opt_record->quantized.packed_codes, config_.embedding_dim, tq);
+        }
+
+        return result;
     }
 
     std::map<std::string, VectorRecord>
@@ -894,6 +970,32 @@ private:
     // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
     mutable std::atomic<size_t> cachedVectorCount_{0};
     mutable std::atomic<bool> counterInitialized_{false};
+
+    // Owned TurboQuantMSE instance - replaces global/TLS plumbing.
+    // Initialized lazily on first use when enable_turboquant_storage is true.
+    mutable std::unique_ptr<TurboQuantMSE> turboquant_;
+
+    /**
+     * Lazily initialize (or re-configure) the owned TurboQuantMSE member.
+     * Returns the raw pointer for use with vector_utils overloads.
+     * Idempotent: subsequent calls with the same config return the existing instance.
+     */
+    TurboQuantMSE* ensureTurboQuant() const {
+        if (!config_.enable_turboquant_storage) {
+            return nullptr;
+        }
+        if (!turboquant_ || turboquant_->config().dimension != config_.embedding_dim ||
+            turboquant_->config().bits_per_channel != config_.turboquant_bits) {
+            TurboQuantConfig cfg;
+            cfg.dimension = config_.embedding_dim;
+            cfg.bits_per_channel = config_.turboquant_bits;
+            cfg.seed = config_.turboquant_seed;
+            turboquant_ = std::make_unique<TurboQuantMSE>(cfg);
+            spdlog::debug("VectorDB: TurboQuant configured: dim={} bits={}", cfg.dimension,
+                          cfg.bits_per_channel);
+        }
+        return turboquant_.get();
+    }
 };
 
 // VectorDatabase implementation
@@ -1012,7 +1114,10 @@ std::optional<VectorRecord> VectorDatabase::getVector(const std::string& chunk_i
     YAMS_ZONE_SCOPED_N("VectorDB::getVector");
     auto result = pImpl->getVector(chunk_id);
     YAMS_PLOT("vector_db::get_vector_found", result.has_value() ? 1 : 0);
-    return result;
+    if (!result) {
+        return std::nullopt;
+    }
+    return result.value();
 }
 
 std::map<std::string, VectorRecord>

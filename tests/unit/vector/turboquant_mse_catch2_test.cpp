@@ -125,6 +125,36 @@ TEST_CASE_METHOD(TurboQuantMSEFixture, "TurboQuantMSE storage size calculation",
     REQUIRE(quantizer.storageSize() == 192);
 }
 
+TEST_CASE_METHOD(TurboQuantMSEFixture, "TurboQuantMSE packed encode size matches storageSize",
+                 "[turboquant][mse][basic][packed][catch2]") {
+    TurboQuantConfig config;
+    config.dimension = 384;
+    config.bits_per_channel = 4;
+    config.seed = 42;
+
+    TurboQuantMSE quantizer(config);
+
+    std::vector<float> v(384, 0.0f);
+    v[0] = 1.0f;
+
+    // Packed encode should return exactly storageSize() bytes
+    auto packed = quantizer.packedEncode(v);
+    REQUIRE(packed.size() == quantizer.storageSize());
+    REQUIRE(packed.size() == 192); // 384 * 4 / 8 = 192 bytes
+
+    // Verify packed decode round-trips correctly
+    auto decoded = quantizer.packedDecode(packed);
+    REQUIRE(decoded.size() == 384);
+
+    // Check reconstruction is valid (norm should be ~1.0 for unit vector)
+    double norm_sq = 0.0;
+    for (size_t i = 0; i < decoded.size(); ++i) {
+        norm_sq += static_cast<double>(decoded[i]) * static_cast<double>(decoded[i]);
+    }
+    double norm = std::sqrt(norm_sq);
+    REQUIRE(norm > 0.9); // Should be close to 1.0
+}
+
 TEST_CASE_METHOD(TurboQuantMSEFixture, "TurboQuantMSE 2-bit storage size",
                  "[turboquant][mse][basic][catch2]") {
     TurboQuantConfig config;

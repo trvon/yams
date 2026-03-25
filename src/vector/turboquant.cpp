@@ -1,18 +1,29 @@
 /**
  * TurboQuant Implementation
  *
- * Paper: arXiv:2504.19874
- * TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate
+ * Paper reference: arXiv:2504.19874 (approximation)
  *
- * Algorithm:
- *  1. Generate random orthogonal matrix Π (d×d) via QR decomposition (once at init)
- *  2. Rotate: y = Π · x  (O(d²) per vector)
- *  3. Quantize each coordinate with Lloyd-Max scalar quantizer (b bits)  (O(d) per vector)
+ * This implementation uses a signed Hadamard transform (O(d log d)) instead of
+ * the paper's full random orthogonal rotation (O(d²)). This is an engineering
+ * approximation that:
+ *   - Preserves l2-norm
+ *   - Approximates rotational property for MSE optimality
+ *   - Does NOT provide the paper's theoretical distortion guarantees
+ *
+ * Algorithm (signed Hadamard variant):
+ *  1. Apply signed Hadamard: y = D · H · x  (O(d log d))
+ *     - H is the Walsh-Hadamard matrix
+ *     - D is a random diagonal matrix of ±1 signs
+ *  2. Scale by 1/√d
+ *  3. Quantize each coordinate with Lloyd-Max scalar quantizer (b bits)  (O(d))
  *  4. Store index vector idx ∈ [2^b]^d
  *
  * Reconstruction:
  *  - Lookup centroids for each index
- *  - Inverse rotate: x̃ = Π^T · ỹ
+ *  - Undo scale, apply diagonal signs, inverse Hadamard: x̃ = H · D · y
+ *
+ * Note: Non-power-of-2 dimensions are padded to the next power of 2 before the
+ * Hadamard transform. This is an engineering workaround; the paper assumes d=2^k.
  */
 
 #include <yams/vector/turboquant.h>
@@ -158,18 +169,27 @@ void TurboQuantMSE::generateCentroids() {
 }
 
 uint8_t TurboQuantMSE::scalarQuantize(float value) const {
-    // Fast path for common case
+    // Fast path for common cases
+    if (decision_boundaries_.empty()) {
+        return 0;
+    }
     if (value < decision_boundaries_[0]) {
         return 0;
     }
 
-    for (size_t i = 0; i < decision_boundaries_.size(); ++i) {
-        if (value < decision_boundaries_[i]) {
-            return static_cast<uint8_t>(i);
+    // Binary search for the correct bin (log2(boundaries) instead of linear)
+    size_t lo = 0;
+    size_t hi = decision_boundaries_.size();
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (value < decision_boundaries_[mid]) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
         }
     }
 
-    return static_cast<uint8_t>(centroids_.size() - 1);
+    return static_cast<uint8_t>(lo);
 }
 
 float TurboQuantMSE::scalarDequantize(uint8_t index) const {
@@ -182,19 +202,33 @@ std::vector<uint8_t> TurboQuantMSE::encode(const std::vector<float>& vector) {
     const size_t d = config_.dimension;
     assert(vector.size() == d);
 
-    // Fast random rotation using Diagonal · Hadamard:
-    // y = D · H · x  (O(d log d) instead of O(d²))
-    std::vector<float> rotated = vector;
+    // Pad to power of 2 for FWHT (required by Hadamard transform)
+    // NOTE: This is an engineering workaround for non-power-of-2 dimensions.
+    // The paper assumes d=2^k. Padding zeros to n (next power of 2) means the
+    // transform sees extra zero elements - this is an approximation.
+    size_t n = 1;
+    while (n < d) {
+        n *= 2;
+    }
 
-    // Apply FWHT: H · x
+    // Build padded vector with zeros
+    std::vector<float> rotated(n, 0.0f);
+    for (size_t i = 0; i < d; ++i) {
+        rotated[i] = vector[i];
+    }
+
+    // Apply FWHT: H · x (n must be power of 2)
     fwht(rotated);
 
-    // Apply diagonal signs: D · (H · x)
+    // Apply diagonal signs: D · (H · x) - only for first d elements
     for (size_t i = 0; i < d; ++i) {
         rotated[i] *= diagonal_signs_[i];
     }
 
-    // Scale coordinates for Lloyd-Max quantizer (coordinates ~ N(0, 1) after Hadamard)
+    // Scale coordinates by 1/sqrt(d) so variance ~1 for Lloyd-Max quantizer.
+    // The Hadamard transform preserves l2-norm; for a unit vector x:
+    //   ||H·x||² = n·||x||²  (Hadamard has l2-norm up to n)
+    // So scaling by 1/sqrt(d) gives variance ~1/d per coordinate.
     float scale = 1.0f / std::sqrt(static_cast<float>(d));
     for (size_t i = 0; i < d; ++i) {
         rotated[i] *= scale;
@@ -213,8 +247,14 @@ std::vector<float> TurboQuantMSE::decode(const std::vector<uint8_t>& indices) {
     const size_t d = config_.dimension;
     assert(indices.size() == d);
 
+    // Pad to power of 2 for FWHT
+    size_t n = 1;
+    while (n < d) {
+        n *= 2;
+    }
+
     // Step 1: Dequantize - lookup centroids
-    std::vector<float> dequantized(d);
+    std::vector<float> dequantized(n, 0.0f);
     for (size_t i = 0; i < d; ++i) {
         dequantized[i] = scalarDequantize(indices[i]);
     }
@@ -231,23 +271,96 @@ std::vector<float> TurboQuantMSE::decode(const std::vector<uint8_t>& indices) {
         dequantized[i] *= diagonal_signs_[i];
     }
 
-    // Apply FWHT (inverse = forward for Hadamard)
+    // Apply FWHT (inverse = forward for Hadamard) - n is power of 2
     fwht(dequantized);
 
-    // Normalize to unit sphere
+    // Extract only the first d elements and normalize to unit sphere
+    std::vector<float> result(d);
     float norm_sq = 0.0f;
     for (size_t i = 0; i < d; ++i) {
-        norm_sq += dequantized[i] * dequantized[i];
+        result[i] = dequantized[i];
+        norm_sq += result[i] * result[i];
     }
     float norm = std::sqrt(norm_sq);
     if (norm > 1e-6f) {
         float inv_norm = 1.0f / norm;
         for (size_t i = 0; i < d; ++i) {
-            dequantized[i] *= inv_norm;
+            result[i] *= inv_norm;
         }
     }
 
-    return dequantized;
+    return result;
+}
+
+std::vector<uint8_t> TurboQuantMSE::packedEncode(const std::vector<float>& vector) {
+    auto indices = encode(vector);
+    const size_t d = config_.dimension;
+    const uint8_t bits = config_.bits_per_channel;
+    const size_t total_bits = d * bits;
+    const size_t num_bytes = (total_bits + 7) / 8;
+
+    std::vector<uint8_t> packed(num_bytes, 0);
+
+    for (size_t i = 0; i < d; ++i) {
+        size_t bit_pos = i * bits;
+        size_t byte_idx = bit_pos / 8;
+        size_t bit_offset = bit_pos % 8;
+
+        // Store the index value in the packed bits
+        uint8_t val = indices[i];
+        size_t bits_remaining = bits;
+        size_t bit_pos_in_val = 0;
+
+        while (bits_remaining > 0) {
+            size_t space_in_byte = 8 - bit_offset;
+            size_t bits_to_write = std::min(bits_remaining, space_in_byte);
+
+            uint8_t mask = ((1 << bits_to_write) - 1) << bit_offset;
+            uint8_t chunk = (val >> bit_pos_in_val) & ((1 << bits_to_write) - 1);
+            packed[byte_idx] = (packed[byte_idx] & ~mask) | (chunk << bit_offset);
+
+            bit_offset = 0;
+            byte_idx++;
+            bits_remaining -= bits_to_write;
+            bit_pos_in_val += bits_to_write;
+        }
+    }
+
+    return packed;
+}
+
+std::vector<float> TurboQuantMSE::packedDecode(const std::vector<uint8_t>& packed) {
+    const size_t d = config_.dimension;
+    const uint8_t bits = config_.bits_per_channel;
+    const size_t expected_bytes = (d * bits + 7) / 8;
+    assert(packed.size() == expected_bytes);
+
+    std::vector<uint8_t> indices(d);
+
+    for (size_t i = 0; i < d; ++i) {
+        size_t bit_pos = i * bits;
+        size_t byte_idx = bit_pos / 8;
+        size_t bit_offset = bit_pos % 8;
+
+        uint8_t val = 0;
+        size_t bits_read = 0;
+
+        while (bits_read < bits) {
+            size_t bits_available = 8 - bit_offset;
+            size_t bits_to_read = std::min(bits - bits_read, bits_available);
+
+            uint8_t chunk = (packed[byte_idx] >> bit_offset) & ((1 << bits_to_read) - 1);
+            val |= chunk << bits_read;
+
+            bit_offset = 0;
+            byte_idx++;
+            bits_read += bits_to_read;
+        }
+
+        indices[i] = val;
+    }
+
+    return decode(indices);
 }
 
 double TurboQuantMSE::computeMSE(const std::vector<float>& original,
@@ -324,6 +437,15 @@ TurboQuantProd::encode(const std::vector<float>& vector) {
     return {mse_indices, qjl_signs};
 }
 
+/**
+ * Estimate inner product between two vectors
+ *
+ * NOTE: This is an approximation. The QJL residual term is encoded during
+ * encode() but NOT used in this estimation. The paper's unbiasedness claim
+ * does NOT hold until QJL correction is implemented.
+ *
+ * @return Approximate inner product
+ */
 float TurboQuantProd::estimateInnerProduct(
     const std::pair<std::vector<uint8_t>, std::vector<int8_t>>& enc1,
     const std::pair<std::vector<uint8_t>, std::vector<int8_t>>& enc2) {
@@ -339,10 +461,10 @@ float TurboQuantProd::estimateInnerProduct(
         dot += x1[i] * x2[i];
     }
 
-    // Add QJL correction term (simplified)
-    // Full implementation would use the QJL signs for bias correction
-    (void)enc1;
-    (void)enc2;
+    // NOTE: QJL correction term is OMITTED.
+    // The QJL signs are encoded but not used in scoring. The paper's
+    // unbiasedness guarantee does not apply to this implementation.
+    // TODO: Add proper QJL correction using sign agreement rate
 
     return dot;
 }

@@ -45,12 +45,40 @@ struct VectorDatabaseConfig {
     size_t max_batch_size = 1000;
     float default_similarity_threshold = 0.35f;
     bool use_in_memory = false; // For testing
+
+    // TurboQuant compression settings (arXiv:2504.19874 approximation)
+    // EXPERIMENTAL: Packed storage is implemented but HNSW still uses decoded floats.
+    // TurboQuantProd inner product is approximate (QJL correction not applied).
+    bool enable_turboquant_storage = false;
+    uint8_t turboquant_bits = 4;   // Bits per channel (1-4)
+    uint64_t turboquant_seed = 42; // Random seed for reproducibility
 };
 
 /**
  * Represents a vector record in the database
  */
 struct VectorRecord {
+    /**
+     * Format version for quantized embeddings
+     * Allows schema evolution without breaking existing stored data
+     */
+    enum class QuantizedFormat : uint8_t {
+        NONE = 0,         // No quantization
+        TURBOquant_1 = 1, // TurboQuant with major version 1
+    };
+
+    /**
+     * Metadata and packed codes for quantized embeddings.
+     * This struct is stored as a binary blob alongside float embeddings for
+     * backward-compatible reconstruction.
+     */
+    struct QuantizedEmbedding {
+        QuantizedFormat format = QuantizedFormat::NONE;
+        uint8_t bits_per_channel = 0;      // 1-4 for TurboQuant
+        uint64_t seed = 0;                 // Random seed used for quantization
+        std::vector<uint8_t> packed_codes; // Bit-packed quantization codes
+    };
+
     std::string chunk_id;                        // UUID for chunk
     std::string document_hash;                   // SHA-256 hash of source document
     std::vector<float> embedding;                // Embedding vector
@@ -68,6 +96,10 @@ struct VectorRecord {
     std::string content_hash_at_embedding; // SHA-256 of content when embedded
     std::chrono::system_clock::time_point embedded_at; // When embedding was generated
     bool is_stale = false;                             // Mark for re-embedding
+
+    // TurboQuant compressed embedding fields (arXiv:2504.19874 approximation)
+    // Quantized representation: present when TurboQuant compression is enabled
+    QuantizedEmbedding quantized;
 
     EmbeddingLevel level = EmbeddingLevel::CHUNK;
     std::vector<std::string> source_chunk_ids;

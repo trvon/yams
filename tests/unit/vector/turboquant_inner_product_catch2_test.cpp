@@ -1,6 +1,10 @@
-// Catch2 unit tests for TurboQuant inner product quantizer
+// Catch2 unit tests for TurboQuant inner product quantizer (approximation)
 // Tests the TurboQuant_Prod class from turboquant.h
-// Paper: arXiv:2504.19874 - TurboQuant
+// Paper reference: arXiv:2504.19874 (approximation implementation)
+//
+// NOTE: This tests the CURRENT implementation, which is an approximation.
+// The QJL correction term is NOT yet applied in estimateInnerProduct().
+// The paper's unbiasedness claim does NOT apply to this implementation.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>

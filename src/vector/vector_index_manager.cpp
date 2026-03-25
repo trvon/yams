@@ -2390,6 +2390,16 @@ struct TurboQuantRuntimeConfig {
 static thread_local std::optional<TurboQuantMSE> g_turboquant_mse;
 static thread_local TurboQuantRuntimeConfig g_turboquant_config;
 
+void configureTurboQuant(bool enable, size_t dimension, uint8_t bits, uint64_t seed) {
+    g_turboquant_config.enable_turboquant = enable;
+    g_turboquant_config.dimension = dimension;
+    g_turboquant_config.turboquant_bits = bits;
+    g_turboquant_config.turboquant_seed = seed;
+    g_turboquant_config.config_valid = enable;
+    // Force re-initialization on next use
+    g_turboquant_mse.reset();
+}
+
 std::vector<uint8_t> quantizeVector(const std::vector<float>& vector) {
     // Check if TurboQuant is enabled and configured
     if (g_turboquant_config.enable_turboquant && g_turboquant_config.config_valid &&
@@ -2451,6 +2461,114 @@ std::vector<float> dequantizeVector(const std::vector<uint8_t>& quantized, size_
         vector.push_back(0.0f);
     }
 
+    return vector;
+}
+
+std::vector<uint8_t> packedQuantizeVector(const std::vector<float>& vector) {
+    // Check if TurboQuant is enabled and configured
+    if (g_turboquant_config.enable_turboquant && g_turboquant_config.config_valid &&
+        vector.size() == g_turboquant_config.dimension) {
+        if (!g_turboquant_mse.has_value() ||
+            g_turboquant_mse->config().dimension != g_turboquant_config.dimension ||
+            g_turboquant_mse->config().bits_per_channel != g_turboquant_config.turboquant_bits) {
+            // Re-initialize TurboQuant with current config
+            TurboQuantConfig tq_config;
+            tq_config.dimension = g_turboquant_config.dimension;
+            tq_config.bits_per_channel = g_turboquant_config.turboquant_bits;
+            tq_config.seed = g_turboquant_config.turboquant_seed;
+            tq_config.inner_product_mode = g_turboquant_config.turboquant_inner_product;
+            g_turboquant_mse.emplace(tq_config);
+        }
+        return g_turboquant_mse->packedEncode(vector);
+    }
+
+    // Fall back to linear 8-bit quantization (packed)
+    size_t num_bytes = (vector.size() + 7) / 8;
+    std::vector<uint8_t> packed(num_bytes, 0);
+
+    for (size_t i = 0; i < vector.size(); ++i) {
+        float clamped = std::max(-1.0f, std::min(1.0f, vector[i]));
+        uint8_t val = static_cast<uint8_t>((clamped + 1.0f) * 127.5f);
+
+        size_t bit_pos = i * 8;
+        size_t byte_idx = bit_pos / 8;
+        size_t bit_offset = bit_pos % 8;
+        packed[byte_idx] |= (val << bit_offset);
+    }
+
+    return packed;
+}
+
+std::vector<float> packedDequantizeVector(const std::vector<uint8_t>& packed, size_t dimension) {
+    // Check if TurboQuant is enabled and configured
+    if (g_turboquant_config.enable_turboquant && g_turboquant_config.config_valid &&
+        dimension == g_turboquant_config.dimension) {
+        if (!g_turboquant_mse.has_value()) {
+            TurboQuantConfig tq_config;
+            tq_config.dimension = g_turboquant_config.dimension;
+            tq_config.bits_per_channel = g_turboquant_config.turboquant_bits;
+            tq_config.seed = g_turboquant_config.turboquant_seed;
+            tq_config.inner_product_mode = g_turboquant_config.turboquant_inner_product;
+            g_turboquant_mse.emplace(tq_config);
+        }
+        return g_turboquant_mse->packedDecode(packed);
+    }
+
+    // Fall back to linear 8-bit dequantization
+    std::vector<float> vector;
+    vector.reserve(dimension);
+
+    for (size_t i = 0; i < dimension; ++i) {
+        size_t bit_pos = i * 8;
+        size_t byte_idx = bit_pos / 8;
+        size_t bit_offset = bit_pos % 8;
+
+        uint8_t val = 0;
+        if (byte_idx < packed.size()) {
+            val = (packed[byte_idx] >> bit_offset) & 0xFF;
+        }
+
+        float fval = (val / 127.5f) - 1.0f;
+        vector.push_back(fval);
+    }
+
+    return vector;
+}
+
+std::vector<uint8_t> packedQuantizeVector(const std::vector<float>& vector,
+                                          TurboQuantMSE* quantizer) {
+    if (quantizer != nullptr) {
+        assert(vector.size() == quantizer->config().dimension);
+        return quantizer->packedEncode(vector);
+    }
+    // Fall back to linear 8-bit packing
+    size_t num_bytes = (vector.size() + 7) / 8;
+    std::vector<uint8_t> packed(num_bytes, 0);
+    for (size_t i = 0; i < vector.size(); ++i) {
+        float clamped = std::max(-1.0f, std::min(1.0f, vector[i]));
+        uint8_t val = static_cast<uint8_t>((clamped + 1.0f) * 127.5f);
+        size_t byte_idx = (i * 8) / 8;
+        size_t bit_offset = (i * 8) % 8;
+        packed[byte_idx] |= (val << bit_offset);
+    }
+    return packed;
+}
+
+std::vector<float> packedDequantizeVector(const std::vector<uint8_t>& packed, size_t dimension,
+                                          TurboQuantMSE* quantizer) {
+    if (quantizer != nullptr) {
+        assert(dimension == quantizer->config().dimension);
+        return quantizer->packedDecode(packed);
+    }
+    // Fall back to linear 8-bit dequantization
+    std::vector<float> vector;
+    vector.reserve(dimension);
+    for (size_t i = 0; i < dimension; ++i) {
+        size_t byte_idx = (i * 8) / 8;
+        size_t bit_offset = (i * 8) % 8;
+        uint8_t val = (byte_idx < packed.size()) ? ((packed[byte_idx] >> bit_offset) & 0xFF) : 0;
+        vector.push_back((val / 127.5f) - 1.0f);
+    }
     return vector;
 }
 

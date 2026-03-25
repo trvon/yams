@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/core/types.h>
+#include <yams/vector/turboquant.h>
 
 #include <chrono>
 #include <functional>
@@ -370,14 +371,52 @@ std::vector<float> meanVector(const std::vector<std::vector<float>>& vectors);
 std::vector<float> centroid(const std::vector<std::vector<float>>& vectors);
 
 /**
- * Quantize vector for compression
+ * Configure TurboQuant settings for compression (DEPRECATED: use TurboQuantMSE member)
+ */
+void configureTurboQuant(bool enable, size_t dimension, uint8_t bits, uint64_t seed);
+
+/**
+ * Quantize vector for compression (uses configured TurboQuant settings)
+ * @return Unpacked codes: one byte per dimension (not storage-ready)
  */
 std::vector<uint8_t> quantizeVector(const std::vector<float>& vector);
 
 /**
- * Dequantize compressed vector
+ * Quantize vector and return packed bytes for storage
+ * @return Packed bits: dimension*bits/8 bytes, suitable for storage
+ */
+std::vector<uint8_t> packedQuantizeVector(const std::vector<float>& vector);
+
+/**
+ * Dequantize compressed vector (uses configured TurboQuant settings)
  */
 std::vector<float> dequantizeVector(const std::vector<uint8_t>& quantized, size_t dimension);
+
+/**
+ * Dequantize from packed storage bytes
+ * @param packed Packed bytes (dimension*bits/8 bytes)
+ * @param dimension Original vector dimension
+ */
+std::vector<float> packedDequantizeVector(const std::vector<uint8_t>& packed, size_t dimension);
+
+/**
+ * Packed quantize using a caller-owned TurboQuantMSE instance (no global state).
+ * Preferred over the global variant when a TurboQuantMSE member is available.
+ * @param vector Input vector (must match quantizer's configured dimension)
+ * @param quantizer Pointer to an initialized TurboQuantMSE instance (may be nullptr)
+ */
+std::vector<uint8_t> packedQuantizeVector(const std::vector<float>& vector,
+                                          ::yams::vector::TurboQuantMSE* quantizer);
+
+/**
+ * Packed dequantize using a caller-owned TurboQuantMSE instance (no global state).
+ * Preferred over the global variant when a TurboQuantMSE member is available.
+ * @param packed Packed bytes
+ * @param dimension Original vector dimension
+ * @param quantizer Pointer to an initialized TurboQuantMSE instance (may be nullptr)
+ */
+std::vector<float> packedDequantizeVector(const std::vector<uint8_t>& packed, size_t dimension,
+                                          ::yams::vector::TurboQuantMSE* quantizer);
 } // namespace vector_utils
 
 } // namespace yams::vector
