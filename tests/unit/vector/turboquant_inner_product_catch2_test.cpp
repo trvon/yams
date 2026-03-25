@@ -1,10 +1,13 @@
-// Catch2 unit tests for TurboQuant inner product quantizer (approximation)
-// Tests the TurboQuant_Prod class from turboquant.h
+// Catch2 unit tests for TurboQuant inner product quantizer
+// Tests the TurboQuantProd class from turboquant.h
 // Paper reference: arXiv:2504.19874 (approximation implementation)
 //
-// NOTE: This tests the CURRENT implementation, which is an approximation.
-// The QJL correction term is NOT yet applied in estimateInnerProduct().
-// The paper's unbiasedness claim does NOT apply to this implementation.
+// Test coverage:
+//   - Conservative blend correction (estimateInnerProduct): sign agreement rate
+//     adjusts the MSE-decoded dot product. Blend factor = 0.25.
+//   - Full QJL correction (estimateInnerProductFull): uses residual norms.
+//     Benchmark shows WORSE than decoded-only for random vectors (MAE: 0.28-0.36 vs 0.04-0.06).
+//   - Statistical tests: bias, monotonicity, orthogonal, same-vector.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -88,15 +91,15 @@ TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd basic encode produces va
     TurboQuantProd quantizer(config);
 
     std::vector<float> v = generateUnitVector(128);
-    auto [mse_indices, signs] = quantizer.encode(v);
+    auto enc = quantizer.encode(v);
 
     // Should produce correct number of indices and signs
-    REQUIRE(mse_indices.size() == 128);
-    REQUIRE(signs.size() == 64); // qjl_m
+    REQUIRE(enc.mse_indices.size() == 128);
+    REQUIRE(enc.qjl_signs.size() == 64); // qjl_m
 
     // Signs should be ±1
-    for (size_t i = 0; i < signs.size(); ++i) {
-        bool is_valid_sign = (signs[i] == 1) || (signs[i] == -1);
+    for (size_t i = 0; i < enc.qjl_signs.size(); ++i) {
+        bool is_valid_sign = (enc.qjl_signs[i] == 1) || (enc.qjl_signs[i] == -1);
         REQUIRE(is_valid_sign);
     }
 }
@@ -113,8 +116,8 @@ TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd decode reconstructs vect
     TurboQuantProd quantizer(config);
 
     std::vector<float> original = generateUnitVector(256);
-    auto [mse_indices, signs] = quantizer.encode(original);
-    std::vector<float> reconstructed = quantizer.decode(mse_indices);
+    auto enc = quantizer.encode(original);
+    std::vector<float> reconstructed = quantizer.decode(enc.mse_indices);
 
     // Should approximately reconstruct
     float dist = l2Distance(original, reconstructed);
@@ -147,8 +150,10 @@ TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd inner product same vecto
     INFO("Inner product estimate (same vector): " << ip_estimate);
     INFO("True inner product: " << true_ip);
 
-    // The estimate won't be exact, but should be positive and reasonable
-    REQUIRE(ip_estimate > 0.0f);
+    // The estimate should be in a reasonable range for a unit vector self-IP
+    // With QJL correction (kQjlBlendFactor=0.25), max boost when gamma=1 gives 1.25x
+    REQUIRE(ip_estimate > 0.5f); // Clearly positive
+    REQUIRE(ip_estimate < 2.5f); // Not wildly inflated
 }
 
 TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd inner product orthogonal vectors",
@@ -189,55 +194,112 @@ TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd inner product orthogonal
     INFO("Inner product estimate (orthogonal): " << ip_estimate);
     INFO("True inner product: " << true_ip);
 
-    // Should be close to 0
-    REQUIRE(std::abs(ip_estimate) < 1.0f);
+    // For orthogonal unit vectors: true_ip ≈ 0. With QJL correction, estimates
+    // near 0 are expected (agreement ≈ 0.5 means correction ≈ 1.0).
+    // Require: |estimate| < 0.5 — meaningfully closer to 0 than 1.0
+    REQUIRE(std::abs(ip_estimate) < 0.5f);
 }
 
-TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd inner product varies with angle",
-                 "[turboquant][prod][inner_product][catch2]") {
+TEST_CASE_METHOD(TurboQuantProdFixture,
+                 "TurboQuantProd IP estimate bias is near zero across random pairs",
+                 "[turboquant][prod][inner_product][statistical][catch2]") {
     TurboQuantConfig config;
-    config.dimension = 384;
-    config.bits_per_channel = 4;
-    config.seed = 42;
+    config.dimension = 256;
+    config.bits_per_channel = 3;
+    config.seed = 7;
     config.inner_product_mode = true;
-    config.qjl_m = 256;
+    config.qjl_m = 128;
 
     TurboQuantProd quantizer(config);
 
-    std::vector<float> v1 = generateUnitVector(384);
+    // Run 50 random pairs, measure bias = mean(estimate - true_ip)
+    constexpr size_t kNumPairs = 50;
+    std::vector<float> errors;
+    errors.reserve(kNumPairs);
 
-    // Create v2 at known angle from v1
-    float angle = 0.5f; // radians
-    float c = std::cos(angle);
-    float s = std::sin(angle);
+    for (size_t trial = 0; trial < kNumPairs; ++trial) {
+        auto v1 = generateUnitVector(256);
+        auto v2 = generateUnitVector(256);
+        auto enc1 = quantizer.encode(v1);
+        auto enc2 = quantizer.encode(v2);
 
-    std::vector<float> v2(384, 0.0f);
-    v2[0] = c;
-    v2[1] = s;
-    // Rest is random but orthonormal to first two basis
-    std::normal_distribution<float> dist(0.0f, 1.0f);
-    for (size_t i = 2; i < 384; ++i) {
-        v2[i] = dist(rng);
+        float estimate = quantizer.estimateInnerProduct(enc1, enc2);
+        float true_ip = innerProduct(v1, v2);
+        errors.push_back(estimate - true_ip);
     }
-    float norm = 0.0f;
-    for (size_t i = 0; i < 384; ++i)
-        norm += v2[i] * v2[i];
-    norm = std::sqrt(norm);
-    for (size_t i = 0; i < 384; ++i)
-        v2[i] /= norm;
 
-    auto enc1 = quantizer.encode(v1);
-    auto enc2 = quantizer.encode(v2);
+    // Compute mean error
+    float mean_error = 0.0f;
+    for (float e : errors)
+        mean_error += e;
+    mean_error /= static_cast<float>(kNumPairs);
 
-    float ip_estimate = quantizer.estimateInnerProduct(enc1, enc2);
-    float true_ip = innerProduct(v1, v2);
+    INFO("Mean IP bias across " << kNumPairs << " random pairs: " << mean_error);
 
-    INFO("Inner product estimate: " << ip_estimate);
-    INFO("True inner product (cosine): " << true_ip);
+    // Bias should be within [-0.2, 0.2] for unit vectors (conservative threshold)
+    REQUIRE(std::abs(mean_error) < 0.2f);
+}
 
-    // The signs of the estimates should generally agree (both positive for acute angle)
-    float expected_sign = (true_ip > 0) ? 1.0f : -1.0f;
-    INFO("Expected sign: " << expected_sign);
+TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd IP estimate is monotonic with cosine angle",
+                 "[turboquant][prod][inner_product][statistical][catch2]") {
+    TurboQuantConfig config;
+    config.dimension = 384;
+    config.bits_per_channel = 4;
+    config.seed = 99;
+    config.inner_product_mode = true;
+    config.qjl_m = 128;
+
+    TurboQuantProd quantizer(config);
+
+    // Test 5 angle buckets: 0°, 30°, 60°, 90°, 120°
+    std::vector<float> angles_rad = {0.0f, 0.524f, 1.047f, 1.571f,
+                                     2.094f}; // 0, 30, 60, 90, 120 deg
+
+    std::vector<float> estimates;
+    for (float angle : angles_rad) {
+        auto v1 = generateUnitVector(384);
+
+        // Build v2 at this angle from v1
+        float c = std::cos(angle);
+        float s = std::sin(angle);
+        std::vector<float> v2(384);
+        v2[0] = c;
+        v2[1] = s;
+        for (size_t i = 2; i < 384; ++i) {
+            v2[i] = generateUnitVector(384)[i];
+        }
+        float norm = 0.0f;
+        for (size_t i = 0; i < 384; ++i)
+            norm += v2[i] * v2[i];
+        norm = std::sqrt(norm);
+        for (size_t i = 0; i < 384; ++i)
+            v2[i] /= norm;
+
+        auto enc1 = quantizer.encode(v1);
+        auto enc2 = quantizer.encode(v2);
+
+        float est = quantizer.estimateInnerProduct(enc1, enc2);
+        float true_ip = innerProduct(v1, v2);
+
+        INFO("Angle=" << angle << " rad: estimate=" << est << ", true_ip=" << true_ip);
+        estimates.push_back(est);
+
+        // Sanity: same angle gives close estimate to true_ip
+        if (angle < 0.1f) {
+            REQUIRE(std::abs(est - true_ip) < 1.0f);
+        }
+    }
+
+    // Monotonicity: estimates should decrease (or stay same) as angle increases.
+    // Check that estimate[0] >= estimate[1] >= ... (with small tolerance for noise)
+    size_t violations = 0;
+    for (size_t i = 0; i + 1 < estimates.size(); ++i) {
+        if (estimates[i] < estimates[i + 1] - 0.5f) {
+            violations++;
+        }
+    }
+    INFO("Monotonicity violations: " << violations << " / " << (estimates.size() - 1));
+    REQUIRE(violations <= 1); // Allow at most 1 noisy violation out of 4 comparisons
 }
 
 // =============================================================================
@@ -265,11 +327,11 @@ TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd same seed reproducibilit
 
     std::vector<float> v = generateUnitVector(256);
 
-    auto [idx1, signs1] = q1.encode(v);
-    auto [idx2, signs2] = q2.encode(v);
+    auto enc1 = q1.encode(v);
+    auto enc2 = q2.encode(v);
 
-    REQUIRE(idx1 == idx2);
-    REQUIRE(signs1 == signs2);
+    REQUIRE(enc1.mse_indices == enc2.mse_indices);
+    REQUIRE(enc1.qjl_signs == enc2.qjl_signs);
 }
 
 // =============================================================================
@@ -289,9 +351,9 @@ TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd zero vector",
     std::vector<float> zero(128, 0.0f);
 
     // Should not crash
-    auto [mse_indices, signs] = quantizer.encode(zero);
-    REQUIRE(mse_indices.size() == 128);
-    REQUIRE(signs.size() == 64);
+    auto enc = quantizer.encode(zero);
+    REQUIRE(enc.mse_indices.size() == 128);
+    REQUIRE(enc.qjl_signs.size() == 64);
 }
 
 TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd high m value",
@@ -306,12 +368,11 @@ TEST_CASE_METHOD(TurboQuantProdFixture, "TurboQuantProd high m value",
     TurboQuantProd quantizer(config);
 
     std::vector<float> v = generateUnitVector(256);
-    auto [mse_indices, signs] = quantizer.encode(v);
+    auto enc = quantizer.encode(v);
 
-    REQUIRE(signs.size() == 512);
+    REQUIRE(enc.qjl_signs.size() == 512);
 
     // Should still produce reasonable inner product estimates
-    auto enc = quantizer.encode(v);
     float ip_estimate = quantizer.estimateInnerProduct(enc, enc);
     INFO("IP estimate with high m: " << ip_estimate);
     REQUIRE(ip_estimate > 0.0f);

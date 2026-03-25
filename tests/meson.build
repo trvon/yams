@@ -1470,6 +1470,7 @@ if catch2_dep.found()
         'unit/vector/vector_smoke_catch2_test.cpp',
         'unit/vector/turboquant_mse_catch2_test.cpp',
         'unit/vector/turboquant_inner_product_catch2_test.cpp',
+        'unit/vector/turboquant_math_test.cpp',
         'unit/vector/turboquant_integration_catch2_test.cpp',
         'unit/vector/turboquant_storage_catch2_test.cpp',
       ),

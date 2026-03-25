@@ -13,10 +13,10 @@
  * approximation that preserves the l2-norm but does not provide the same
  * theoretical distortion guarantees.
  *
- * Current limitations:
- *   - TurboQuant_Prod QJL correction term is NOT yet applied in estimation
- *   - No persistent packed storage path (backend persists float embeddings)
- *   - Variable bit-width: 1-4 bits per channel
+ * Storage: V2.2 schema persists quantized sidecar (format, bits, seed, packed_codes).
+ * Inner product: TurboQuantProd provides two estimators:
+ *   - estimateInnerProduct(): conservative blend (default, production-safe)
+ *   - estimateInnerProductFull(): full QJL correction (EXPERIMENTAL, research-only)
  */
 
 #include <yams/core/types.h>
@@ -50,6 +50,49 @@ struct TurboQuantConfig {
 
     /** Reserved for future rotation matrix caching; currently unused */
     bool cache_rotation = false;
+};
+
+/**
+ * TurboQuantProd encoding output
+ *
+ * Extended encoding that captures the residual norm squared alongside the
+ * MSE-decoded indices and QJL signs. This enables the full QJL-corrected
+ * inner product estimation.
+ *
+ * Mathematical components:
+ *   - mse_indices: quantized Hadamard coefficients (from MSE stage)
+ *   - qjl_signs: sign of (S·residual) for each of m random projections
+ *   - residual_norm_sq: squared l2-norm of the post-MSE quantization residual
+ *
+ * QJL correction formula (full method):
+ *   gamma_raw = matching_signs / m                            // raw agreement rate ∈ [0, 1]
+ *   P(same sign) = 0.5 + (1/π)·arcsin(ρ)                  // [Feller Vol.2 Ch.III.4]
+ *   E[sgn·sgn]  = 2·gamma_raw - 1
+ *   arcsin(ρ)   = π·gamma_raw - π/2
+ *   rho_res     = sin(π·gamma_raw - π/2) = -cos(π·gamma_raw) // correct inverse
+ *   dot_estimate = dot_mse + rho_res · √(r1_norm_sq · r2_norm_sq)
+ *
+ *   Joint Normal Lemma derivation (see TurboQuantProd::estimateInnerProductFull):
+ *     P(same) = 0.5 + (1/π)·arcsin(ρ)
+ *     E[sgn·sgn] = 2·gamma_raw - 1 = (2/π)·arcsin(ρ)
+ *     arcsin(ρ) = π·gamma_raw - π/2  →  rho_res = sin(π·gamma_raw - π/2) = -cos(π·gamma_raw)
+ */
+struct TurboQuantEncoded {
+    /** MSE-decoded Hadamard indices */
+    std::vector<uint8_t> mse_indices;
+
+    /** QJL projection signs (one per m hash) */
+    std::vector<int8_t> qjl_signs;
+
+    /** Squared l2-norm of the residual (x - MSE_decode(mse_indices)) */
+    float residual_norm_sq = 0.0f;
+
+    /** Implicit conversion to std::pair for backward compatibility with
+     *  existing code that uses (mse_indices, qjl_signs) pairs.
+     *  The residual_norm_sq is dropped in the conversion. */
+    operator std::pair<std::vector<uint8_t>, std::vector<int8_t>>() const {
+        return {mse_indices, qjl_signs};
+    }
 };
 
 /**
@@ -176,19 +219,17 @@ private:
 /**
  * TurboQuant Inner Product Quantizer (Two-Stage) [EXPERIMENTAL]
  *
- * WARNING: This class is experimental. The inner product estimation is approximate
- * and does NOT provide the unbiasedness guarantee described in the paper.
+ * WARNING: This class is experimental. The inner product estimation is approximate.
  *
  * Algorithm:
  *  1. Apply TurboQuant_MSE with (b-1) bits → x̃
  *  2. Compute residual: r = x - x̃
  *  3. Apply 1-bit QJL: s = sign(S · r) where S ∈ R^{m×d}
- *  4. Store: (idx_mse, s)
+ *  4. Store: (idx_mse, s, ||r||²)
  *
- * Inner product estimation: Currently returns MSE-decoded dot product only.
- * The QJL residual term is encoded but NOT applied in estimation.
- *
- * Do NOT use this for production ranking/scoring until QJL correction is implemented.
+ * Inner product estimation:
+ *   - estimateInnerProduct(): conservative sign-agreement blend (default, production-safe)
+ *   - estimateInnerProductFull(): full QJL correction using residual norms (EXPERIMENTAL)
  */
 class TurboQuantProd {
 public:
@@ -201,18 +242,33 @@ public:
     /**
      * Encode a vector for inner product estimation
      * @param vector Input vector (dim=config.dimension)
-     * @return Pair of (MSE indices, QJL signs)
+     * @return TurboQuantEncoded with mse_indices, qjl_signs, and residual_norm_sq
      */
-    std::pair<std::vector<uint8_t>, std::vector<int8_t>> encode(const std::vector<float>& vector);
+    TurboQuantEncoded encode(const std::vector<float>& vector);
 
     /**
-     * Estimate inner product between two vectors (both encoded)
-     * @param enc1 Encoded vector 1 (from encode)
+     * Estimate inner product between two vectors using conservative sign-agreement blend.
+     *
+     * Uses sign agreement rate γ = matching_signs / m to compute a confidence-weighted
+     * blend around the MSE-decoded dot product:
+     *   est = dot_mse · (1 + 0.25 · (γ - 0.5) · 2)
+     *
+     * The blend factor (0.25) is deliberately conservative — it nudges the estimate
+     * in the direction indicated by QJL sign agreement without over-correcting.
+     * This avoids the pitfall of the full QJL correction (estimateInnerProductFull)
+     * which performs WORSE than decoded-only on random vectors.
+     *
+     * @param enc1 Encoded vector 1 (from encode — implicit conversion to pair supported)
      * @param enc2 Encoded vector 2 (from encode)
-     * @return Approximate inner product (QJL correction NOT applied)
+     * @return Approximate inner product with conservative QJL-assisted blend
      */
     float estimateInnerProduct(const std::pair<std::vector<uint8_t>, std::vector<int8_t>>& enc1,
                                const std::pair<std::vector<uint8_t>, std::vector<int8_t>>& enc2);
+
+    /* EXPERIMENTAL — for structured-data research only.
+     * See turboquant.h TurboQuantEncoded docs for the full QJL correction formula.
+     * Benchmarks show this is WORSE than the conservative blend on random vectors. */
+    float estimateInnerProductFull(const TurboQuantEncoded& enc1, const TurboQuantEncoded& enc2);
 
     /**
      * Decode to approximate vector

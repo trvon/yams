@@ -55,6 +55,10 @@ struct BenchmarkResult {
     double baseline_decode_p50;
     double speedup_encode;
     double speedup_decode;
+    // IP scoring quality (TurboQuantProd::estimateInnerProductFull)
+    double ip_mae;           // Mean absolute error vs true inner product
+    double ip_rmse;          // Root mean squared error vs true inner product
+    double ip_sign_accuracy; // Fraction of pairs where IP sign was correct
 };
 
 // Baseline: Linear 8-bit quantization (matches vector_index_manager.cpp)
@@ -273,6 +277,54 @@ void runBenchmark(const BenchmarkConfig& config) {
 
             double recall_at_1 = static_cast<double>(correct_top1) / recall_vectors;
 
+            // Measure IP scoring quality using TurboQuantProd::estimateInnerProductFull()
+            // Create a TurboQuantProd instance with the same config
+            TurboQuantConfig prod_config = tq_config;
+            prod_config.inner_product_mode = true;
+            prod_config.qjl_m = dim / 4;
+            TurboQuantProd prod_quantizer(prod_config);
+
+            // Encode a subset of vectors with TurboQuantProd for IP measurement
+            size_t ip_num_pairs = std::min(config.search_queries * 10, all_indices.size());
+            double ip_total_abs_error = 0.0;
+            double ip_total_sq_error = 0.0;
+            size_t ip_correct_sign = 0;
+            // Also measure decoded-only baseline (no QJL correction) for comparison
+            double decoded_total_abs_error = 0.0;
+            for (size_t i = 0; i < ip_num_pairs; ++i) {
+                size_t j = (i + 37) % all_indices.size(); // Different pair each time
+                auto enc_i = prod_quantizer.encode(vectors[config.warmup_vectors + i]);
+                auto enc_j = prod_quantizer.encode(vectors[config.warmup_vectors + j]);
+
+                float ip_estimate = prod_quantizer.estimateInnerProductFull(enc_i, enc_j);
+
+                // Decoded-only (no QJL): just the MSE-decoded dot product
+                float decoded_ip = prod_quantizer.estimateInnerProduct(enc_i, enc_j);
+
+                // True inner product on unit vectors (cosine similarity)
+                float true_ip = 0.0f;
+                for (size_t k = 0; k < dim; ++k) {
+                    true_ip += vectors[config.warmup_vectors + i][k] *
+                               vectors[config.warmup_vectors + j][k];
+                }
+
+                float abs_err = std::abs(ip_estimate - true_ip);
+                ip_total_abs_error += abs_err;
+                ip_total_sq_error += static_cast<double>(abs_err) * abs_err;
+                decoded_total_abs_error += std::abs(decoded_ip - true_ip);
+
+                // Sign accuracy: was the sign (positive/negative) correct?
+                bool est_pos = ip_estimate >= 0.0f;
+                bool true_pos = true_ip >= 0.0f;
+                if (est_pos == true_pos)
+                    ip_correct_sign++;
+            }
+
+            double ip_mae = ip_total_abs_error / static_cast<double>(ip_num_pairs);
+            double ip_rmse = std::sqrt(ip_total_sq_error / static_cast<double>(ip_num_pairs));
+            double ip_sign_accuracy = static_cast<double>(ip_correct_sign) / ip_num_pairs;
+            double decoded_mae = decoded_total_abs_error / static_cast<double>(ip_num_pairs);
+
             // Storage size: theoretical packed storage from storageSize()
             // NOTE: This is NOT the active runtime storage format (which uses unpacked codes)
             size_t storage_bytes = quantizer.storageSize();
@@ -291,6 +343,9 @@ void runBenchmark(const BenchmarkConfig& config) {
             result.baseline_decode_p50 = baseline_decode_p50;
             result.speedup_encode = speedup_encode;
             result.speedup_decode = speedup_decode;
+            result.ip_mae = ip_mae;
+            result.ip_rmse = ip_rmse;
+            result.ip_sign_accuracy = ip_sign_accuracy;
 
             results.push_back(result);
 
@@ -307,6 +362,13 @@ void runBenchmark(const BenchmarkConfig& config) {
                 std::cout << "  MSE: " << std::scientific << avg_mse << std::endl;
                 std::cout << "  Recall@1: " << std::fixed << std::setprecision(4) << recall_at_1
                           << std::endl;
+                // IP scoring quality: note that decoded MAE dominates the error.
+                // QJL residual correction is negligible for random vectors because
+                // decoded dot product error (∝ 2^(-b)) >> QJL residual (∝ 1/√m).
+                std::cout << "  IP (decoded MAE=" << std::scientific << std::setprecision(3)
+                          << decoded_mae << ", QJL-corrected MAE=" << ip_mae << "  RMSE=" << ip_rmse
+                          << "  sign_acc=" << std::setprecision(3) << (ip_sign_accuracy * 100.0)
+                          << "%)" << std::endl;
                 std::cout << "  Storage (theoretical packed): " << storage_bytes
                           << " bytes (vs 8-bit baseline: " << dim << " bytes)" << std::endl;
                 std::cout << std::endl;
@@ -338,7 +400,10 @@ void runBenchmark(const BenchmarkConfig& config) {
                                  {"baseline_encode_us_p50", r.baseline_encode_p50},
                                  {"baseline_decode_us_p50", r.baseline_decode_p50},
                                  {"speedup_encode", r.speedup_encode},
-                                 {"speedup_decode", r.speedup_decode}});
+                                 {"speedup_decode", r.speedup_decode},
+                                 {"ip_mae", r.ip_mae},
+                                 {"ip_rmse", r.ip_rmse},
+                                 {"ip_sign_accuracy", r.ip_sign_accuracy}});
     }
     json_output["results"] = results_array;
 

@@ -327,8 +327,8 @@ TEST_CASE_METHOD(TurboQuantIntegrationFixture, "TurboQuantProd basic encode/deco
     TurboQuantProd quantizer(config);
 
     std::vector<float> original = generateUnitVector(256);
-    auto [mse_indices, signs] = quantizer.encode(original);
-    std::vector<float> reconstructed = quantizer.decode(mse_indices);
+    auto enc = quantizer.encode(original);
+    std::vector<float> reconstructed = quantizer.decode(enc.mse_indices);
 
     // Should get back something reasonable
     float dist = l2Distance(original, reconstructed);

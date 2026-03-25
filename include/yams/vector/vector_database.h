@@ -47,8 +47,9 @@ struct VectorDatabaseConfig {
     bool use_in_memory = false; // For testing
 
     // TurboQuant compression settings (arXiv:2504.19874 approximation)
-    // EXPERIMENTAL: Packed storage is implemented but HNSW still uses decoded floats.
-    // TurboQuantProd inner product is approximate (QJL correction not applied).
+    // Storage: V2.2 schema persists quantized sidecar; HNSW still uses decoded floats.
+    // IP scoring: estimateInnerProduct() uses conservative sign-agreement blend (production-safe).
+    // estimateInnerProductFull() uses full QJL correction (EXPERIMENTAL, research-only).
     bool enable_turboquant_storage = false;
     uint8_t turboquant_bits = 4;   // Bits per channel (1-4)
     uint64_t turboquant_seed = 42; // Random seed for reproducibility

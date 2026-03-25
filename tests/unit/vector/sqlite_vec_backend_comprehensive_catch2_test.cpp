@@ -19,7 +19,9 @@
 #include <string>
 #include <vector>
 
+#include <sqlite3.h>
 #include <yams/vector/sqlite_vec_backend.h>
+#include <yams/vector/vector_schema_migration.h>
 
 using namespace yams::vector;
 using Catch::Matchers::WithinAbs;
@@ -1363,4 +1365,236 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend zero-norm vector val
             CHECK(result.chunk_id != "batch_zero_7");
         }
     }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend V2.2 migration adds quantized columns",
+                 "[sqlite_vec_backend][migration][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend backend;
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value()); // Creates fresh V2.2 schema
+
+    // V2.2 schema adds quantized sidecar columns.
+    auto schema_version = VectorSchemaMigration::detectVersion(backend.getDbHandle());
+    CHECK(static_cast<int>(schema_version) >= 3); // At least V2.1
+    CHECK(VectorSchemaMigration::hasQuantizedColumns(backend.getDbHandle()));
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(
+        backend.getDbHandle(),
+        "SELECT quantized_format, quantized_bits, quantized_seed FROM vectors LIMIT 1", -1, &stmt,
+        nullptr);
+    CHECK(rc == SQLITE_OK);
+    sqlite3_finalize(stmt);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend quantized sidecar round-trips through insert/get",
+                 "[sqlite_vec_backend][turboquant][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend backend;
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value()); // Creates fresh V2.2 schema
+
+    VectorRecord rec;
+    rec.chunk_id = "quantized_test_1";
+    rec.document_hash = "quant_doc_1";
+    rec.embedding = createEmbedding(128, 1.0f);
+    rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+    rec.quantized.bits_per_channel = 4;
+    rec.quantized.seed = 42;
+    rec.quantized.packed_codes = {1, 2, 3, 4, 5, 6, 7, 8};
+
+    auto insert_result = backend.insertVector(rec);
+    REQUIRE(insert_result.has_value());
+
+    auto get_result = backend.getVector("quantized_test_1");
+    REQUIRE(get_result.has_value());
+    REQUIRE(get_result.value().has_value());
+    auto retrieved = get_result.value().value();
+    CHECK(retrieved.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1);
+    CHECK(retrieved.quantized.bits_per_channel == 4);
+    CHECK(retrieved.quantized.seed == 42);
+    CHECK(retrieved.quantized.packed_codes.size() == 8);
+    CHECK(std::memcmp(retrieved.quantized.packed_codes.data(), rec.quantized.packed_codes.data(),
+                      8) == 0);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend mixed rows: quantized and non-quantized coexist",
+                 "[sqlite_vec_backend][turboquant][mixed][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend backend;
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value());
+
+    // Insert a non-quantized row
+    VectorRecord plain_rec;
+    plain_rec.chunk_id = "plain_row_1";
+    plain_rec.document_hash = "plain_doc";
+    plain_rec.embedding = createEmbedding(128, 1.0f);
+    REQUIRE(backend.insertVector(plain_rec).has_value());
+
+    // Insert a quantized row
+    VectorRecord quant_rec;
+    quant_rec.chunk_id = "quant_row_1";
+    quant_rec.document_hash = "quant_doc";
+    quant_rec.embedding = createEmbedding(128, 2.0f);
+    quant_rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+    quant_rec.quantized.bits_per_channel = 4;
+    quant_rec.quantized.seed = 99;
+    quant_rec.quantized.packed_codes = {10, 20, 30, 40};
+    REQUIRE(backend.insertVector(quant_rec).has_value());
+
+    // Retrieve both
+    auto plain_get = backend.getVector("plain_row_1");
+    REQUIRE(plain_get.has_value());
+    REQUIRE(plain_get.value().has_value());
+    CHECK(plain_get.value().value().quantized.packed_codes.empty());
+
+    auto quant_get = backend.getVector("quant_row_1");
+    REQUIRE(quant_get.has_value());
+    REQUIRE(quant_get.value().has_value());
+    CHECK(quant_get.value().value().quantized.format ==
+          VectorRecord::QuantizedFormat::TURBOquant_1);
+    CHECK(quant_get.value().value().quantized.packed_codes.size() == 4);
+
+    // Batch get both at once
+    std::vector<std::string> ids = {"plain_row_1", "quant_row_1"};
+    auto batch_result = backend.getVectorsBatch(ids);
+    REQUIRE(batch_result.has_value());
+    CHECK(batch_result.value().size() == 2);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend batch insert of quantized rows",
+                 "[sqlite_vec_backend][turboquant][batch][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend backend;
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value());
+
+    std::vector<VectorRecord> batch;
+    for (size_t i = 0; i < 5; ++i) {
+        VectorRecord rec;
+        rec.chunk_id = "batch_quant_" + std::to_string(i);
+        rec.document_hash = "batch_doc_" + std::to_string(i);
+        rec.embedding = createEmbedding(128, static_cast<float>(i + 1));
+        rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+        rec.quantized.bits_per_channel = 4;
+        rec.quantized.seed = static_cast<uint64_t>(i * 11);
+        rec.quantized.packed_codes = {static_cast<uint8_t>(i), static_cast<uint8_t>(i * 2),
+                                      static_cast<uint8_t>(i * 3), static_cast<uint8_t>(i * 4)};
+        batch.push_back(rec);
+    }
+
+    auto batch_result = backend.insertVectorsBatch(batch);
+    REQUIRE(batch_result.has_value());
+
+    // Retrieve all 5 and verify quantized data survived
+    for (size_t i = 0; i < 5; ++i) {
+        auto get_result = backend.getVector("batch_quant_" + std::to_string(i));
+        REQUIRE(get_result.has_value());
+        REQUIRE(get_result.value().has_value());
+        auto& rec = get_result.value().value();
+        CHECK(rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1);
+        CHECK(rec.quantized.packed_codes.size() == 4);
+        CHECK(rec.quantized.packed_codes[0] == static_cast<uint8_t>(i));
+    }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend update changes quantized sidecar",
+                 "[sqlite_vec_backend][turboquant][update][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend backend;
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value());
+
+    VectorRecord rec;
+    rec.chunk_id = "update_quant_1";
+    rec.document_hash = "update_doc";
+    rec.embedding = createEmbedding(128, 3.0f);
+    rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+    rec.quantized.bits_per_channel = 4;
+    rec.quantized.seed = 7;
+    rec.quantized.packed_codes = {1, 2, 3, 4};
+    REQUIRE(backend.insertVector(rec).has_value());
+
+    // Update: replace quantized data
+    rec.quantized.packed_codes = {9, 8, 7, 6};
+    rec.quantized.seed = 88;
+    auto update_result = backend.updateVector(rec.chunk_id, rec);
+    REQUIRE(update_result.has_value());
+
+    auto get_result = backend.getVector("update_quant_1");
+    REQUIRE(get_result.has_value());
+    REQUIRE(get_result.value().has_value());
+    auto& retrieved = get_result.value().value();
+    CHECK(retrieved.quantized.seed == 88);
+    CHECK(retrieved.quantized.packed_codes.size() == 4);
+    CHECK(retrieved.quantized.packed_codes[0] == 9);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend loads legacy V2.1 row (NULL quantized columns) safely",
+                 "[sqlite_vec_backend][turboquant][migration][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend backend;
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value());
+
+    // Manually insert a row that simulates a pre-V2.2 insert: quantized columns as NULL.
+    // This mimics a row that existed before the quantized sidecar was added.
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(
+        backend.getDbHandle(),
+        "INSERT INTO vectors (chunk_id, document_hash, embedding, embedding_dim, "
+        "quantized_format, quantized_bits, quantized_seed, quantized_packed_codes) "
+        "VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+        -1, &stmt, nullptr);
+    REQUIRE(rc == SQLITE_OK);
+
+    std::vector<uint8_t> embedding_bytes(128 * sizeof(float));
+    std::memcpy(embedding_bytes.data(), createEmbedding(128, 99.0f).data(), 128 * sizeof(float));
+
+    sqlite3_bind_text(stmt, 1, "legacy_row_1", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, "legacy_doc", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(stmt, 3, embedding_bytes.data(), static_cast<int>(embedding_bytes.size()),
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, 128);
+    rc = sqlite3_step(stmt);
+    REQUIRE(rc == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+
+    // Load it back — should not crash and should return the row with empty quantized fields
+    auto get_result = backend.getVector("legacy_row_1");
+    REQUIRE(get_result.has_value());
+    REQUIRE(get_result.value().has_value());
+    auto& retrieved = get_result.value().value();
+    CHECK(retrieved.chunk_id == "legacy_row_1");
+    CHECK(retrieved.quantized.packed_codes.empty());
+    CHECK(retrieved.quantized.seed == 0); // Default/zero for NULL
 }
