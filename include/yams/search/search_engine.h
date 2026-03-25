@@ -328,6 +328,17 @@ struct SearchEngineConfig {
     // Boosts documents that score well in BOTH text AND vector components
     bool useScoreBasedReranking = true; // Use score-based reranking (fast, default)
 
+    // TurboQuant packed-code reranking (compressed-space scoring, no decode needed)
+    // Operates on TurboQuant quantized-primary records without reconstructing floats
+    // Runs between first-stage retrieval and optional cross-encoder reranking
+    bool enableTurboQuantRerank = false;  // Enable TurboQuant vector reranking
+    size_t turboQuantRerankWindow = 50;   // Max candidates to rerank with TurboQuant
+    float turboQuantRerankWeight = 0.50f; // Blend weight for TurboQuant score (0-1)
+    uint8_t turboQuantRerankBits = 4;     // Bits per channel for reranking (1-4)
+    size_t turboQuantRerankDim = 384;     // Embedding dimension expected by reranker
+    bool turboQuantRerankOnlyWhenPackedAvailable =
+        true; // Only rerank candidates with packed codes; others fall through
+
     /**
      * @brief Get preset configuration for a corpus profile
      *

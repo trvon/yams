@@ -254,17 +254,30 @@ Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req
         selectExecutor(opts),
         [client, req, p = std::move(p2),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->streamingList(req);
-            p.set_value(std::move(r));
+            try {
+                auto r = co_await client->streamingList(req);
+                p.set_value(std::move(r));
+            } catch (const std::exception& e) {
+                p.set_value(Error{ErrorCode::InternalError,
+                                  std::string("list failed with exception: ") + e.what()});
+            } catch (...) {
+                p.set_value(Error{ErrorCode::InternalError, "list failed with unknown exception"});
+            }
             d.set_value();
             co_return;
         },
         boost::asio::detached);
-    if (f2.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-        std::future_status::ready) {
-        auto result = f2.get();
+    try {
+        if (f2.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
+            std::future_status::ready) {
+            auto result = f2.get();
+            done_f.wait();
+            return result;
+        }
+    } catch (const std::exception& e) {
         done_f.wait();
-        return result;
+        return Error{ErrorCode::InternalError,
+                     std::string("list failed with exception: ") + e.what()};
     }
     done_f.wait();
     return Error{ErrorCode::Timeout, "list timed out"};

@@ -32,6 +32,7 @@ yams_search = static_library('yams_search',
     'internal_benchmark.cpp',
     'symspell_search.cpp',
     'query_concept_extractor.cpp',
+    'turboquant_packed_reranker.cpp',
   ],
   include_directories: [
     include_directories('../../include'),

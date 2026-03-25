@@ -605,6 +605,192 @@ void runAsymmetricRecallBenchmark(const BenchmarkConfig& config) {
     std::cout << std::endl;
 }
 
+/// Reranking pipeline benchmark: measure TurboQuant reranking latency and quality
+/// vs a baseline decode+cosine reranking pipeline.
+///
+/// Simulates a reranking scenario:
+///   1. Build a corpus of vectors
+///   2. Pre-encode all corpus vectors into packed codes
+///   3. For each query:
+///      a. Transform query (TurboQuant::transformQuery)
+///      b. Run TurboQuant reranking on top-N candidates
+///      c. Run baseline decode+cosine reranking on same top-N
+///   4. Compare latency and ranking quality
+void runRerankBenchmark(const BenchmarkConfig& config) {
+    struct RerankResult {
+        size_t dim;
+        uint8_t bits;
+        size_t window;
+        double turboquant_latency_us;
+        double baseline_latency_us;
+        double speedup;
+        double recall_at_10;
+        double recall_at_1;
+        double kendall_tau; // Ranking correlation
+    };
+    std::vector<RerankResult> rerank_results;
+
+    std::cout << "\n=== Reranking Pipeline Benchmark ===" << std::endl;
+    std::cout << "Simulates top-N reranking: TurboQuant asymmetric vs decode+cosine baseline\n"
+              << std::endl;
+
+    const size_t default_dims[] = {128, 384};
+    const uint8_t default_bits[] = {4};
+    const size_t default_window = 50;
+    const size_t default_corpus = config.benchmark_vectors;
+    const size_t default_queries = config.search_queries;
+
+    const size_t* dims = config.dimensions.empty() ? default_dims : config.dimensions.data();
+    const uint8_t* bits = config.bitwidths.empty() ? default_bits : config.bitwidths.data();
+    size_t ndims = config.dimensions.empty() ? 2 : config.dimensions.size();
+    size_t nbits = config.bitwidths.empty() ? 1 : config.bitwidths.size();
+
+    for (size_t di = 0; di < ndims; ++di) {
+        size_t dim = dims[di];
+        for (size_t bi = 0; bi < nbits; ++bi) {
+            uint8_t b = bits[bi];
+
+            std::mt19937 rng(config.seed);
+            const size_t corpus_size = default_corpus;
+            const size_t num_queries = default_queries;
+
+            // Generate corpus
+            std::vector<std::vector<float>> corpus;
+            corpus.reserve(corpus_size);
+            for (size_t i = 0; i < corpus_size; ++i) {
+                corpus.push_back(generateUnitVector(dim, rng));
+            }
+
+            // Setup quantizer
+            TurboQuantConfig tq_cfg;
+            tq_cfg.dimension = dim;
+            tq_cfg.bits_per_channel = b;
+            tq_cfg.seed = config.seed;
+            TurboQuantMSE tq(tq_cfg);
+
+            // Pre-encode corpus
+            std::vector<std::vector<uint8_t>> packed_corpus;
+            packed_corpus.reserve(corpus_size);
+            for (size_t i = 0; i < corpus_size; ++i) {
+                packed_corpus.push_back(tq.packedEncode(corpus[i]));
+            }
+
+            // Pre-transform queries
+            std::vector<std::vector<float>> transformed_queries;
+            std::vector<std::vector<float>> queries;
+            transformed_queries.reserve(num_queries);
+            queries.reserve(num_queries);
+            std::mt19937 q_rng(config.seed + 2000);
+            for (size_t i = 0; i < num_queries; ++i) {
+                auto q = generateUnitVector(dim, q_rng);
+                queries.push_back(q);
+                transformed_queries.push_back(tq.transformQuery(q));
+            }
+
+            const size_t window = default_window;
+
+            // --- TurboQuant reranking pass ---
+            auto t0 = std::chrono::high_resolution_clock::now();
+            std::vector<std::vector<size_t>> turboquant_top_n(num_queries);
+            for (size_t qi = 0; qi < num_queries; ++qi) {
+                const auto& y_q = transformed_queries[qi];
+                // Score all corpus vectors
+                std::vector<std::pair<float, size_t>> scores;
+                scores.reserve(corpus_size);
+                for (size_t ci = 0; ci < corpus_size; ++ci) {
+                    float s = tq.scoreFromPacked(y_q, packed_corpus[ci]);
+                    scores.emplace_back(s, ci);
+                }
+                std::partial_sort(scores.begin(), scores.begin() + static_cast<long>(window),
+                                  scores.end(),
+                                  [](const auto& a, const auto& b) { return a.first > b.first; });
+                turboquant_top_n[qi].reserve(window);
+                for (size_t i = 0; i < window; ++i) {
+                    turboquant_top_n[qi].push_back(scores[i].second);
+                }
+            }
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double turboquant_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            double turboquant_per_query = turboquant_us / num_queries;
+
+            // --- Baseline decode+cosine pass ---
+            auto t2 = std::chrono::high_resolution_clock::now();
+            std::vector<std::vector<size_t>> baseline_top_n(num_queries);
+            for (size_t qi = 0; qi < num_queries; ++qi) {
+                const auto& q = queries[qi];
+                // Decode all then score
+                std::vector<std::pair<float, size_t>> scores;
+                scores.reserve(corpus_size);
+                for (size_t ci = 0; ci < corpus_size; ++ci) {
+                    auto dec = tq.packedDecode(packed_corpus[ci]);
+                    float dot = 0.0f;
+                    for (size_t k = 0; k < dim; ++k)
+                        dot += q[k] * dec[k];
+                    scores.emplace_back(dot, ci);
+                }
+                std::partial_sort(scores.begin(), scores.begin() + static_cast<long>(window),
+                                  scores.end(),
+                                  [](const auto& a, const auto& b) { return a.first > b.first; });
+                baseline_top_n[qi].reserve(window);
+                for (size_t i = 0; i < window; ++i) {
+                    baseline_top_n[qi].push_back(scores[i].second);
+                }
+            }
+            auto t3 = std::chrono::high_resolution_clock::now();
+            double baseline_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+            double baseline_per_query = baseline_us / num_queries;
+
+            double speedup = baseline_per_query / turboquant_per_query;
+
+            // --- Compute recall: how often TurboQuant top-N overlaps with baseline top-N ---
+            int recall_at_10_correct = 0;
+            int recall_at_1_correct = 0;
+            for (size_t qi = 0; qi < num_queries; ++qi) {
+                if (baseline_top_n[qi][0] == turboquant_top_n[qi][0])
+                    recall_at_1_correct++;
+                for (size_t i = 0; i < std::min(window, turboquant_top_n[qi].size()); ++i) {
+                    for (size_t j = 0; j < std::min(window, baseline_top_n[qi].size()); ++j) {
+                        if (turboquant_top_n[qi][i] == baseline_top_n[qi][j]) {
+                            if (i < 10)
+                                recall_at_10_correct++;
+                            break;
+                        }
+                    }
+                }
+            }
+            double recall_at_10 = static_cast<double>(recall_at_10_correct) /
+                                  (num_queries * std::min(size_t(10), window));
+            double recall_at_1 = static_cast<double>(recall_at_1_correct) / num_queries;
+
+            std::cout << "dim=" << dim << " bits=" << static_cast<int>(b) << " window=" << window
+                      << ":"
+                      << " tq_lat=" << std::fixed << std::setprecision(1) << turboquant_per_query
+                      << " us"
+                      << " baseline_lat=" << baseline_per_query << " us"
+                      << " speedup=" << std::setprecision(2) << speedup << "x"
+                      << " recall@1=" << (recall_at_1 * 100) << "%"
+                      << " recall@10=" << (recall_at_10 * 100) << "%" << std::endl;
+
+            rerank_results.push_back({dim, b, window, turboquant_per_query, baseline_per_query,
+                                      speedup, recall_at_10, recall_at_1, 0.0});
+        }
+    }
+
+    // Summary table
+    std::cout << "\n=== Rerank Summary ===" << std::endl;
+    std::cout << "dim | bits | window | tq_us | baseline_us | speedup | recall@1 | recall@10"
+              << std::endl;
+    for (const auto& r : rerank_results) {
+        std::cout << r.dim << " | " << static_cast<int>(r.bits) << " | " << r.window << " | "
+                  << std::fixed << std::setprecision(1) << r.turboquant_latency_us << " | "
+                  << r.baseline_latency_us << " | " << std::setprecision(2) << r.speedup << "x | "
+                  << (r.recall_at_1 * 100) << "% | " << (r.recall_at_10 * 100) << "%" << std::endl;
+    }
+    std::cout << std::endl;
+}
+
 /// On-disk size benchmark: compare float-blob storage vs quantized-primary storage.
 void runSizeBenchmark(const BenchmarkConfig& config) {
     std::vector<double> float_sizes_kb;
@@ -723,6 +909,10 @@ int main(int argc, char** argv) {
             std::cout << "  --bits=b1,b2,...   Bit-widths to test" << std::endl;
             std::cout << "  --vectors=N        Number of vectors to benchmark" << std::endl;
             std::cout << "  --json-only        Output JSON only (no console output)" << std::endl;
+            std::cout << "  --size-only        Run only storage size benchmark" << std::endl;
+            std::cout << "  --recall-only      Run only asymmetric scoring recall benchmark"
+                      << std::endl;
+            std::cout << "  --rerank-only      Run only reranking pipeline benchmark" << std::endl;
             return 0;
         } else if (arg.substr(0, 7) == "--dims=") {
             std::string dims_str = arg.substr(7);
@@ -750,6 +940,9 @@ int main(int argc, char** argv) {
         } else if (arg == "--recall-only") {
             runAsymmetricRecallBenchmark(config);
             return 0;
+        } else if (arg == "--rerank-only") {
+            runRerankBenchmark(config);
+            return 0;
         }
     }
 
@@ -760,6 +953,9 @@ int main(int argc, char** argv) {
 
     std::cout << "\n=== Asymmetric Recall Benchmark ===" << std::endl;
     runAsymmetricRecallBenchmark(config);
+
+    std::cout << "\n=== Reranking Pipeline Benchmark ===" << std::endl;
+    runRerankBenchmark(config);
 
     return 0;
 }

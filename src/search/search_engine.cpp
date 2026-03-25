@@ -11,6 +11,8 @@
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
+#include <yams/search/vector_reranker.h>
+#include <yams/search/turboquant_packed_reranker.h>
 
 #include <algorithm>
 #include <chrono>
@@ -1284,9 +1286,10 @@ private:
     std::optional<boost::asio::any_io_executor> executor_;
     SearchEngineConfig config_;
     mutable SearchEngine::Statistics stats_;
-    EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
-    std::shared_ptr<IReranker> reranker_;   // Cross-encoder reranker (optional)
-    std::shared_ptr<SearchTuner> tuner_;    // Adaptive runtime tuner (optional)
+    EntityExtractionFunc conceptExtractor_;               // GLiNER concept extractor (optional)
+    std::shared_ptr<IReranker> reranker_;                 // Cross-encoder reranker (optional)
+    std::shared_ptr<IVectorReranker> turboQuantReranker_; // TurboQuant vector reranker (optional)
+    std::shared_ptr<SearchTuner> tuner_;                  // Adaptive runtime tuner (optional)
     std::atomic<int64_t> rerankerCooldownUntilMicros_{0};
 };
 
@@ -2514,6 +2517,84 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("fusion::results");
         response.results = fusion.fuse(allComponentResults);
     }
+
+    // TurboQuant packed-code reranking: operates on fused results using compressed codes
+    // without full float reconstruction. Runs after fusion but before graph reranking.
+    bool turboQuantRerankApplied = false;
+    if (workingConfig.enableTurboQuantRerank && queryEmbedding.has_value() && vectorDb_) {
+        const size_t window =
+            std::min(workingConfig.turboQuantRerankWindow, response.results.size());
+        if (window > 0) {
+            // Lazy-init the reranker (built once per SearchEngine lifetime)
+            if (!turboQuantReranker_) {
+                TurboQuantPackedRerankerConfig cfg;
+                cfg.dimension = workingConfig.turboQuantRerankDim;
+                cfg.bits_per_channel = workingConfig.turboQuantRerankBits;
+                cfg.seed = 42;
+                cfg.rerank_weight = workingConfig.turboQuantRerankWeight;
+                cfg.require_packed_codes = workingConfig.turboQuantRerankOnlyWhenPackedAvailable;
+                turboQuantReranker_ = createTurboQuantPackedReranker(cfg);
+            }
+            if (turboQuantReranker_ && turboQuantReranker_->isReady()) {
+                YAMS_ZONE_SCOPED_N("turboquant::rerank");
+                // Transform query once
+                yams::vector::TurboQuantConfig tq_cfg;
+                tq_cfg.dimension = workingConfig.turboQuantRerankDim;
+                tq_cfg.bits_per_channel = workingConfig.turboQuantRerankBits;
+                tq_cfg.seed = 42;
+                yams::vector::TurboQuantMSE quantizer(tq_cfg);
+                auto y_q = quantizer.transformQuery(queryEmbedding.value());
+
+                // Collect top-N candidates
+                std::vector<SearchResult> topN;
+                topN.reserve(window);
+                for (size_t i = 0; i < window; ++i) {
+                    topN.push_back(response.results[i]);
+                }
+
+                // Build reranker input
+                VectorRerankInput input;
+                input.transformed_query = std::move(y_q);
+                for (size_t i = 0; i < topN.size(); ++i) {
+                    const auto& doc = topN[i].document;
+                    // Try to get vector records for this document
+                    auto records = vectorDb_->getVectorsByDocument(doc.sha256Hash);
+                    if (!records.empty()) {
+                        // Use the best-matching chunk for this document
+                        input.candidates[topN[i].document.filePath] = records[0];
+                        input.initial_scores[topN[i].document.filePath] =
+                            static_cast<float>(topN[i].score);
+                    }
+                }
+
+                // Run reranking
+                auto rerankResult = turboQuantReranker_->rerank(input);
+                if (rerankResult) {
+                    const auto& ranked = rerankResult.value();
+                    // Update reranker scores in the top-N results
+                    for (size_t i = 0; i < window; ++i) {
+                        const auto& doc = topN[i].document;
+                        for (const auto& rc : ranked.candidates) {
+                            if (rc.chunk_id == doc.filePath) {
+                                response.results[i].rerankerScore =
+                                    static_cast<double>(rc.rerank_score);
+                                // Blend score into the result score if rerankReplaceScores is false
+                                if (!workingConfig.rerankReplaceScores) {
+                                    const float w = workingConfig.turboQuantRerankWeight;
+                                    response.results[i].score =
+                                        (1.0 - w) * response.results[i].score +
+                                        w * static_cast<double>(rc.rerank_score);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    turboQuantRerankApplied = ranked.packed_candidates_scored > 0;
+                }
+            }
+        }
+    }
+
     const bool hasGraphSources =
         std::any_of(allComponentResults.begin(), allComponentResults.end(), [](const auto& comp) {
             return comp.source == ComponentResult::Source::GraphText ||
