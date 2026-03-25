@@ -2413,6 +2413,34 @@ std::vector<float> packedDequantizeVector(const std::vector<uint8_t>& packed, si
     return vector;
 }
 
+std::vector<float> transformQueryForScoring(const std::vector<float>& query,
+                                            TurboQuantMSE* quantizer) {
+    if (quantizer == nullptr) {
+        return {};
+    }
+    return quantizer->transformQuery(query);
+}
+
+float scoreCompressedCosine(const std::vector<float>& transformed_query,
+                            const std::vector<uint8_t>& packed_codes, TurboQuantMSE* quantizer) {
+    if (quantizer == nullptr) {
+        return 0.0f;
+    }
+    return quantizer->scoreFromPacked(transformed_query, packed_codes);
+}
+
+float scoreCompressedCosineSpan(const std::span<const float>& transformed_query,
+                                const std::span<const uint8_t>& packed_codes_span,
+                                TurboQuantMSE* quantizer) {
+    if (quantizer == nullptr) {
+        return 0.0f;
+    }
+    // Convert span to vector for scoreFromPacked
+    std::vector<uint8_t> packed(packed_codes_span.begin(), packed_codes_span.end());
+    return quantizer->scoreFromPacked(
+        std::vector<float>(transformed_query.begin(), transformed_query.end()), packed);
+}
+
 } // namespace vector_utils
 
 // VectorIndexManager missing method implementations

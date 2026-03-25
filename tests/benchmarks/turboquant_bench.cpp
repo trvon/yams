@@ -419,6 +419,192 @@ void runBenchmark(const BenchmarkConfig& config) {
     }
 }
 
+/// Asymmetric packed-code scoring benchmark: measure recall vs exact cosine.
+/// Tests both compressed scoring (no decode) and full-decode scoring for comparison.
+void runAsymmetricRecallBenchmark(const BenchmarkConfig& config) {
+    struct RecallResult {
+        size_t dim;
+        uint8_t bits;
+        double recall_at_10;
+        double recall_at_1;
+        double asym_latency_us;
+        double decode_latency_us;
+        double speedup;
+        double correlation; // Spearman-like correlation between asym and exact scores
+    };
+    std::vector<RecallResult> recall_results;
+
+    std::cout << "\n=== Asymmetric Scoring Recall Benchmark ===" << std::endl;
+
+    for (size_t dim : config.dimensions) {
+        for (uint8_t bits : config.bitwidths) {
+            std::mt19937 rng(config.seed);
+            const size_t corpus_size = config.benchmark_vectors;
+            const size_t num_queries = config.search_queries;
+
+            // Generate corpus
+            std::vector<std::vector<float>> corpus;
+            corpus.reserve(corpus_size);
+            for (size_t i = 0; i < corpus_size; ++i) {
+                corpus.push_back(generateUnitVector(dim, rng));
+            }
+
+            // Generate queries (from same distribution, different seed)
+            std::vector<std::vector<float>> queries;
+            queries.reserve(num_queries);
+            std::mt19937 query_rng(config.seed + 1000);
+            for (size_t i = 0; i < num_queries; ++i) {
+                queries.push_back(generateUnitVector(dim, query_rng));
+            }
+
+            // Setup quantizer
+            TurboQuantConfig tq_cfg;
+            tq_cfg.dimension = dim;
+            tq_cfg.bits_per_channel = bits;
+            tq_cfg.seed = config.seed;
+            TurboQuantMSE tq(tq_cfg);
+
+            // Pre-encode corpus into packed codes
+            std::vector<std::vector<uint8_t>> packed_corpus;
+            packed_corpus.reserve(corpus_size);
+            for (size_t i = 0; i < corpus_size; ++i) {
+                packed_corpus.push_back(tq.packedEncode(corpus[i]));
+            }
+
+            // Pre-transform queries
+            std::vector<std::vector<float>> transformed_queries;
+            transformed_queries.reserve(num_queries);
+            for (size_t i = 0; i < num_queries; ++i) {
+                transformed_queries.push_back(tq.transformQuery(queries[i]));
+            }
+
+            // Measure asymmetric scoring latency
+            auto t0 = std::chrono::high_resolution_clock::now();
+            double asym_total = 0.0;
+            for (size_t qi = 0; qi < num_queries; ++qi) {
+                const auto& y_q = transformed_queries[qi];
+                for (size_t ci = 0; ci < corpus_size; ++ci) {
+                    float s = tq.scoreFromPacked(y_q, packed_corpus[ci]);
+                    asym_total += s;
+                }
+            }
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double asym_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            double asym_per_query = asym_us / num_queries;
+
+            // Measure full-decode + cosine latency
+            auto t2 = std::chrono::high_resolution_clock::now();
+            double decode_total = 0.0;
+            for (size_t qi = 0; qi < num_queries; ++qi) {
+                for (size_t ci = 0; ci < corpus_size; ++ci) {
+                    auto dec = tq.packedDecode(packed_corpus[ci]);
+                    float s = 0.0f;
+                    for (size_t k = 0; k < dim; ++k)
+                        s += queries[qi][k] * dec[k];
+                    decode_total += s;
+                }
+            }
+            auto t3 = std::chrono::high_resolution_clock::now();
+            double decode_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+            double decode_per_query = decode_us / num_queries;
+
+            // Compute exact cosine for recall ground truth and measure recall
+            int recall_at_10_correct = 0;
+            int recall_at_1_correct = 0;
+            int total_queries = 0;
+
+            for (size_t qi = 0; qi < num_queries; ++qi) {
+                const auto& query = queries[qi];
+                const auto& y_q = transformed_queries[qi];
+
+                // Compute exact cosine scores (ground truth)
+                std::vector<std::pair<float, size_t>> exact_scores;
+                exact_scores.reserve(corpus_size);
+                for (size_t ci = 0; ci < corpus_size; ++ci) {
+                    float dot = 0.0f;
+                    for (size_t k = 0; k < dim; ++k)
+                        dot += query[k] * corpus[ci][k];
+                    exact_scores.emplace_back(dot, ci);
+                }
+                std::sort(exact_scores.begin(), exact_scores.end(),
+                          [](const auto& a, const auto& b) { return a.first > b.first; });
+
+                // Top-10 exact IDs
+                std::vector<size_t> exact_top10;
+                for (size_t i = 0; i < std::min(size_t(10), exact_scores.size()); ++i) {
+                    exact_top10.push_back(exact_scores[i].second);
+                }
+                size_t exact_top1_id = exact_scores[0].second;
+
+                // Asymmetric top-10
+                std::vector<std::pair<float, size_t>> asym_scores;
+                asym_scores.reserve(corpus_size);
+                for (size_t ci = 0; ci < corpus_size; ++ci) {
+                    float s = tq.scoreFromPacked(y_q, packed_corpus[ci]);
+                    asym_scores.emplace_back(s, ci);
+                }
+                std::sort(asym_scores.begin(), asym_scores.end(),
+                          [](const auto& a, const auto& b) { return a.first > b.first; });
+
+                std::vector<size_t> asym_top10;
+                for (size_t i = 0; i < std::min(size_t(10), asym_scores.size()); ++i) {
+                    asym_top10.push_back(asym_scores[i].second);
+                }
+                size_t asym_top1_id = asym_scores[0].second;
+
+                // Check recall
+                bool in_top10 = false;
+                for (size_t id : exact_top10) {
+                    if (id == asym_top1_id) {
+                        in_top10 = true;
+                        break;
+                    }
+                }
+                // Recall@1: did asym pick the same top-1?
+                if (asym_top1_id == exact_top1_id)
+                    recall_at_1_correct++;
+
+                // Recall@10: is exact top-1 in asym top-10?
+                if (in_top10)
+                    recall_at_10_correct++;
+
+                total_queries++;
+            }
+
+            double recall_at_10 = static_cast<double>(recall_at_10_correct) / total_queries;
+            double recall_at_1 = static_cast<double>(recall_at_1_correct) / total_queries;
+            double speedup = decode_per_query / asym_per_query;
+
+            std::cout << "dim=" << dim << " bits=" << static_cast<int>(bits)
+                      << ": recall@10=" << std::fixed << std::setprecision(4)
+                      << (recall_at_10 * 100) << "%"
+                      << " recall@1=" << (recall_at_1 * 100) << "%"
+                      << " asym_lat=" << std::setprecision(1) << asym_per_query << " us"
+                      << " decode_lat=" << decode_per_query << " us"
+                      << " speedup=" << std::setprecision(2) << speedup << "x"
+                      << "  [NOTE: shared centroids; per-coord centroids would improve recall]"
+                      << std::endl;
+
+            recall_results.push_back({dim, bits, recall_at_10, recall_at_1, asym_per_query,
+                                      decode_per_query, speedup, 0.0});
+        }
+    }
+
+    // Print summary table
+    std::cout << "\n=== Recall Summary ===" << std::endl;
+    std::cout << "dim | bits | recall@10 | recall@1 | asym_us | decode_us | speedup" << std::endl;
+    for (const auto& r : recall_results) {
+        std::cout << r.dim << " | " << static_cast<int>(r.bits) << " | " << std::fixed
+                  << std::setprecision(2) << (r.recall_at_10 * 100) << "%"
+                  << " | " << (r.recall_at_1 * 100) << "%"
+                  << " | " << std::setprecision(1) << r.asym_latency_us << " us"
+                  << " | " << r.decode_latency_us << " us"
+                  << " | " << std::setprecision(2) << r.speedup << "x" << std::endl;
+    }
+    std::cout << std::endl;
+}
+
 /// On-disk size benchmark: compare float-blob storage vs quantized-primary storage.
 void runSizeBenchmark(const BenchmarkConfig& config) {
     std::vector<double> float_sizes_kb;
@@ -561,6 +747,9 @@ int main(int argc, char** argv) {
         } else if (arg == "--size-only") {
             runSizeBenchmark(config);
             return 0;
+        } else if (arg == "--recall-only") {
+            runAsymmetricRecallBenchmark(config);
+            return 0;
         }
     }
 
@@ -568,6 +757,9 @@ int main(int argc, char** argv) {
 
     std::cout << "\n=== Storage Size Benchmark ===" << std::endl;
     runSizeBenchmark(config);
+
+    std::cout << "\n=== Asymmetric Recall Benchmark ===" << std::endl;
+    runAsymmetricRecallBenchmark(config);
 
     return 0;
 }

@@ -3,10 +3,12 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,6 +21,7 @@
 #include <cerrno>
 #include <csignal>
 #include <fcntl.h>
+#include <spawn.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -169,59 +172,39 @@ struct SubprocessResult {
 
 struct BackgroundProcess {
     pid_t pid = -1;
-    int outputFd = -1;
-
-    BackgroundProcess() = default;
-    BackgroundProcess(pid_t processId, int fd) : pid(processId), outputFd(fd) {}
-
-    BackgroundProcess(const BackgroundProcess&) = delete;
-    BackgroundProcess& operator=(const BackgroundProcess&) = delete;
-
-    BackgroundProcess(BackgroundProcess&& other) noexcept
-        : pid(other.pid), outputFd(other.outputFd) {
-        other.pid = -1;
-        other.outputFd = -1;
-    }
-
-    BackgroundProcess& operator=(BackgroundProcess&& other) noexcept {
-        if (this != &other) {
-            if (outputFd >= 0) {
-                ::close(outputFd);
-            }
-            if (pid > 0) {
-                (void)::kill(pid, SIGKILL);
-                int status = 0;
-                while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-                }
-            }
-            pid = other.pid;
-            outputFd = other.outputFd;
-            other.pid = -1;
-            other.outputFd = -1;
-        }
-        return *this;
-    }
-
-    ~BackgroundProcess() {
-        if (outputFd >= 0) {
-            ::close(outputFd);
-        }
-        if (pid > 0) {
-            (void)::kill(pid, SIGKILL);
-            int status = 0;
-            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-            }
-        }
-    }
 };
 
-void closeInheritedFdsExceptStd() {
-    long maxFd = ::sysconf(_SC_OPEN_MAX);
-    if (maxFd <= 0) {
-        maxFd = 1024;
+std::string shellQuote(const std::string& value) {
+    std::string quoted = "'";
+    for (char c : value) {
+        if (c == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted.push_back(c);
+        }
     }
-    for (int fd = 3; fd < maxFd; ++fd) {
-        ::close(fd);
+    quoted += "'";
+    return quoted;
+}
+
+void cleanupBackgroundProcess(const BackgroundProcess& process) {
+    if (process.pid <= 0) {
+        return;
+    }
+    (void)::kill(process.pid, SIGTERM);
+    int status = 0;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        pid_t waited = ::waitpid(process.pid, &status, WNOHANG);
+        if (waited == process.pid) {
+            return;
+        }
+        if (waited < 0 && errno != EINTR) {
+            return;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+    (void)::kill(process.pid, SIGKILL);
+    while (::waitpid(process.pid, &status, 0) < 0 && errno == EINTR) {
     }
 }
 
@@ -307,29 +290,40 @@ SubprocessResult runSubprocess(const fs::path& binary, const std::vector<std::st
         return result;
     }
 
+    (void)::fcntl(outputPipe[0], F_SETFD, FD_CLOEXEC);
+    (void)::fcntl(outputPipe[1], F_SETFD, FD_CLOEXEC);
+
     const int flags = ::fcntl(outputPipe[0], F_GETFL, 0);
     if (flags >= 0) {
         (void)::fcntl(outputPipe[0], F_SETFL, flags | O_NONBLOCK);
     }
 
+    posix_spawn_file_actions_t fileActions;
+    ::posix_spawn_file_actions_init(&fileActions);
+    ::posix_spawn_file_actions_adddup2(&fileActions, outputPipe[1], STDOUT_FILENO);
+    ::posix_spawn_file_actions_adddup2(&fileActions, outputPipe[1], STDERR_FILENO);
+    ::posix_spawn_file_actions_addclose(&fileActions, outputPipe[0]);
+    ::posix_spawn_file_actions_addclose(&fileActions, outputPipe[1]);
+
+    posix_spawnattr_t attr;
+    ::posix_spawnattr_init(&attr);
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+    short spawnFlags = POSIX_SPAWN_CLOEXEC_DEFAULT;
+    ::posix_spawnattr_setflags(&attr, spawnFlags);
+#endif
+
     const auto start = std::chrono::steady_clock::now();
-    pid_t pid = ::fork();
-    if (pid < 0) {
+    pid_t pid = -1;
+    const int spawnErr =
+        ::posix_spawn(&pid, binary.c_str(), &fileActions, &attr, argv.data(), envp.data());
+    ::posix_spawn_file_actions_destroy(&fileActions);
+    ::posix_spawnattr_destroy(&attr);
+
+    if (spawnErr != 0) {
         ::close(outputPipe[0]);
         ::close(outputPipe[1]);
-        result.output = "fork() failed";
+        result.output = std::string("posix_spawn() failed: ") + std::strerror(spawnErr);
         return result;
-    }
-
-    if (pid == 0) {
-        ::dup2(outputPipe[1], STDOUT_FILENO);
-        ::dup2(outputPipe[1], STDERR_FILENO);
-        ::close(outputPipe[0]);
-        ::close(outputPipe[1]);
-
-        closeInheritedFdsExceptStd();
-        ::execve(binary.c_str(), argv.data(), envp.data());
-        _exit(127);
     }
 
     ::close(outputPipe[1]);
@@ -400,11 +394,17 @@ std::optional<BackgroundProcess>
 startBackgroundProcess(const fs::path& binary, const std::vector<std::string>& args,
                        const std::map<std::string, std::string>& env,
                        std::string* error = nullptr) {
-    std::vector<std::string> ownedArgs;
-    ownedArgs.reserve(args.size() + 1);
-    ownedArgs.push_back(binary.string());
-    ownedArgs.insert(ownedArgs.end(), args.begin(), args.end());
+    std::ostringstream shell;
+    for (const auto& [key, value] : env) {
+        shell << key << "=" << shellQuote(value) << " ";
+    }
+    shell << "exec " << shellQuote(binary.string());
+    for (const auto& arg : args) {
+        shell << " " << shellQuote(arg);
+    }
+    shell << " >/dev/null 2>&1";
 
+    std::vector<std::string> ownedArgs = {"/bin/sh", "-c", shell.str()};
     std::vector<char*> argv;
     argv.reserve(ownedArgs.size() + 1);
     for (auto& arg : ownedArgs) {
@@ -412,62 +412,23 @@ startBackgroundProcess(const fs::path& binary, const std::vector<std::string>& a
     }
     argv.push_back(nullptr);
 
-    std::map<std::string, std::string> mergedEnv;
-    for (char** it = environ; it != nullptr && *it != nullptr; ++it) {
-        std::string entry(*it);
-        const auto eq = entry.find('=');
-        if (eq == std::string::npos) {
-            continue;
-        }
-        mergedEnv.emplace(entry.substr(0, eq), entry.substr(eq + 1));
-    }
-    for (const auto& [key, value] : env) {
-        mergedEnv[key] = value;
-    }
+    posix_spawn_file_actions_t fileActions;
+    ::posix_spawn_file_actions_init(&fileActions);
+    ::posix_spawn_file_actions_addopen(&fileActions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
 
-    std::vector<std::string> ownedEnv;
-    ownedEnv.reserve(mergedEnv.size());
-    for (const auto& [key, value] : mergedEnv) {
-        ownedEnv.push_back(key + "=" + value);
-    }
+    pid_t pid = -1;
+    const int spawnErr =
+        ::posix_spawn(&pid, "/bin/sh", &fileActions, nullptr, argv.data(), environ);
+    ::posix_spawn_file_actions_destroy(&fileActions);
 
-    std::vector<char*> envp;
-    envp.reserve(ownedEnv.size() + 1);
-    for (auto& entry : ownedEnv) {
-        envp.push_back(entry.data());
-    }
-    envp.push_back(nullptr);
-
-    int outputPipe[2] = {-1, -1};
-    if (::pipe(outputPipe) != 0) {
+    if (spawnErr != 0) {
         if (error != nullptr) {
-            *error = "pipe() failed";
+            *error = std::string("posix_spawn(/bin/sh) failed: ") + std::strerror(spawnErr);
         }
         return std::nullopt;
     }
 
-    pid_t pid = ::fork();
-    if (pid < 0) {
-        ::close(outputPipe[0]);
-        ::close(outputPipe[1]);
-        if (error != nullptr) {
-            *error = "fork() failed";
-        }
-        return std::nullopt;
-    }
-
-    if (pid == 0) {
-        ::dup2(outputPipe[1], STDOUT_FILENO);
-        ::dup2(outputPipe[1], STDERR_FILENO);
-        ::close(outputPipe[0]);
-        ::close(outputPipe[1]);
-        closeInheritedFdsExceptStd();
-        ::execve(binary.c_str(), argv.data(), envp.data());
-        _exit(127);
-    }
-
-    ::close(outputPipe[1]);
-    return BackgroundProcess{pid, outputPipe[0]};
+    return BackgroundProcess{pid};
 }
 
 std::string describeFailure(const std::vector<std::string>& args, const SubprocessResult& result) {
@@ -542,7 +503,7 @@ TEST(CliSubprocessSegfaultRegressionSmoke, ShortLivedCommandsExitCleanly) {
     const fs::path dataDir = root / "data";
     const fs::path runtimeDir = root / "runtime";
     const fs::path configPath = root / "config.toml";
-    const fs::path socketPath = root / "yams-daemon.sock";
+    const fs::path socketPath = fs::path("/tmp") / ("yams_cli_" + unique + ".sock");
     const fs::path pidFile = root / "yams-daemon.pid";
     const fs::path daemonLogPath = root / "yams-daemon.log";
     const fs::path docPath = root / "turboquant_cli_smoke.txt";
@@ -638,6 +599,9 @@ TEST(CliSubprocessSegfaultRegressionSmoke, ShortLivedCommandsExitCleanly) {
             }
         }
     }
+
+    cleanupBackgroundProcess(daemon);
+    daemon.pid = -1;
 }
 #else
 TEST(CliSubprocessSegfaultRegressionSmoke, ShortLivedCommandsExitCleanly) {

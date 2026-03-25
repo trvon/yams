@@ -177,6 +177,42 @@ public:
      */
     std::vector<float> packedDecode(const std::vector<uint8_t>& packed);
 
+    // =========================================================================
+    // Asymmetric Compressed-Space Scoring
+    //
+    // For HNSW traversal without full float reconstruction:
+    //
+    // Given a unit query vector q and a packed stored code C:
+    //   q · C = (1/d) · sum_i y_q[i] · centroid[i][code_i]
+    //
+    // where y_q = (1/sqrt(d)) · D · H · q is the transformed query.
+    // Pre-computing y_q once per search makes each candidate O(total_bits).
+    // =========================================================================
+
+    /**
+     * Pre-compute transformed query for asymmetric packed scoring.
+     * Call once per query, reuse the result for all candidates.
+     * @param query Unit query vector (dim = config_.dimension)
+     * @return Transformed query y_q = (1/sqrt(d)) · D · H · q
+     */
+    std::vector<float> transformQuery(const std::vector<float>& query) const;
+
+    /**
+     * Asymmetric cosine score from packed codes (no full decode).
+     *
+     * Computes: (1/d) · sum_i y_q[i] · centroid[i][code_i]
+     * where y_q is the transformed query from transformQuery(),
+     * and centroid[i][code_i] is the Lloyd-Max centroid for coordinate i.
+     *
+     * This avoids full packedDecode() per candidate during HNSW traversal.
+     *
+     * @param transformed_query Output of transformQuery() for the current query
+     * @param packed_codes Packed storage bytes (from packedEncode())
+     * @return Approximate cosine similarity (unit vectors, so dot product = cosine)
+     */
+    float scoreFromPacked(const std::vector<float>& transformed_query,
+                          const std::vector<uint8_t>& packed_codes) const;
+
 private:
     TurboQuantConfig config_;
 

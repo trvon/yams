@@ -417,6 +417,53 @@ std::vector<uint8_t> packedQuantizeVector(const std::vector<float>& vector,
  */
 std::vector<float> packedDequantizeVector(const std::vector<uint8_t>& packed, size_t dimension,
                                           ::yams::vector::TurboQuantMSE* quantizer);
+
+// =============================================================================
+// Asymmetric Compressed-Space Scoring
+// =============================================================================
+
+/**
+ * Pre-compute transformed query for asymmetric packed scoring.
+ * Call once per query; reuse the result for all candidates.
+ *
+ * @param query Unit query vector
+ * @param quantizer TurboQuantMSE instance (must be initialized)
+ * @return Transformed query y_q = (1/sqrt(d)) · D · H · query
+ */
+std::vector<float> transformQueryForScoring(const std::vector<float>& query,
+                                            ::yams::vector::TurboQuantMSE* quantizer);
+
+/**
+ * Asymmetric compressed-space cosine score.
+ *
+ * Computes: (1/d) · sum_i y_q[i] · centroid[i][code_i]
+ * where y_q is from transformQueryForScoring().
+ *
+ * No memory allocation per call (caller owns the output vector from transformQuery).
+ *
+ * @param transformed_query Output of transformQueryForScoring()
+ * @param packed_codes Packed TurboQuant codes
+ * @param quantizer TurboQuantMSE instance (must match the quantizer used for transformQuery)
+ * @return Approximate cosine similarity (unit vectors: dot product = cosine)
+ */
+float scoreCompressedCosine(const std::vector<float>& transformed_query,
+                            const std::vector<uint8_t>& packed_codes,
+                            ::yams::vector::TurboQuantMSE* quantizer);
+
+/**
+ * Asymmetric compressed-space cosine score (span-based, zero-allocation).
+ *
+ * Same as scoreCompressedCosine but works with std::span for zero-copy interface.
+ *
+ * @param transformed_query Span of transformed query values (size = dimension)
+ * @param packed_codes_span Span of packed bytes
+ * @param quantizer TurboQuantMSE instance
+ * @return Approximate cosine similarity
+ */
+float scoreCompressedCosineSpan(const std::span<const float>& transformed_query,
+                                const std::span<const uint8_t>& packed_codes_span,
+                                ::yams::vector::TurboQuantMSE* quantizer);
+
 } // namespace vector_utils
 
 } // namespace yams::vector

@@ -376,6 +376,99 @@ double TurboQuantMSE::computeMSE(const std::vector<float>& original,
     return mse / original.size();
 }
 
+std::vector<float> TurboQuantMSE::transformQuery(const std::vector<float>& query) const {
+    const size_t d = config_.dimension;
+    assert(query.size() == d);
+
+    // Pad to power of 2 for FWHT
+    size_t n = 1;
+    while (n < d) {
+        n *= 2;
+    }
+
+    // Step 1: Copy to padded buffer
+    std::vector<float> rotated(n, 0.0f);
+    for (size_t i = 0; i < d; ++i) {
+        rotated[i] = query[i];
+    }
+
+    // Step 2: Apply FWHT: H · q
+    fwht(rotated);
+
+    // Step 3: Apply diagonal signs: D · (H · q)
+    for (size_t i = 0; i < d; ++i) {
+        rotated[i] *= diagonal_signs_[i];
+    }
+
+    // Step 4: Scale by 1/sqrt(d) — this matches the encode() scaling
+    float scale = 1.0f / std::sqrt(static_cast<float>(d));
+    for (size_t i = 0; i < d; ++i) {
+        rotated[i] *= scale;
+    }
+
+    // Step 5: Truncate to first d elements (drop padding)
+    std::vector<float> result(d);
+    for (size_t i = 0; i < d; ++i) {
+        result[i] = rotated[i];
+    }
+
+    return result;
+}
+
+float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query,
+                                     const std::vector<uint8_t>& packed_codes) const {
+    const size_t d = config_.dimension;
+    const uint8_t bits = config_.bits_per_channel;
+    assert(transformed_query.size() == d);
+    assert(!centroids_.empty());
+
+    const size_t expected_bytes = (d * bits + 7) / 8;
+    assert(packed_codes.size() == expected_bytes);
+
+    // Pre-fetch these once
+    const float* y_q = transformed_query.data();
+    const size_t num_centroids = centroids_.size(); // 2^bits
+
+    float accumulator = 0.0f;
+    float z_norm_sq = 0.0f; // ||z||² for normalization
+
+    for (size_t i = 0; i < d; ++i) {
+        // Unpack the code value for coordinate i
+        size_t bit_pos = i * bits;
+        size_t byte_idx = bit_pos / 8;
+        size_t bit_offset = bit_pos % 8;
+
+        uint8_t code = 0;
+        size_t bits_read = 0;
+        while (bits_read < bits) {
+            size_t bits_available = 8 - bit_offset;
+            size_t bits_to_read = std::min(bits - bits_read, bits_available);
+            uint8_t chunk = (packed_codes[byte_idx] >> bit_offset) & ((1 << bits_to_read) - 1);
+            code |= chunk << bits_read;
+            bit_offset = 0;
+            bits_read += bits_to_read;
+        }
+
+        // Lookup centroid for this coordinate
+        float centroid_val = (code < num_centroids) ? centroids_[code] : 0.0f;
+
+        // Accumulate y_q^T · z and ||z||² simultaneously
+        accumulator += y_q[i] * centroid_val;
+        z_norm_sq += centroid_val * centroid_val;
+    }
+
+    // Correct formula:
+    //   y_q = (1/√d)·D·H·q  →  ||y_q|| ≈ 1 (unit query in Hadamard space)
+    //   z[i] = centroid[i]  →  dequantized Hadamard coordinate
+    //   dot(q, v_decoded) = (1/||z||) · y_q^T · z
+    //                      = accumulator / ||z||
+    float z_norm = std::sqrt(z_norm_sq);
+    if (z_norm < 1e-6f) {
+        return 0.0f;
+    }
+    return accumulator / z_norm;
+}
+
 // =============================================================================
 // TurboQuantProd Implementation (Inner Product Mode)
 // =============================================================================
