@@ -4,7 +4,12 @@
  * Benchmarks the TurboQuant implementation against baseline linear quantization.
  * Tests encode latency, decode latency, MSE, and recall.
  *
- * Paper: arXiv:2504.19874 - TurboQuant
+ * Paper reference: arXiv:2504.19874 (approximation implementation)
+ *
+ * NOTE: This benchmarks the CURRENT implementation:
+ * - Uses signed Hadamard transform (not full random orthogonal rotation)
+ * - Reports theoretical packed storage via storageSize() (not active runtime format)
+ * - Recall is computed from reconstructed vectors (not from compressed search)
  */
 
 #include <chrono>
@@ -33,6 +38,7 @@ struct BenchmarkConfig {
     size_t benchmark_vectors = 1000;
     size_t search_queries = 100;
     uint32_t seed = 42;
+    bool json_only = false; // Suppress console output, emit JSON only
 };
 
 struct BenchmarkResult {
@@ -43,8 +49,8 @@ struct BenchmarkResult {
     double decode_latency_us_p50;
     double decode_latency_us_p95;
     double mse;
-    double recall_at_10;
-    double storage_bytes_per_vector;
+    double recall_at_1;              // Top-1 recall (not top-10 as field name suggests)
+    double storage_bytes_per_vector; // Theoretical packed storage (not active runtime)
     double baseline_encode_p50;
     double baseline_decode_p50;
     double speedup_encode;
@@ -111,15 +117,19 @@ void runBenchmark(const BenchmarkConfig& config) {
     std::mt19937 rng(config.seed);
     std::vector<BenchmarkResult> results;
 
-    std::cout << "=== TurboQuant Benchmark ===" << std::endl;
-    std::cout << "Warmup vectors: " << config.warmup_vectors << std::endl;
-    std::cout << "Benchmark vectors: " << config.benchmark_vectors << std::endl;
-    std::cout << "Search queries: " << config.search_queries << std::endl;
-    std::cout << std::endl;
+    if (!config.json_only) {
+        std::cout << "=== TurboQuant Benchmark ===" << std::endl;
+        std::cout << "Warmup vectors: " << config.warmup_vectors << std::endl;
+        std::cout << "Benchmark vectors: " << config.benchmark_vectors << std::endl;
+        std::cout << "Search queries: " << config.search_queries << std::endl;
+        std::cout << std::endl;
+    }
 
     for (size_t dim : config.dimensions) {
         for (uint8_t bits : config.bitwidths) {
-            std::cout << "Dimension: " << dim << ", Bits: " << (int)bits << std::endl;
+            if (!config.json_only) {
+                std::cout << "Dimension: " << dim << ", Bits: " << (int)bits << std::endl;
+            }
 
             // Setup TurboQuant
             TurboQuantConfig tq_config;
@@ -221,17 +231,16 @@ void runBenchmark(const BenchmarkConfig& config) {
             double avg_mse = total_mse / all_indices.size();
 
             // Compute recall (approximate nearest neighbor)
-            // Use subset for recall computation
+            // Note: This computes TOP-1 recall only, not top-10
             size_t recall_vectors = std::min(config.search_queries, all_indices.size());
             size_t correct_top1 = 0;
-            size_t correct_top10 = 0;
 
             for (size_t q = 0; q < recall_vectors; ++q) {
                 const auto& query = vectors[config.warmup_vectors + q];
                 auto query_indices = quantizer.encode(query);
                 auto query_recon = quantizer.decode(query_indices);
 
-                // Find best match by brute force in compressed space
+                // Find best match by brute force in reconstructed space
                 size_t best_idx = 0;
                 float best_sim = -1.0f;
                 for (size_t i = 0; i < all_indices.size(); ++i) {
@@ -262,9 +271,10 @@ void runBenchmark(const BenchmarkConfig& config) {
                     correct_top1++;
             }
 
-            double recall = static_cast<double>(correct_top1) / recall_vectors;
+            double recall_at_1 = static_cast<double>(correct_top1) / recall_vectors;
 
-            // Storage size
+            // Storage size: theoretical packed storage from storageSize()
+            // NOTE: This is NOT the active runtime storage format (which uses unpacked codes)
             size_t storage_bytes = quantizer.storageSize();
 
             BenchmarkResult result;
@@ -275,7 +285,7 @@ void runBenchmark(const BenchmarkConfig& config) {
             result.decode_latency_us_p50 = decode_p50;
             result.decode_latency_us_p95 = decode_p95;
             result.mse = avg_mse;
-            result.recall_at_10 = recall;
+            result.recall_at_1 = recall_at_1;
             result.storage_bytes_per_vector = static_cast<double>(storage_bytes);
             result.baseline_encode_p50 = baseline_encode_p50;
             result.baseline_decode_p50 = baseline_decode_p50;
@@ -284,21 +294,23 @@ void runBenchmark(const BenchmarkConfig& config) {
 
             results.push_back(result);
 
-            std::cout << "  Encode: " << std::fixed << std::setprecision(2) << encode_p50 << "/"
-                      << encode_p95 << " us (p50/p95)"
-                      << " [baseline: " << baseline_encode_p50
-                      << " us, speedup: " << std::setprecision(2) << speedup_encode << "x]"
-                      << std::endl;
-            std::cout << "  Decode: " << decode_p50 << "/" << decode_p95 << " us (p50/p95)"
-                      << " [baseline: " << baseline_decode_p50
-                      << " us, speedup: " << std::setprecision(2) << speedup_decode << "x]"
-                      << std::endl;
-            std::cout << "  MSE: " << std::scientific << avg_mse << std::endl;
-            std::cout << "  Recall@1: " << std::fixed << std::setprecision(4) << recall
-                      << std::endl;
-            std::cout << "  Storage: " << storage_bytes << " bytes (vs 8-bit baseline: " << dim * 8
-                      << " bytes)" << std::endl;
-            std::cout << std::endl;
+            if (!config.json_only) {
+                std::cout << "  Encode: " << std::fixed << std::setprecision(2) << encode_p50 << "/"
+                          << encode_p95 << " us (p50/p95)"
+                          << " [baseline: " << baseline_encode_p50
+                          << " us, speedup: " << std::setprecision(2) << speedup_encode << "x]"
+                          << std::endl;
+                std::cout << "  Decode: " << decode_p50 << "/" << decode_p95 << " us (p50/p95)"
+                          << " [baseline: " << baseline_decode_p50
+                          << " us, speedup: " << std::setprecision(2) << speedup_decode << "x]"
+                          << std::endl;
+                std::cout << "  MSE: " << std::scientific << avg_mse << std::endl;
+                std::cout << "  Recall@1: " << std::fixed << std::setprecision(4) << recall_at_1
+                          << std::endl;
+                std::cout << "  Storage (theoretical packed): " << storage_bytes
+                          << " bytes (vs 8-bit baseline: " << dim << " bytes)" << std::endl;
+                std::cout << std::endl;
+            }
         }
     }
 
@@ -321,7 +333,7 @@ void runBenchmark(const BenchmarkConfig& config) {
                                  {"decode_latency_us_p50", r.decode_latency_us_p50},
                                  {"decode_latency_us_p95", r.decode_latency_us_p95},
                                  {"mse", r.mse},
-                                 {"recall_at_1", r.recall_at_10},
+                                 {"recall_at_1", r.recall_at_1},
                                  {"storage_bytes", r.storage_bytes_per_vector},
                                  {"baseline_encode_us_p50", r.baseline_encode_p50},
                                  {"baseline_decode_us_p50", r.baseline_decode_p50},
@@ -330,8 +342,13 @@ void runBenchmark(const BenchmarkConfig& config) {
     }
     json_output["results"] = results_array;
 
-    std::cout << "=== Results JSON ===" << std::endl;
-    std::cout << json_output.dump(2) << std::endl;
+    // JSON-only mode for script parsing (suppresses console output)
+    if (config.json_only) {
+        std::cout << json_output.dump(2) << std::endl;
+    } else {
+        std::cout << "=== Results JSON ===" << std::endl;
+        std::cout << json_output.dump(2) << std::endl;
+    }
 }
 
 } // namespace
@@ -348,6 +365,7 @@ int main(int argc, char** argv) {
             std::cout << "  --dims=d1,d2,...   Dimensions to test" << std::endl;
             std::cout << "  --bits=b1,b2,...   Bit-widths to test" << std::endl;
             std::cout << "  --vectors=N        Number of vectors to benchmark" << std::endl;
+            std::cout << "  --json-only        Output JSON only (no console output)" << std::endl;
             return 0;
         } else if (arg.substr(0, 7) == "--dims=") {
             std::string dims_str = arg.substr(7);
@@ -367,6 +385,8 @@ int main(int argc, char** argv) {
             }
         } else if (arg.substr(0, 10) == "--vectors=") {
             config.benchmark_vectors = std::stoul(arg.substr(10));
+        } else if (arg == "--json-only") {
+            config.json_only = true;
         }
     }
 
