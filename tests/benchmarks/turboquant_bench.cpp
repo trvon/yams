@@ -22,6 +22,9 @@
 
 #include "benchmark_base.h"
 #include <yams/vector/turboquant.h>
+#include <yams/vector/sqlite_vec_backend.h>
+
+#include <filesystem>
 #include <yams/vector/vector_index_manager.h>
 
 using namespace yams;
@@ -416,6 +419,109 @@ void runBenchmark(const BenchmarkConfig& config) {
     }
 }
 
+/// On-disk size benchmark: compare float-blob storage vs quantized-primary storage.
+void runSizeBenchmark(const BenchmarkConfig& config) {
+    std::vector<double> float_sizes_kb;
+    std::vector<double> packed_sizes_kb;
+    std::vector<double> ratios;
+
+    for (size_t dim : config.dimensions) {
+        for (uint8_t bits : config.bitwidths) {
+            std::mt19937 rng(config.seed);
+            std::vector<std::vector<float>> vectors;
+            vectors.reserve(config.benchmark_vectors);
+            for (size_t i = 0; i < config.benchmark_vectors; ++i) {
+                vectors.push_back(generateUnitVector(dim, rng));
+            }
+
+            // Float storage DB
+            std::string float_path = std::filesystem::temp_directory_path() /
+                                     ("tq_size_float_" + std::to_string(dim) + "_" +
+                                      std::to_string(static_cast<int>(bits)) + ".db");
+            {
+                SqliteVecBackend::Config cfg;
+                cfg.embedding_dim = dim;
+                cfg.enable_turboquant_storage = false;
+                cfg.quantized_primary_storage = false;
+                SqliteVecBackend db(cfg);
+                db.initialize(float_path).value();
+                db.createTables(dim).value();
+                for (size_t i = 0; i < vectors.size(); ++i) {
+                    VectorRecord rec;
+                    rec.chunk_id = "vec_" + std::to_string(i);
+                    rec.document_hash = "doc_" + std::to_string(i);
+                    rec.embedding = vectors[i];
+                    db.insertVector(rec).value();
+                }
+            }
+            auto float_size = static_cast<double>(std::filesystem::file_size(float_path)) / 1024.0;
+
+            // Quantized-primary storage DB
+            std::string packed_path = std::filesystem::temp_directory_path() /
+                                      ("tq_size_packed_" + std::to_string(dim) + "_" +
+                                       std::to_string(static_cast<int>(bits)) + ".db");
+            {
+                SqliteVecBackend::Config cfg;
+                cfg.embedding_dim = dim;
+                cfg.enable_turboquant_storage = true;
+                cfg.quantized_primary_storage = true;
+                cfg.turboquant_bits = bits;
+                cfg.turboquant_seed = config.seed;
+                SqliteVecBackend db(cfg);
+                db.initialize(packed_path).value();
+                db.createTables(dim).value();
+
+                TurboQuantConfig tq_cfg;
+                tq_cfg.dimension = dim;
+                tq_cfg.bits_per_channel = bits;
+                tq_cfg.seed = config.seed;
+                TurboQuantMSE tq(tq_cfg);
+
+                for (size_t i = 0; i < vectors.size(); ++i) {
+                    VectorRecord rec;
+                    rec.chunk_id = "vec_" + std::to_string(i);
+                    rec.document_hash = "doc_" + std::to_string(i);
+                    rec.embedding = vectors[i];
+                    rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+                    rec.quantized.bits_per_channel = bits;
+                    rec.quantized.seed = config.seed;
+                    rec.quantized.packed_codes =
+                        vector_utils::packedQuantizeVector(vectors[i], &tq);
+                    db.insertVector(rec).value();
+                }
+            }
+            auto packed_size =
+                static_cast<double>(std::filesystem::file_size(packed_path)) / 1024.0;
+
+            // Cleanup
+            std::filesystem::remove(float_path);
+            std::filesystem::remove(packed_path);
+
+            double ratio = float_size > 0 ? packed_size / float_size : 0.0;
+            float_sizes_kb.push_back(float_size);
+            packed_sizes_kb.push_back(packed_size);
+            ratios.push_back(ratio);
+
+            std::cout << std::fixed << std::setprecision(2) << "dim=" << dim
+                      << " bits=" << static_cast<int>(bits) << ": "
+                      << "float=" << float_size << " KB  "
+                      << "packed=" << packed_size << " KB  "
+                      << "ratio=" << std::setprecision(4) << ratio << " (" << std::fixed
+                      << std::setprecision(1) << (1.0 - ratio) * 100 << "% smaller)" << std::endl;
+        }
+    }
+
+    double avg_ratio = 0.0;
+    if (!ratios.empty()) {
+        for (double r : ratios)
+            avg_ratio += r;
+        avg_ratio /= ratios.size();
+    }
+    std::cout << "\n=== Average packed/float ratio: " << std::setprecision(4) << avg_ratio
+              << " (avg " << std::fixed << std::setprecision(1) << (1.0 - avg_ratio) * 100
+              << "% storage reduction) ===" << std::endl;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -452,10 +558,16 @@ int main(int argc, char** argv) {
             config.benchmark_vectors = std::stoul(arg.substr(10));
         } else if (arg == "--json-only") {
             config.json_only = true;
+        } else if (arg == "--size-only") {
+            runSizeBenchmark(config);
+            return 0;
         }
     }
 
     runBenchmark(config);
+
+    std::cout << "\n=== Storage Size Benchmark ===" << std::endl;
+    runSizeBenchmark(config);
 
     return 0;
 }

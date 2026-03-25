@@ -158,6 +158,9 @@ VectorSchemaMigration::SchemaVersion VectorSchemaMigration::detectVersion(sqlite
     // Check for V2 schema (unified vectors table)
     if (tableExists(db, "vectors") && tableExists(db, "vectors_hnsw_meta")) {
         // Check for V2.1 (has embedding_dim column)
+        if (columnExists(db, "vectors", "quantized_packed_codes")) {
+            return SchemaVersion::V2_2;
+        }
         if (columnExists(db, "vectors", "embedding_dim")) {
             return SchemaVersion::V2_1;
         }
@@ -251,6 +254,72 @@ Result<void> VectorSchemaMigration::migrateV2ToV2_1(sqlite3* db) {
     }
 
     spdlog::info("V2 to V2.1 migration completed successfully");
+    return Result<void>{};
+}
+
+bool VectorSchemaMigration::hasQuantizedColumns(sqlite3* db) {
+    if (!db) {
+        return false;
+    }
+    return columnExists(db, "vectors", "quantized_packed_codes");
+}
+
+Result<void> VectorSchemaMigration::migrateV2_1ToV2_2(sqlite3* db) {
+    if (!db) {
+        return Error{ErrorCode::InvalidArgument, "Database handle is null"};
+    }
+
+    // Check if already migrated
+    if (hasQuantizedColumns(db)) {
+        spdlog::debug("Database already has quantized columns, skipping migration");
+        return Result<void>{};
+    }
+
+    spdlog::info("Starting V2.1 to V2.2 schema migration (adding quantized sidecar columns)...");
+
+    // Begin transaction
+    auto result = beginTransaction(db);
+    if (!result) {
+        return result;
+    }
+
+    // Add quantized columns
+    result = executeSQL(db, "ALTER TABLE vectors ADD COLUMN quantized_format INTEGER DEFAULT 0");
+    if (!result) {
+        executeSQL(db, "ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to add quantized_format column: " + result.error().message};
+    }
+
+    result = executeSQL(db, "ALTER TABLE vectors ADD COLUMN quantized_bits INTEGER DEFAULT 0");
+    if (!result) {
+        executeSQL(db, "ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to add quantized_bits column: " + result.error().message};
+    }
+
+    result = executeSQL(db, "ALTER TABLE vectors ADD COLUMN quantized_seed INTEGER DEFAULT 0");
+    if (!result) {
+        executeSQL(db, "ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to add quantized_seed column: " + result.error().message};
+    }
+
+    result = executeSQL(db, "ALTER TABLE vectors ADD COLUMN quantized_packed_codes BLOB");
+    if (!result) {
+        executeSQL(db, "ROLLBACK");
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to add quantized_packed_codes column: " + result.error().message};
+    }
+
+    // Commit transaction
+    result = executeSQL(db, "COMMIT");
+    if (!result) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to commit migration: " + result.error().message};
+    }
+
+    spdlog::info("V2.1 to V2.2 migration completed successfully");
     return Result<void>{};
 }
 

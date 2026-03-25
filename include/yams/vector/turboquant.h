@@ -217,9 +217,16 @@ private:
 };
 
 /**
- * TurboQuant Inner Product Quantizer (Two-Stage) [EXPERIMENTAL]
+ * TurboQuant Inner Product Quantizer (Two-Stage) [EXPERIMENTAL — QJL correction incomplete]
  *
- * WARNING: This class is experimental. The inner product estimation is approximate.
+ * WARNING: This class is experimental. The inner product estimation is approximate and
+ * the QJL correction is not yet fully calibrated. Use only for research/evaluation.
+ *
+ * Current status:
+ *   - TurboQuantMSE: stable for storage (79% size reduction vs float)
+ *   - TurboQuantProd::estimateInnerProduct(): conservative blend, production-safe lower bound
+ *   - TurboQuantProd::estimateInnerProductFull(): QJL correction is EXPERIMENTAL;
+ *     requires arc-sine calibration and residual-norm-weighted decoding before production use
  *
  * Algorithm:
  *  1. Apply TurboQuant_MSE with (b-1) bits → x̃

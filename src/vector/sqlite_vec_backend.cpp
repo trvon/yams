@@ -1,5 +1,7 @@
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_schema_migration.h>
+#include <yams/vector/turboquant.h>
+#include <yams/vector/vector_index_manager.h>
 
 #include <yams/daemon/components/TuneAdvisor.h>
 
@@ -30,9 +32,9 @@
 
 namespace yams::vector {
 
-// Type aliases for sqlite-vec-cpp
-using DistanceMetric = sqlite_vec_cpp::distances::CosineMetric<float>;
-using HNSWIndex = sqlite_vec_cpp::index::HNSWIndex<float, DistanceMetric>;
+// Type aliases for sqlite-vec-cpp (use distinct name to avoid conflict with enum DistanceMetric)
+using HNSWCosineMetric = sqlite_vec_cpp::distances::CosineMetric<float>;
+using HNSWIndex = sqlite_vec_cpp::index::HNSWIndex<float, HNSWCosineMetric>;
 
 namespace {
 
@@ -243,7 +245,7 @@ CREATE TABLE IF NOT EXISTS vectors (
     rowid INTEGER PRIMARY KEY,
     chunk_id TEXT UNIQUE NOT NULL,
     document_hash TEXT NOT NULL,
-    embedding BLOB NOT NULL,
+    embedding BLOB,
     embedding_dim INTEGER,
     content TEXT,
     start_offset INTEGER DEFAULT 0,
@@ -259,7 +261,11 @@ CREATE TABLE IF NOT EXISTS vectors (
     level INTEGER DEFAULT 0,
     source_chunk_ids TEXT,
     parent_document_hash TEXT,
-    child_document_hashes TEXT
+    child_document_hashes TEXT,
+    quantized_format INTEGER DEFAULT 0,
+    quantized_bits INTEGER DEFAULT 0,
+    quantized_seed INTEGER DEFAULT 0,
+    quantized_packed_codes BLOB
 );
 CREATE INDEX IF NOT EXISTS idx_vectors_chunk_id ON vectors(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_vectors_document_hash ON vectors(document_hash);
@@ -273,8 +279,9 @@ INSERT INTO vectors (
     start_offset, end_offset, metadata,
     model_id, model_version, embedding_version, content_hash,
     created_at, embedded_at, is_stale, level,
-    source_chunk_ids, parent_document_hash, child_document_hashes
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    source_chunk_ids, parent_document_hash, child_document_hashes,
+    quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 )sql";
 
 constexpr const char* kSelectByChunkId = R"sql(
@@ -282,7 +289,8 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes
+       source_chunk_ids, parent_document_hash, child_document_hashes,
+       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
 FROM vectors WHERE chunk_id = ?
 )sql";
 
@@ -291,7 +299,8 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes
+       source_chunk_ids, parent_document_hash, child_document_hashes,
+       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
 FROM vectors WHERE rowid = ?
 )sql";
 
@@ -300,7 +309,8 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes
+       source_chunk_ids, parent_document_hash, child_document_hashes,
+       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
 FROM vectors WHERE document_hash = ?
 )sql";
 
@@ -448,11 +458,20 @@ public:
 
     ~Impl() { close(); }
 
+    /// Get raw SQLite handle (for migration/testing only)
+    sqlite3* dbHandle() const { return db_; }
+
     Result<void> initialize(const std::string& db_path) {
         std::unique_lock lock(mutex_);
 
         if (db_) {
             return Error{ErrorCode::InvalidState, "Already initialized"};
+        }
+
+        // Contract: quantized-primary storage requires TurboQuant sidecar for reconstruction
+        if (config_.quantized_primary_storage && !config_.enable_turboquant_storage) {
+            return Error{ErrorCode::InvalidArgument,
+                         "quantized_primary_storage=true requires enable_turboquant_storage=true"};
         }
 
         last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
@@ -522,6 +541,18 @@ public:
                              "Schema migration failed: " + migrate_result.error().message};
             }
             spdlog::info("V2 to V2.1 migration completed successfully");
+        } else if (schema_version == VectorSchemaMigration::SchemaVersion::V2_1) {
+            // Upgrade V2.1 to V2.2 (add quantized sidecar columns)
+            spdlog::info("Detected V2.1 vector schema, upgrading to V2.2...");
+            auto migrate_result = VectorSchemaMigration::migrateV2_1ToV2_2(db_);
+            if (!migrate_result) {
+                spdlog::error("V2.1 to V2.2 migration failed: {}", migrate_result.error().message);
+                sqlite3_close(db_);
+                db_ = nullptr;
+                return Error{ErrorCode::DatabaseError,
+                             "Schema migration failed: " + migrate_result.error().message};
+            }
+            spdlog::info("V2.1 to V2.2 migration completed successfully");
         }
 
         db_path_ = db_path;
@@ -963,10 +994,12 @@ public:
         int64_t old_rowid = *rowid_opt;
 
         // Get old dimension before deleting (need to know which HNSW index to remove from)
+        // Use embedding_dim when embedding blob is absent (quantized-primary mode).
         std::optional<size_t> old_dim;
         auto old_record = getVectorByChunkIdUnlocked(chunk_id);
         if (old_record) {
-            old_dim = old_record->embedding.size();
+            old_dim = !old_record->embedding.empty() ? old_record->embedding.size()
+                                                     : old_record->embedding_dim;
         }
 
         const bool maintain_hnsw = shouldMaintainHnswOnWriteUnlocked();
@@ -995,7 +1028,9 @@ public:
         }
 
         int64_t new_rowid = rowid_result.value();
-        size_t new_dim = record.embedding.size();
+        size_t new_dim = !record.embedding.empty()
+                             ? record.embedding.size()
+                             : (record.embedding_dim > 0 ? record.embedding_dim : 0);
 
         if (old_dim) {
             auto oldIt = query_dim_counts_.find(*old_dim);
@@ -1060,11 +1095,11 @@ public:
 
         int64_t rowid = *rowid_opt;
 
-        // Get dimension before deleting
+        // Get dimension before deleting (use embedding_dim when blob is absent)
         std::optional<size_t> dim;
         auto record = getVectorByChunkIdUnlocked(chunk_id);
         if (record) {
-            dim = record->embedding.size();
+            dim = !record->embedding.empty() ? record->embedding.size() : record->embedding_dim;
         }
 
         if (dim) {
@@ -2346,12 +2381,20 @@ private:
         sqlite3_bind_text(stmt_insert_, 1, record.chunk_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt_insert_, 2, record.document_hash.c_str(), -1, SQLITE_TRANSIENT);
 
-        // Embedding as blob
-        sqlite3_bind_blob(stmt_insert_, 3, record.embedding.data(),
-                          record.embedding.size() * sizeof(float), SQLITE_TRANSIENT);
+        // Embedding as blob: skip when quantized-primary storage is enabled
+        // (embedding is reconstructed from quantized sidecar on read)
+        if (config_.quantized_primary_storage && !record.embedding.empty()) {
+            sqlite3_bind_null(stmt_insert_, 3);
+        } else {
+            sqlite3_bind_blob(stmt_insert_, 3, record.embedding.data(),
+                              record.embedding.size() * sizeof(float), SQLITE_TRANSIENT);
+        }
 
-        // Embedding dimension
-        sqlite3_bind_int64(stmt_insert_, 4, static_cast<int64_t>(record.embedding.size()));
+        // Embedding dimension: always populate it so HNSW/search maintenance can use it
+        // even when the float blob is absent in quantized-primary mode.
+        size_t effective_dim =
+            record.embedding_dim > 0 ? record.embedding_dim : record.embedding.size();
+        sqlite3_bind_int64(stmt_insert_, 4, static_cast<int64_t>(effective_dim));
 
         sqlite3_bind_text(stmt_insert_, 5, record.content.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt_insert_, 6, static_cast<int64_t>(record.start_offset));
@@ -2379,6 +2422,18 @@ private:
                           SQLITE_TRANSIENT);
         std::string child_hashes_json = serializeStringVector(record.child_document_hashes);
         sqlite3_bind_text(stmt_insert_, 19, child_hashes_json.c_str(), -1, SQLITE_TRANSIENT);
+
+        // Quantized sidecar columns (packed TurboQuant codes)
+        sqlite3_bind_int(stmt_insert_, 20, static_cast<int>(record.quantized.format));
+        sqlite3_bind_int(stmt_insert_, 21, static_cast<int>(record.quantized.bits_per_channel));
+        sqlite3_bind_int64(stmt_insert_, 22, static_cast<int64_t>(record.quantized.seed));
+        if (!record.quantized.packed_codes.empty()) {
+            sqlite3_bind_blob(stmt_insert_, 23, record.quantized.packed_codes.data(),
+                              static_cast<int>(record.quantized.packed_codes.size()),
+                              SQLITE_TRANSIENT);
+        } else {
+            sqlite3_bind_null(stmt_insert_, 23);
+        }
 
         int rc = stepWithRetry(stmt_insert_);
         if (rc != SQLITE_DONE) {
@@ -2477,15 +2532,19 @@ private:
         record.chunk_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         record.document_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
 
-        // Embedding blob
+        // Embedding blob — may be NULL in quantized-primary mode
         const void* blob = sqlite3_column_blob(stmt, 3);
         int blob_size = sqlite3_column_bytes(stmt, 3);
-        size_t num_floats = blob_size / sizeof(float);
-        record.embedding.resize(num_floats);
-        std::memcpy(record.embedding.data(), blob, blob_size);
-
-        // Column 4 is embedding_dim - we skip it since embedding.size() provides this
-        // (useful for queries but not needed when loading record)
+        if (blob && blob_size > 0) {
+            size_t num_floats = static_cast<size_t>(blob_size) / sizeof(float);
+            record.embedding.resize(num_floats);
+            std::memcpy(record.embedding.data(), blob, blob_size);
+            record.embedding_dim = num_floats;
+        } else {
+            // Quantized-primary row: embedding blob is absent; use embedding_dim column
+            record.embedding_dim = static_cast<size_t>(sqlite3_column_int64(stmt, 4));
+            // Note: embedding will be empty; caller (VectorDatabase) dequantizes on read
+        }
 
         const char* content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
         record.content = content ? content : "";
@@ -2520,6 +2579,19 @@ private:
 
         const char* child_hashes = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 19));
         record.child_document_hashes = deserializeStringVector(child_hashes ? child_hashes : "");
+
+        // Quantized sidecar columns (packed TurboQuant codes)
+        record.quantized.format =
+            static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 20));
+        record.quantized.bits_per_channel = static_cast<uint8_t>(sqlite3_column_int(stmt, 21));
+        record.quantized.seed = static_cast<uint64_t>(sqlite3_column_int64(stmt, 22));
+
+        const void* qblob = sqlite3_column_blob(stmt, 23);
+        int qblob_size = sqlite3_column_bytes(stmt, 23);
+        if (qblob && qblob_size > 0) {
+            record.quantized.packed_codes.resize(static_cast<size_t>(qblob_size));
+            std::memcpy(record.quantized.packed_codes.data(), qblob, qblob_size);
+        }
 
         return record;
     }
@@ -2633,7 +2705,7 @@ private:
         try {
             std::string table_prefix = hnswTablePrefix(dim);
             char* err = nullptr;
-            auto loaded_hnsw = sqlite_vec_cpp::index::load_hnsw_index<float, DistanceMetric>(
+            auto loaded_hnsw = sqlite_vec_cpp::index::load_hnsw_index<float, HNSWCosineMetric>(
                 db_, "main", table_prefix.c_str(), &err);
             if (err) {
                 spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
@@ -2662,7 +2734,7 @@ private:
                     return false;
                 }
                 auto [entryPointId, entryPointLayer, _maxNodeId] =
-                    sqlite_vec_cpp::index::get_hnsw_checkpoint_info<float, DistanceMetric>(
+                    sqlite_vec_cpp::index::get_hnsw_checkpoint_info<float, HNSWCosineMetric>(
                         db_, "main", table_prefix.c_str());
                 auto fallbackConfig = defaultConfigForDim();
                 auto loaded_hnsw = HNSWIndex::from_serialized(fallbackConfig, entryPointId,
@@ -2684,9 +2756,12 @@ private:
     std::vector<size_t> queryVectorDimsUnlocked() {
         std::vector<size_t> dims;
         sqlite3_stmt* stmt = nullptr;
-        const char* sql = "SELECT DISTINCT CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
-                          "THEN LENGTH(embedding) / 4 ELSE embedding_dim END AS dim "
-                          "FROM vectors WHERE embedding IS NOT NULL ORDER BY dim";
+        // Include both float-blob rows and quantized-primary rows (where embedding_dim > 0).
+        // embedding_dim is now always populated even when embedding blob is NULL.
+        const char* sql =
+            "SELECT DISTINCT CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
+            "THEN LENGTH(embedding) / 4 ELSE embedding_dim END AS dim "
+            "FROM vectors WHERE embedding IS NOT NULL OR embedding_dim > 0 ORDER BY dim";
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
             while (sqlite3_step(stmt) == SQLITE_ROW) {
                 int64_t dim = sqlite3_column_int64(stmt, 0);
@@ -2780,33 +2855,62 @@ private:
     Result<BackgroundSeedSnapshot> collectBackgroundSeedSnapshotUnlocked(size_t focus_dim) {
         BackgroundSeedSnapshot snapshot;
 
+        // Fetch embedding, dimension, and quantized sidecar to handle both float-blob
+        // rows and quantized-primary rows (where embedding blob is NULL).
         const char* select_by_dim =
-            "SELECT rowid, embedding, embedding_dim FROM vectors ORDER BY embedding_dim, rowid";
+            "SELECT rowid, embedding, embedding_dim, "
+            "quantized_format, quantized_bits, quantized_seed, quantized_packed_codes "
+            "FROM vectors ORDER BY embedding_dim, rowid";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, select_by_dim, -1, &stmt, nullptr) != SQLITE_OK) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to prepare background seed snapshot query"};
         }
 
+        std::unique_ptr<TurboQuantMSE> snapshot_tq;
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            TurboQuantConfig cfg;
+            cfg.dimension = config_.embedding_dim;
+            cfg.bits_per_channel = config_.turboquant_bits;
+            cfg.seed = config_.turboquant_seed;
+            snapshot_tq = std::make_unique<TurboQuantMSE>(cfg);
+        }
+
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             int64_t rowid = sqlite3_column_int64(stmt, 0);
-            const void* blob = sqlite3_column_blob(stmt, 1);
-            int blob_size = sqlite3_column_bytes(stmt, 1);
-            if (!blob || blob_size <= 0 || (blob_size % static_cast<int>(sizeof(float))) != 0) {
-                continue;
-            }
-
-            size_t num_floats = static_cast<size_t>(blob_size) / sizeof(float);
             size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 2));
-            if (dim == 0 || dim != num_floats) {
-                dim = num_floats;
-            }
             if (dim == 0) {
                 continue;
             }
 
-            std::vector<float> embedding(num_floats);
-            std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
+            std::vector<float> embedding;
+            const void* blob = sqlite3_column_blob(stmt, 1);
+            int blob_size = sqlite3_column_bytes(stmt, 1);
+
+            if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
+                // Float blob row: use directly
+                size_t num_floats = static_cast<size_t>(blob_size) / sizeof(float);
+                embedding.resize(num_floats);
+                std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
+            } else {
+                // Quantized-primary row: dequantize from packed codes
+                if (!snapshot_tq) {
+                    continue;
+                }
+                auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 3));
+                if (fmt != VectorRecord::QuantizedFormat::TURBOquant_1) {
+                    continue;
+                }
+                const void* qblob = sqlite3_column_blob(stmt, 6);
+                int qblob_size = sqlite3_column_bytes(stmt, 6);
+                if (!qblob || qblob_size <= 0) {
+                    continue;
+                }
+                std::vector<uint8_t> packed(qblob_size);
+                std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
+                embedding = vector_utils::packedDequantizeVector(packed, dim, snapshot_tq.get());
+            }
+
             if (isZeroNormEmbedding(embedding) || !isFiniteEmbedding(embedding)) {
                 continue;
             }
@@ -2934,12 +3038,15 @@ private:
             return std::vector<VectorRecord>{};
         }
 
+        // Extended SQL to include quantized sidecar columns for dequantization in
+        // quantized-primary mode (where the float blob is NULL).
         const char* sql = R"sql(
 SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes
+       source_chunk_ids, parent_document_hash, child_document_hashes,
+       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
 FROM vectors
 WHERE (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 THEN LENGTH(embedding) / 4
             ELSE embedding_dim END) = ?
@@ -2953,9 +3060,25 @@ ORDER BY rowid
 
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(query_embedding.size()));
 
+        // Dequantizer for quantized-primary rows (when float blob is absent)
+        std::unique_ptr<TurboQuantMSE> bf_tq;
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            TurboQuantConfig cfg;
+            cfg.dimension = query_embedding.size();
+            cfg.bits_per_channel = config_.turboquant_bits;
+            cfg.seed = config_.turboquant_seed;
+            bf_tq = std::make_unique<TurboQuantMSE>(cfg);
+        }
+
         std::vector<std::pair<float, VectorRecord>> scored_results;
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             auto record = recordFromStatement(stmt);
+
+            // Dequantize if embedding is absent but quantized sidecar is present
+            if (record.embedding.empty() && !record.quantized.packed_codes.empty() && bf_tq) {
+                record.embedding = vector_utils::packedDequantizeVector(
+                    record.quantized.packed_codes, query_embedding.size(), bf_tq.get());
+            }
 
             if (!candidate_hashes.empty() &&
                 candidate_hashes.find(record.document_hash) == candidate_hashes.end()) {
@@ -2977,8 +3100,11 @@ ORDER BY rowid
                 continue;
             }
 
-            if (record.embedding.size() != query_embedding.size()) {
+            if (!record.embedding.empty() && record.embedding.size() != query_embedding.size()) {
                 continue;
+            }
+            if (record.embedding.empty() && record.embedding_dim != query_embedding.size()) {
+                continue; // Quantized-primary row: use embedding_dim for dimension check
             }
             if (isZeroNormEmbedding(record.embedding) || !isFiniteEmbedding(record.embedding)) {
                 continue;
@@ -3042,7 +3168,11 @@ ORDER BY rowid
     std::vector<std::pair<size_t, std::vector<float>>>
     queryMissingVectorsForDimUnlocked(size_t dim) {
         std::vector<std::pair<size_t, std::vector<float>>> rows;
-        std::string sql = "SELECT v.rowid, v.embedding FROM vectors v LEFT JOIN \"" +
+        // Fetch embedding blob and quantized sidecar to handle both float rows
+        // and quantized-primary rows (where embedding blob is NULL).
+        std::string sql = "SELECT v.rowid, v.embedding, v.quantized_format, "
+                          "v.quantized_bits, v.quantized_seed, v.quantized_packed_codes "
+                          "FROM vectors v LEFT JOIN \"" +
                           hnswTablePrefix(dim) +
                           "_hnsw_nodes\" n ON n.node_id = v.rowid "
                           "WHERE (CASE WHEN v.embedding_dim IS NULL OR v.embedding_dim = 0 "
@@ -3052,17 +3182,43 @@ ORDER BY rowid
         if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
             return rows;
         }
+
+        std::unique_ptr<TurboQuantMSE> catchup_tq;
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            TurboQuantConfig cfg;
+            cfg.dimension = dim;
+            cfg.bits_per_channel = config_.turboquant_bits;
+            cfg.seed = config_.turboquant_seed;
+            catchup_tq = std::make_unique<TurboQuantMSE>(cfg);
+        }
+
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             size_t rowid = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
             const void* blob = sqlite3_column_blob(stmt, 1);
             int blob_size = sqlite3_column_bytes(stmt, 1);
-            if (!blob || blob_size <= 0 || (blob_size % static_cast<int>(sizeof(float))) != 0) {
-                continue;
+
+            std::vector<float> embedding;
+            if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
+                embedding.resize(static_cast<size_t>(blob_size) / sizeof(float));
+                std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
+            } else if (catchup_tq) {
+                // Quantized-primary row: dequantize from packed codes
+                auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 2));
+                if (fmt == VectorRecord::QuantizedFormat::TURBOquant_1) {
+                    const void* qblob = sqlite3_column_blob(stmt, 5);
+                    int qblob_size = sqlite3_column_bytes(stmt, 5);
+                    if (qblob && qblob_size > 0) {
+                        std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
+                        std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
+                        embedding =
+                            vector_utils::packedDequantizeVector(packed, dim, catchup_tq.get());
+                    }
+                }
             }
-            std::vector<float> embedding(static_cast<size_t>(blob_size) / sizeof(float));
-            std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
-            if (isZeroNormEmbedding(embedding) || !isFiniteEmbedding(embedding)) {
+
+            if (embedding.empty() || isZeroNormEmbedding(embedding) ||
+                !isFiniteEmbedding(embedding)) {
                 continue;
             }
             rows.emplace_back(rowid, std::move(embedding));
@@ -3078,7 +3234,7 @@ ORDER BY rowid
         }
         std::string table_prefix = hnswTablePrefix(dim);
         char* err = nullptr;
-        int rc = sqlite_vec_cpp::index::save_hnsw_index<float, DistanceMetric>(
+        int rc = sqlite_vec_cpp::index::save_hnsw_index<float, HNSWCosineMetric>(
             db_, "main", table_prefix.c_str(), *it->second, &err);
         if (rc != SQLITE_OK) {
             if (err) {
@@ -3271,7 +3427,7 @@ ORDER BY rowid
                     std::string table_prefix = hnswTablePrefix(dim);
                     char* err = nullptr;
                     auto loaded_hnsw =
-                        sqlite_vec_cpp::index::load_hnsw_index<float, DistanceMetric>(
+                        sqlite_vec_cpp::index::load_hnsw_index<float, HNSWCosineMetric>(
                             db_, "main", table_prefix.c_str(), &err);
                     if (err) {
                         spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
@@ -3391,7 +3547,7 @@ ORDER BY rowid
             char* err = nullptr;
             const auto saveStart = std::chrono::steady_clock::now();
             spdlog::info("[HNSW] Saving full index for dim={} with {} vectors", dim, hnsw->size());
-            int rc = sqlite_vec_cpp::index::save_hnsw_index<float, DistanceMetric>(
+            int rc = sqlite_vec_cpp::index::save_hnsw_index<float, HNSWCosineMetric>(
                 db_, "main", table_prefix.c_str(), *hnsw, &err);
             if (rc != SQLITE_OK) {
                 if (err) {
@@ -3421,7 +3577,7 @@ ORDER BY rowid
 
             std::string table_prefix = hnswTablePrefix(dim);
             char* err = nullptr;
-            int rc = sqlite_vec_cpp::index::save_hnsw_checkpoint<float, DistanceMetric>(
+            int rc = sqlite_vec_cpp::index::save_hnsw_checkpoint<float, HNSWCosineMetric>(
                 db_, "main", table_prefix.c_str(), *hnsw, &err);
             if (rc != SQLITE_OK && err) {
                 spdlog::warn("[HNSW] Failed to save checkpoint for dim={}: {}", dim, err);
@@ -3640,6 +3796,10 @@ void SqliteVecBackend::close() {
 
 bool SqliteVecBackend::isInitialized() const {
     return impl_->isInitialized();
+}
+
+sqlite3* SqliteVecBackend::getDbHandle() const {
+    return impl_->dbHandle();
 }
 
 Result<void> SqliteVecBackend::createTables(size_t embedding_dim) {

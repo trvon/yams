@@ -43,7 +43,15 @@ static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts)
     if (opts.autoStart.has_value()) {
         cfg.autoStart = *opts.autoStart;
     }
+    cfg.executor = opts.executor;
     return cfg;
+}
+
+static boost::asio::any_io_executor selectExecutor(const RetrievalOptions& opts) {
+    if (opts.executor.has_value()) {
+        return *opts.executor;
+    }
+    return yams::daemon::GlobalIOContext::global_executor();
 }
 
 std::shared_ptr<yams::daemon::DaemonClient>
@@ -89,7 +97,7 @@ Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_op
     auto f = p.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, req, p = std::move(p),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->get(req);
@@ -160,7 +168,7 @@ Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req
     auto future = p.get_future();
     auto done_future = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, req, p = std::move(p),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->streamingGrep(req);
@@ -243,7 +251,7 @@ Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req
     auto f2 = p2.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, req, p = std::move(p2),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->streamingList(req);
@@ -278,7 +286,7 @@ Result<void> RetrievalService::getToStdout(const GetInitOptions& req_opts,
     auto f2 = p2.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, req, p = std::move(p2),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->getToStdout(req);
@@ -314,7 +322,7 @@ Result<void> RetrievalService::getToFile(const GetInitOptions& req_opts,
     auto f2 = p2.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, req, outputPath, p = std::move(p2),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->getToFile(req, outputPath);
@@ -352,7 +360,7 @@ RetrievalService::getChunkedBuffer(const GetInitOptions& req_opts, std::size_t c
         auto f2 = p2.get_future();
         auto done_f = done.get_future();
         boost::asio::co_spawn(
-            yams::daemon::GlobalIOContext::global_executor(),
+            selectExecutor(opts),
             [client, req, capBytes, p = std::move(p2),
              d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
                 auto init = co_await client->getInit(req);
@@ -466,7 +474,7 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
     auto future = promise.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, sreq, p = std::move(promise),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->streamingSearch(sreq);
@@ -787,7 +795,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         auto f = p.get_future();
         auto done_f = done.get_future();
         boost::asio::co_spawn(
-            yams::daemon::GlobalIOContext::global_executor(),
+            selectExecutor(opts),
             [client, sreq, p = std::move(p),
              d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
                 auto r = co_await client->streamingSearch(sreq);
@@ -840,7 +848,7 @@ bool RetrievalService::isFTS5Ready(const RetrievalOptions& opts) const {
         auto f = p.get_future();
         auto done_f = done.get_future();
         boost::asio::co_spawn(
-            yams::daemon::GlobalIOContext::global_executor(),
+            selectExecutor(opts),
             [client, p = std::move(p),
              d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
                 auto r = co_await client->status();
@@ -919,7 +927,7 @@ Result<yams::daemon::SearchResponse> RetrievalService::search(const SearchOption
     auto f = p.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, req, p = std::move(p),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->streamingSearch(req);
@@ -952,7 +960,7 @@ Result<yams::daemon::StatusResponse> RetrievalService::status(const RetrievalOpt
     auto f = p.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, p = std::move(p), d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->status();
             p.set_value(std::move(r));
@@ -985,7 +993,7 @@ Result<yams::daemon::CatResponse> RetrievalService::cat(const yams::daemon::CatR
     auto f = p.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, req, p = std::move(p),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->cat(req);
@@ -1020,7 +1028,7 @@ RetrievalService::graphQuery(const yams::daemon::GraphQueryRequest& req,
     auto f = p.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, req, p = std::move(p),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->call<yams::daemon::GraphQueryRequest>(req);
@@ -1055,7 +1063,7 @@ RetrievalService::download(const yams::daemon::DownloadRequest& req,
     auto f = p.get_future();
     auto done_f = done.get_future();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        selectExecutor(opts),
         [client, req, p = std::move(p),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->call<yams::daemon::DownloadRequest>(req);

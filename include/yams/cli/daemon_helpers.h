@@ -664,6 +664,8 @@ private:
 
 inline bool operator==(const yams::daemon::ClientConfig& lhs,
                        const yams::daemon::ClientConfig& rhs) {
+    const bool executorsEqual = lhs.executor.has_value() == rhs.executor.has_value() &&
+                                (!lhs.executor.has_value() || *lhs.executor == *rhs.executor);
     return lhs.socketPath == rhs.socketPath && lhs.dataDir == rhs.dataDir &&
            lhs.connectTimeout == rhs.connectTimeout && lhs.headerTimeout == rhs.headerTimeout &&
            lhs.bodyTimeout == rhs.bodyTimeout && lhs.requestTimeout == rhs.requestTimeout &&
@@ -674,7 +676,8 @@ inline bool operator==(const yams::daemon::ClientConfig& lhs,
            lhs.progressiveOutput == rhs.progressiveOutput &&
            lhs.singleUseConnections == rhs.singleUseConnections &&
            lhs.disableStreamingForLargeQueries == rhs.disableStreamingForLargeQueries &&
-           lhs.acceptCompressed == rhs.acceptCompressed && lhs.transportMode == rhs.transportMode;
+           lhs.acceptCompressed == rhs.acceptCompressed && lhs.transportMode == rhs.transportMode &&
+           executorsEqual;
 }
 
 inline bool operator!=(const yams::daemon::ClientConfig& lhs,
@@ -943,6 +946,7 @@ apply_cli_daemon_plan_to_retrieval_options(const CliDaemonClientPlan& plan,
                                            yams::app::services::RetrievalOptions& opts) {
     opts.transportMode = plan.resolvedMode;
     opts.autoStart = plan.config.autoStart;
+    opts.executor = plan.config.executor;
     if (!plan.config.socketPath.empty()) {
         opts.socketPath = plan.config.socketPath;
     }
@@ -1090,15 +1094,18 @@ acquire_cli_daemon_client_shared_with_fallback(
 // Generic runner for any boost::asio::awaitable<Result<T>>. Optional timeout (0 => no timeout).
 template <typename T>
 inline Result<T> run_result(boost::asio::awaitable<Result<T>> aw,
-                            std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+                            std::chrono::milliseconds timeout = std::chrono::milliseconds{0},
+                            boost::asio::any_io_executor executor = {}) {
     const auto start = std::chrono::steady_clock::now();
-    auto& io = yams::daemon::GlobalIOContext::instance().get_io_context();
+    if (!executor) {
+        executor = yams::daemon::GlobalIOContext::instance().get_io_context().get_executor();
+    }
     // Use shared_ptr to ensure the promise outlives the coroutine even if we timeout and return
     // early. The coroutine captures a copy of the shared_ptr, preventing use-after-free.
     auto prom = std::make_shared<std::promise<Result<T>>>();
     auto fut = prom->get_future();
     boost::asio::co_spawn(
-        io,
+        executor,
         [a = std::move(aw), prom]() mutable -> boost::asio::awaitable<void> {
             try {
                 auto r = co_await std::move(a);

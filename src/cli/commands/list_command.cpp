@@ -411,6 +411,7 @@ public:
             // Use RetrievalService with helper-resolved daemon transport plan.
             {
                 yams::daemon::ClientConfig daemonCfg;
+                daemonCfg.executor = getExecutor();
                 if (cli_->hasExplicitDataDir()) {
                     daemonCfg.dataDir = cli_->getDataPath();
                 }
@@ -623,6 +624,7 @@ private:
         try {
             // Acquire daemon client (allow in-process fallback in sandboxed environments)
             daemon::ClientConfig config;
+            config.executor = getExecutor();
             if (cli_ && cli_->hasExplicitDataDir()) {
                 config.dataDir = cli_->getDataPath();
             }
@@ -1562,6 +1564,7 @@ private:
             yams::app::services::RetrievalService rsvc;
             yams::app::services::RetrievalOptions ropts;
             yams::daemon::ClientConfig daemonCfg;
+            daemonCfg.executor = getExecutor();
             if (cli_->hasExplicitDataDir()) {
                 daemonCfg.dataDir = cli_->getDataPath();
             }

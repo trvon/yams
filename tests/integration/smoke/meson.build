@@ -22,6 +22,7 @@ integration_smoke_srcs += files(
 
 if tests_has_cli
   integration_smoke_srcs += files(
+    'cli_subprocess_segfault_regression_smoke_test.cpp',
     'daemon_cli_start_status_regression_smoke_test.cpp',
     'daemon_embeddings_regression_smoke_test.cpp',
     'daemon_ingestion_reliability_smoke_test.cpp',

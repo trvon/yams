@@ -53,6 +53,11 @@ struct VectorDatabaseConfig {
     bool enable_turboquant_storage = false;
     uint8_t turboquant_bits = 4;   // Bits per channel (1-4)
     uint64_t turboquant_seed = 42; // Random seed for reproducibility
+
+    // Quantized-primary storage mode: omit float embedding blobs and store only
+    // TurboQuant sidecar. On retrieval, dequantize sidecar → float embedding.
+    // HNSW still uses reconstructed floats (no compressed-space traversal yet).
+    bool quantized_primary_storage = false;
 };
 
 /**
@@ -97,6 +102,10 @@ struct VectorRecord {
     std::string content_hash_at_embedding; // SHA-256 of content when embedded
     std::chrono::system_clock::time_point embedded_at; // When embedding was generated
     bool is_stale = false;                             // Mark for re-embedding
+
+    // Embedding dimension (populated from embedding_dim column; reliable even when
+    // embedding blob is NULL in quantized-primary storage mode)
+    size_t embedding_dim = 0;
 
     // TurboQuant compressed embedding fields (arXiv:2504.19874 approximation)
     // Quantized representation: present when TurboQuant compression is enabled

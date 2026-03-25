@@ -48,6 +48,12 @@ public:
         float compaction_threshold = 0.2f; ///< Compact when >20% deleted
         size_t filter_candidate_chunks_per_doc =
             10; ///< Estimated chunks per document for filtering
+        // TurboQuant settings (mirrored from VectorDatabaseConfig)
+        bool enable_turboquant_storage = false;
+        bool quantized_primary_storage =
+            false; ///< Store quantized sidecar only; reconstruct floats on read
+        uint8_t turboquant_bits = 4;
+        uint64_t turboquant_seed = 42;
     };
 
     SqliteVecBackend();
@@ -65,6 +71,9 @@ public:
     Result<void> initialize(const std::string& db_path) override;
     void close() override;
     bool isInitialized() const override;
+
+    /// Get raw SQLite handle (for migration/testing only)
+    sqlite3* getDbHandle() const;
 
     Result<void> createTables(size_t embedding_dim) override;
     bool tablesExist() const override;

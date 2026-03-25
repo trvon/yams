@@ -23,9 +23,10 @@ public:
     /// Schema version enum
     enum class SchemaVersion {
         Unknown = 0,
-        V1 = 1,  ///< Old schema: doc_embeddings (vec0) + doc_metadata
-        V2 = 2,  ///< New schema: vectors + vectors_hnsw_meta + vectors_hnsw_nodes
-        V2_1 = 3 ///< V2 with embedding_dim column
+        V1 = 1,   ///< Old schema: doc_embeddings (vec0) + doc_metadata
+        V2 = 2,   ///< New schema: vectors + vectors_hnsw_meta + vectors_hnsw_nodes
+        V2_1 = 3, ///< V2 with embedding_dim column
+        V2_2 = 4  ///< V2.1 with quantized sidecar columns (TurboQuant packed codes)
     };
 
     /**
@@ -69,6 +70,25 @@ public:
      * @return true if embedding_dim column exists
      */
     static bool hasEmbeddingDimColumn(sqlite3* db);
+
+    /**
+     * @brief Migrate V2.1 schema to V2.2 (add quantized sidecar columns)
+     *
+     * Steps:
+     * 1. Add quantized_format, quantized_bits, quantized_seed, quantized_packed_codes columns
+     * 2. Columns default to 0/NULL — no data backfill needed
+     *
+     * @param db SQLite database handle
+     * @return Success or error
+     */
+    static Result<void> migrateV2_1ToV2_2(sqlite3* db);
+
+    /**
+     * @brief Check if vectors table has quantized sidecar columns
+     * @param db SQLite database handle
+     * @return true if quantized columns exist
+     */
+    static bool hasQuantizedColumns(sqlite3* db);
 
     /**
      * @brief Rollback V2 migration (restore V1 schema)

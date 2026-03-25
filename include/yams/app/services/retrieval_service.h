@@ -10,6 +10,7 @@
 
 #include <yams/core/types.h>
 // Ensure boost::asio symbols used by daemon_client.h are declared in TU including this header
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -27,6 +28,7 @@ struct RetrievalOptions {
     // Optional explicit daemon socket path (overrides default resolver)
     std::optional<std::filesystem::path> socketPath;
     std::optional<std::filesystem::path> explicitDataDir; // only when user overrides
+    std::optional<boost::asio::any_io_executor> executor;
     bool enableStreaming{true};
     bool progressiveOutput{false};
     bool singleUseConnections{false};

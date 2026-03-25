@@ -21,13 +21,13 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <sys/stat.h>
-#include <yams/cli/command.h>
 #include <yams/cli/cli_sync.h>
+#include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
-#include <yams/common/fs_utils.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -443,7 +443,7 @@ public:
         // model provider: print active backend and default/preferred model
         auto* sub_provider =
             cmd->add_subcommand("provider", "Show active model provider and preferred model");
-        sub_provider->callback([]() {
+        sub_provider->callback([this]() {
             auto printPreferredModel = []() {
                 std::string preferred;
                 auto cfgp = yams::config::get_config_path();
@@ -459,6 +459,7 @@ public:
             try {
                 using namespace yams::daemon;
                 ClientConfig cfg;
+                cfg.executor = getExecutor();
                 cfg.requestTimeout = std::chrono::milliseconds(3000);
                 auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
                     cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
@@ -473,7 +474,8 @@ public:
                 ModelStatusRequest msr;
                 msr.detailed = true;
                 auto& client = **leaseHandle;
-                auto s = yams::cli::run_result(client.call(msr), std::chrono::milliseconds(3000));
+                auto s = yams::cli::run_result(client.call(msr), std::chrono::milliseconds(3000),
+                                               getExecutor());
                 std::cout << "Model Provider\n==============\n";
                 if (!s) {
                     std::cout << "Status: unavailable - " << s.error().message << "\n";
@@ -577,6 +579,7 @@ private:
             if (std::string(withd) == "1" || std::string(withd) == "true") {
                 try {
                     yams::daemon::ClientConfig cfg;
+                    cfg.executor = getExecutor();
                     cfg.requestTimeout = std::chrono::milliseconds(800);
                     auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
                         cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
@@ -592,7 +595,7 @@ private:
                     msr.detailed = true;
                     auto& client = **leaseHandle;
                     auto s = yams::cli::run_result(client.getModelStatus(msr),
-                                                   std::chrono::milliseconds(800));
+                                                   std::chrono::milliseconds(800), getExecutor());
                     if (s) {
                         for (const auto& m : s.value().models) {
                             std::ostringstream ln;

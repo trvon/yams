@@ -1172,6 +1172,7 @@ public:
             clientConfig.progressiveOutput = true;
             clientConfig.maxChunkSize = chunkSize_;
             clientConfig.singleUseConnections = false;
+            clientConfig.executor = getExecutor();
             // Ensure daemon uses explicit CLI storage only when user overrode it
             if (cli_ && cli_->hasExplicitDataDir()) {
                 auto dp = cli_->getDataPath();
@@ -1735,6 +1736,7 @@ public:
         clientConfig.progressiveOutput = true;
         clientConfig.maxChunkSize = chunkSize_;
         clientConfig.singleUseConnections = true;
+        clientConfig.executor = getExecutor();
         if (cli_) {
             auto dp = cli_->getDataPath();
             if (!dp.empty())

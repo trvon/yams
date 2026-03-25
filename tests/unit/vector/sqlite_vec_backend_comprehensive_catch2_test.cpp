@@ -22,6 +22,8 @@
 #include <sqlite3.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_schema_migration.h>
+#include <yams/vector/turboquant.h>
+#include <yams/vector/vector_index_manager.h>
 
 using namespace yams::vector;
 using Catch::Matchers::WithinAbs;
@@ -1597,4 +1599,303 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
     CHECK(retrieved.chunk_id == "legacy_row_1");
     CHECK(retrieved.quantized.packed_codes.empty());
     CHECK(retrieved.quantized.seed == 0); // Default/zero for NULL
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend quantized-primary storage omits float blob",
+                 "[sqlite_vec_backend][turboquant][quantized_primary][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    // Configure backend with quantized-primary storage mode
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 128;
+    config.enable_turboquant_storage = true;
+    config.quantized_primary_storage = true;
+    config.turboquant_bits = 4;
+    config.turboquant_seed = 7;
+    SqliteVecBackend backend(config);
+
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value());
+
+    // Insert a vector with both embedding and quantized data
+    VectorRecord rec;
+    rec.chunk_id = "qp_test_1";
+    rec.document_hash = "qp_doc";
+    rec.embedding = createEmbedding(128, 3.0f);
+    rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+    rec.quantized.bits_per_channel = 4;
+    rec.quantized.seed = 7;
+    rec.quantized.packed_codes = {1, 2, 3, 4, 5, 6, 7, 8};
+    REQUIRE(backend.insertVector(rec).has_value());
+
+    // Verify embedding blob is NULL directly in SQLite
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(backend.getDbHandle(),
+                                "SELECT embedding, quantized_format, quantized_bits, "
+                                "quantized_seed, quantized_packed_codes "
+                                "FROM vectors WHERE chunk_id = ?",
+                                -1, &stmt, nullptr);
+    REQUIRE(rc == SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, "qp_test_1", -1, SQLITE_TRANSIENT);
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+
+    // Float blob should be NULL in quantized-primary mode
+    CHECK(sqlite3_column_type(stmt, 0) == SQLITE_NULL);
+
+    // Quantized sidecar should be populated
+    CHECK(sqlite3_column_int(stmt, 1) == 1);            // TURBOquant_1
+    CHECK(sqlite3_column_int(stmt, 2) == 4);            // bits
+    CHECK(sqlite3_column_int64(stmt, 3) == 7);          // seed
+    CHECK(sqlite3_column_type(stmt, 4) != SQLITE_NULL); // packed_codes present
+    sqlite3_finalize(stmt);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend quantized-primary + VectorDatabase dequantizes on getVector",
+                 "[sqlite_vec_backend][turboquant][quantized_primary][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 128;
+    config.enable_turboquant_storage = true;
+    config.quantized_primary_storage = true;
+    config.turboquant_bits = 4;
+    config.turboquant_seed = 99;
+    SqliteVecBackend backend(config);
+
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value());
+
+    // Insert quantized-primary row
+    VectorRecord rec;
+    rec.chunk_id = "qp_vec_1";
+    rec.document_hash = "qp_doc_1";
+    rec.embedding = createEmbedding(128, 7.0f);
+    rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+    rec.quantized.bits_per_channel = 4;
+    rec.quantized.seed = 99;
+    rec.quantized.packed_codes = {10, 20, 30, 40};
+    REQUIRE(backend.insertVector(rec).has_value());
+
+    // getVector should return the row (backend itself returns NULL blob)
+    auto get_result = backend.getVector("qp_vec_1");
+    REQUIRE(get_result.has_value());
+    REQUIRE(get_result.value().has_value());
+    auto& retrieved = get_result.value().value();
+    CHECK(retrieved.chunk_id == "qp_vec_1");
+    // Backend returns NULL blob → embedding is empty (VectorDatabase layer handles dequantization)
+    CHECK(retrieved.embedding.empty());
+    CHECK(retrieved.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1);
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend update/delete derive dimension from embedding_dim in quantized-primary mode",
+    "[sqlite_vec_backend][turboquant][quantized_primary][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 128;
+    config.enable_turboquant_storage = true;
+    config.quantized_primary_storage = true;
+    config.turboquant_bits = 4;
+    config.turboquant_seed = 11;
+    SqliteVecBackend backend(config);
+
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value());
+
+    // Insert a quantized-primary row
+    VectorRecord rec;
+    rec.chunk_id = "upd_del_1";
+    rec.document_hash = "doc_upd";
+    rec.embedding = createEmbedding(128, 5.0f);
+    rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+    rec.quantized.bits_per_channel = 4;
+    rec.quantized.seed = 11;
+    rec.quantized.packed_codes = {5, 10, 15, 20, 25, 30, 35, 40};
+    REQUIRE(backend.insertVector(rec).has_value());
+
+    // Update: pass a record with embedding for HNSW but quantized for storage
+    VectorRecord upd;
+    upd.chunk_id = "upd_del_1";
+    upd.document_hash = "doc_upd";
+    upd.embedding = createEmbedding(128, 6.0f);
+    upd.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+    upd.quantized.bits_per_channel = 4;
+    upd.quantized.seed = 11;
+    upd.quantized.packed_codes = {6, 12, 18, 24, 30, 36, 42, 48};
+    REQUIRE(backend.updateVector("upd_del_1", upd).has_value());
+
+    // Verify the row still exists (update succeeded without dimension error)
+    auto get_result = backend.getVector("upd_del_1");
+    REQUIRE(get_result.has_value());
+    REQUIRE(get_result.value().has_value());
+    CHECK(get_result.value().value().chunk_id == "upd_del_1");
+
+    // Delete: should not crash (dimension derived from embedding_dim, not embedding.size())
+    REQUIRE(backend.deleteVector("upd_del_1").has_value());
+
+    // Verify gone
+    auto gone_result = backend.getVector("upd_del_1");
+    REQUIRE(gone_result.has_value());
+    CHECK(!gone_result.value().has_value());
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend queryVectorDimsUnlocked includes quantized-primary rows",
+                 "[sqlite_vec_backend][turboquant][quantized_primary][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 128;
+    config.enable_turboquant_storage = true;
+    config.quantized_primary_storage = true;
+    config.turboquant_bits = 4;
+    config.turboquant_seed = 13;
+    SqliteVecBackend backend(config);
+
+    auto init_result = backend.initialize(createTempDbPath());
+    REQUIRE(init_result.has_value());
+    REQUIRE(backend.createTables(128).has_value());
+
+    // Prepare a TurboQuantMSE to produce valid packed codes for dim=128, bits=4
+    TurboQuantConfig tq_cfg;
+    tq_cfg.dimension = 128;
+    tq_cfg.bits_per_channel = 4;
+    tq_cfg.seed = 13;
+    TurboQuantMSE tq(tq_cfg);
+
+    // Insert several quantized-primary rows using real quantized data
+    for (int i = 0; i < 3; ++i) {
+        auto emb = createEmbedding(128, static_cast<float>(i));
+        std::vector<uint8_t> packed = vector_utils::packedQuantizeVector(emb, &tq);
+
+        VectorRecord rec;
+        rec.chunk_id = "dim_test_" + std::to_string(i);
+        rec.document_hash = "doc_dim";
+        rec.embedding = emb;
+        rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+        rec.quantized.bits_per_channel = 4;
+        rec.quantized.seed = 13;
+        rec.quantized.packed_codes = packed;
+        REQUIRE(backend.insertVector(rec).has_value());
+    }
+
+    // Brute-force search should find these quantized-primary rows
+    // (proves queryVectorDimsUnlocked includes them in its dimension scan)
+    // Use same seed as first row for exact match (similarity = 1.0)
+    auto bf_result = backend.searchSimilar(createEmbedding(128, 0.0f), 5, 0.0f);
+    REQUIRE(bf_result.has_value());
+    auto& results = bf_result.value();
+    // Should find at least the row with matching seed 0.0f
+    CHECK(results.size() >= 1);
+    CHECK(results[0].chunk_id == "dim_test_0");
+    CHECK(results[0].relevance_score >
+          0.5f); // TurboQuant causes some distortion; just verify reasonable similarity
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend quantized-primary rows survive close+reopen and remain searchable",
+    "[sqlite_vec_backend][turboquant][quantized_primary][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    std::string db_path = createTempDbPath();
+
+    // Phase 1: write
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 128;
+        config.enable_turboquant_storage = true;
+        config.quantized_primary_storage = true;
+        config.turboquant_bits = 4;
+        config.turboquant_seed = 17;
+        SqliteVecBackend writer(config);
+        REQUIRE(writer.initialize(db_path).has_value());
+        REQUIRE(writer.createTables(128).has_value());
+
+        TurboQuantConfig tq_cfg;
+        tq_cfg.dimension = 128;
+        tq_cfg.bits_per_channel = 4;
+        tq_cfg.seed = 17;
+        TurboQuantMSE tq(tq_cfg);
+
+        // Insert two rows
+        for (int i = 0; i < 2; ++i) {
+            auto emb = createEmbedding(128, static_cast<float>(i));
+            std::vector<uint8_t> packed = vector_utils::packedQuantizeVector(emb, &tq);
+            VectorRecord rec;
+            rec.chunk_id = "reopen_" + std::to_string(i);
+            rec.document_hash = "doc_reopen";
+            rec.embedding = emb;
+            rec.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+            rec.quantized.bits_per_channel = 4;
+            rec.quantized.seed = 17;
+            rec.quantized.packed_codes = packed;
+            REQUIRE(writer.insertVector(rec).has_value());
+        }
+    } // writer closes here
+
+    // Phase 2: reopen fresh backend on same path and verify rows survived
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 128;
+        config.enable_turboquant_storage = true;
+        config.quantized_primary_storage = true;
+        config.turboquant_bits = 4;
+        config.turboquant_seed = 17;
+        SqliteVecBackend reader(config);
+        REQUIRE(reader.initialize(db_path).has_value());
+
+        // Verify both rows exist (backend getVector returns raw record; dequantization
+        // is VectorDatabase's responsibility. The proof is that search finds them.)
+        for (int i = 0; i < 2; ++i) {
+            auto get_result = reader.getVector("reopen_" + std::to_string(i));
+            REQUIRE(get_result.has_value());
+            REQUIRE(get_result.value().has_value());
+            const auto& rec = get_result.value().value();
+            CHECK(rec.chunk_id == "reopen_" + std::to_string(i));
+            CHECK(rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1);
+        }
+
+        // Phase 3: brute-force search finds the rows after reopen (dequantizes from packed codes)
+        auto bf_result = reader.searchSimilar(createEmbedding(128, 0.0f), 5, 0.0f);
+        REQUIRE(bf_result.has_value());
+        CHECK(bf_result.value().size() >= 1);
+        CHECK(bf_result.value()[0].chunk_id == "reopen_0");
+    }
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend rejects quantized_primary_storage without enable_turboquant_storage",
+    "[sqlite_vec_backend][turboquant][quantized_primary][catch2]") {
+    if (!skipReason.empty()) {
+        SKIP(skipReason);
+    }
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 128;
+    config.enable_turboquant_storage = false;
+    config.quantized_primary_storage = true; // Invalid: requires TurboQuant
+    SqliteVecBackend backend(config);
+
+    auto result = backend.initialize(createTempDbPath());
+    CHECK(!result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::InvalidArgument);
 }

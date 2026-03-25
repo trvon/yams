@@ -225,6 +225,7 @@ public:
         try {
             // Connect to daemon
             ClientConfig cfg;
+            cfg.executor = getExecutor();
             if (cli_)
                 if (cli_->hasExplicitDataDir()) {
                     cfg.dataDir = cli_->getDataPath();
@@ -238,7 +239,8 @@ public:
             auto leaseHandle = std::move(leaseRes.value());
             auto& client = **leaseHandle;
             // Updated: run asynchronous daemon client call via generic run_result helper
-            auto status = yams::cli::run_result(client.status(), std::chrono::seconds(3));
+            auto status =
+                yams::cli::run_result(client.status(), std::chrono::seconds(3), getExecutor());
             if (!status) {
                 std::cout << "Daemon unavailable: " << status.error().message << "\n";
                 return;
@@ -317,14 +319,16 @@ public:
             LoadModelRequest lreq;
             lreq.modelName = targetModel;
             lreq.preload = true;
-            auto lres = yams::cli::run_result(client.loadModel(lreq), std::chrono::seconds(30));
+            auto lres = yams::cli::run_result(client.loadModel(lreq), std::chrono::seconds(30),
+                                              getExecutor());
             if (!lres) {
                 std::cout << "Model load failed: " << lres.error().message << "\n";
                 return;
             }
 
             // Verify status again
-            auto s2 = yams::cli::run_result(client.status(), std::chrono::seconds(5));
+            auto s2 =
+                yams::cli::run_result(client.status(), std::chrono::seconds(5), getExecutor());
             bool cleared = false;
             if (s2) {
                 try {
@@ -385,6 +389,7 @@ private:
     void ensureDaemonStopped() {
         try {
             yams::daemon::ClientConfig ccfg;
+            ccfg.executor = getExecutor();
             if (cli_)
                 if (cli_->hasExplicitDataDir()) {
                     ccfg.dataDir = cli_->getDataPath();
@@ -395,7 +400,8 @@ private:
                 return;
             auto leaseHandle = std::move(leaseRes.value());
             auto& shut = **leaseHandle;
-            (void)yams::cli::run_result(shut.shutdown(true), std::chrono::seconds(6));
+            (void)yams::cli::run_result(shut.shutdown(true), std::chrono::seconds(6),
+                                        getExecutor());
         } catch (...) {
         }
     }
@@ -2595,7 +2601,8 @@ private:
                 }
                 auto leaseHandle = std::move(leaseRes.value());
                 auto& client = **leaseHandle;
-                auto statusRes = yams::cli::run_result(client.status(), std::chrono::seconds(5));
+                auto statusRes =
+                    yams::cli::run_result(client.status(), std::chrono::seconds(5), getExecutor());
                 if (!statusRes) {
                     std::cout << "  "
                               << ui::status_error("Failed to get daemon status: " +
@@ -3000,7 +3007,8 @@ Result<void> DoctorCommand::repairGraph() {
 
         std::cout << status_pending("Repairing knowledge graph") << "\n";
 
-        auto result = yams::cli::run_result(client.graphRepair(req), std::chrono::seconds(180));
+        auto result = yams::cli::run_result(client.graphRepair(req), std::chrono::seconds(180),
+                                            getExecutor());
         if (!result) {
             std::cout << status_error("Graph repair failed") << "\n";
             return Error{ErrorCode::InternalError,
@@ -3074,7 +3082,8 @@ Result<void> DoctorCommand::validateGraph() {
 
         std::cout << status_pending("Validating knowledge graph") << "\n";
 
-        auto result = yams::cli::run_result(client.graphValidate(req), std::chrono::seconds(120));
+        auto result = yams::cli::run_result(client.graphValidate(req), std::chrono::seconds(120),
+                                            getExecutor());
         if (!result) {
             std::cout << status_error("Graph validation failed") << "\n";
             return Error{ErrorCode::InternalError,
@@ -3426,7 +3435,8 @@ void DoctorCommand::runPrune() {
             spinner->start("Pruning...");
         }
 
-        auto respRes = run_result(lease->call<daemon::PruneRequest>(req), std::chrono::minutes(10));
+        auto respRes = run_result(lease->call<daemon::PruneRequest>(req), std::chrono::minutes(10),
+                                  getExecutor());
         if (spinner) {
             spinner->stop();
         }

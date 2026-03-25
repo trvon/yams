@@ -32,7 +32,14 @@ public:
         : config_(config), initialized_(false), has_error_(false) {
         // Create backend based on configuration
         // For now, always use sqlite-vec for persistence
-        backend_ = std::make_unique<SqliteVecBackend>();
+        // Mirror TurboQuant settings from VectorDatabaseConfig into SqliteVecBackend config
+        SqliteVecBackend::Config backend_config;
+        backend_config.embedding_dim = config_.embedding_dim;
+        backend_config.enable_turboquant_storage = config_.enable_turboquant_storage;
+        backend_config.quantized_primary_storage = config_.quantized_primary_storage;
+        backend_config.turboquant_bits = config_.turboquant_bits;
+        backend_config.turboquant_seed = config_.turboquant_seed;
+        backend_ = std::make_unique<SqliteVecBackend>(backend_config);
     }
 
     bool initialize() {
@@ -40,6 +47,16 @@ public:
 
         if (initialized_) {
             return true;
+        }
+
+        // Contract: quantized-primary storage requires a TurboQuant sidecar to be present.
+        // Without it, there is no way to reconstruct embeddings from packed codes on read.
+        if (config_.quantized_primary_storage && !config_.enable_turboquant_storage) {
+            has_error_ = true;
+            setError(
+                "quantized_primary_storage=true requires enable_turboquant_storage=true: "
+                "cannot reconstruct embeddings from packed codes without TurboQuant configuration");
+            return false;
         }
 
         try {
@@ -582,8 +599,9 @@ public:
             return result;
         }
 
-        // TurboQuant decompression if enabled and record is compressed
-        if (config_.enable_turboquant_storage &&
+        // TurboQuant decompression: dequantize if enabled OR if quantized-primary storage is active
+        // (embedding blob is NULL, so it needs reconstruction from packed codes)
+        if ((config_.enable_turboquant_storage || config_.quantized_primary_storage) &&
             opt_record->quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
             !opt_record->quantized.packed_codes.empty()) {
             // Dequantize from packed storage using owned quantizer
@@ -608,7 +626,19 @@ public:
             return {};
         }
 
-        return result.value();
+        auto records = std::move(result.value());
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            TurboQuantMSE* tq = ensureTurboQuant();
+            for (auto& [id, rec] : records) {
+                if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
+                    !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
+                    rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
+                                                                         config_.embedding_dim, tq);
+                }
+            }
+        }
+
+        return records;
     }
 
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const {
@@ -619,7 +649,19 @@ public:
             return {};
         }
 
-        return result.value();
+        auto records = std::move(result.value());
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            TurboQuantMSE* tq = ensureTurboQuant();
+            for (auto& rec : records) {
+                if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
+                    !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
+                    rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
+                                                                         config_.embedding_dim, tq);
+                }
+            }
+        }
+
+        return records;
     }
 
     bool hasEmbedding(const std::string& document_hash) const {

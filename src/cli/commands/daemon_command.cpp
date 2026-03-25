@@ -6,12 +6,12 @@
 #include <boost/asio/use_future.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
-#include <yams/common/fs_utils.h>
 #include <yams/cli/error_hints.h>
 #include <yams/cli/pipeline_stage_render.h>
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
@@ -3099,21 +3099,23 @@ private:
 
     Result<std::shared_ptr<yams::cli::DaemonClientPool::Lease>>
     acquireDaemonClient(const yams::daemon::ClientConfig& cfg = {}) const {
-        return yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto effectiveCfg = cfg;
+        effectiveCfg.executor = getExecutor();
+        return yams::cli::acquire_cli_daemon_client_shared(effectiveCfg);
     }
 
     template <typename AwaitableProvider>
     auto runDaemonClient(const yams::daemon::ClientConfig& cfg, AwaitableProvider&& provider,
                          std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) const
         -> decltype(yams::cli::run_result(provider(std::declval<yams::daemon::DaemonClient&>()),
-                                          timeout)) {
+                                          timeout, getExecutor())) {
         using ResultType = decltype(yams::cli::run_result(
-            provider(std::declval<yams::daemon::DaemonClient&>()), timeout));
+            provider(std::declval<yams::daemon::DaemonClient&>()), timeout, getExecutor()));
         auto leaseRes = acquireDaemonClient(cfg);
         if (!leaseRes)
             return ResultType{leaseRes.error()};
         auto leaseHandle = std::move(leaseRes.value());
-        return yams::cli::run_result(provider(**leaseHandle), timeout);
+        return yams::cli::run_result(provider(**leaseHandle), timeout, getExecutor());
     }
 
     void restartDaemon() {
