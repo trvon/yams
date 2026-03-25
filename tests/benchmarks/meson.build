@@ -78,6 +78,21 @@ grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   install: false,
 )
 
+# TurboQuant benchmark (arXiv:2504.19874) - always built, no external dependencies
+turboquant_bench = executable('turboquant_bench', files('turboquant_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('yams_benchmarks'),
+    dependency('nlohmann_json'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_turboquant', turboquant_bench)
+
 # Large-scale ingestion benchmark (requires google-benchmark)
 if benchmark_dep.found()
   large_scale_ingestion_bench_deps = [

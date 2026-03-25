@@ -77,6 +77,13 @@ struct IndexConfig {
     // Delta index for incremental updates
     bool enable_delta_index = true;
     size_t delta_threshold = 1000; // Merge delta when it reaches this size
+
+    // TurboQuant compression settings (arXiv:2504.19874)
+    // When enabled, overrides the default 8-bit linear quantization
+    bool enable_turboquant = false;        // Enable TurboQuant compression
+    uint8_t turboquant_bits = 4;           // Bits per channel (1-4)
+    bool turboquant_inner_product = false; // Use two-stage for inner product
+    uint64_t turboquant_seed = 42;         // Random seed for reproducibility
 };
 
 /**

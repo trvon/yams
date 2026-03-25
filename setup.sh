@@ -795,8 +795,9 @@ if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true"
     "-Dbuild-tests=true"
     "-Denable-bench-tests=true"
     "-Denable-vector-tests=true"
+    "-Dbuild-benchmarks=true"
   )
-  echo "Vector/embedding tests enabled for ${BUILD_TYPE} build"
+  echo "Vector/embedding tests and benchmarks enabled for ${BUILD_TYPE} build"
 fi
 
 # Optionally enable tests in Release builds for benchmark executables.

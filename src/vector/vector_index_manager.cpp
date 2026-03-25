@@ -1,4 +1,5 @@
 #include <yams/vector/vector_index_manager.h>
+#include <yams/vector/turboquant.h>
 
 #include <algorithm>
 #include <cmath>
@@ -2375,7 +2376,39 @@ std::vector<float> centroid(const std::vector<std::vector<float>>& vectors) {
     return meanVector(vectors); // For now, same as mean
 }
 
+// Thread-local TurboQuant instance for compression (set by VectorIndexManager)
+// Stores the IndexConfig fields needed for TurboQuant
+struct TurboQuantRuntimeConfig {
+    bool enable_turboquant = false;
+    uint8_t turboquant_bits = 4;
+    bool turboquant_inner_product = false;
+    size_t dimension = 384;
+    uint64_t turboquant_seed = 42;
+    bool config_valid = false; // Whether config has been set
+};
+
+static thread_local std::optional<TurboQuantMSE> g_turboquant_mse;
+static thread_local TurboQuantRuntimeConfig g_turboquant_config;
+
 std::vector<uint8_t> quantizeVector(const std::vector<float>& vector) {
+    // Check if TurboQuant is enabled and configured
+    if (g_turboquant_config.enable_turboquant && g_turboquant_config.config_valid &&
+        vector.size() == g_turboquant_config.dimension) {
+        if (!g_turboquant_mse.has_value() ||
+            g_turboquant_mse->config().dimension != g_turboquant_config.dimension ||
+            g_turboquant_mse->config().bits_per_channel != g_turboquant_config.turboquant_bits) {
+            // Re-initialize TurboQuant with current config
+            TurboQuantConfig tq_config;
+            tq_config.dimension = g_turboquant_config.dimension;
+            tq_config.bits_per_channel = g_turboquant_config.turboquant_bits;
+            tq_config.seed = g_turboquant_config.turboquant_seed;
+            tq_config.inner_product_mode = g_turboquant_config.turboquant_inner_product;
+            g_turboquant_mse.emplace(tq_config);
+        }
+        return g_turboquant_mse->encode(vector);
+    }
+
+    // Fall back to linear 8-bit quantization
     std::vector<uint8_t> quantized;
     quantized.reserve(vector.size());
 
@@ -2390,6 +2423,21 @@ std::vector<uint8_t> quantizeVector(const std::vector<float>& vector) {
 }
 
 std::vector<float> dequantizeVector(const std::vector<uint8_t>& quantized, size_t dimension) {
+    // Check if TurboQuant is enabled and configured
+    if (g_turboquant_config.enable_turboquant && g_turboquant_config.config_valid &&
+        dimension == g_turboquant_config.dimension) {
+        if (!g_turboquant_mse.has_value()) {
+            TurboQuantConfig tq_config;
+            tq_config.dimension = g_turboquant_config.dimension;
+            tq_config.bits_per_channel = g_turboquant_config.turboquant_bits;
+            tq_config.seed = g_turboquant_config.turboquant_seed;
+            tq_config.inner_product_mode = g_turboquant_config.turboquant_inner_product;
+            g_turboquant_mse.emplace(tq_config);
+        }
+        return g_turboquant_mse->decode(quantized);
+    }
+
+    // Fall back to linear 8-bit dequantization
     std::vector<float> vector;
     vector.reserve(dimension);
 
@@ -2411,6 +2459,17 @@ std::vector<float> dequantizeVector(const std::vector<uint8_t>& quantized, size_
 // VectorIndexManager missing method implementations
 void VectorIndexManager::setConfig(const IndexConfig& config) {
     pImpl->setConfig(config);
+
+    // Update thread-local TurboQuant config
+    vector_utils::g_turboquant_config.enable_turboquant = config.enable_turboquant;
+    vector_utils::g_turboquant_config.turboquant_bits = config.turboquant_bits;
+    vector_utils::g_turboquant_config.turboquant_inner_product = config.turboquant_inner_product;
+    vector_utils::g_turboquant_config.dimension = config.dimension;
+    vector_utils::g_turboquant_config.turboquant_seed = config.turboquant_seed;
+    vector_utils::g_turboquant_config.config_valid = true;
+
+    // Reset the TurboQuant instance to re-initialize with new config
+    vector_utils::g_turboquant_mse.reset();
 }
 
 const IndexConfig& VectorIndexManager::getConfig() const {

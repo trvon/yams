@@ -137,6 +137,7 @@ srcs = [
   'mock_embedding_provider.cpp',
   'dim_resolver.cpp',
   'tokenizer.cpp',
+  'turboquant.cpp',
   '../genai/onnx_genai_adapter.cpp',
 ] + sqlite_vec_cpp_src
 

@@ -1,0 +1,376 @@
+/**
+ * TurboQuant Benchmark
+ *
+ * Benchmarks the TurboQuant implementation against baseline linear quantization.
+ * Tests encode latency, decode latency, MSE, and recall.
+ *
+ * Paper: arXiv:2504.19874 - TurboQuant
+ */
+
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <random>
+#include <sstream>
+#include <vector>
+
+#include "benchmark_base.h"
+#include <yams/vector/turboquant.h>
+#include <yams/vector/vector_index_manager.h>
+
+using namespace yams;
+using namespace yams::vector;
+using namespace yams::benchmark;
+
+namespace {
+
+struct BenchmarkConfig {
+    std::vector<size_t> dimensions = {128, 384, 768, 1536};
+    std::vector<uint8_t> bitwidths = {2, 3, 4};
+    std::vector<size_t> dataset_sizes = {1000, 10000};
+    size_t warmup_vectors = 100;
+    size_t benchmark_vectors = 1000;
+    size_t search_queries = 100;
+    uint32_t seed = 42;
+};
+
+struct BenchmarkResult {
+    size_t dimension;
+    uint8_t bitwidth;
+    double encode_latency_us_p50;
+    double encode_latency_us_p95;
+    double decode_latency_us_p50;
+    double decode_latency_us_p95;
+    double mse;
+    double recall_at_10;
+    double storage_bytes_per_vector;
+    double baseline_encode_p50;
+    double baseline_decode_p50;
+    double speedup_encode;
+    double speedup_decode;
+};
+
+// Baseline: Linear 8-bit quantization (matches vector_index_manager.cpp)
+std::vector<uint8_t> baselineEncode(const std::vector<float>& vector) {
+    std::vector<uint8_t> quantized;
+    quantized.reserve(vector.size());
+    for (float val : vector) {
+        float clamped = std::max(-1.0f, std::min(1.0f, val));
+        float scaled = (clamped + 1.0f) * 127.5f;
+        quantized.push_back(static_cast<uint8_t>(std::round(scaled)));
+    }
+    return quantized;
+}
+
+std::vector<float> baselineDecode(const std::vector<uint8_t>& quantized, size_t dim) {
+    std::vector<float> vector;
+    vector.reserve(dim);
+    for (size_t i = 0; i < std::min(quantized.size(), dim); ++i) {
+        float val = (quantized[i] / 127.5f) - 1.0f;
+        vector.push_back(val);
+    }
+    return vector;
+}
+
+std::vector<float> generateUnitVector(size_t dim, std::mt19937& rng) {
+    std::vector<float> v(dim);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    float norm_sq = 0.0f;
+    for (size_t i = 0; i < dim; ++i) {
+        v[i] = dist(rng);
+        norm_sq += v[i] * v[i];
+    }
+    float norm = std::sqrt(norm_sq);
+    for (size_t i = 0; i < dim; ++i) {
+        v[i] /= norm;
+    }
+    return v;
+}
+
+double computeMSE(const std::vector<float>& a, const std::vector<float>& b) {
+    double sum = 0.0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        double diff = static_cast<double>(a[i]) - static_cast<double>(b[i]);
+        sum += diff * diff;
+    }
+    return sum / a.size();
+}
+
+float cosineSimilarity(const std::vector<float>& a, const std::vector<float>& b) {
+    float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
+    for (size_t i = 0; i < a.size(); ++i) {
+        dot += a[i] * b[i];
+        norm_a += a[i] * a[i];
+        norm_b += b[i] * b[i];
+    }
+    return dot / (std::sqrt(norm_a) * std::sqrt(norm_b) + 1e-8f);
+}
+
+void runBenchmark(const BenchmarkConfig& config) {
+    std::mt19937 rng(config.seed);
+    std::vector<BenchmarkResult> results;
+
+    std::cout << "=== TurboQuant Benchmark ===" << std::endl;
+    std::cout << "Warmup vectors: " << config.warmup_vectors << std::endl;
+    std::cout << "Benchmark vectors: " << config.benchmark_vectors << std::endl;
+    std::cout << "Search queries: " << config.search_queries << std::endl;
+    std::cout << std::endl;
+
+    for (size_t dim : config.dimensions) {
+        for (uint8_t bits : config.bitwidths) {
+            std::cout << "Dimension: " << dim << ", Bits: " << (int)bits << std::endl;
+
+            // Setup TurboQuant
+            TurboQuantConfig tq_config;
+            tq_config.dimension = dim;
+            tq_config.bits_per_channel = bits;
+            tq_config.seed = config.seed;
+            TurboQuantMSE quantizer(tq_config);
+
+            // Generate test vectors
+            std::vector<std::vector<float>> vectors;
+            vectors.reserve(config.benchmark_vectors + config.warmup_vectors);
+            for (size_t i = 0; i < config.benchmark_vectors + config.warmup_vectors; ++i) {
+                vectors.push_back(generateUnitVector(dim, rng));
+            }
+
+            // Warmup
+            for (size_t i = 0; i < config.warmup_vectors; ++i) {
+                volatile auto idx = quantizer.encode(vectors[i]);
+                (void)idx;
+            }
+
+            // Benchmark encode latency
+            std::vector<double> encode_times;
+            encode_times.reserve(config.benchmark_vectors);
+            for (size_t i = config.warmup_vectors; i < vectors.size(); ++i) {
+                auto start = std::chrono::high_resolution_clock::now();
+                auto indices = quantizer.encode(vectors[i]);
+                auto end = std::chrono::high_resolution_clock::now();
+                double us = std::chrono::duration<double, std::micro>(end - start).count();
+                encode_times.push_back(us);
+                (void)indices;
+            }
+
+            std::sort(encode_times.begin(), encode_times.end());
+            double encode_p50 = encode_times[encode_times.size() / 2];
+            double encode_p95 = encode_times[(size_t)(encode_times.size() * 0.95)];
+
+            // Benchmark decode latency
+            std::vector<double> decode_times;
+            std::vector<std::vector<uint8_t>> all_indices;
+            all_indices.reserve(config.benchmark_vectors);
+            for (size_t i = config.warmup_vectors; i < vectors.size(); ++i) {
+                all_indices.push_back(quantizer.encode(vectors[i]));
+            }
+
+            for (size_t i = 0; i < all_indices.size(); ++i) {
+                auto start = std::chrono::high_resolution_clock::now();
+                volatile auto recon = quantizer.decode(all_indices[i]);
+                auto end = std::chrono::high_resolution_clock::now();
+                double us = std::chrono::duration<double, std::micro>(end - start).count();
+                decode_times.push_back(us);
+                (void)recon;
+            }
+
+            std::sort(decode_times.begin(), decode_times.end());
+            double decode_p50 = decode_times[decode_times.size() / 2];
+            double decode_p95 = decode_times[(size_t)(decode_times.size() * 0.95)];
+
+            // Baseline: Linear 8-bit quantization benchmark
+            std::vector<double> baseline_encode_times;
+            baseline_encode_times.reserve(config.benchmark_vectors);
+            for (size_t i = config.warmup_vectors; i < vectors.size(); ++i) {
+                auto start = std::chrono::high_resolution_clock::now();
+                volatile auto indices = baselineEncode(vectors[i]);
+                auto end = std::chrono::high_resolution_clock::now();
+                baseline_encode_times.push_back(
+                    std::chrono::duration<double, std::micro>(end - start).count());
+            }
+            std::sort(baseline_encode_times.begin(), baseline_encode_times.end());
+            double baseline_encode_p50 = baseline_encode_times[baseline_encode_times.size() / 2];
+
+            std::vector<std::vector<uint8_t>> baseline_indices;
+            baseline_indices.reserve(config.benchmark_vectors);
+            for (size_t i = config.warmup_vectors; i < vectors.size(); ++i) {
+                baseline_indices.push_back(baselineEncode(vectors[i]));
+            }
+
+            std::vector<double> baseline_decode_times;
+            baseline_decode_times.reserve(config.benchmark_vectors);
+            for (size_t i = 0; i < baseline_indices.size(); ++i) {
+                auto start = std::chrono::high_resolution_clock::now();
+                volatile auto recon = baselineDecode(baseline_indices[i], dim);
+                auto end = std::chrono::high_resolution_clock::now();
+                baseline_decode_times.push_back(
+                    std::chrono::duration<double, std::micro>(end - start).count());
+            }
+            std::sort(baseline_decode_times.begin(), baseline_decode_times.end());
+            double baseline_decode_p50 = baseline_decode_times[baseline_decode_times.size() / 2];
+
+            double speedup_encode = baseline_encode_p50 / encode_p50;
+            double speedup_decode = baseline_decode_p50 / decode_p50;
+
+            // Compute MSE
+            double total_mse = 0.0;
+            for (size_t i = 0; i < all_indices.size(); ++i) {
+                auto recon = quantizer.decode(all_indices[i]);
+                total_mse += computeMSE(vectors[config.warmup_vectors + i], recon);
+            }
+            double avg_mse = total_mse / all_indices.size();
+
+            // Compute recall (approximate nearest neighbor)
+            // Use subset for recall computation
+            size_t recall_vectors = std::min(config.search_queries, all_indices.size());
+            size_t correct_top1 = 0;
+            size_t correct_top10 = 0;
+
+            for (size_t q = 0; q < recall_vectors; ++q) {
+                const auto& query = vectors[config.warmup_vectors + q];
+                auto query_indices = quantizer.encode(query);
+                auto query_recon = quantizer.decode(query_indices);
+
+                // Find best match by brute force in compressed space
+                size_t best_idx = 0;
+                float best_sim = -1.0f;
+                for (size_t i = 0; i < all_indices.size(); ++i) {
+                    if (i == q)
+                        continue;
+                    auto cand_recon = quantizer.decode(all_indices[i]);
+                    float sim = cosineSimilarity(query_recon, cand_recon);
+                    if (sim > best_sim) {
+                        best_sim = sim;
+                        best_idx = i;
+                    }
+                }
+
+                // True nearest in original space
+                size_t true_best = 0;
+                float true_best_sim = -1.0f;
+                for (size_t i = 0; i < vectors.size() - config.warmup_vectors; ++i) {
+                    if (i == q)
+                        continue;
+                    float sim = cosineSimilarity(query, vectors[config.warmup_vectors + i]);
+                    if (sim > true_best_sim) {
+                        true_best_sim = sim;
+                        true_best = i;
+                    }
+                }
+
+                if (best_idx == true_best)
+                    correct_top1++;
+            }
+
+            double recall = static_cast<double>(correct_top1) / recall_vectors;
+
+            // Storage size
+            size_t storage_bytes = quantizer.storageSize();
+
+            BenchmarkResult result;
+            result.dimension = dim;
+            result.bitwidth = bits;
+            result.encode_latency_us_p50 = encode_p50;
+            result.encode_latency_us_p95 = encode_p95;
+            result.decode_latency_us_p50 = decode_p50;
+            result.decode_latency_us_p95 = decode_p95;
+            result.mse = avg_mse;
+            result.recall_at_10 = recall;
+            result.storage_bytes_per_vector = static_cast<double>(storage_bytes);
+            result.baseline_encode_p50 = baseline_encode_p50;
+            result.baseline_decode_p50 = baseline_decode_p50;
+            result.speedup_encode = speedup_encode;
+            result.speedup_decode = speedup_decode;
+
+            results.push_back(result);
+
+            std::cout << "  Encode: " << std::fixed << std::setprecision(2) << encode_p50 << "/"
+                      << encode_p95 << " us (p50/p95)"
+                      << " [baseline: " << baseline_encode_p50
+                      << " us, speedup: " << std::setprecision(2) << speedup_encode << "x]"
+                      << std::endl;
+            std::cout << "  Decode: " << decode_p50 << "/" << decode_p95 << " us (p50/p95)"
+                      << " [baseline: " << baseline_decode_p50
+                      << " us, speedup: " << std::setprecision(2) << speedup_decode << "x]"
+                      << std::endl;
+            std::cout << "  MSE: " << std::scientific << avg_mse << std::endl;
+            std::cout << "  Recall@1: " << std::fixed << std::setprecision(4) << recall
+                      << std::endl;
+            std::cout << "  Storage: " << storage_bytes << " bytes (vs 8-bit baseline: " << dim * 8
+                      << " bytes)" << std::endl;
+            std::cout << std::endl;
+        }
+    }
+
+    // Write results to JSON
+    nlohmann::json json_output;
+    json_output["benchmark"] = "turboquant";
+    json_output["date"] = __DATE__;
+    json_output["config"] = {{"dimensions", config.dimensions},
+                             {"bitwidths", config.bitwidths},
+                             {"warmup_vectors", config.warmup_vectors},
+                             {"benchmark_vectors", config.benchmark_vectors},
+                             {"search_queries", config.search_queries}};
+
+    nlohmann::json::array_t results_array;
+    for (const auto& r : results) {
+        results_array.push_back({{"dimension", r.dimension},
+                                 {"bitwidth", r.bitwidth},
+                                 {"encode_latency_us_p50", r.encode_latency_us_p50},
+                                 {"encode_latency_us_p95", r.encode_latency_us_p95},
+                                 {"decode_latency_us_p50", r.decode_latency_us_p50},
+                                 {"decode_latency_us_p95", r.decode_latency_us_p95},
+                                 {"mse", r.mse},
+                                 {"recall_at_1", r.recall_at_10},
+                                 {"storage_bytes", r.storage_bytes_per_vector},
+                                 {"baseline_encode_us_p50", r.baseline_encode_p50},
+                                 {"baseline_decode_us_p50", r.baseline_decode_p50},
+                                 {"speedup_encode", r.speedup_encode},
+                                 {"speedup_decode", r.speedup_decode}});
+    }
+    json_output["results"] = results_array;
+
+    std::cout << "=== Results JSON ===" << std::endl;
+    std::cout << json_output.dump(2) << std::endl;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    BenchmarkConfig config;
+
+    // Parse simple args
+    for (int i = 1; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if (arg == "--help" || arg == "-h") {
+            std::cout << "Usage: " << argv[0] << " [options]" << std::endl;
+            std::cout << "Options:" << std::endl;
+            std::cout << "  --dims=d1,d2,...   Dimensions to test" << std::endl;
+            std::cout << "  --bits=b1,b2,...   Bit-widths to test" << std::endl;
+            std::cout << "  --vectors=N        Number of vectors to benchmark" << std::endl;
+            return 0;
+        } else if (arg.substr(0, 7) == "--dims=") {
+            std::string dims_str = arg.substr(7);
+            std::stringstream ss(dims_str);
+            std::string dim_str;
+            config.dimensions.clear();
+            while (std::getline(ss, dim_str, ',')) {
+                config.dimensions.push_back(std::stoul(dim_str));
+            }
+        } else if (arg.substr(0, 7) == "--bits=") {
+            std::string bits_str = arg.substr(7);
+            std::stringstream ss(bits_str);
+            std::string bit_str;
+            config.bitwidths.clear();
+            while (std::getline(ss, bit_str, ',')) {
+                config.bitwidths.push_back(static_cast<uint8_t>(std::stoul(bit_str)));
+            }
+        } else if (arg.substr(0, 10) == "--vectors=") {
+            config.benchmark_vectors = std::stoul(arg.substr(10));
+        }
+    }
+
+    runBenchmark(config);
+
+    return 0;
+}
