@@ -78,18 +78,18 @@ public:
     }
 
     Result<void> execute() override {
-        std::promise<Result<void>> prom;
-        auto fut = prom.get_future();
+        auto prom = std::make_shared<std::promise<Result<void>>>();
+        auto fut = prom->get_future();
         boost::asio::co_spawn(
             getExecutor(),
-            [this, &prom]() -> boost::asio::awaitable<void> {
+            [this, prom]() -> boost::asio::awaitable<void> {
                 try {
                     auto r = co_await this->executeAsync();
-                    prom.set_value(std::move(r));
+                    prom->set_value(std::move(r));
                 } catch (const std::exception& e) {
-                    prom.set_value(Error{ErrorCode::InternalError, e.what()});
+                    prom->set_value(Error{ErrorCode::InternalError, e.what()});
                 } catch (...) {
-                    prom.set_value(Error{ErrorCode::InternalError, "unknown delete error"});
+                    prom->set_value(Error{ErrorCode::InternalError, "unknown delete error"});
                 }
                 co_return;
             },

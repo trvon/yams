@@ -135,6 +135,7 @@ public:
 
         // Connect to daemon
         ClientConfig cfg;
+        cfg.executor = getExecutor();
         if (cli_->hasExplicitDataDir()) {
             cfg.dataDir = cli_->getDataPath();
         }
@@ -221,14 +222,22 @@ public:
         };
 
         // Execute the RPC call
-        std::promise<Result<RepairResponse>> prom;
-        auto fut = prom.get_future();
+        auto prom = std::make_shared<std::promise<Result<RepairResponse>>>();
+        auto fut = prom->get_future();
         boost::asio::co_spawn(
             getExecutor(),
-            [leaseHandle, req, &prom, &onEvent]() mutable -> boost::asio::awaitable<void> {
-                auto& client = **leaseHandle;
-                auto r = co_await client.callRepair(req, onEvent);
-                prom.set_value(std::move(r));
+            [leaseHandle, req, prom, onEvent]() mutable -> boost::asio::awaitable<void> {
+                try {
+                    auto& client = **leaseHandle;
+                    auto r = co_await client.callRepair(req, onEvent);
+                    prom->set_value(std::move(r));
+                } catch (const std::exception& e) {
+                    prom->set_value(Error{ErrorCode::InternalError,
+                                          std::string("Repair awaitable threw: ") + e.what()});
+                } catch (...) {
+                    prom->set_value(Error{ErrorCode::InternalError,
+                                          "Repair awaitable threw unknown exception"});
+                }
                 co_return;
             },
             boost::asio::detached);
@@ -247,8 +256,8 @@ public:
         std::optional<Result<RepairResponse>> res;
         constexpr auto kPollInterval = std::chrono::milliseconds(500);
         while (fut.wait_for(kPollInterval) != std::future_status::ready) {
-            const auto idleFor =
-                std::chrono::milliseconds(nowMillis() - lastProgressAtMs.load(std::memory_order_relaxed));
+            const auto idleFor = std::chrono::milliseconds(
+                nowMillis() - lastProgressAtMs.load(std::memory_order_relaxed));
             if (idleFor >= localWaitTimeout) {
                 std::string op;
                 std::string phase;
@@ -266,22 +275,23 @@ public:
 
                 const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::steady_clock::now() - startTime);
-                std::string timeoutMessage =
-                    "Repair RPC timed out after " + std::to_string(localWaitTimeout.count()) +
-                    "ms without progress";
+                std::string timeoutMessage = "Repair RPC timed out after " +
+                                             std::to_string(localWaitTimeout.count()) +
+                                             "ms without progress";
                 if (!op.empty()) {
                     timeoutMessage += " (last phase: " + op;
                     if (!phase.empty())
                         timeoutMessage += "/" + phase;
                     if (total > 0)
-                        timeoutMessage += " " + std::to_string(processed) + "/" +
-                                          std::to_string(total);
+                        timeoutMessage +=
+                            " " + std::to_string(processed) + "/" + std::to_string(total);
                     timeoutMessage += ")";
                 }
                 if (!message.empty())
                     timeoutMessage += ": " + message;
-                timeoutMessage += ". Total elapsed=" + std::to_string(elapsed.count()) +
-                                  "s. Increase YAMS_REPAIR_RPC_TIMEOUT_MS if work is still progressing.";
+                timeoutMessage +=
+                    ". Total elapsed=" + std::to_string(elapsed.count()) +
+                    "s. Increase YAMS_REPAIR_RPC_TIMEOUT_MS if work is still progressing.";
 
                 res = Result<RepairResponse>(Error{ErrorCode::Timeout, timeoutMessage});
                 break;

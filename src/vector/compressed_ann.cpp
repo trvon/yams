@@ -56,7 +56,8 @@ CompressedANNIndex::CompressedANNIndex(CompressedANNIndex&& other) noexcept
     : config_(other.config_), scorer_(std::move(other.scorer_)), nodes_(std::move(other.nodes_)),
       packed_storage_(std::move(other.packed_storage_)),
       packed_codes_(std::move(other.packed_codes_)), rng_(std::move(other.rng_)),
-      transformed_query_cache_(std::move(other.transformed_query_cache_)) {
+      transformed_query_cache_(std::move(other.transformed_query_cache_)),
+      transformed_storage_(std::move(other.transformed_storage_)) {
     // Rebuild spans after move since storage may have moved
     for (size_t i = 0; i < nodes_.size(); ++i) {
         nodes_[i].packed_code = packed_codes_[i];
@@ -72,6 +73,7 @@ CompressedANNIndex& CompressedANNIndex::operator=(CompressedANNIndex&& other) no
         packed_codes_ = std::move(other.packed_codes_);
         rng_ = std::move(other.rng_);
         transformed_query_cache_ = std::move(other.transformed_query_cache_);
+        transformed_storage_ = std::move(other.transformed_storage_);
         for (size_t i = 0; i < nodes_.size(); ++i) {
             nodes_[i].packed_code = packed_codes_[i];
         }
@@ -80,7 +82,8 @@ CompressedANNIndex& CompressedANNIndex::operator=(CompressedANNIndex&& other) no
 }
 
 size_t CompressedANNIndex::memoryBytes() const {
-    size_t bytes = packed_storage_.size(); // packed corpus
+    size_t bytes = packed_storage_.size();                // packed corpus
+    bytes += transformed_storage_.size() * sizeof(float); // precomputed transformed vectors
     for (const auto& node : nodes_) {
         bytes += node.neighbors.size() * sizeof(size_t); // graph edges
     }
@@ -112,8 +115,9 @@ void CompressedANNIndex::connectNodeToGraph(size_t new_node_idx) {
     if (nodes_.empty())
         return;
 
-    // For each existing node (in reverse to favor newer/more connected nodes),
-    // compute score and keep top-M neighbors
+    // For each existing node, compute metric-aligned packed score and keep top-M neighbors.
+    // Uses the SAME scorer as search: scoreFromPacked(transformed_new, packed_cand).
+    // This ensures new edges reflect the angular/cosine-like geometry used at search time.
     const size_t m = std::min(config_.m, nodes_.size() - 1);
     if (m == 0)
         return;
@@ -133,36 +137,25 @@ void CompressedANNIndex::connectNodeToGraph(size_t new_node_idx) {
         }
     }
 
-    // Score all candidates (this is build-time so latency is acceptable)
+    // Score all candidates using metric-aligned packed scoring
     std::vector<std::pair<float, size_t>> scored;
     scored.reserve(candidate_indices.size());
 
-    // Create a dummy transformed query from the packed code itself for build scoring
-    // (we use the code as its own "query" for symmetric neighbor selection)
-    std::vector<float> dummy_transformed(config_.dimension, 0.0f);
-    for (size_t j = 0; j < config_.dimension; ++j) {
-        // Score node vs new_node using simple XOR-like comparison in packed space
-        // For symmetric NSW construction, we score from both sides
-        dummy_transformed[j] = 0.0f; // placeholder
-    }
+    // Precompute transformed vector for the new node (if not already in storage)
+    // For incremental builds, ensure we have the transformed vector
+    std::vector<float> new_transformed(config_.dimension);
+    scorer_.transformPackedCode(new_packed,
+                                std::span<float>(new_transformed.data(), config_.dimension));
 
-    // Actually, use the packed code's centroid (precomputed per-code latent)
-    // For simplicity in build, score by raw L2 on a zero query (distance from origin)
-    // This is just for graph construction - search uses real transformed queries
     for (size_t cand_idx : candidate_indices) {
-        // Symmetric score for NSW construction: XOR distance between packed codes
-        float xor_dist = 0.0f;
-        const auto& cand_code = packed_codes_[cand_idx];
-        for (size_t b = 0; b < packedByteLen(config_.dimension, config_.bits_per_channel); ++b) {
-            uint8_t x = new_packed[b] ^ cand_code[b];
-            // Count set bits as rough distance proxy
-            xor_dist += static_cast<float>(__builtin_popcount(x));
-        }
-        // Negative XOR = we want SMALL xor distance (close codes)
-        scored.emplace_back(-xor_dist, cand_idx);
+        // Metric-aligned score: same as search path
+        float s = scorer_.scoreFromPacked(
+            std::span<const float>(new_transformed.data(), config_.dimension),
+            packed_codes_[cand_idx]);
+        scored.emplace_back(s, cand_idx);
     }
 
-    // Sort by score (higher = smaller XOR distance = closer)
+    // Sort by score descending (higher = closer in packed-score space)
     std::partial_sort(scored.begin(), scored.begin() + static_cast<long>(m), scored.end(),
                       [](const auto& a, const auto& b) { return a.first > b.first; });
 
@@ -180,37 +173,76 @@ void CompressedANNIndex::connectNodeToGraph(size_t new_node_idx) {
     }
 }
 
-Result<void> CompressedANNIndex::build() {
-    // Build NSW-style graph: connect each node to nearest M neighbors
-    // Uses XOR distance in packed space (O(n^2) build, fast for < 1000 vectors)
-    const size_t max_neighbors = std::min(config_.m, nodes_.size() - 1);
-    for (size_t i = 0; i < nodes_.size(); ++i) {
-        std::vector<std::pair<float, size_t>> dists;
-        dists.reserve(nodes_.size());
+Result<void> CompressedANNIndex::buildMetricAligned() {
+    // ========================================================================
+    // METRIC-ALIGNED NSW GRAPH CONSTRUCTION
+    // ========================================================================
+    // Replaces XOR-distance neighbor selection with packed-score-aligned selection.
+    // This fixes the graph-topology mismatch that caused poor recall at 10k+.
+    //
+    // The key insight: graph edges must reflect the SAME metric used at search time.
+    // - Old: XOR distance between packed codes (popcount of a ^ b)
+    // - New: scoreFromPacked(transformed_a, b) — the same LUT used during search
+    //
+    // Algorithm:
+    // 1. Transform every node's packed code ONCE (O(n × dim) — done once)
+    // 2. For each node i: score all j≠i using scoreFromPacked(transformed_i, packed_j)
+    //    (O(n² × packed_bytes) using LUT — same cost as XOR but correct metric)
+    // 3. Connect i to its top-M neighbors by packed score
+    //
+    // This is O(n²) scoring + O(n² × dim) for the initial transform pass.
+    // Build time is dominated by the transform pass; scoring itself is fast
+    // since scoreFromPacked is just LUT lookup + accumulation.
+    // ========================================================================
 
-        for (size_t j = 0; j < nodes_.size(); ++j) {
+    const size_t n = nodes_.size();
+    const size_t dim = config_.dimension;
+    const size_t max_neighbors = std::min(config_.m, n - 1);
+
+    if (n == 0)
+        return {};
+
+    // --- Step 1: Precompute all transformed vectors (transform each node once) ---
+    transformed_storage_.resize(n * dim);
+    for (size_t i = 0; i < n; ++i) {
+        scorer_.transformPackedCode(packed_codes_[i],
+                                    std::span<float>(transformed_storage_.data() + i * dim, dim));
+    }
+
+    // --- Step 2: Build metric-aligned graph ---
+    for (size_t i = 0; i < n; ++i) {
+        std::vector<std::pair<float, size_t>> scored;
+        scored.reserve(n - 1);
+
+        std::span<const float> transformed_i(transformed_storage_.data() + i * dim, dim);
+
+        for (size_t j = 0; j < n; ++j) {
             if (i == j)
                 continue;
-            float d = 0.0f;
-            const auto& a = packed_codes_[i];
-            const auto& b = packed_codes_[j];
-            size_t byte_len = packedByteLen(config_.dimension, config_.bits_per_channel);
-            for (size_t k = 0; k < byte_len; ++k) {
-                d += static_cast<float>(__builtin_popcount(a[k] ^ b[k]));
-            }
-            dists.emplace_back(d, j);
+            // Use the SAME scorer as search: scoreFromPacked(transformed_query, packed_code)
+            // Higher score = more similar = closer in angular space
+            float s = scorer_.scoreFromPacked(transformed_i, packed_codes_[j]);
+            scored.emplace_back(s, j);
         }
 
-        // Sort by XOR distance (ascending = closer)
-        std::partial_sort(dists.begin(), dists.begin() + static_cast<long>(max_neighbors),
-                          dists.end(),
-                          [](const auto& x, const auto& y) { return x.first < y.first; });
+        // Sort by score descending (higher = closer in packed-score space)
+        std::partial_sort(scored.begin(), scored.begin() + static_cast<long>(max_neighbors),
+                          scored.end(),
+                          [](const auto& x, const auto& y) { return x.first > y.first; });
 
         for (size_t k = 0; k < max_neighbors; ++k) {
-            nodes_[i].neighbors.push_back(dists[k].second);
+            nodes_[i].neighbors.push_back(scored[k].second);
         }
     }
+
     return {};
+}
+
+Result<void> CompressedANNIndex::build() {
+    // Build NSW-style graph: connect each node to nearest M neighbors.
+    // Uses metric-aligned scoring (scoreFromPacked) — the same metric as search.
+    // This replaces the old XOR-distance approach that caused topology mismatch.
+    return buildMetricAligned();
 }
 
 std::vector<size_t> CompressedANNIndex::greedyDescent(std::span<const float> transformed_query,
@@ -293,39 +325,51 @@ CompressedANNIndex::searchWithStats(const std::vector<float>& query_embedding, s
     scorer_.transformQueryInPlace(query_embedding, cache_span);
     std::span<const float> transformed_query(transformed_query_cache_);
 
-    // Phase 1 (Milestone 9): entry-point heuristic — node with most neighbors (highest
-    // connectivity)
-    size_t entry_idx = 0;
-    size_t best_conn = 0;
-    for (size_t i = 0; i < nodes_.size(); ++i) {
-        if (nodes_[i].neighbors.size() > best_conn) {
-            best_conn = nodes_[i].neighbors.size();
-            entry_idx = i;
+    // Adaptive multi-start search: scale with corpus size.
+    // Single-start is sufficient for n ≤ 1k; larger corpora need diversification.
+    // Multi-start explores multiple graph regions, dramatically improving recall.
+    size_t num_starts;
+    if (nodes_.size() <= 1000) {
+        num_starts = 1;
+    } else if (nodes_.size() <= 10000) {
+        num_starts = 4;
+    } else if (nodes_.size() <= 50000) {
+        num_starts = 8;
+    } else {
+        num_starts = 16;
+    }
+
+    // Collect all candidates from multi-start greedy descent
+    std::vector<size_t> all_candidates;
+    all_candidates.reserve(num_starts * config_.ef_search * 4);
+    std::unordered_set<size_t> seen;
+    seen.reserve(num_starts * config_.ef_search * 4);
+
+    std::mt19937 local_rng(42); // deterministic per search
+    for (size_t s = 0; s < num_starts; ++s) {
+        // Reservoir-sampled entry point (fast, no full shuffle)
+        size_t entry_idx = std::uniform_int_distribution<size_t>(0, nodes_.size() - 1)(local_rng);
+        auto candidates = greedyDescent(transformed_query, entry_idx, config_.ef_search);
+        for (size_t c : candidates) {
+            if (seen.insert(c).second) {
+                all_candidates.push_back(c);
+            }
         }
     }
 
-    // Greedy descent in NSW graph — visits bounded frontier, not all nodes
-    std::vector<size_t> top_candidates =
-        greedyDescent(transformed_query, entry_idx, config_.ef_search);
-
-    // Defensive: if greedyDescent returns empty, return empty results
-    if (top_candidates.empty()) {
+    // Defensive: if no candidates found, return empty
+    if (all_candidates.empty()) {
         stats.results.clear();
         return stats;
     }
 
-    // If greedyDescent returned fewer candidates than requested k, that's fine
-    // We sort and return what we have
-    size_t top_cand_count = top_candidates.size(); // for logging below
-    (void)top_cand_count;                          // suppress unused in non-debug
+    stats.candidate_count = all_candidates.size();
+    stats.decode_escapes = 0; // Zero decode in compressed path
 
-    stats.candidate_count = top_candidates.size();
-    stats.decode_escapes = 0; // No decode in compressed path
-
-    // Score only the frontier with scoreFromPacked — zero decode
+    // Score all candidates with scoreFromPacked — zero decode
     std::vector<std::pair<float, size_t>> scored;
-    scored.reserve(top_candidates.size());
-    for (size_t idx : top_candidates) {
+    scored.reserve(all_candidates.size());
+    for (size_t idx : all_candidates) {
         float s = packedScore(scorer_, transformed_query, packed_codes_[idx]);
         scored.emplace_back(s, nodes_[idx].id);
     }

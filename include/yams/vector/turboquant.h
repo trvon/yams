@@ -240,6 +240,21 @@ public:
                           std::span<const uint8_t> packed_codes) const;
 
     /**
+     * Transform a packed code into the same space as transformQuery().
+     *
+     * For graph construction (buildMetricAligned), we need transformed vectors for all
+     * corpus nodes. This avoids the packedDecode() → transformQuery() round-trip by
+     * directly unpacking the bit indices and scaling by the same Hadamard+sign pipeline.
+     *
+     * Math: the packed code stores round(scale * D * H * v). We return scale * D * packed.
+     * This is approximately the same as transformQuery(v) but skips the encode→decode detour.
+     *
+     * @param packed_code Packed TurboQuant bytes (size = (dim*bits+7)/8)
+     * @param output Pre-allocated span with at least dimension elements
+     */
+    void transformPackedCode(std::span<const uint8_t> packed_code, std::span<float> output) const;
+
+    /**
      * Fit per-coordinate scales from training vectors using Welford's algorithm.
      * Improves scoring quality when training data is representative of the corpus.
      * @param vectors Training vectors (unit sphere, all dim=config_.dimension)

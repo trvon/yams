@@ -154,21 +154,22 @@ Result<void> UpdateCommand::execute() {
                 std::chrono::milliseconds backoff{100};
                 Error last_err{ErrorCode::Unknown, "unknown"};
                 for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
-                    std::promise<Result<yams::daemon::UpdateDocumentResponse>> prom;
-                    auto fut = prom.get_future();
+                    auto prom = std::make_shared<
+                        std::promise<Result<yams::daemon::UpdateDocumentResponse>>>();
+                    auto fut = prom->get_future();
                     boost::asio::co_spawn(
                         getExecutor(),
-                        [leaseHandle, dreq, &prom]() mutable -> boost::asio::awaitable<void> {
+                        [leaseHandle, dreq, prom]() mutable -> boost::asio::awaitable<void> {
                             try {
                                 auto& client = **leaseHandle;
                                 auto r = co_await client.call(dreq);
-                                prom.set_value(std::move(r));
+                                prom->set_value(std::move(r));
                             } catch (const std::exception& e) {
-                                prom.set_value(
+                                prom->set_value(
                                     Error{ErrorCode::InternalError,
                                           std::string("Update daemon call threw: ") + e.what()});
                             } catch (...) {
-                                prom.set_value(
+                                prom->set_value(
                                     Error{ErrorCode::InternalError, "Update daemon call threw"});
                             }
                             co_return;

@@ -105,18 +105,16 @@ public:
      * @brief Pre-build the NSW navigation graph from all added vectors.
      *
      * Must be called after all insertions and before any search.
-     * Uses compressed scoring (scoreFromPacked) to select neighbors.
+     * Uses METRIC-ALIGNED neighbor selection: graph edges are chosen using
+     * scoreFromPacked() — the SAME scorer used at search time.
+     * This fixes the graph-topology mismatch (was XOR distance, now angular/packed-score).
      *
      * @return Error on failure
      */
     Result<void> build();
 
     /**
-     * @brief Greedy NSW search using packed scoring only.
-     *
-     * Traverses the pre-built NSW graph, scoring candidates with
-    /**
-     * @brief Return total in-memory bytes for packed corpus + graph.
+     * @brief Return total in-memory bytes for packed corpus + graph + transformed vectors.
      */
     size_t memoryBytes() const;
 
@@ -140,6 +138,19 @@ private:
     /** Build NSW graph: connect each new node to its ef_search nearest existing neighbors */
     void connectNodeToGraph(size_t new_node_idx);
 
+    /**
+     * @brief Rebuild the NSW graph using metric-aligned neighbor selection.
+     *
+     * Replaces XOR-distance graph construction with packed-score-aligned construction.
+     * This ensures graph edges reflect the same angular/cosine-like geometry used
+     * during search, fixing the topology mismatch that caused poor recall at 10k+.
+     *
+     * Uses precomputed transformed vectors so build() cost is dominated by the
+     * O(n² × dim) transform pass; scoring itself is O(n²) using the same LUT used
+     * at search time.
+     */
+    Result<void> buildMetricAligned();
+
     /** Greedy descent: start from entry, iteratively move to better neighbor */
     std::vector<size_t> greedyDescent(std::span<const float> transformed_query, size_t entry_idx,
                                       size_t ef);
@@ -151,6 +162,13 @@ private:
     std::vector<std::span<const uint8_t>> packed_codes_; // views into packed_storage_
     std::mt19937 rng_;
     std::vector<float> transformed_query_cache_; // reused allocation for transformQuery output
+
+    /**
+     * Precomputed transformed vectors for all nodes.
+     * Used for metric-aligned graph construction (build() / buildMetricAligned()).
+     * Lazily computed on first build(), then reused.
+     */
+    std::vector<float> transformed_storage_; // flat [n * dim] row-major
 };
 
 } // namespace vector

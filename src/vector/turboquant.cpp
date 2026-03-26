@@ -571,6 +571,60 @@ float TurboQuantMSE::scoreFromPacked(std::span<const float> transformed_query,
     return accumulator / z_norm;
 }
 
+void TurboQuantMSE::transformPackedCode(std::span<const uint8_t> packed_code,
+                                        std::span<float> output) const {
+    // Transform a packed code into the same space as transformQuery().
+    // The packed code stores: round(scale * D * H * v) (quantized Hadamard coefficients)
+    // We return: scale * D * packed_code
+    // This skips the encode→decode round-trip while producing the same geometric structure.
+    //
+    // The key insight: encode() computes scale * D * H * v, then rounds to indices.
+    // We have the indices, so we apply D and scale directly to get approximately
+    // the same result as transformQuery(v) would give (up to quantization error).
+    //
+    // Algorithm:
+    // 1. Unpack each bit index from the packed code
+    // 2. Look up the centroid value (quantized Hadamard coefficient)
+    // 3. Apply diagonal sign: sign * centroid
+    // 4. Scale by 1/sqrt(d) to match the transformQuery() scaling
+
+    const size_t d = config_.dimension;
+    const uint8_t bits = config_.bits_per_channel;
+    assert(packed_code.size() == (d * bits + 7) / 8);
+    assert(output.size() >= d);
+
+    const float scale = 1.0f / std::sqrt(static_cast<float>(d));
+    const float* diag_signs = diagonal_signs_.data();
+    const uint8_t* packed = packed_code.data();
+    const size_t num_centroids = centroids_.size(); // 2^bits
+
+    for (size_t i = 0; i < d; ++i) {
+        // Unpack code value for coordinate i
+        size_t bit_pos = i * bits;
+        size_t byte_idx = bit_pos >> 3;  // bit_pos / 8
+        size_t bit_offset = bit_pos & 7; // bit_pos % 8
+
+        uint8_t code = 0;
+        size_t bits_read = 0;
+        while (bits_read < bits) {
+            size_t bits_available = 8 - bit_offset;
+            size_t bits_to_read = std::min(bits - bits_read, bits_available);
+            uint8_t chunk = (packed[byte_idx] >> bit_offset) & ((1 << bits_to_read) - 1);
+            code |= chunk << bits_read;
+
+            bit_offset = 0;
+            bits_read += bits_to_read;
+        }
+
+        // Look up centroid and apply sign + scale (same as transformQuery output structure)
+        float centroid_val = (code < num_centroids) ? centroids_[code] : 0.0f;
+        // The centroid is the quantized Hadamard coefficient.
+        // Apply diagonal sign: D[i] * centroid (D[i] = ±1)
+        // Then scale by 1/sqrt(d) to match transformQuery() scaling
+        output[i] = scale * diag_signs[i] * centroid_val;
+    }
+}
+
 void TurboQuantMSE::fitPerCoordScales(const std::vector<std::vector<float>>& vectors,
                                       size_t sample_limit) {
     const size_t d = config_.dimension;

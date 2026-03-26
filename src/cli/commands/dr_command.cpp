@@ -39,6 +39,7 @@ private:
         bool hasObj = false, hasDr = false;
         try {
             ClientConfig cfg;
+            cfg.executor = getExecutor();
             if (cli_->hasExplicitDataDir()) {
                 cfg.dataDir = cli_->getDataPath();
             }
@@ -51,19 +52,19 @@ private:
             }
             auto leaseHandle = std::move(leaseRes.value());
             GetStatsRequest req;
-            std::promise<Result<yams::daemon::GetStatsResponse>> prom;
-            auto fut = prom.get_future();
+            auto prom = std::make_shared<std::promise<Result<yams::daemon::GetStatsResponse>>>();
+            auto fut = prom->get_future();
             boost::asio::co_spawn(
                 getExecutor(),
-                [leaseHandle, req, &prom]() mutable -> boost::asio::awaitable<void> {
+                [leaseHandle, req, prom]() mutable -> boost::asio::awaitable<void> {
                     try {
                         auto& client = **leaseHandle;
                         auto r = co_await client.call(req);
-                        prom.set_value(std::move(r));
+                        prom->set_value(std::move(r));
                     } catch (const std::exception& e) {
-                        prom.set_value(Error{ErrorCode::InternalError, e.what()});
+                        prom->set_value(Error{ErrorCode::InternalError, e.what()});
                     } catch (...) {
-                        prom.set_value(Error{ErrorCode::InternalError, "unknown daemon error"});
+                        prom->set_value(Error{ErrorCode::InternalError, "unknown daemon error"});
                     }
                     co_return;
                 },

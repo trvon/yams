@@ -879,22 +879,23 @@ private:
                 dreq.limit = static_cast<std::size_t>(warmLimit_);
                 dreq.snippetLen = static_cast<std::size_t>(snippetLen_ > 0 ? snippetLen_ : 160);
 
-                std::promise<Result<yams::daemon::PrepareSessionResponse>> prom;
-                auto fut = prom.get_future();
+                auto prom =
+                    std::make_shared<std::promise<Result<yams::daemon::PrepareSessionResponse>>>();
+                auto fut = prom->get_future();
                 boost::asio::co_spawn(
                     getExecutor(),
-                    [leaseHandle, dreq, &prom]() mutable -> boost::asio::awaitable<void> {
+                    [leaseHandle, dreq, prom]() mutable -> boost::asio::awaitable<void> {
                         try {
                             auto& client = **leaseHandle;
                             auto result =
                                 co_await client.call<yams::daemon::PrepareSessionRequest>(dreq);
-                            prom.set_value(std::move(result));
+                            prom->set_value(std::move(result));
                         } catch (const std::exception& e) {
-                            prom.set_value(
+                            prom->set_value(
                                 Error{ErrorCode::InternalError,
                                       std::string("session warm daemon call threw: ") + e.what()});
                         } catch (...) {
-                            prom.set_value(
+                            prom->set_value(
                                 Error{ErrorCode::InternalError, "session warm daemon call threw"});
                         }
                         co_return;
