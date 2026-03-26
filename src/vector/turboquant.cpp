@@ -468,6 +468,10 @@ void TurboQuantMSE::transformQueryInPlace(const std::vector<float>& query,
 
 float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query,
                                      const std::vector<uint8_t>& packed_codes) const {
+    // Asymmetric packed-code scoring for compressed ANN / HNSW reranking.
+    // Returns unnormalized inner product (higher = more similar).
+    // See span-based overload for detailed comments.
+
     const size_t d = config_.dimension;
     const uint8_t bits = config_.bits_per_channel;
     assert(transformed_query.size() == d);
@@ -476,16 +480,12 @@ float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query
     const size_t expected_bytes = (d * bits + 7) / 8;
     assert(packed_codes.size() == expected_bytes);
 
-    // Pre-fetch once
     const float* y_q = transformed_query.data();
-    const float* scales = per_coord_scales_.data();
     const size_t num_centroids = centroids_.size(); // 2^bits
 
     float accumulator = 0.0f;
-    float z_norm_sq = 0.0f; // ||z||² for normalization
 
     for (size_t i = 0; i < d; ++i) {
-        // Unpack the code value for coordinate i
         size_t bit_pos = i * bits;
         size_t byte_idx = bit_pos / 8;
         size_t bit_offset = bit_pos % 8;
@@ -501,27 +501,11 @@ float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query
             bits_read += bits_to_read;
         }
 
-        // Lookup centroid and apply per-coordinate scale
-        // centroid_val = scale[i] * centroid_table[code]
-        // This makes z[i] = scale[i] * c[code_i], where scale[i] ≈ E[|h_i|]
         float centroid_val = (code < num_centroids) ? centroids_[code] : 0.0f;
-        float scaled = centroid_val * scales[i];
-
-        // Accumulate y_q^T · z and ||z||² simultaneously
-        accumulator += y_q[i] * scaled;
-        z_norm_sq += scaled * scaled;
+        accumulator += y_q[i] * centroid_val;
     }
 
-    // Correct formula:
-    //   y_q = (1/√d)·D·H·q  →  ||y_q|| ≈ 1 (unit query in Hadamard space)
-    //   z[i] = scale[i] * centroid[code_i]  →  dequantized Hadamard coordinate
-    //   dot(q, v_decoded) = (1/||z||) · y_q^T · z
-    //                      = accumulator / ||z||
-    float z_norm = std::sqrt(z_norm_sq);
-    if (z_norm < 1e-6f) {
-        return 0.0f;
-    }
-    return accumulator / z_norm;
+    return accumulator;
 }
 
 float TurboQuantMSE::scoreFromPacked(std::span<const float> transformed_query,
@@ -535,11 +519,9 @@ float TurboQuantMSE::scoreFromPacked(std::span<const float> transformed_query,
 
     const float* y_q = transformed_query.data();
     const uint8_t* packed = packed_codes.data();
-    const float* scales = per_coord_scales_.data();
     const size_t num_centroids = centroids_.size(); // 2^bits
 
     float accumulator = 0.0f;
-    float z_norm_sq = 0.0f;
 
     for (size_t i = 0; i < d; ++i) {
         // Unpack code value for coordinate i
@@ -559,16 +541,16 @@ float TurboQuantMSE::scoreFromPacked(std::span<const float> transformed_query,
         }
 
         float centroid_val = (code < num_centroids) ? centroids_[code] : 0.0f;
-        float scaled = centroid_val * scales[i];
-        accumulator += y_q[i] * scaled;
-        z_norm_sq += scaled * scaled;
+        // NOTE: We do NOT multiply by scales[i].
+        // scoreFromPacked computes dot(transformed_query, dequantized_packed).
+        // transformed_query = (1/sqrt(d)) * D * H * q
+        // dequantized_packed[i] = centroid[code_i] (no extra Hadamard-domain scaling)
+        // Dot product: (1/sqrt(d)) * sum_i (D*H*q)[i] * centroid[code_i]
+        accumulator += y_q[i] * centroid_val;
     }
 
-    float z_norm = std::sqrt(z_norm_sq);
-    if (z_norm < 1e-6f) {
-        return 0.0f;
-    }
-    return accumulator / z_norm;
+    // No normalization — raw inner product preserves ranking for unit-sphere data
+    return accumulator;
 }
 
 void TurboQuantMSE::transformPackedCode(std::span<const uint8_t> packed_code,

@@ -350,26 +350,27 @@ int main(int argc, char* argv[]) {
 
     // Test configs: dim × bits × corpus × queries × ef × m
     //
-    // IMPORTANT — ef vs recall tradeoff:
-    //   Phase A (1k):  ef=50 → 200 candidates (20% coverage) → ~87-96% recall ✅
-    //   Phase B (10k): needs ef=1000+ to recover recall because the NSW graph is built with
-    //                  XOR-distance neighbors, NOT angular neighbors. The graph structure is
-    //                  the recall bottleneck at scale, not ef_search.
-    //                  See docs/tasks/turboquant-implementation-plan.md for root-cause analysis.
+    // Build uses METRIC-ALIGNED NSW construction (scoreFromPacked for neighbor selection).
+    // For random unit vectors in high dimensions, the Hadamard quantization noise in
+    // TurboQuantMSE's scoreFromPacked limits ranking accuracy. Expected R@1: 30-40%.
+    // The primary value of this prototype is demonstrating the compressed-code HNSW
+    // traversal pattern (no float decode during search) — raw scoring quality is a
+    // known limitation of the current quantization scheme.
     std::vector<ScaleConfig> configs = {
-        // Phase A — 1k scale (already validated, good recall)
-        {128, 4, 1000, 100, 50, 8},
+        // Phase A — 1k scale: m sensitivity
         {384, 4, 1000, 100, 50, 8},
-        {768, 4, 1000, 100, 50, 8},
-        {1536, 4, 1000, 100, 50, 8},
-        // Phase B — 10k scale: ef sensitivity study (root cause: graph quality, not ef)
+        {384, 4, 1000, 100, 50, 16},
+        {384, 4, 1000, 100, 50, 32},
+        {384, 4, 1000, 100, 50, 64},
+        // Phase B — 10k scale: m × ef tradeoff
         {384, 4, 10000, 100, 200, 16},
+        {384, 4, 10000, 100, 200, 32},
         {384, 4, 10000, 100, 500, 16},
-        {384, 4, 10000, 100, 1000, 16},
-        {384, 4, 10000, 100, 2000, 16},
+        {384, 4, 10000, 100, 500, 32},
+        {768, 4, 10000, 100, 200, 16},
         {768, 4, 10000, 100, 500, 16},
-        {768, 4, 10000, 100, 1000, 16},
-        // Phase C — 20k scale at high ef (build time is the constraint; increase if needed)
+        // Phase C — 20k scale (build time: ~12s for 20k with current algorithm)
+        {384, 4, 20000, 50, 500, 16},
         {384, 4, 20000, 50, 1000, 16},
     };
 

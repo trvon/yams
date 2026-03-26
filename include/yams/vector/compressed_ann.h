@@ -123,17 +123,22 @@ public:
      */
     size_t size() const { return packed_codes_.size(); }
 
-    /**
-     * @brief Access the underlying TurboQuant scorer for transform/decode.
-     */
-    const TurboQuantMSE& scorer() const { return scorer_; }
-
-private:
+public:
     struct NSWNode {
         size_t id;
         std::span<const uint8_t> packed_code;
         std::vector<size_t> neighbors; // neighbor node indices
     };
+
+    /**
+     * @brief Return the graph nodes (for debugging/testing).
+     */
+    const std::vector<NSWNode>& nodes() const { return nodes_; }
+
+    /**
+     * @brief Access the underlying TurboQuant scorer for transform/decode.
+     */
+    const TurboQuantMSE& scorer() const { return scorer_; }
 
     /** Build NSW graph: connect each new node to its ef_search nearest existing neighbors */
     void connectNodeToGraph(size_t new_node_idx);

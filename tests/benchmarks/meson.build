@@ -108,6 +108,49 @@ compressed_ann_scale_bench = executable('compressed_ann_scale_bench',
 
 alias_target('bench_compressed_ann_scale', compressed_ann_scale_bench)
 
+# Quick validation of metric-aligned graph fix (1k + 10k @ ef=200)
+compressed_ann_quick_check = executable('compressed_ann_quick_check',
+  files('compressed_ann_quick_check.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_compressed_ann_quick', compressed_ann_quick_check)
+
+# Build-time profiler for CompressedANNIndex
+compressed_ann_build_profile = executable('compressed_ann_build_profile',
+  files('compressed_ann_build_profile.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_compressed_ann_build_profile', compressed_ann_build_profile)
+
+# Score quality diagnostic
+compressed_ann_score_diag = executable('compressed_ann_score_diag',
+  files('compressed_ann_score_diag.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_compressed_ann_score_diag', compressed_ann_score_diag)
+
 # Large-scale ingestion benchmark (requires google-benchmark)
 if benchmark_dep.found()
   large_scale_ingestion_bench_deps = [
