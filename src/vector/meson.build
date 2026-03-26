@@ -138,6 +138,7 @@ srcs = [
   'dim_resolver.cpp',
   'tokenizer.cpp',
   'turboquant.cpp',
+  'compressed_ann.cpp',
   '../genai/onnx_genai_adapter.cpp',
 ] + sqlite_vec_cpp_src
 

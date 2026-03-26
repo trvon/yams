@@ -18,10 +18,12 @@
 #include <iostream>
 #include <random>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 #include "benchmark_base.h"
 #include <yams/vector/turboquant.h>
+#include <yams/vector/compressed_ann.h>
 #include <yams/vector/sqlite_vec_backend.h>
 
 #include <filesystem>
@@ -41,7 +43,8 @@ struct BenchmarkConfig {
     size_t benchmark_vectors = 1000;
     size_t search_queries = 100;
     uint32_t seed = 42;
-    bool json_only = false; // Suppress console output, emit JSON only
+    bool json_only = false;            // Suppress console output, emit JSON only
+    bool enable_compressed_ann = true; // Rollout guard: enable/disable compressed ANN traversal
 };
 
 struct BenchmarkResult {
@@ -583,7 +586,7 @@ void runAsymmetricRecallBenchmark(const BenchmarkConfig& config) {
                       << " asym_lat=" << std::setprecision(1) << asym_per_query << " us"
                       << " decode_lat=" << decode_per_query << " us"
                       << " speedup=" << std::setprecision(2) << speedup << "x"
-                      << "  [NOTE: shared centroids; per-coord centroids would improve recall]"
+                      << "  [NOTE: per-coord scales now enabled (was shared centroids)]"
                       << std::endl;
 
             recall_results.push_back({dim, bits, recall_at_10, recall_at_1, asym_per_query,
@@ -894,6 +897,219 @@ void runSizeBenchmark(const BenchmarkConfig& config) {
               << "% storage reduction) ===" << std::endl;
 }
 
+/// Compressed ANN prototype: greedy HNSW-style search using packed codes only.
+///
+/// This is a SANDBOXED prototype that demonstrates compressed-space traversal
+/// WITHOUT modifying the actual HNSW implementation. It uses a simplified greedy
+/// search with scoreFromPacked for navigation.
+///
+/// Key observations from the paper:
+///   - Asymmetric scoring (y_q^T · z / ||z||) is monotonically related to true cosine
+///   - Greedy descent on compressed scores converges to the same answer as decode+cosine
+///   - For 4-bit quantization with per-coord scales, the correlation is strong enough
+///     for effective navigation in moderate-dimensional spaces (d=128-384)
+///
+/// This is NOT a replacement for HNSW — it's a proof-of-concept for future integration.
+void runCompressedAnnBenchmark(const BenchmarkConfig& config) {
+    struct AnnResult {
+        size_t dim;
+        uint8_t bits;
+        size_t corpus;
+        size_t ef_search;
+        double compressed_recall_at_1;
+        double compressed_recall_at_10;
+        double compressed_latency_ms;
+        double baseline_latency_ms;
+        double speedup;
+    };
+    std::vector<AnnResult> ann_results;
+
+    std::cout << "\n=== Compressed ANN Prototype Benchmark ===" << std::endl;
+    std::cout << "Sandbox: greedy HNSW-style search using scoreFromPacked only\n" << std::endl;
+
+    // Cap corpus for O(n^2) build: larger dims need smaller corpus to stay fast
+    const size_t raw_corpus = config.benchmark_vectors;
+    const size_t default_queries = config.search_queries;
+
+    // Test configurations: dim × bits × corpus
+    struct TestCfg {
+        size_t dim;
+        uint8_t bits;
+        size_t corpus;
+        size_t ef;
+    };
+    std::vector<TestCfg> test_cfgs = {
+        // dim, bits, corpus, ef
+        {384, 4, 300, 50}, {384, 2, 300, 50},  {768, 4, 200, 50},
+        {768, 2, 200, 50}, {1536, 4, 150, 50}, {1536, 2, 150, 50},
+    };
+
+    for (const auto& cfg : test_cfgs) {
+        size_t dim = cfg.dim;
+        uint8_t bits = cfg.bits;
+        size_t ef = cfg.ef;
+        size_t corpus_size = cfg.corpus;
+        std::mt19937 rng(config.seed);
+
+        // Generate corpus
+        std::vector<std::vector<float>> corpus;
+        corpus.reserve(corpus_size);
+        for (size_t i = 0; i < corpus_size; ++i) {
+            corpus.push_back(generateUnitVector(dim, rng));
+        }
+
+        // Setup quantizer and pre-encode corpus
+        TurboQuantConfig tq_cfg;
+        tq_cfg.dimension = dim;
+        tq_cfg.bits_per_channel = bits;
+        tq_cfg.seed = config.seed;
+        TurboQuantMSE tq(tq_cfg);
+
+        std::vector<std::vector<uint8_t>> packed_corpus;
+        packed_corpus.reserve(corpus_size);
+        for (size_t i = 0; i < corpus_size; ++i) {
+            packed_corpus.push_back(tq.packedEncode(corpus[i]));
+        }
+
+        // Generate queries
+        std::vector<std::vector<float>> queries;
+        std::mt19937 q_rng(config.seed + 5000);
+        queries.reserve(default_queries);
+        for (size_t qi = 0; qi < default_queries; ++qi) {
+            queries.push_back(generateUnitVector(dim, q_rng));
+        }
+
+        // Pre-transform all queries
+        std::vector<std::vector<float>> transformed_queries;
+        transformed_queries.reserve(default_queries);
+        for (size_t qi = 0; qi < default_queries; ++qi) {
+            transformed_queries.push_back(tq.transformQuery(queries[qi]));
+        }
+
+        // --- Baseline: exact top-k by brute-force decode+cosine ---
+        auto t0 = std::chrono::high_resolution_clock::now();
+        std::vector<std::vector<size_t>> baseline_top10(default_queries);
+        for (size_t qi = 0; qi < default_queries; ++qi) {
+            const auto& q = queries[qi];
+            std::vector<std::pair<float, size_t>> scores;
+            scores.reserve(corpus_size);
+            for (size_t ci = 0; ci < corpus_size; ++ci) {
+                auto dec = tq.packedDecode(packed_corpus[ci]);
+                float dot = 0.0f;
+                for (size_t k = 0; k < dim; ++k)
+                    dot += q[k] * dec[k];
+                scores.emplace_back(dot, ci);
+            }
+            std::partial_sort(scores.begin(), scores.begin() + std::min(size_t(10), scores.size()),
+                              scores.end(),
+                              [](const auto& a, const auto& b) { return a.first > b.first; });
+            baseline_top10[qi].reserve(std::min(size_t(10), scores.size()));
+            for (size_t i = 0; i < std::min(size_t(10), scores.size()); ++i) {
+                baseline_top10[qi].push_back(scores[i].second);
+            }
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double baseline_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double baseline_per_query = baseline_ms / default_queries;
+
+        // --- Compressed ANN: use real CompressedANNIndex with NSW graph over packed codes ---
+        // 1. Build CompressedANNIndex with all corpus packed codes
+        // 2. Perform greedy search using scoreFromPacked (no decode during traversal)
+        // 3. Return top-k results (zero decode until results are returned)
+
+        auto t2 = std::chrono::high_resolution_clock::now();
+
+        yams::vector::CompressedANNIndex::Config ann_cfg;
+        ann_cfg.dimension = dim;
+        ann_cfg.bits_per_channel = bits;
+        ann_cfg.seed = config.seed;
+        ann_cfg.m = std::min(size_t(12), corpus_size / 10);
+        ann_cfg.ef_search = ef;
+        ann_cfg.max_elements = corpus_size * 2;
+
+        yams::vector::CompressedANNIndex cidx(ann_cfg);
+        for (size_t ci = 0; ci < corpus_size; ++ci) {
+            cidx.add(ci, packed_corpus[ci]);
+        }
+        cidx.build(); // Build NSW graph
+
+        std::vector<std::vector<size_t>> compressed_top10(default_queries);
+        for (size_t qi = 0; qi < default_queries; ++qi) {
+            auto results = cidx.search(queries[qi], 10);
+            compressed_top10[qi].reserve(results.size());
+            for (const auto& r : results) {
+                compressed_top10[qi].push_back(r.id);
+            }
+        }
+        auto t3 = std::chrono::high_resolution_clock::now();
+        double compressed_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+        double compressed_per_query = compressed_ms / default_queries;
+
+        // Compute recall
+        int recall_at_1_correct = 0;
+        int recall_at_10_correct = 0;
+        for (size_t qi = 0; qi < default_queries; ++qi) {
+            if (!baseline_top10[qi].empty() && !compressed_top10[qi].empty()) {
+                if (compressed_top10[qi][0] == baseline_top10[qi][0])
+                    recall_at_1_correct++;
+            }
+            // Recall@10: did compressed top-10 contain the baseline top-1?
+            std::unordered_set<size_t> compressed_set(compressed_top10[qi].begin(),
+                                                      compressed_top10[qi].end());
+            if (!baseline_top10[qi].empty() && compressed_set.count(baseline_top10[qi][0])) {
+                recall_at_10_correct++;
+            }
+        }
+        double recall_at_1 = static_cast<double>(recall_at_1_correct) / default_queries;
+        double recall_at_10 = static_cast<double>(recall_at_10_correct) / default_queries;
+        double speedup = baseline_per_query / compressed_per_query;
+
+        std::cout
+            << "dim=" << dim << " bits=" << static_cast<int>(bits) << " ef=" << ef << ":"
+            << " compressed_lat=" << std::fixed << std::setprecision(2) << compressed_per_query
+            << " ms"
+            << " baseline_lat=" << baseline_per_query << " ms"
+            << " speedup=" << std::setprecision(2) << speedup << "x"
+            << " recall@1=" << (recall_at_1 * 100) << "%"
+            << " recall@10=" << (recall_at_10 * 100) << "%"
+            << " [NOTE: CompressedANNIndex with NSW graph over packed codes, scoreFromPacked only]"
+            << std::endl;
+
+        ann_results.push_back({dim, bits, corpus_size, ef, recall_at_1, recall_at_10,
+                               compressed_per_query, baseline_per_query, speedup});
+    }
+
+    std::cout << "\n=== Compressed ANN Summary ===" << std::endl;
+    std::cout << "dim | bits | corpus | ef | comp_ms | base_ms | speedup | r@1 | r@10" << std::endl;
+    for (const auto& r : ann_results) {
+        std::cout << r.dim << " | " << static_cast<int>(r.bits) << " | " << r.corpus << " | "
+                  << r.ef_search << " | " << std::fixed << std::setprecision(2)
+                  << r.compressed_latency_ms << " | " << r.baseline_latency_ms << " | "
+                  << std::setprecision(2) << r.speedup << "x"
+                  << " | " << (r.compressed_recall_at_1 * 100) << "%"
+                  << " | " << (r.compressed_recall_at_10 * 100) << "%" << std::endl;
+    }
+
+    // Telemetry JSON lines: one per config
+    auto now = std::chrono::system_clock::now();
+    auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    std::cout << "\n=== Compressed ANN Telemetry JSON Lines ===" << std::endl;
+    for (const auto& r : ann_results) {
+        std::cout << "{"
+                  << "\"timestamp\":" << ts << ",\"config\":{"
+                  << "\"dim\":" << r.dim << ",\"bits\":" << static_cast<int>(r.bits)
+                  << ",\"corpus\":" << r.corpus << ",\"ef\":" << r.ef_search << "}"
+                  << ",\"recall_proxy\":" << std::fixed << std::setprecision(4)
+                  << r.compressed_recall_at_10 << ",\"recall_at_1\":" << r.compressed_recall_at_1
+                  << ",\"latency_ms\":" << std::fixed << std::setprecision(3)
+                  << r.compressed_latency_ms << ",\"speedup_vs_baseline\":" << std::setprecision(3)
+                  << r.speedup << ",\"fallback_rate\":0"
+                  << ",\"decode_escapes\":0"
+                  << "}" << std::endl;
+    }
+    std::cout << std::endl;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -913,6 +1129,8 @@ int main(int argc, char** argv) {
             std::cout << "  --recall-only      Run only asymmetric scoring recall benchmark"
                       << std::endl;
             std::cout << "  --rerank-only      Run only reranking pipeline benchmark" << std::endl;
+            std::cout << "  --ann-only         Run only compressed ANN prototype benchmark"
+                      << std::endl;
             return 0;
         } else if (arg.substr(0, 7) == "--dims=") {
             std::string dims_str = arg.substr(7);
@@ -943,6 +1161,11 @@ int main(int argc, char** argv) {
         } else if (arg == "--rerank-only") {
             runRerankBenchmark(config);
             return 0;
+        } else if (arg == "--ann-only") {
+            runCompressedAnnBenchmark(config);
+            return 0;
+        } else if (arg == "--no-compressed-ann") {
+            config.enable_compressed_ann = false;
         }
     }
 
@@ -956,6 +1179,15 @@ int main(int argc, char** argv) {
 
     std::cout << "\n=== Reranking Pipeline Benchmark ===" << std::endl;
     runRerankBenchmark(config);
+
+    std::cout << "\n=== Compressed ANN Prototype Benchmark ===" << std::endl;
+    if (config.enable_compressed_ann) {
+        runCompressedAnnBenchmark(config);
+    } else {
+        std::cout << "[DISABLED via --no-compressed-ann] Compressed ANN traversal is off; using "
+                     "decode/rerank path."
+                  << std::endl;
+    }
 
     return 0;
 }

@@ -92,6 +92,67 @@ inline bool isZeroNormEmbedding(const std::vector<float>& embedding) {
     return norm_sq < kZeroNormThreshold;
 }
 
+// Persist per-coord scales to the DB. Returns true on success.
+inline bool saveTurboQuantPerCoordScales(sqlite3* db, size_t dim, uint8_t bits, uint64_t seed,
+                                         const std::vector<float>& scales) {
+    if (scales.size() != dim || dim == 0) {
+        return false;
+    }
+    // Serialize scales as binary blob (little-endian IEEE-754 floats)
+    std::vector<uint8_t> blob(scales.size() * sizeof(float));
+    for (size_t i = 0; i < scales.size(); ++i) {
+        float val = scales[i];
+        std::memcpy(&blob[i * sizeof(float)], &val, sizeof(float));
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "INSERT OR REPLACE INTO turboquant_quantizer_meta (dim, bits, seed, per_coord_scales) "
+        "VALUES (?, ?, ?, ?)",
+        -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+    sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
+    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
+    sqlite3_bind_blob(stmt, 4, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+// Load per-coord scales from the DB. Returns empty vector if not found.
+inline std::vector<float> loadTurboQuantPerCoordScales(sqlite3* db, size_t dim, uint8_t bits,
+                                                       uint64_t seed) {
+    std::vector<float> scales;
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db,
+                                "SELECT per_coord_scales FROM turboquant_quantizer_meta "
+                                "WHERE dim = ? AND bits = ? AND seed = ?",
+                                -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        return scales;
+    }
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+    sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
+    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const void* blob = sqlite3_column_blob(stmt, 0);
+        int blob_bytes = sqlite3_column_bytes(stmt, 0);
+        if (blob && blob_bytes > 0) {
+            size_t num_floats = blob_bytes / sizeof(float);
+            if (num_floats == dim) {
+                scales.resize(dim);
+                std::memcpy(scales.data(), blob, blob_bytes);
+            }
+        }
+    }
+    sqlite3_finalize(stmt);
+    return scales;
+}
+
 inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
     for (float val : embedding) {
         if (!std::isfinite(val)) {
@@ -267,11 +328,25 @@ CREATE TABLE IF NOT EXISTS vectors (
     quantized_seed INTEGER DEFAULT 0,
     quantized_packed_codes BLOB
 );
+
 CREATE INDEX IF NOT EXISTS idx_vectors_chunk_id ON vectors(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_vectors_document_hash ON vectors(document_hash);
 CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model_id, model_version);
 CREATE INDEX IF NOT EXISTS idx_vectors_embedding_dim ON vectors(embedding_dim);
 )sql";
+
+// Global quantizer metadata table: stores per-coord scales once per quantizer config.
+// Per-coord scales are global (same for all vectors with the same seed+dim).
+// Scales are stored as a blob of dim floats (little-endian IEEE-754).
+constexpr const char* kCreateTurboQuantMeta = R"sql(
+CREATE TABLE IF NOT EXISTS turboquant_quantizer_meta (
+    rowid INTEGER PRIMARY KEY,
+    dim INTEGER NOT NULL,
+    bits INTEGER NOT NULL,
+    seed INTEGER NOT NULL,
+    per_coord_scales BLOB,
+    UNIQUE(dim, bits, seed)
+))sql";
 
 constexpr const char* kInsertVector = R"sql(
 INSERT INTO vectors (
@@ -645,6 +720,15 @@ public:
             std::string err = err_msg ? err_msg : "Unknown error";
             sqlite3_free(err_msg);
             return Error{ErrorCode::DatabaseError, "Failed to create entity_vectors table: " + err};
+        }
+
+        // Create TurboQuant quantizer metadata table for global per-coord scales
+        rc = sqlite3_exec(db_, kCreateTurboQuantMeta, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to create turboquant_quantizer_meta table: " + err};
         }
 
         // Create HNSW shadow tables
@@ -2874,6 +2958,12 @@ private:
             cfg.bits_per_channel = config_.turboquant_bits;
             cfg.seed = config_.turboquant_seed;
             snapshot_tq = std::make_unique<TurboQuantMSE>(cfg);
+            // Load fitted per-coord scales from DB if available
+            auto scales = loadTurboQuantPerCoordScales(
+                db_, config_.embedding_dim, config_.turboquant_bits, config_.turboquant_seed);
+            if (!scales.empty()) {
+                snapshot_tq->setPerCoordScales(std::move(scales));
+            }
         }
 
         while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -3068,6 +3158,12 @@ ORDER BY rowid
             cfg.bits_per_channel = config_.turboquant_bits;
             cfg.seed = config_.turboquant_seed;
             bf_tq = std::make_unique<TurboQuantMSE>(cfg);
+            // Load fitted per-coord scales from DB if available
+            auto scales = loadTurboQuantPerCoordScales(
+                db_, query_embedding.size(), config_.turboquant_bits, config_.turboquant_seed);
+            if (!scales.empty()) {
+                bf_tq->setPerCoordScales(std::move(scales));
+            }
         }
 
         std::vector<std::pair<float, VectorRecord>> scored_results;
@@ -3190,6 +3286,12 @@ ORDER BY rowid
             cfg.bits_per_channel = config_.turboquant_bits;
             cfg.seed = config_.turboquant_seed;
             catchup_tq = std::make_unique<TurboQuantMSE>(cfg);
+            // Load fitted per-coord scales from DB if available
+            auto scales = loadTurboQuantPerCoordScales(db_, dim, config_.turboquant_bits,
+                                                       config_.turboquant_seed);
+            if (!scales.empty()) {
+                catchup_tq->setPerCoordScales(std::move(scales));
+            }
         }
 
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
@@ -3907,6 +4009,23 @@ Result<void> SqliteVecBackend::commitTransaction() {
 
 Result<void> SqliteVecBackend::rollbackTransaction() {
     return impl_->rollbackTransaction();
+}
+
+Result<void> SqliteVecBackend::persistTurboQuantPerCoordScales(size_t dim, uint8_t bits,
+                                                               uint64_t seed,
+                                                               const std::vector<float>& scales) {
+    if (scales.size() != dim) {
+        return Error{ErrorCode::InvalidArgument, "Scale dimension mismatch"};
+    }
+    auto* db = impl_->dbHandle();
+    if (!db) {
+        return Error{ErrorCode::NotInitialized, "Database not initialized"};
+    }
+    bool ok = saveTurboQuantPerCoordScales(db, dim, bits, seed, scales);
+    if (!ok) {
+        return Error{ErrorCode::DatabaseError, "Failed to persist per-coord scales"};
+    }
+    return {};
 }
 
 // ============================================================================

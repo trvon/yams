@@ -2435,10 +2435,8 @@ float scoreCompressedCosineSpan(const std::span<const float>& transformed_query,
     if (quantizer == nullptr) {
         return 0.0f;
     }
-    // Convert span to vector for scoreFromPacked
-    std::vector<uint8_t> packed(packed_codes_span.begin(), packed_codes_span.end());
-    return quantizer->scoreFromPacked(
-        std::vector<float>(transformed_query.begin(), transformed_query.end()), packed);
+    // Zero-allocation: use span-based overload directly
+    return quantizer->scoreFromPacked(transformed_query, packed_codes_span);
 }
 
 } // namespace vector_utils

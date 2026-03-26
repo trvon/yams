@@ -235,6 +235,17 @@ public:
      * @brief Rollback the current transaction
      */
     virtual Result<void> rollbackTransaction() = 0;
+
+    /**
+     * @brief Persist TurboQuant per-coord scales to the database.
+     * Scales are stored in turboquant_quantizer_meta table once per quantizer config.
+     * @param dim Embedding dimension
+     * @param bits Bits per channel
+     * @param seed Random seed
+     * @param scales Per-coordinate scales (dim floats)
+     */
+    virtual Result<void> persistTurboQuantPerCoordScales(size_t dim, uint8_t bits, uint64_t seed,
+                                                         const std::vector<float>& scales) = 0;
 };
 
 /**

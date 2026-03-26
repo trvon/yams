@@ -100,6 +100,13 @@ TurboQuantMSE::TurboQuantMSE(const TurboQuantConfig& config) : config_(config) {
     // Generate random diagonal signs (stored as vector for Hadamard pre/post multiplication)
     generateDiagonalSigns();
     generateCentroids();
+
+    // Initialize per-coordinate scales using Beta(d/2, d/2) heuristic on unit sphere.
+    // E[|h_i|] = sqrt(2/(π·d)) for standard normal on unit sphere.
+    // Using a slightly more conservative 1/sqrt(π·d) as a safe lower bound.
+    const float scale_val =
+        1.0f / std::sqrt(static_cast<float>(M_PI) * static_cast<float>(config_.dimension));
+    per_coord_scales_.resize(config_.dimension, scale_val);
 }
 
 void TurboQuantMSE::generateDiagonalSigns() {
@@ -234,10 +241,16 @@ std::vector<uint8_t> TurboQuantMSE::encode(const std::vector<float>& vector) {
         rotated[i] *= scale;
     }
 
-    // Quantize each coordinate with Lloyd-Max scalar quantizer
+    // Quantize each coordinate with Lloyd-Max scalar quantizer (per-coordinate scale aware).
+    // For coordinate i: encode `rotated[i] / per_coord_scales_[i]` against the global
+    // centroid table. This is equivalent to finding the centroid c_j that minimizes
+    // (rotated[i] - per_coord_scales_[i] * c_j)².
     std::vector<uint8_t> indices(d);
     for (size_t i = 0; i < d; ++i) {
-        indices[i] = scalarQuantize(rotated[i]);
+        // Divide by per-coordinate scale (equivalent to scaling centroids by scale[i])
+        float scaled =
+            (per_coord_scales_[i] > 1e-6f) ? (rotated[i] / per_coord_scales_[i]) : rotated[i];
+        indices[i] = scalarQuantize(scaled);
     }
 
     return indices;
@@ -253,10 +266,10 @@ std::vector<float> TurboQuantMSE::decode(const std::vector<uint8_t>& indices) {
         n *= 2;
     }
 
-    // Step 1: Dequantize - lookup centroids
+    // Step 1: Dequantize - lookup centroids and apply per-coordinate scales
     std::vector<float> dequantized(n, 0.0f);
     for (size_t i = 0; i < d; ++i) {
-        dequantized[i] = scalarDequantize(indices[i]);
+        dequantized[i] = scalarDequantize(indices[i]) * per_coord_scales_[i];
     }
 
     // Scale up (undo the 1/sqrt(d) scaling from encode)
@@ -415,6 +428,44 @@ std::vector<float> TurboQuantMSE::transformQuery(const std::vector<float>& query
     return result;
 }
 
+void TurboQuantMSE::transformQueryInPlace(const std::vector<float>& query,
+                                          std::span<float> output) const {
+    const size_t d = config_.dimension;
+    assert(query.size() == d);
+    assert(output.size() >= d);
+
+    // Pad to power of 2 for FWHT
+    size_t n = 1;
+    while (n < d) {
+        n *= 2;
+    }
+
+    // Step 1: Copy to padded buffer
+    std::vector<float> rotated(n, 0.0f);
+    for (size_t i = 0; i < d; ++i) {
+        rotated[i] = query[i];
+    }
+
+    // Step 2: Apply FWHT: H · q
+    fwht(rotated);
+
+    // Step 3: Apply diagonal signs: D · (H · q)
+    for (size_t i = 0; i < d; ++i) {
+        rotated[i] *= diagonal_signs_[i];
+    }
+
+    // Step 4: Scale by 1/sqrt(d) — this matches the encode() scaling
+    float scale = 1.0f / std::sqrt(static_cast<float>(d));
+    for (size_t i = 0; i < d; ++i) {
+        rotated[i] *= scale;
+    }
+
+    // Step 5: Copy first d elements to output span
+    for (size_t i = 0; i < d; ++i) {
+        output[i] = rotated[i];
+    }
+}
+
 float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query,
                                      const std::vector<uint8_t>& packed_codes) const {
     const size_t d = config_.dimension;
@@ -425,8 +476,9 @@ float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query
     const size_t expected_bytes = (d * bits + 7) / 8;
     assert(packed_codes.size() == expected_bytes);
 
-    // Pre-fetch these once
+    // Pre-fetch once
     const float* y_q = transformed_query.data();
+    const float* scales = per_coord_scales_.data();
     const size_t num_centroids = centroids_.size(); // 2^bits
 
     float accumulator = 0.0f;
@@ -449,17 +501,20 @@ float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query
             bits_read += bits_to_read;
         }
 
-        // Lookup centroid for this coordinate
+        // Lookup centroid and apply per-coordinate scale
+        // centroid_val = scale[i] * centroid_table[code]
+        // This makes z[i] = scale[i] * c[code_i], where scale[i] ≈ E[|h_i|]
         float centroid_val = (code < num_centroids) ? centroids_[code] : 0.0f;
+        float scaled = centroid_val * scales[i];
 
         // Accumulate y_q^T · z and ||z||² simultaneously
-        accumulator += y_q[i] * centroid_val;
-        z_norm_sq += centroid_val * centroid_val;
+        accumulator += y_q[i] * scaled;
+        z_norm_sq += scaled * scaled;
     }
 
     // Correct formula:
     //   y_q = (1/√d)·D·H·q  →  ||y_q|| ≈ 1 (unit query in Hadamard space)
-    //   z[i] = centroid[i]  →  dequantized Hadamard coordinate
+    //   z[i] = scale[i] * centroid[code_i]  →  dequantized Hadamard coordinate
     //   dot(q, v_decoded) = (1/||z||) · y_q^T · z
     //                      = accumulator / ||z||
     float z_norm = std::sqrt(z_norm_sq);
@@ -467,6 +522,103 @@ float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query
         return 0.0f;
     }
     return accumulator / z_norm;
+}
+
+float TurboQuantMSE::scoreFromPacked(std::span<const float> transformed_query,
+                                     std::span<const uint8_t> packed_codes) const {
+    const size_t d = config_.dimension;
+    const uint8_t bits = config_.bits_per_channel;
+    assert(transformed_query.size() == d);
+
+    const size_t expected_bytes = (d * bits + 7) / 8;
+    assert(packed_codes.size() == expected_bytes);
+
+    const float* y_q = transformed_query.data();
+    const uint8_t* packed = packed_codes.data();
+    const float* scales = per_coord_scales_.data();
+    const size_t num_centroids = centroids_.size(); // 2^bits
+
+    float accumulator = 0.0f;
+    float z_norm_sq = 0.0f;
+
+    for (size_t i = 0; i < d; ++i) {
+        // Unpack code value for coordinate i
+        size_t bit_pos = i * bits;
+        size_t byte_idx = bit_pos >> 3;  // bit_pos / 8
+        size_t bit_offset = bit_pos & 7; // bit_pos % 8
+
+        uint8_t code = 0;
+        size_t bits_read = 0;
+        while (bits_read < bits) {
+            size_t bits_available = 8 - bit_offset;
+            size_t bits_to_read = std::min(bits - bits_read, bits_available);
+            uint8_t chunk = (packed[byte_idx] >> bit_offset) & ((1 << bits_to_read) - 1);
+            code |= chunk << bits_read;
+            bit_offset = 0;
+            bits_read += bits_to_read;
+        }
+
+        float centroid_val = (code < num_centroids) ? centroids_[code] : 0.0f;
+        float scaled = centroid_val * scales[i];
+        accumulator += y_q[i] * scaled;
+        z_norm_sq += scaled * scaled;
+    }
+
+    float z_norm = std::sqrt(z_norm_sq);
+    if (z_norm < 1e-6f) {
+        return 0.0f;
+    }
+    return accumulator / z_norm;
+}
+
+void TurboQuantMSE::fitPerCoordScales(const std::vector<std::vector<float>>& vectors,
+                                      size_t sample_limit) {
+    const size_t d = config_.dimension;
+    const size_t n = sample_limit > 0 ? std::min(sample_limit, vectors.size()) : vectors.size();
+    if (n == 0) {
+        return;
+    }
+
+    // Welford's online algorithm for per-coordinate mean of |h_i|
+    // (mean absolute value after Hadamard transform, which tells us the scale)
+    std::vector<double> mean_abs(d, 0.0); // Running mean of |h_i|
+    std::vector<double> m2(d, 0.0);       // Running sum of squared deviations (for variance)
+
+    for (size_t v = 0; v < n; ++v) {
+        const auto& vec = vectors[v];
+        if (vec.size() != d) {
+            continue; // Skip vectors with wrong dimension
+        }
+
+        // Apply Hadamard transform to this vector
+        std::vector<float> h = vec;
+        size_t n_pow2 = 1;
+        while (n_pow2 < d) {
+            n_pow2 *= 2;
+        }
+        h.resize(n_pow2, 0.0f);
+        fwht(h);
+
+        for (size_t i = 0; i < d; ++i) {
+            h[i] *= diagonal_signs_[i];                        // Apply diagonal signs
+            h[i] *= (1.0f / std::sqrt(static_cast<float>(d))); // Scale by 1/sqrt(d)
+
+            double abs_h = std::abs(h[i]);
+            double delta = abs_h - mean_abs[i];
+            mean_abs[i] += delta / (v + 1);
+            double delta2 = abs_h - mean_abs[i];
+            m2[i] += delta * delta2;
+        }
+    }
+
+    // Update per_coord_scales_ with the per-coordinate means
+    // Use max(mean_abs[i], 1e-6) to avoid zero scales
+    per_coord_scales_.resize(d);
+    for (size_t i = 0; i < d; ++i) {
+        // Use the mean absolute value as the scale
+        // This is approximately E[|h_i|] for the training distribution
+        per_coord_scales_[i] = static_cast<float>(std::max(mean_abs[i], 1e-6));
+    }
 }
 
 // =============================================================================

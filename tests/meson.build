@@ -1475,6 +1475,7 @@ if catch2_dep.found()
         'unit/vector/turboquant_integration_catch2_test.cpp',
         'unit/vector/turboquant_storage_catch2_test.cpp',
         'unit/vector/turboquant_packed_reranker_catch2_test.cpp',
+        'unit/vector/compressed_ann_catch2_test.cpp',
       ),
       include_directories: incs,
       dependencies: [catch2_dep, catch2_main_dep] + test_deps,

@@ -772,6 +772,41 @@ public:
         return backend_->deleteEntityVectorsByDocument(document_hash);
     }
 
+    Result<size_t>
+    fitAndPersistPerCoordScales(const std::vector<std::vector<float>>& training_vectors) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        if (!config_.enable_turboquant_storage && !config_.quantized_primary_storage) {
+            return Error{ErrorCode::InvalidState, "TurboQuant is not enabled"};
+        }
+
+        if (training_vectors.empty()) {
+            return Error{ErrorCode::InvalidState, "No training vectors provided"};
+        }
+
+        // Fit scales
+        yams::vector::TurboQuantConfig cfg;
+        cfg.dimension = config_.embedding_dim;
+        cfg.bits_per_channel = config_.turboquant_bits;
+        cfg.seed = config_.turboquant_seed;
+        yams::vector::TurboQuantMSE tq(cfg);
+        tq.fitPerCoordScales(training_vectors, training_vectors.size());
+
+        // Persist to DB
+        auto scales = tq.perCoordScales();
+        backend_->persistTurboQuantPerCoordScales(config_.embedding_dim, config_.turboquant_bits,
+                                                  config_.turboquant_seed, scales);
+
+        spdlog::info("Fitted and persisted {} per-coord scales for dim={} bits={}", scales.size(),
+                     config_.embedding_dim, static_cast<int>(config_.turboquant_bits));
+
+        return scales.size();
+    }
+
     std::vector<EntityVectorRecord> searchEntities(const std::vector<float>& query_embedding,
                                                    const EntitySearchParams& params) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);

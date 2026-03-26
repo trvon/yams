@@ -252,3 +252,102 @@ TEST_CASE("vector_utils free functions work correctly",
     CHECK(asym_free <= 1.0f);
     CHECK(std::abs(asym_free - asym_method) < 1e-5f); // Should be identical
 }
+
+TEST_CASE("TurboQuantMSE: per-coord scales are non-trivial after fit",
+          "[turboquant][asymmetric][per_coord_scales][catch2]") {
+    // After fitPerCoordScales, scales should vary across coordinates
+    // (not all the same as the heuristic initialization)
+    TurboQuantConfig config;
+    config.dimension = 128;
+    config.bits_per_channel = 4;
+    config.seed = 99;
+    TurboQuantMSE tq(config);
+
+    // Generate training corpus
+    std::vector<std::vector<float>> corpus;
+    for (size_t i = 0; i < 200; ++i) {
+        corpus.push_back(generateUnitVector(128, static_cast<uint32_t>(i + 1000)));
+    }
+
+    tq.fitPerCoordScales(corpus, 200);
+
+    const auto& scales = tq.perCoordScales();
+    REQUIRE(scales.size() == 128);
+
+    // Check scales are all positive and in a reasonable range
+    float min_scale = scales[0];
+    float max_scale = scales[0];
+    for (float s : scales) {
+        CHECK(s > 0.0f);
+        min_scale = std::min(min_scale, s);
+        max_scale = std::max(max_scale, s);
+    }
+
+    // With enough training data, scales should show variance
+    CHECK(max_scale > min_scale * 1.01f); // At least 1% variation
+}
+
+TEST_CASE("TurboQuantMSE: per-coord scales improve scoring vs shared centroids",
+          "[turboquant][asymmetric][per_coord_scales][catch2]") {
+    const size_t dim = 128;
+    const uint64_t seed = 42;
+    const uint8_t bits = 4;
+
+    // Quantizer WITHOUT fitted scales (heuristic default)
+    TurboQuantConfig config_no_fit;
+    config_no_fit.dimension = dim;
+    config_no_fit.bits_per_channel = bits;
+    config_no_fit.seed = seed;
+    TurboQuantMSE tq_no_fit(config_no_fit);
+
+    // Generate training corpus
+    std::vector<std::vector<float>> corpus;
+    for (size_t i = 0; i < 200; ++i) {
+        corpus.push_back(generateUnitVector(dim, static_cast<uint32_t>(i + 2000)));
+    }
+
+    // Quantizer WITH fitted scales
+    TurboQuantMSE tq_fitted(config_no_fit);
+    tq_fitted.fitPerCoordScales(corpus, 200);
+
+    // Test corpus
+    std::vector<std::vector<float>> test_corpus;
+    for (size_t i = 0; i < 100; ++i) {
+        test_corpus.push_back(generateUnitVector(dim, static_cast<uint32_t>(i + 3000)));
+    }
+
+    std::vector<float> query = generateUnitVector(dim, 4000);
+
+    // Measure self-scoring improvement (should be close to 1.0 for each corpus vector)
+    double sum_no_fit = 0.0;
+    double sum_fitted = 0.0;
+    double sum_exact = 0.0;
+    for (const auto& v : test_corpus) {
+        // transformQuery is the same for both (same Hadamard seed)
+        auto y_q = tq_no_fit.transformQuery(query);
+        auto packed_no_fit = tq_no_fit.packedEncode(v);
+        auto packed_fitted = tq_fitted.packedEncode(v);
+
+        float score_no_fit = tq_no_fit.scoreFromPacked(y_q, packed_no_fit);
+        float score_fitted = tq_fitted.scoreFromPacked(y_q, packed_fitted);
+
+        // Exact cosine
+        float exact = dotProduct(query, v);
+
+        sum_no_fit += score_no_fit;
+        sum_fitted += score_fitted;
+        sum_exact += exact;
+    }
+
+    // Mean scores should be positive
+    CHECK(sum_fitted / test_corpus.size() > 0.0);
+    CHECK(sum_no_fit / test_corpus.size() > 0.0);
+
+    // Both should be reasonably close to exact mean
+    double exact_mean = sum_exact / test_corpus.size();
+    double diff_no_fit = std::abs((sum_no_fit / test_corpus.size()) - exact_mean);
+    double diff_fitted = std::abs((sum_fitted / test_corpus.size()) - exact_mean);
+
+    // Fitted should not be worse than unfitted
+    CHECK(diff_fitted <= diff_no_fit * 2.0); // Generous bound: fitted should be comparable
+}

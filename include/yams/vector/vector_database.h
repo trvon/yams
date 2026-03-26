@@ -83,6 +83,10 @@ struct VectorRecord {
         uint8_t bits_per_channel = 0;      // 1-4 for TurboQuant
         uint64_t seed = 0;                 // Random seed used for quantization
         std::vector<uint8_t> packed_codes; // Bit-packed quantization codes
+        // Per-coordinate scales (fitted from corpus via Welford's algorithm).
+        // Stored as a global singleton per quantizer config (seed+bits+dim),
+        // not per-vector. Empty vector means using heuristic scales.
+        std::vector<float> per_coord_scales;
     };
 
     std::string chunk_id;                        // UUID for chunk
@@ -358,6 +362,19 @@ public:
     // Validation
     static bool isValidEmbedding(const std::vector<float>& embedding, size_t expected_dim);
     static double computeCosineSimilarity(const std::vector<float>& a, const std::vector<float>& b);
+
+    /**
+     * Fit and persist per-coordinate scales for TurboQuant scoring.
+     *
+     * Fits per-coord scales using Welford's algorithm on the provided training
+     * vectors and persists them to the database. Subsequent queries will load
+     * and use these scales automatically for scoring.
+     *
+     * @param training_vectors Vectors to fit scales from (unit sphere recommended)
+     * @return Error on failure
+     */
+    Result<size_t>
+    fitAndPersistPerCoordScales(const std::vector<std::vector<float>>& training_vectors);
 
 private:
     class Impl;

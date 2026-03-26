@@ -23,6 +23,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <span>
+#include <vector>
 #include <cstdint>
 #include <random>
 #include <vector>
@@ -198,6 +200,17 @@ public:
     std::vector<float> transformQuery(const std::vector<float>& query) const;
 
     /**
+     * @brief Allocation-free variant: transform query in-place into provided span.
+     *
+     * Avoids heap allocation in hot paths (e.g., compressed ANN traversal).
+     * The output span must have size >= dimension.
+     *
+     * @param query Unit query vector (dim = config_.dimension)
+     * @param output Pre-allocated span with at least dimension elements
+     */
+    void transformQueryInPlace(const std::vector<float>& query, std::span<float> output) const;
+
+    /**
      * Asymmetric cosine score from packed codes (no full decode).
      *
      * Computes: (1/d) · sum_i y_q[i] · centroid[i][code_i]
@@ -213,6 +226,44 @@ public:
     float scoreFromPacked(const std::vector<float>& transformed_query,
                           const std::vector<uint8_t>& packed_codes) const;
 
+    /**
+     * Span-based asymmetric scoring — zero-allocation hot-path for HNSW traversal.
+     * Reuses pre-allocated buffers instead of allocating per candidate.
+     *
+     * @param transformed_query Pre-computed transformed query (size = dim)
+     * @param packed_codes Packed codes (size = (dim*bits+7)/8)
+     * @param temp_decode_buffer Pre-allocated buffer of dim floats for decode (optional, unused in
+     * scoring)
+     * @return Approximate cosine similarity
+     */
+    float scoreFromPacked(std::span<const float> transformed_query,
+                          std::span<const uint8_t> packed_codes) const;
+
+    /**
+     * Fit per-coordinate scales from training vectors using Welford's algorithm.
+     * Improves scoring quality when training data is representative of the corpus.
+     * @param vectors Training vectors (unit sphere, all dim=config_.dimension)
+     * @param sample_limit Max vectors to sample (0 = all)
+     */
+    void fitPerCoordScales(const std::vector<std::vector<float>>& vectors, size_t sample_limit = 0);
+
+    /**
+     * Set per-coordinate scales directly from an external source (e.g., loaded from DB).
+     * Use this when scales were computed during index build and must be restored on open.
+     * @param scales Vector of dim floats; must match config_.dimension
+     */
+    void setPerCoordScales(std::vector<float> scales) {
+        if (scales.size() != config_.dimension) {
+            return; // Ignore mismatched scales
+        }
+        per_coord_scales_ = std::move(scales);
+    }
+
+    /**
+     * Per-coordinate scale getter (for debugging/benchmarking)
+     */
+    const std::vector<float>& perCoordScales() const { return per_coord_scales_; }
+
 private:
     TurboQuantConfig config_;
 
@@ -224,6 +275,14 @@ private:
 
     /** Pre-computed decision boundaries for scalar quantization */
     std::vector<float> decision_boundaries_;
+
+    /**
+     * Per-coordinate scales for LUT-based scoring.
+     * Each coordinate i has scale[i] ≈ E[|h[i]|] for unit-sphere Hadamard coefficients.
+     * Scoring: z[i] = scale[i] * centroid[code_i], where z is dequantized Hadamard coord.
+     * This replaces the shared-scale assumption (same centroid for all coordinates).
+     */
+    std::vector<float> per_coord_scales_;
 
     /**
      * Generate random diagonal signs for Hadamard rotation

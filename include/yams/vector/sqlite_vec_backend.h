@@ -163,6 +163,9 @@ public:
     std::size_t testingLastHnswAddedCount() const;
     std::size_t testingLastHnswRemovedCount() const;
 
+    Result<void> persistTurboQuantPerCoordScales(size_t dim, uint8_t bits, uint64_t seed,
+                                                 const std::vector<float>& scales) override;
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

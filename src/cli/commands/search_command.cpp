@@ -1341,19 +1341,34 @@ public:
                 }
 
                 std::promise<Result<app::services::SearchResponse>> prom;
+                std::promise<void> localDone;
                 auto fut = prom.get_future();
+                auto localDoneFut = localDone.get_future();
                 boost::asio::co_spawn(
                     getExecutor(),
-                    [&]() -> boost::asio::awaitable<void> {
-                        auto r = co_await searchService->search(sreq);
-                        prom.set_value(std::move(r));
+                    [searchService, sreq, prom = std::move(prom),
+                     localDone = std::move(localDone)]() mutable -> boost::asio::awaitable<void> {
+                        try {
+                            auto r = co_await searchService->search(sreq);
+                            prom.set_value(std::move(r));
+                        } catch (const std::exception& e) {
+                            prom.set_value(Error{
+                                ErrorCode::InternalError,
+                                std::string("Local search failed with exception: ") + e.what()});
+                        } catch (...) {
+                            prom.set_value(Error{ErrorCode::InternalError,
+                                                 "Local search failed with unknown exception"});
+                        }
+                        localDone.set_value();
                         co_return;
                     },
                     boost::asio::detached);
                 if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+                    localDoneFut.wait();
                     return Error{ErrorCode::Timeout, "Local search timed out"};
                 }
                 auto rlocal = fut.get();
+                localDoneFut.wait();
                 if (!rlocal) {
                     return rlocal.error();
                 }
@@ -1427,95 +1442,105 @@ public:
             auto work = [&, dreq, enableStream = clientConfig.enableChunkedResponses,
                          bodyTimeoutMs = bodyTimeoutMs_, daemonLease, fuzzyFlag = fuzzySearch_,
                          literalFlag = literalText_]() -> boost::asio::awaitable<void> {
-                auto& client = **daemonLease;
-                spdlog::info("[CLI:Search] Work coroutine started, enableStream={}", enableStream);
-                auto unaryCallWithFreshLease = [&, dreq, clientConfig]()
-                    -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
-                    auto unaryConfig = clientConfig;
-                    unaryConfig.enableChunkedResponses = false;
-                    unaryConfig.singleUseConnections = true;
+                try {
+                    auto& client = **daemonLease;
+                    spdlog::info("[CLI:Search] Work coroutine started, enableStream={}",
+                                 enableStream);
+                    auto unaryCallWithFreshLease = [&, dreq, clientConfig]()
+                        -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+                        auto unaryConfig = clientConfig;
+                        unaryConfig.enableChunkedResponses = false;
+                        unaryConfig.singleUseConnections = true;
 
-                    auto unaryLeaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
-                        unaryConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
-                    if (!unaryLeaseRes) {
-                        co_return unaryLeaseRes.error();
-                    }
+                        auto unaryLeaseRes =
+                            yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                                unaryConfig,
+                                yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+                        if (!unaryLeaseRes) {
+                            co_return unaryLeaseRes.error();
+                        }
 
-                    auto unaryLease = std::move(unaryLeaseRes.value());
-                    auto& unaryClient = **unaryLease;
-                    unaryClient.setStreamingEnabled(false);
-                    co_return co_await unaryClient.unarySearch(dreq);
-                };
-                auto callOnce = [&](const yams::daemon::SearchRequest& rq)
-                    -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
-                    spdlog::info("[CLI:Search] callOnce invoked, enableStream={}", enableStream);
-                    if (enableStream) {
-                        spdlog::info("[CLI:Search] Calling streamingSearch");
-                        co_return co_await client.streamingSearch(rq);
-                    }
-                    spdlog::info("[CLI:Search] Calling unarySearch");
-                    co_return co_await client.unarySearch(rq);
-                };
-                const auto ipcStart = std::chrono::steady_clock::now();
-                spdlog::info("[CLI:Search] About to call callOnce");
-                auto r = co_await callOnce(dreq);
-                const auto ipcEnd = std::chrono::steady_clock::now();
-                spdlog::info(
-                    "[TIMING] IPC call completed in {}ms",
-                    std::chrono::duration_cast<std::chrono::milliseconds>(ipcEnd - ipcStart)
-                        .count());
-                if (!r && enableStream) {
-                    const auto& err = r.error();
-                    if (err.code == ErrorCode::Timeout &&
-                        err.message.find("Read timeout") != std::string::npos) {
-                        spdlog::warn("Streaming search timed out; retrying unary path with "
-                                     "extended header timeout");
-                        client.setHeaderTimeout(std::chrono::milliseconds(bodyTimeoutMs));
-                        auto ur = co_await unaryCallWithFreshLease();
-                        if (ur) {
-                            auto ok = render(ur.value());
-                            done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
-                            co_return;
+                        auto unaryLease = std::move(unaryLeaseRes.value());
+                        auto& unaryClient = **unaryLease;
+                        unaryClient.setStreamingEnabled(false);
+                        co_return co_await unaryClient.unarySearch(dreq);
+                    };
+                    auto callOnce = [&](const yams::daemon::SearchRequest& rq)
+                        -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+                        spdlog::info("[CLI:Search] callOnce invoked, enableStream={}",
+                                     enableStream);
+                        if (enableStream) {
+                            spdlog::info("[CLI:Search] Calling streamingSearch");
+                            co_return co_await client.streamingSearch(rq);
+                        }
+                        spdlog::info("[CLI:Search] Calling unarySearch");
+                        co_return co_await client.unarySearch(rq);
+                    };
+                    const auto ipcStart = std::chrono::steady_clock::now();
+                    spdlog::info("[CLI:Search] About to call callOnce");
+                    auto r = co_await callOnce(dreq);
+                    const auto ipcEnd = std::chrono::steady_clock::now();
+                    spdlog::info(
+                        "[TIMING] IPC call completed in {}ms",
+                        std::chrono::duration_cast<std::chrono::milliseconds>(ipcEnd - ipcStart)
+                            .count());
+                    if (!r && enableStream) {
+                        const auto& err = r.error();
+                        if (err.code == ErrorCode::Timeout &&
+                            err.message.find("Read timeout") != std::string::npos) {
+                            spdlog::warn("Streaming search timed out; retrying unary path with "
+                                         "extended header timeout");
+                            client.setHeaderTimeout(std::chrono::milliseconds(bodyTimeoutMs));
+                            auto ur = co_await unaryCallWithFreshLease();
+                            if (ur) {
+                                auto ok = render(ur.value());
+                                done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
+                                co_return;
+                            }
                         }
                     }
-                }
-                if (r) {
-                    const auto& resp = r.value();
-                    bool noResults = resp.results.empty() || resp.totalCount == 0;
-                    if (noResults && !fuzzyFlag) {
-                        auto retryReq = dreq;
-                        retryReq.fuzzy = true;
-                        auto fr = co_await callOnce(retryReq);
-                        if (fr) {
-                            auto ok = render(fr.value());
-                            done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
-                            co_return;
+                    if (r) {
+                        const auto& resp = r.value();
+                        bool noResults = resp.results.empty() || resp.totalCount == 0;
+                        if (noResults && !fuzzyFlag) {
+                            auto retryReq = dreq;
+                            retryReq.fuzzy = true;
+                            auto fr = co_await callOnce(retryReq);
+                            if (fr) {
+                                auto ok = render(fr.value());
+                                done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
+                                co_return;
+                            }
                         }
-                    }
-                    auto ok = render(resp);
-                    done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
-                    co_return;
-                }
-                // Heuristic retry with literal-text when parse-like failure
-                const auto& derr = r.error();
-                bool parseLike = derr.code == ErrorCode::InvalidArgument ||
-                                 derr.message.find("syntax") != std::string::npos ||
-                                 derr.message.find("FTS5") != std::string::npos ||
-                                 derr.message.find("unbalanced") != std::string::npos ||
-                                 derr.message.find("near") != std::string::npos ||
-                                 derr.message.find("tokenize") != std::string::npos;
-                if (!literalFlag && parseLike) {
-                    // Silent retry with literal-text for better ergonomics
-                    auto retryReq = dreq;
-                    retryReq.literalText = true;
-                    auto rr = co_await callOnce(retryReq);
-                    if (rr) {
-                        auto ok = render(rr.value());
+                        auto ok = render(resp);
                         done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
                         co_return;
                     }
+                    const auto& derr = r.error();
+                    bool parseLike = derr.code == ErrorCode::InvalidArgument ||
+                                     derr.message.find("syntax") != std::string::npos ||
+                                     derr.message.find("FTS5") != std::string::npos ||
+                                     derr.message.find("unbalanced") != std::string::npos ||
+                                     derr.message.find("near") != std::string::npos ||
+                                     derr.message.find("tokenize") != std::string::npos;
+                    if (!literalFlag && parseLike) {
+                        auto retryReq = dreq;
+                        retryReq.literalText = true;
+                        auto rr = co_await callOnce(retryReq);
+                        if (rr) {
+                            auto ok = render(rr.value());
+                            done.set_value(ok ? Result<void>() : Result<void>(ok.error()));
+                            co_return;
+                        }
+                    }
+                    done.set_value(r.error());
+                } catch (const std::exception& e) {
+                    done.set_value(Error{ErrorCode::InternalError,
+                                         std::string("search failed with exception: ") + e.what()});
+                } catch (...) {
+                    done.set_value(
+                        Error{ErrorCode::InternalError, "search failed with unknown exception"});
                 }
-                done.set_value(r.error());
                 co_return;
             };
             spdlog::info("[CLI:Search] Spawning work coroutine on executor");
@@ -1525,10 +1550,7 @@ public:
                 return Error{ErrorCode::Timeout, "search daemon call timed out"};
             }
             auto rv = fut.get();
-            // Ensure coroutine cleanup completes before destroying captured references
-            if (coroFut.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
-                spdlog::debug("search: coroutine cleanup still in progress");
-            }
+            coroFut.get();
             if (rv)
                 return Result<void>();
             if (yams::cli::is_transport_failure(rv.error())) {
