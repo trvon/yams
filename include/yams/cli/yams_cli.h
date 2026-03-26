@@ -28,6 +28,12 @@ public:
     explicit YamsCLI(boost::asio::any_io_executor executor = {});
     ~YamsCLI();
 
+    /// Resolve the daemon socket path using the same env/config/default precedence as CLI tools.
+    static std::filesystem::path resolveConfiguredDaemonSocketPath();
+
+    /// Resolve the daemon PID file using config.toml when present, else daemon defaults.
+    static std::filesystem::path resolveConfiguredDaemonPidFilePath();
+
     /**
      * Get the executor for async operations
      */

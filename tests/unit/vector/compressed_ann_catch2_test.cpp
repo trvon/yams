@@ -156,6 +156,46 @@ TEST_CASE("CompressedANNIndex: empty index search returns empty",
     CHECK(results.empty());
 }
 
+TEST_CASE("CompressedANNIndex: search visits bounded candidates (graph-based, not brute-force)",
+          "[vector][turboquant][compressed_ann]") {
+    // Acceptance criterion for Phase 1: search() must use the NSW graph, not brute-force.
+    // With ef_search=10 and 200 vectors, graph search visits at most ef*4=40 candidates.
+    // Brute-force would visit all 200.
+
+    yams::vector::CompressedANNIndex::Config cfg;
+    cfg.dimension = kDim;
+    cfg.bits_per_channel = kBits;
+    cfg.seed = kSeed;
+    cfg.m = 8;
+    cfg.ef_search = 10;
+    cfg.max_elements = 2000;
+
+    yams::vector::CompressedANNIndex idx(cfg);
+    yams::vector::TurboQuantConfig tq_cfg;
+    tq_cfg.dimension = kDim;
+    tq_cfg.bits_per_channel = kBits;
+    tq_cfg.seed = kSeed;
+    yams::vector::TurboQuantMSE tq(tq_cfg);
+
+    std::mt19937 rng(kSeed + 50);
+    for (size_t i = 0; i < 200; ++i) {
+        idx.add(i, tq.packedEncode(randUnitVec(kDim, rng)));
+    }
+    REQUIRE(idx.build().has_value());
+    CHECK(idx.size() == 200);
+
+    size_t candidate_count = 0;
+    float decode_escapes = 0.0f;
+    auto ann_results =
+        idx.searchWithStats(randUnitVec(kDim, rng), 10, &candidate_count, &decode_escapes);
+
+    // Phase 1 acceptance: graph search visits strictly fewer than all nodes
+    CHECK(candidate_count < idx.size());         // Graph vs brute-force
+    CHECK(candidate_count <= cfg.ef_search * 4); // Upper bound from greedyDescent
+    CHECK(decode_escapes == 0.0f);               // Zero decode in compressed path
+    CHECK(!ann_results.results.empty());         // At least some candidates found
+}
+
 TEST_CASE("CompressedANNIndex: memoryBytes accounts for corpus + graph",
           "[vector][turboquant][compressed_ann]") {
     yams::vector::CompressedANNIndex::Config cfg;

@@ -6,14 +6,12 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
-#include <iostream>
-#include <unordered_set>
 #include <limits>
 #include <numeric>
-#include <queue>
 #include <random>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 
@@ -21,13 +19,6 @@ namespace yams {
 namespace vector {
 
 namespace {
-
-/** Max-priority-queue element for greedy search: (score, node_idx) */
-struct PQEntry {
-    float score;
-    size_t node_idx;
-    bool operator<(const PQEntry& other) const { return score < other.score; }
-};
 
 /** Compute packed code byte length for a given dim and bits. */
 constexpr size_t packedByteLen(size_t dim, uint8_t bits) {
@@ -192,11 +183,11 @@ void CompressedANNIndex::connectNodeToGraph(size_t new_node_idx) {
 Result<void> CompressedANNIndex::build() {
     // Build NSW-style graph: connect each node to nearest M neighbors
     // Uses XOR distance in packed space (O(n^2) build, fast for < 1000 vectors)
+    const size_t max_neighbors = std::min(config_.m, nodes_.size() - 1);
     for (size_t i = 0; i < nodes_.size(); ++i) {
-        if (nodes_[i].neighbors.size() >= config_.m)
-            continue;
-
         std::vector<std::pair<float, size_t>> dists;
+        dists.reserve(nodes_.size());
+
         for (size_t j = 0; j < nodes_.size(); ++j) {
             if (i == j)
                 continue;
@@ -211,10 +202,11 @@ Result<void> CompressedANNIndex::build() {
         }
 
         // Sort by XOR distance (ascending = closer)
-        std::partial_sort(dists.begin(), dists.begin() + static_cast<long>(config_.m), dists.end(),
+        std::partial_sort(dists.begin(), dists.begin() + static_cast<long>(max_neighbors),
+                          dists.end(),
                           [](const auto& x, const auto& y) { return x.first < y.first; });
 
-        for (size_t k = 0; k < config_.m && k < dists.size(); ++k) {
+        for (size_t k = 0; k < max_neighbors; ++k) {
             nodes_[i].neighbors.push_back(dists[k].second);
         }
     }
@@ -223,75 +215,75 @@ Result<void> CompressedANNIndex::build() {
 
 std::vector<size_t> CompressedANNIndex::greedyDescent(std::span<const float> transformed_query,
                                                       size_t entry_idx, size_t ef) {
-    std::vector<size_t> visited;
-    visited.reserve(ef * 4);
+    // Standard NSW greedy traversal:
+    // 1. Maintain a max-heap of (score, node_idx)
+    // 2. Pop best node, explore all its neighbors
+    // 3. Stop when we've popped ef candidates OR heap is empty
+    // 4. Return all popped node indices as the candidate set
 
-    // Max-heap of (score, node_idx), accessed via std::less for max behavior
-    std::priority_queue<PQEntry> candidates;
-    std::unordered_set<size_t> visited_set;
+    if (nodes_.empty())
+        return {};
 
-    // Initialize from entry point
+    // Max-heap: higher score = higher priority
+    std::vector<std::pair<float, size_t>> heap; // (score, node_idx)
+    heap.reserve(ef * 4);
+    std::unordered_set<size_t> visited;
+    visited.reserve(nodes_.size());
+
+    // Initialize with entry point
     float entry_score = packedScore(scorer_, transformed_query, packed_codes_[entry_idx]);
-    candidates.push({entry_score, entry_idx});
-    visited.push_back(entry_idx);
-    visited_set.insert(entry_idx);
+    heap.emplace_back(entry_score, entry_idx);
+    visited.insert(entry_idx);
 
-    // Greedy descent: always expand the best candidate
-    // Stop when we've collected ef candidates
-    while (!candidates.empty() && visited.size() < ef * 4) {
-        // Get current best candidate
-        auto [current_score, current_idx] = candidates.top();
-        candidates.pop();
+    // Make max-heap
+    std::make_heap(heap.begin(), heap.end(),
+                   [](const auto& a, const auto& b) { return a.first < b.first; });
 
-        // Mark as visited
-        visited.push_back(current_idx);
+    std::vector<size_t> popped; // nodes popped from heap = candidate set
+    popped.reserve(ef * 4);
+
+    while (!heap.empty() && popped.size() < ef * 4) {
+        // Extract max
+        std::pop_heap(heap.begin(), heap.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+        auto [current_score, current_idx] = heap.back();
+        heap.pop_back();
+        popped.push_back(current_idx);
 
         // Explore neighbors
-        const auto& neighbors = nodes_[current_idx].neighbors;
-        for (size_t neighbor_idx : neighbors) {
-            if (visited_set.contains(neighbor_idx))
+        for (size_t nb : nodes_[current_idx].neighbors) {
+            if (visited.contains(nb))
                 continue;
-            visited_set.insert(neighbor_idx);
-
-            float neighbor_score =
-                packedScore(scorer_, transformed_query, packed_codes_[neighbor_idx]);
-            candidates.push({neighbor_score, neighbor_idx});
-
-            if (candidates.size() > ef * 4) {
-                // Trim to keep only top ef candidates
-                // Note: priority_queue doesn't support partial_sort,
-                // so we just let it grow and trim at the end
-            }
+            visited.insert(nb);
+            float nb_score = packedScore(scorer_, transformed_query, packed_codes_[nb]);
+            heap.emplace_back(nb_score, nb);
+            std::push_heap(heap.begin(), heap.end(),
+                           [](const auto& a, const auto& b) { return a.first < b.first; });
         }
     }
 
-    // Collect top ef from candidates
-    std::vector<PQEntry> results;
-    results.reserve(candidates.size());
-    while (!candidates.empty()) {
-        results.push_back(candidates.top());
-        candidates.pop();
-    }
-
-    // Sort and return top ef indices
-    std::partial_sort(
-        results.begin(), results.begin() + static_cast<long>(std::min(ef, results.size())),
-        results.end(), [](const PQEntry& a, const PQEntry& b) { return a.score > b.score; });
-
-    std::vector<size_t> top_indices;
-    top_indices.reserve(std::min(ef, results.size()));
-    for (size_t i = 0; i < std::min(ef, results.size()); ++i) {
-        top_indices.push_back(results[i].node_idx);
-    }
-    return top_indices;
+    return popped;
 }
 
 std::vector<CompressedANNIndex::SearchResult>
 CompressedANNIndex::search(const std::vector<float>& query_embedding, size_t k) {
+    size_t cand_count = 0;
+    float dec_escapes = 0.0f;
+    auto stats = searchWithStats(query_embedding, k, &cand_count, &dec_escapes);
+    return std::move(stats.results);
+}
+
+CompressedANNIndex::SearchStats
+CompressedANNIndex::searchWithStats(const std::vector<float>& query_embedding, size_t k,
+                                    size_t* out_candidate_count, float* out_decode_esapes) {
+    SearchStats stats;
+    stats.candidate_count = 0;
+    stats.decode_escapes = 0.0f;
+
     if (nodes_.empty())
-        return {};
+        return stats;
     if (k == 0)
-        return {};
+        return stats;
 
     // Transform query once (allocation-free via reused cache)
     if (transformed_query_cache_.size() != config_.dimension) {
@@ -301,12 +293,41 @@ CompressedANNIndex::search(const std::vector<float>& query_embedding, size_t k) 
     scorer_.transformQueryInPlace(query_embedding, cache_span);
     std::span<const float> transformed_query(transformed_query_cache_);
 
-    // Brute-force search over all packed codes (compressed ANN: no decode)
+    // Phase 1 (Milestone 9): entry-point heuristic — node with most neighbors (highest
+    // connectivity)
+    size_t entry_idx = 0;
+    size_t best_conn = 0;
+    for (size_t i = 0; i < nodes_.size(); ++i) {
+        if (nodes_[i].neighbors.size() > best_conn) {
+            best_conn = nodes_[i].neighbors.size();
+            entry_idx = i;
+        }
+    }
+
+    // Greedy descent in NSW graph — visits bounded frontier, not all nodes
+    std::vector<size_t> top_candidates =
+        greedyDescent(transformed_query, entry_idx, config_.ef_search);
+
+    // Defensive: if greedyDescent returns empty, return empty results
+    if (top_candidates.empty()) {
+        stats.results.clear();
+        return stats;
+    }
+
+    // If greedyDescent returned fewer candidates than requested k, that's fine
+    // We sort and return what we have
+    size_t top_cand_count = top_candidates.size(); // for logging below
+    (void)top_cand_count;                          // suppress unused in non-debug
+
+    stats.candidate_count = top_candidates.size();
+    stats.decode_escapes = 0; // No decode in compressed path
+
+    // Score only the frontier with scoreFromPacked — zero decode
     std::vector<std::pair<float, size_t>> scored;
-    scored.reserve(nodes_.size());
-    for (size_t i = 0; i < packed_codes_.size(); ++i) {
-        float s = packedScore(scorer_, transformed_query, packed_codes_[i]);
-        scored.emplace_back(s, nodes_[i].id);
+    scored.reserve(top_candidates.size());
+    for (size_t idx : top_candidates) {
+        float s = packedScore(scorer_, transformed_query, packed_codes_[idx]);
+        scored.emplace_back(s, nodes_[idx].id);
     }
 
     std::partial_sort(scored.begin(),
@@ -318,7 +339,21 @@ CompressedANNIndex::search(const std::vector<float>& query_embedding, size_t k) 
     for (size_t i = 0; i < std::min(k, scored.size()); ++i) {
         results.push_back({scored[i].second, scored[i].first});
     }
-    return results;
+
+    // Defensive: if scored is empty somehow, return empty
+    if (results.empty()) {
+        stats.results.clear();
+        return stats;
+    }
+
+    stats.results = std::move(results);
+
+    if (out_candidate_count)
+        *out_candidate_count = stats.candidate_count;
+    if (out_decode_esapes)
+        *out_decode_esapes = stats.decode_escapes;
+
+    return stats;
 }
 
 } // namespace vector

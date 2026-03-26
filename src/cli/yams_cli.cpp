@@ -10,7 +10,9 @@
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/daemon.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -139,6 +141,18 @@ bool env_truthy(const char* raw) {
 
 void YamsCLI::setPendingCommand(ICommand* cmd) {
     pendingCommand_ = cmd;
+}
+
+std::filesystem::path YamsCLI::resolveConfiguredDaemonSocketPath() {
+    return yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+}
+
+std::filesystem::path YamsCLI::resolveConfiguredDaemonPidFilePath() {
+    auto pidPath = yams::config::resolve_pid_file_from_config();
+    if (!pidPath.empty()) {
+        return pidPath;
+    }
+    return yams::daemon::YamsDaemon::resolveSystemPath(yams::daemon::YamsDaemon::PathType::PidFile);
 }
 
 YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(executor)) {

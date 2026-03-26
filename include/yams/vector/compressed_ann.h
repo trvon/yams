@@ -56,6 +56,33 @@ public:
         float score; // higher = better (inner product)
     };
 
+    /** Runtime stats emitted per search for telemetry. */
+    struct SearchStats {
+        size_t candidate_count = 0;  // nodes scored during greedy descent
+        float decode_escapes = 0.0f; // always 0 in compressed path
+        std::vector<SearchResult> results;
+    };
+
+    /**
+     * Graph-search with telemetry output.
+     * @param out_candidate_count If non-null, receives the number of nodes scored
+     * @param out_decode_escapes  If non-null, receives decode-escape count (always 0)
+     */
+    SearchStats searchWithStats(const std::vector<float>& query_embedding, size_t k,
+                                size_t* out_candidate_count, float* out_decode_escapes);
+
+    /**
+     * Greedy NSW search using packed scoring only.
+     *
+     * Traverses the pre-built NSW graph, scoring candidates with
+     * scoreFromPacked (per-coordinate LUT) — zero decode until results.
+     *
+     * @param query_embedding Float query (transformed via transformQuery internally)
+     * @param k Number of results to return
+     * @return Vector of top-k results (sorted descending by score)
+     */
+    std::vector<SearchResult> search(const std::vector<float>& query_embedding, size_t k);
+
     explicit CompressedANNIndex(const Config& config);
 
     // Non-copyable, movable
@@ -88,14 +115,6 @@ public:
      * @brief Greedy NSW search using packed scoring only.
      *
      * Traverses the pre-built NSW graph, scoring candidates with
-     * scoreFromPacked (per-coordinate LUT) — zero decode until results.
-     *
-     * @param query_embedding Float query (transformed via transformQuery internally)
-     * @param k Number of results to return
-     * @return Vector of top-k results (sorted descending by score)
-     */
-    std::vector<SearchResult> search(const std::vector<float>& query_embedding, size_t k);
-
     /**
      * @brief Return total in-memory bytes for packed corpus + graph.
      */

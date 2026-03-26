@@ -119,6 +119,7 @@ std::filesystem::path get_legacy_plugin_trust_file();
 
 // Daemon-specific config resolution (env → config → defaults)
 std::filesystem::path resolve_socket_path_from_config();
+std::filesystem::path resolve_pid_file_from_config();
 std::filesystem::path resolve_data_dir_from_config();
 std::string resolve_daemon_mode_from_config();
 

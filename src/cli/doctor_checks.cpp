@@ -22,7 +22,7 @@ namespace fs = std::filesystem;
 DaemonCheckResult checkDaemon(YamsCLI* cli, std::optional<daemon::StatusResponse>& cachedStatus) {
     DaemonCheckResult result;
 
-    std::string socketPath = daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+    std::string socketPath = yams::cli::YamsCLI::resolveConfiguredDaemonSocketPath().string();
 
     // Check if daemon is running
     if (!cachedStatus) {
@@ -38,6 +38,7 @@ DaemonCheckResult checkDaemon(YamsCLI* cli, std::optional<daemon::StatusResponse
     if (!cachedStatus) {
         try {
             daemon::ClientConfig cfg;
+            cfg.socketPath = socketPath;
             if (cli && cli->hasExplicitDataDir()) {
                 cfg.dataDir = cli->getDataPath();
             }

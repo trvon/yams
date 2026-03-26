@@ -93,6 +93,21 @@ turboquant_bench = executable('turboquant_bench', files('turboquant_bench.cpp'),
 
 alias_target('bench_turboquant', turboquant_bench)
 
+# Compressed ANN scale validation benchmark (1k–50k corpus for staged rollout decision)
+# Measures: Recall@1, Recall@10, p50/p95 latency, candidate count, memory, throughput.
+compressed_ann_scale_bench = executable('compressed_ann_scale_bench',
+  files('compressed_ann_scale_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_compressed_ann_scale', compressed_ann_scale_bench)
+
 # Large-scale ingestion benchmark (requires google-benchmark)
 if benchmark_dep.found()
   large_scale_ingestion_bench_deps = [

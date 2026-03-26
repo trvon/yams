@@ -267,6 +267,24 @@ std::filesystem::path resolve_socket_path_from_config() {
     return {};
 }
 
+std::filesystem::path resolve_pid_file_from_config() {
+    std::filesystem::path config_path;
+    if (const char* cfg_env = std::getenv("YAMS_CONFIG"); cfg_env && *cfg_env) {
+        config_path = std::filesystem::path(cfg_env);
+    } else {
+        config_path = get_config_path();
+    }
+
+    if (!config_path.empty()) {
+        if (auto result = parse_config_path_value(config_path, "daemon", "pid_file");
+            !result.empty()) {
+            return result;
+        }
+    }
+
+    return {};
+}
+
 std::filesystem::path resolve_data_dir_from_config() {
     // 1) YAMS_STORAGE or YAMS_DATA_DIR env
     if (const char* env = std::getenv("YAMS_STORAGE"); env && *env) {

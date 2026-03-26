@@ -339,6 +339,17 @@ struct SearchEngineConfig {
     bool turboQuantRerankOnlyWhenPackedAvailable =
         true; // Only rerank candidates with packed codes; others fall through
 
+    // Compressed ANN traversal (Phase 9: Milestone 7 production integration)
+    // Uses CompressedANNIndex with NSW graph over packed codes for retrieval.
+    // When enabled, this path bypasses the float HNSW and uses packed scoring only.
+    bool enableCompressedANN = false;  // Enable compressed ANN traversal
+    size_t compressedAnnTopK = 50;     // Number of results from compressed ANN search
+    size_t compressedAnnEfSearch = 50; // ef_search parameter for CompressedANNIndex
+    uint8_t compressedAnnBits = 4;     // Bits per channel for compressed ANN (must match storage)
+    size_t compressedAnnDim = 384;     // Embedding dimension (must match stored vectors)
+    bool compressedAnnFallbackToRerank =
+        true; // If compressed ANN fails/misses, fall back to TurboQuant rerank path
+
     /**
      * @brief Get preset configuration for a corpus profile
      *
@@ -1231,6 +1242,14 @@ public:
 
         std::atomic<uint64_t> avgResultsPerQuery{0};
         std::atomic<uint64_t> avgComponentsPerResult{0};
+
+        // Compressed ANN telemetry (Phase 3, Milestone 9)
+        std::atomic<uint64_t> compressedAnnQueries{0};        // total compressed ANN attempts
+        std::atomic<uint64_t> compressedAnnSucceeded{0};      // successful searches
+        std::atomic<uint64_t> compressedAnnFallback{0};       // fell back to other path
+        std::atomic<uint64_t> compressedAnnDecodeEscapes{0};  // times decode was triggered
+        std::atomic<uint64_t> compressedAnnCandidateCount{0}; // total candidates scored
+        std::atomic<uint64_t> compressedAnnBuildErrors{0};    // index build failures
     };
 
     const Statistics& getStatistics() const;

@@ -850,9 +850,7 @@ private:
                     "Socket shutdown failed for incompatible daemon, trying PID-based termination");
 
                 // Resolve PID file path
-                std::string pidFilePath =
-                    daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                        .string();
+                std::string pidFilePath = YamsCLI::resolveConfiguredDaemonPidFilePath().string();
 
                 pid_t pid = readPidFromFile(pidFilePath);
                 if (pid > 0) {
@@ -887,18 +885,24 @@ private:
 
         return true; // Compatible daemon is running (block new start)
     }
+
+    std::string resolveConfiguredSocketPath() const {
+        return socketPath_.empty() ? YamsCLI::resolveConfiguredDaemonSocketPath().string()
+                                   : socketPath_;
+    }
+
+    std::string resolveConfiguredPidFilePath() const {
+        return pidFile_.empty() ? YamsCLI::resolveConfiguredDaemonPidFilePath().string() : pidFile_;
+    }
+
     void startDaemon() {
         namespace fs = std::filesystem;
 
         // Resolve paths if not explicitly provided
         // For start: do NOT persist a resolved socket into socketPath_ unless user passed it.
         // Use a local effective path for pre-checks only; the daemon will resolve from config.
-        if (pidFile_.empty()) {
-            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                           .string();
-        }
-        const std::string configuredSocket =
-            daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+        pidFile_ = resolveConfiguredPidFilePath();
+        const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
             resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
 
@@ -1129,14 +1133,9 @@ private:
     }
 
     void stopDaemon() {
-        if (pidFile_.empty()) {
-            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                           .string();
-        }
+        pidFile_ = resolveConfiguredPidFilePath();
         // Resolve paths if not explicitly provided (do not persist into socketPath_)
-        const std::string configuredSocket =
-            socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
-                                : socketPath_;
+        const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
             resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
 
@@ -1449,9 +1448,7 @@ private:
 
     void doctorDaemon() {
         namespace fs = std::filesystem;
-        std::string effectiveSocket =
-            socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
-                                : socketPath_;
+        std::string effectiveSocket = resolveConfiguredSocketPath();
         // Title - more compact
         std::cout << "\n=== YAMS Daemon Doctor ===\n\n";
 
@@ -1459,10 +1456,7 @@ private:
         std::cout << "IPC & Files:\n";
         std::cout << "  Socket:    "
                   << (effectiveSocket.empty() ? "<resolve failed>" : effectiveSocket) << "\n";
-        if (pidFile_.empty()) {
-            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                           .string();
-        }
+        pidFile_ = resolveConfiguredPidFilePath();
         std::cout << "  PID File:  " << pidFile_ << "\n";
         // Helper: interactive confirm when on a TTY
         auto confirm = [](const std::string& q) -> bool {
@@ -1787,14 +1781,9 @@ private:
     }
 
     void showStatus() {
-        if (pidFile_.empty()) {
-            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                           .string();
-        }
+        pidFile_ = resolveConfiguredPidFilePath();
 
-        const std::string configuredSocket =
-            socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
-                                : socketPath_;
+        const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
             resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
 
@@ -3119,14 +3108,9 @@ private:
     }
 
     void restartDaemon() {
-        if (pidFile_.empty()) {
-            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
-                           .string();
-        }
+        pidFile_ = resolveConfiguredPidFilePath();
 
-        const std::string configuredSocket =
-            socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
-                                : socketPath_;
+        const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
             resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
 

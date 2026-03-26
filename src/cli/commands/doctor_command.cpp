@@ -1121,8 +1121,7 @@ private:
     void checkDaemon(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
         using namespace yams::daemon;
         try {
-            std::string effectiveSocket =
-                daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+            std::string effectiveSocket = YamsCLI::resolveConfiguredDaemonSocketPath().string();
 
             auto printTrustDiagnostics = [this]() {
                 // Plugin trust health (show stale/suspicious trusted roots with cleanup commands)
@@ -1800,7 +1799,7 @@ private:
         std::string effectiveSocket;
         {
             using namespace yams::daemon;
-            effectiveSocket = daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+            effectiveSocket = YamsCLI::resolveConfiguredDaemonSocketPath().string();
             daemon_up = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
         }
 
@@ -3399,7 +3398,7 @@ void DoctorCommand::runPrune() {
         req.verbose = pruneVerbose_;
 
         daemon::ClientConfig clientCfg;
-        clientCfg.socketPath = daemon::DaemonClient::resolveSocketPathConfigFirst();
+        clientCfg.socketPath = YamsCLI::resolveConfiguredDaemonSocketPath();
         clientCfg.requestTimeout = std::chrono::minutes(10);
 
         if (!daemon::DaemonClient::isDaemonRunning(clientCfg.socketPath)) {

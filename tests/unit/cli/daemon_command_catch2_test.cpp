@@ -34,6 +34,7 @@ namespace fs = std::filesystem;
 struct CliTestHelper {
     fs::path tempDir;
     fs::path socketPath;
+    fs::path pidFile;
     std::optional<yams::test::ScopedEnvVar> configEnv;
     std::optional<yams::test::ScopedEnvVar> dataEnv;
     std::optional<yams::test::ScopedEnvVar> nonInteractiveEnv;
@@ -43,6 +44,14 @@ struct CliTestHelper {
         tempDir = yams::test::make_temp_dir("yams_cli_daemon_catch2_test_");
         fs::create_directories(tempDir / "data");
         socketPath = tempDir / "test-daemon.sock";
+        pidFile = tempDir / "configured-daemon.pid";
+
+        {
+            std::ofstream cfg(tempDir / "config.toml");
+            cfg << "[daemon]\n";
+            cfg << "socket_path = \"" << socketPath.string() << "\"\n";
+            cfg << "pid_file = \"" << pidFile.string() << "\"\n";
+        }
 
         configEnv.emplace("YAMS_CONFIG", (tempDir / "config.toml").string());
         dataEnv.emplace("YAMS_DATA_DIR", (tempDir / "data").string());
@@ -136,6 +145,17 @@ TEST_CASE("DaemonCommand - status reports non-running daemon cleanly", "[cli][da
     CHECK(rc == 0);
     CHECK(output.find("YAMS daemon is ") != std::string::npos);
     CHECK(output.find("terminate") == std::string::npos);
+}
+
+TEST_CASE("DaemonCommand - doctor shows configured pid file", "[cli][daemon][catch2]") {
+    CliTestHelper helper;
+    CaptureStdout capture;
+
+    const int rc = helper.runCommand({"yams", "daemon", "doctor"});
+    const std::string output = capture.str();
+
+    CHECK(rc == 0);
+    CHECK(output.find(helper.pidFile.string()) != std::string::npos);
 }
 
 TEST_CASE("DaemonCommand - doctor prints diagnostics without daemon", "[cli][daemon][catch2]") {

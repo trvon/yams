@@ -5,6 +5,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 
 #include <cstdlib>
@@ -211,6 +212,27 @@ TEST_CASE("DataDirResolution - falls back to platform default", "[cli][data_dir]
     auto resolved = yams::config::resolve_data_dir_from_config();
     CHECK_FALSE(resolved.empty());
     CHECK(resolved.string().find("yams") != std::string::npos);
+}
+
+TEST_CASE("DataDirResolution - daemon pid file uses config when present",
+          "[cli][data_dir][catch2]") {
+    TempConfig config(R"(
+[daemon]
+pid_file = "/tmp/from-config.pid"
+)");
+    ScopedEnv configEnv("YAMS_CONFIG", config.pathStr().c_str());
+
+    auto resolved = yams::cli::YamsCLI::resolveConfiguredDaemonPidFilePath();
+    CHECK(resolved == fs::path("/tmp/from-config.pid"));
+}
+
+TEST_CASE("DataDirResolution - daemon pid file falls back when config missing",
+          "[cli][data_dir][catch2]") {
+    ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
+
+    auto resolved = yams::cli::YamsCLI::resolveConfiguredDaemonPidFilePath();
+    CHECK_FALSE(resolved.empty());
+    CHECK(resolved.filename().string().find("yams-daemon") != std::string::npos);
 }
 
 // ============================================================================

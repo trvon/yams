@@ -13,6 +13,7 @@
 #include <yams/search/search_tuner.h>
 #include <yams/search/vector_reranker.h>
 #include <yams/search/turboquant_packed_reranker.h>
+#include <yams/vector/compressed_ann.h>
 
 #include <algorithm>
 #include <chrono>
@@ -1271,6 +1272,11 @@ private:
     Result<std::vector<ComponentResult>> queryEntityVectors(const std::vector<float>& embedding,
                                                             const SearchEngineConfig& config,
                                                             size_t limit);
+
+    // Compressed ANN traversal using CompressedANNIndex over packed TurboQuant codes
+    Result<std::vector<ComponentResult>> queryCompressedANN(const std::vector<float>& embedding,
+                                                            const SearchEngineConfig& config,
+                                                            size_t limit);
     Result<std::vector<ComponentResult>> queryTags(const std::vector<std::string>& tags,
                                                    bool matchAll, size_t limit);
     Result<std::vector<ComponentResult>> queryMetadata(const SearchParams& params, size_t limit);
@@ -1289,7 +1295,11 @@ private:
     EntityExtractionFunc conceptExtractor_;               // GLiNER concept extractor (optional)
     std::shared_ptr<IReranker> reranker_;                 // Cross-encoder reranker (optional)
     std::shared_ptr<IVectorReranker> turboQuantReranker_; // TurboQuant vector reranker (optional)
-    std::shared_ptr<SearchTuner> tuner_;                  // Adaptive runtime tuner (optional)
+
+    // Compressed ANN index (built lazily from packed vectors when enabled)
+    std::unique_ptr<vector::CompressedANNIndex> compressedAnnIndex_;
+    bool compressedAnnIndexReady_ = false; // True once build() has been called
+    std::shared_ptr<SearchTuner> tuner_;   // Adaptive runtime tuner (optional)
     std::atomic<int64_t> rerankerCooldownUntilMicros_{0};
 };
 
@@ -1759,6 +1769,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::future<Result<std::vector<ComponentResult>>> entityVectorFuture;
         std::future<Result<std::vector<ComponentResult>>> tagFuture;
         std::future<Result<std::vector<ComponentResult>>> metaFuture;
+        std::future<Result<std::vector<ComponentResult>>> compressedAnnFuture;
 
         auto schedule = [&]([[maybe_unused]] const char* name, [[maybe_unused]] float weight,
                             [[maybe_unused]] std::atomic<uint64_t>& queryCount,
@@ -2020,6 +2031,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         return queryEntityVectors(queryEmbedding.value(), workingConfig,
                                                   workingConfig.entityVectorMaxResults);
                     });
+
+                // Compressed ANN traversal: runs alongside vector search, inserts into
+                // allComponentResults
+                if (workingConfig.enableCompressedANN) {
+                    compressedAnnFuture = schedule(
+                        "compressed_ann", workingConfig.vectorWeight, stats_.vectorQueries,
+                        stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
+                            YAMS_ZONE_SCOPED_N("component::compressed_ann");
+                            return queryCompressedANN(queryEmbedding.value(), workingConfig,
+                                                      workingConfig.compressedAnnTopK);
+                        });
+                }
             }
 
             collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
@@ -2030,6 +2053,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                       stats_.avgEntityVectorTimeMicros);
             collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
+            collectIf(compressedAnnFuture, "compressed_ann", stats_.vectorQueries,
+                      stats_.avgVectorTimeMicros);
         }
     } else {
         auto runSequential = [&](auto queryFn, const char* name, float weight,
@@ -5116,6 +5141,131 @@ SearchEngine::Impl::queryEntityVectors(const std::vector<float>& embedding,
     } catch (const std::exception& e) {
         spdlog::warn("Entity vector search exception: {}", e.what());
         return results;
+    }
+
+    return results;
+}
+
+Result<std::vector<ComponentResult>>
+SearchEngine::Impl::queryCompressedANN(const std::vector<float>& embedding,
+                                       const SearchEngineConfig& config, size_t limit) {
+    std::vector<ComponentResult> results;
+    results.reserve(limit);
+
+    ++stats_.compressedAnnQueries;
+
+    if (!vectorDb_) {
+        ++stats_.compressedAnnFallback;
+        return results;
+    }
+
+    try {
+        // Lazy-build or rebuild the compressed ANN index if needed
+        if (!compressedAnnIndex_ || !compressedAnnIndexReady_) {
+            // Build compressed ANN index from all packed vectors in the database
+            yams::vector::CompressedANNIndex::Config ann_cfg;
+            ann_cfg.dimension = config.compressedAnnDim;
+            ann_cfg.bits_per_channel = config.compressedAnnBits;
+            ann_cfg.seed = 42;
+            ann_cfg.m = 16;
+            ann_cfg.ef_search = config.compressedAnnEfSearch;
+            ann_cfg.max_elements = vectorDb_->getVectorCount();
+
+            compressedAnnIndex_ = std::make_unique<yams::vector::CompressedANNIndex>(ann_cfg);
+
+            // Collect all vectors using entity search with large k
+            size_t total = vectorDb_->getVectorCount();
+            if (total > 0) {
+                vector::EntitySearchParams params;
+                params.k = std::min(total, size_t(10000));
+                params.similarity_threshold = -1.0f; // Accept all
+                params.include_embeddings = true;
+
+                auto entity_records = vectorDb_->searchEntities(embedding, params);
+                if (!entity_records.empty()) {
+                    size_t idx = 0;
+                    for (const auto& rec : entity_records) {
+                        if (rec.embedding.empty())
+                            continue;
+                        yams::vector::TurboQuantConfig tq_cfg;
+                        tq_cfg.dimension = config.compressedAnnDim;
+                        tq_cfg.bits_per_channel = config.compressedAnnBits;
+                        tq_cfg.seed = 42;
+                        yams::vector::TurboQuantMSE tq(tq_cfg);
+                        auto packed = tq.packedEncode(rec.embedding);
+                        compressedAnnIndex_->add(idx++, packed);
+                    }
+                }
+            }
+
+            auto build_result = compressedAnnIndex_->build();
+            if (!build_result) {
+                spdlog::warn("[CompressedANN] Build failed: {}", build_result.error().message);
+                ++stats_.compressedAnnBuildErrors;
+                ++stats_.compressedAnnFallback;
+                return results;
+            }
+
+            compressedAnnIndexReady_ = true;
+            spdlog::info("[CompressedANN] Built index: {} vectors, {} bytes",
+                         compressedAnnIndex_->size(), compressedAnnIndex_->memoryBytes());
+        }
+
+        if (!compressedAnnIndexReady_ || compressedAnnIndex_->size() == 0) {
+            ++stats_.compressedAnnFallback;
+            return results;
+        }
+
+        // Search using compressed ANN with telemetry
+        size_t candidate_count = 0;
+        float decode_escapes = 0.0f;
+        auto ann_search_results = compressedAnnIndex_->searchWithStats(
+            embedding, limit, &candidate_count, &decode_escapes);
+
+        stats_.compressedAnnCandidateCount += candidate_count;
+        stats_.compressedAnnDecodeEscapes += static_cast<uint64_t>(decode_escapes);
+
+        if (ann_search_results.results.empty()) {
+            ++stats_.compressedAnnFallback;
+            return results;
+        }
+
+        ++stats_.compressedAnnSucceeded;
+
+        // Batch-fetch document metadata
+        compat::flat_map<std::string, std::string> hashToPath;
+        if (metadataRepo_) {
+            std::vector<std::string> hashes;
+            hashes.reserve(ann_search_results.results.size());
+            for (const auto& r : ann_search_results.results) {
+                hashes.push_back(std::to_string(r.id));
+            }
+            if (!hashes.empty()) {
+                auto docMapResult = metadataRepo_->batchGetDocumentsByHash(hashes);
+                if (docMapResult) {
+                    compat::reserve_if_needed(hashToPath, docMapResult.value().size());
+                    for (const auto& [hash, docInfo] : docMapResult.value()) {
+                        hashToPath[hash] = docInfo.filePath;
+                    }
+                }
+            }
+        }
+
+        for (size_t rank = 0; rank < ann_search_results.results.size(); ++rank) {
+            const auto& r = ann_search_results.results[rank];
+            ComponentResult cr;
+            cr.source = ComponentResult::Source::Vector;
+            cr.documentHash = std::to_string(r.id);
+            auto it = hashToPath.find(cr.documentHash);
+            cr.filePath = (it != hashToPath.end()) ? it->second : cr.documentHash;
+            cr.score = r.score;
+            cr.rank = rank;
+            cr.debugInfo["compressed_ann"] = "true";
+            cr.debugInfo["candidate_count"] = std::to_string(candidate_count);
+            results.push_back(cr);
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Compressed ANN search exception: {}", e.what());
     }
 
     return results;
