@@ -1295,6 +1295,17 @@ public:
      */
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner);
 
+    /**
+     * @brief Invalidate the compressed ANN index so the next query rebuilds it.
+     *
+     * Call this after inserting or updating vectors in the VectorDatabase to
+     * ensure the compressed ANN index stays in sync. The next query will
+     * lazily rebuild the index from the current database state.
+     *
+     * @note This is a no-op if enableCompressedANN is false.
+     */
+    void invalidateCompressedANNIndex();
+
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl_;

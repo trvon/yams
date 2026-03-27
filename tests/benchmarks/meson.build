@@ -151,6 +151,65 @@ compressed_ann_score_diag = executable('compressed_ann_score_diag',
 
 alias_target('bench_compressed_ann_score_diag', compressed_ann_score_diag)
 
+# Score ceiling benchmark — Milestone 9: scorer fidelity × data distribution
+compressed_ann_score_ceiling_bench = executable('compressed_ann_score_ceiling_bench',
+  files('compressed_ann_score_ceiling_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_compressed_ann_score_ceiling_bench', compressed_ann_score_ceiling_bench)
+
+# Milestone 11: Real embedding packed-score ceiling benchmark
+compressed_ann_real_emb_bench = executable('compressed_ann_real_emb_bench',
+  files('compressed_ann_real_emb_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_compressed_ann_real_emb_bench', compressed_ann_real_emb_bench)
+
+# Milestone 11 Step 2: Graph traversal recall on real embeddings
+compressed_ann_graph_real_bench = executable('compressed_ann_graph_real_bench',
+  files('compressed_ann_graph_real_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_compressed_ann_graph_real_bench', compressed_ann_graph_real_bench)
+
+# Milestone 11 Step 3: Decision benchmark (YAMS real data, ceiling vs graph vs reranker)
+compressed_ann_decision_bench = executable('compressed_ann_decision_bench',
+  files('compressed_ann_decision_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_compressed_ann_decision_bench', compressed_ann_decision_bench)
+
 # Large-scale ingestion benchmark (requires google-benchmark)
 if benchmark_dep.found()
   large_scale_ingestion_bench_deps = [

@@ -246,6 +246,18 @@ public:
      */
     virtual Result<void> persistTurboQuantPerCoordScales(size_t dim, uint8_t bits, uint64_t seed,
                                                          const std::vector<float>& scales) = 0;
+
+    /**
+     * Persist the full fitted quantizer model (v2: scales + per-coord centroids).
+     * @param dim Vector dimension
+     * @param bits Bits per channel
+     * @param seed Random seed
+     * @param scales Per-coordinate scales (dim floats)
+     * @param centroids Per-coordinate centroid tables (dim * num_centroids floats)
+     */
+    virtual Result<void> persistTurboQuantFittedModel(size_t dim, uint8_t bits, uint64_t seed,
+                                                      const std::vector<float>& scales,
+                                                      const std::vector<float>& centroids) = 0;
 };
 
 /**

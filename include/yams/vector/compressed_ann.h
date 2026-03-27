@@ -93,6 +93,18 @@ public:
     ~CompressedANNIndex();
 
     /**
+     * @brief Set the fitted TurboQuant quantizer.
+     *
+     * Must be called BEFORE addVector() / build().
+     * Allows callers to fit the quantizer on a representative corpus,
+     * then hand the fitted state to the index for use during
+     * addVector() encoding and graph construction.
+     *
+     * @param scorer Pre-fitted TurboQuantMSE quantizer
+     */
+    void setScorer(TurboQuantMSE scorer) { scorer_ = std::move(scorer); }
+
+    /**
      * @brief Add a packed vector to the index.
      *
      * @param id Unique identifier for this vector
@@ -122,6 +134,18 @@ public:
      * @brief Return number of vectors in the index.
      */
     size_t size() const { return packed_codes_.size(); }
+
+    /**
+     * @brief Invalidate all indexed data, forcing a full rebuild on the next build() call.
+     *
+     * Resets nodes, packed codes, and transformed vector storage. The Config and
+     * fitted Scorer are preserved so a new corpus can be loaded without reconfiguring.
+     *
+     * @note This is the preferred way to trigger index rebuilds from external callers
+     * (e.g. SearchEngine::invalidateCompressedANNIndex) rather than destroying and
+     * recreating the index object.
+     */
+    void invalidate();
 
 public:
     struct NSWNode {

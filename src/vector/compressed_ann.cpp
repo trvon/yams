@@ -81,6 +81,18 @@ CompressedANNIndex& CompressedANNIndex::operator=(CompressedANNIndex&& other) no
     return *this;
 }
 
+void CompressedANNIndex::invalidate() {
+    nodes_.clear();
+    nodes_.shrink_to_fit();
+    packed_codes_.clear();
+    packed_codes_.shrink_to_fit();
+    packed_storage_.clear();
+    packed_storage_.shrink_to_fit();
+    transformed_storage_.clear();
+    transformed_storage_.shrink_to_fit();
+    spdlog::debug("CompressedANNIndex: invalidated (size=0, scorer preserved)");
+}
+
 size_t CompressedANNIndex::memoryBytes() const {
     size_t bytes = packed_storage_.size();                // packed corpus
     bytes += transformed_storage_.size() * sizeof(float); // precomputed transformed vectors
@@ -173,57 +185,62 @@ void CompressedANNIndex::connectNodeToGraph(size_t new_node_idx) {
 
 Result<void> CompressedANNIndex::buildMetricAligned() {
     // ========================================================================
-    // NSW GRAPH CONSTRUCTION — XOR Distance + Bidirectional Edges
+    // NSW GRAPH CONSTRUCTION — Metric-Aligned Packed Scoring + Bidirectional Edges
     // ========================================================================
-    // Uses XOR distance between packed codes for graph construction (matching original
-    // approach). XOR distance is a fast proxy: fewer differing bits means vectors
-    // had similar Hadamard coefficients after quantization.
+    // Uses scoreFromPacked for graph construction — the SAME metric as search.
+    // This ensures graph topology is aligned with the ranking used at query time,
+    // eliminating the topology mismatch that plagued XOR-based construction.
     //
-    // Search uses scoreFromPacked for fine-grained ranking.
+    // Build-time cost: O(n² × dim) for precomputing transformed vectors (once).
+    // Search cost per edge: O(byte_len) with popcount.
     //
     // Key improvement over original: bidirectional edges.
-    // Each node i connects to its top-M XOR-closest neighbors, AND those
+    // Each node i connects to its top-M scored neighbors, AND those
     // neighbors connect back to i. This makes the graph navigable from any
     // entry point (original was unidirectional only).
     //
-    // Complexity: O(n² × byte_len) with popcount — fast for 100k+ scale.
+    // Complexity: O(n² × byte_len) at build time — fast for 100k+ scale.
     // ========================================================================
 
     const size_t n = nodes_.size();
     const size_t dim = config_.dimension;
     const uint8_t bits = config_.bits_per_channel;
     const size_t max_neighbors = std::min(config_.m, n > 0 ? n - 1 : 0);
-    const size_t byte_len = packedByteLen(dim, bits);
 
     if (n == 0)
         return {};
 
-    // XOR-based graph construction: O(n² × byte_len) with popcount
+    // Precompute transformed vectors for all nodes ONCE: O(n × dim)
+    // These are used for all pairwise score computations.
+    std::vector<std::vector<float>> transformed_vectors(n, std::vector<float>(dim));
     for (size_t i = 0; i < n; ++i) {
-        std::vector<std::pair<float, size_t>> xor_dists;
-        xor_dists.reserve(n - 1);
+        scorer_.transformPackedCode(packed_codes_[i],
+                                    std::span<float>(transformed_vectors[i].data(), dim));
+    }
 
-        const uint8_t* a = packed_codes_[i].data();
+    // Metric-aligned graph construction: O(n² × byte_len) with scoreFromPacked
+    for (size_t i = 0; i < n; ++i) {
+        std::vector<std::pair<float, size_t>> scored;
+        scored.reserve(n - 1);
+
+        const auto& tq_i = transformed_vectors[i];
 
         for (size_t j = 0; j < n; ++j) {
             if (i == j)
                 continue;
-
-            const uint8_t* b = packed_codes_[j].data();
-            size_t xor_bits = 0;
-            for (size_t k = 0; k < byte_len; ++k) {
-                xor_bits += __builtin_popcount(a[k] ^ b[k]);
-            }
-            // Negate so higher = closer (matches score convention)
-            xor_dists.emplace_back(-static_cast<float>(xor_bits), j);
+            // scoreFromPacked: O(byte_len) popcount over packed codes
+            float s =
+                scorer_.scoreFromPacked(std::span<const float>(tq_i.data(), dim), packed_codes_[j]);
+            scored.emplace_back(s, j);
         }
 
-        std::partial_sort(xor_dists.begin(), xor_dists.begin() + static_cast<long>(max_neighbors),
-                          xor_dists.end(),
+        // Higher score = closer in packed-code space
+        std::partial_sort(scored.begin(), scored.begin() + static_cast<long>(max_neighbors),
+                          scored.end(),
                           [](const auto& x, const auto& y) { return x.first > y.first; });
 
-        for (size_t k = 0; k < std::min(max_neighbors, xor_dists.size()); ++k) {
-            size_t nb = xor_dists[k].second;
+        for (size_t k = 0; k < std::min(max_neighbors, scored.size()); ++k) {
+            size_t nb = scored[k].second;
             nodes_[i].neighbors.push_back(nb);
 
             // Bidirectional: add reverse edge (nb → i) if nb has room

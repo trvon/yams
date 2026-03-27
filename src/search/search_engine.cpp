@@ -1253,6 +1253,13 @@ public:
 
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner) { tuner_ = std::move(tuner); }
 
+    void invalidateCompressedANNIndex() {
+        if (compressedAnnIndex_) {
+            compressedAnnIndex_->invalidate();
+        }
+        compressedAnnIndexReady_ = false;
+    }
+
 private:
     Result<SearchResponse> searchInternal(const std::string& query, const SearchParams& params);
 
@@ -5183,15 +5190,32 @@ SearchEngine::Impl::queryCompressedANN(const std::vector<float>& embedding,
 
                 auto entity_records = vectorDb_->searchEntities(embedding, params);
                 if (!entity_records.empty()) {
+                    // Collect embeddings first for fitting
+                    std::vector<std::vector<float>> corpus;
+                    corpus.reserve(entity_records.size());
+                    for (const auto& rec : entity_records) {
+                        if (!rec.embedding.empty())
+                            corpus.push_back(rec.embedding);
+                    }
+
+                    // Milestone 11 fix: create ONE fitted quantizer for all encodes
+                    yams::vector::TurboQuantConfig tq_cfg;
+                    tq_cfg.dimension = config.compressedAnnDim;
+                    tq_cfg.bits_per_channel = config.compressedAnnBits;
+                    tq_cfg.seed = 42;
+                    yams::vector::TurboQuantMSE tq(tq_cfg);
+                    if (!corpus.empty()) {
+                        tq.fit(corpus, 5); // k-means fit on the full corpus
+                    }
+
+                    // Inject fitted scorer into the index
+                    compressedAnnIndex_->setScorer(tq);
+
+                    // Now encode all with the fitted quantizer
                     size_t idx = 0;
                     for (const auto& rec : entity_records) {
                         if (rec.embedding.empty())
                             continue;
-                        yams::vector::TurboQuantConfig tq_cfg;
-                        tq_cfg.dimension = config.compressedAnnDim;
-                        tq_cfg.bits_per_channel = config.compressedAnnBits;
-                        tq_cfg.seed = 42;
-                        yams::vector::TurboQuantMSE tq(tq_cfg);
                         auto packed = tq.packedEncode(rec.embedding);
                         compressedAnnIndex_->add(idx++, packed);
                     }
@@ -5468,6 +5492,10 @@ void SearchEngine::setReranker(std::shared_ptr<IReranker> reranker) {
 
 void SearchEngine::setSearchTuner(std::shared_ptr<SearchTuner> tuner) {
     pImpl_->setSearchTuner(std::move(tuner));
+}
+
+void SearchEngine::invalidateCompressedANNIndex() {
+    pImpl_->invalidateCompressedANNIndex();
 }
 
 // Factory function

@@ -76,6 +76,14 @@ public:
         return semanticUpdateErrors_.load(std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Set a callback invoked after each successful vector batch insert.
+     *
+     * Used to invalidate downstream indexes (e.g. CompressedANNIndex in SearchEngine)
+     * that depend on the VectorDatabase contents.
+     */
+    void setCompressedAnnInvalidator(std::function<void()> cb);
+
     void start();
 
 private:
@@ -100,6 +108,7 @@ private:
     std::function<std::string()> getPreferredModel_;
     std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
     std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore_;
+    std::function<void()> compressedAnnInvalidator_; // called after batch insert
 
     std::atomic<bool> stop_{false};
     std::atomic<std::size_t> processed_{0};

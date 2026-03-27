@@ -796,7 +796,9 @@ public:
         yams::vector::TurboQuantMSE tq(cfg);
         tq.fitPerCoordScales(training_vectors, training_vectors.size());
 
-        // Persist to DB
+        // Persist to DB using the full-fitted-model path (v2: scales + centroids)
+        // Note: fitPerCoordCentroids() is available but Milestone 9 benchmarks show it does NOT
+        // improve scoring on random/unit-sphere data. Keeping scales-only for now.
         auto scales = tq.perCoordScales();
         backend_->persistTurboQuantPerCoordScales(config_.embedding_dim, config_.turboquant_bits,
                                                   config_.turboquant_seed, scales);

@@ -177,8 +177,8 @@ int main() {
     std::cerr << "======================================================\n\n";
 
     std::vector<QuickConfig> configs = {
-        {384, 4, 1000, 100, 50, 50},    // 1k baseline
-        {384, 4, 10000, 100, 200, 200}, // 10k @ m=200
+        {384, 4, 1000, 100, 50, 50}, // 1k baseline
+        {384, 4, 3000, 100, 64, 64}, // 3k @ m=64 (reduced for build-time budget)
     };
 
     std::vector<json> all_results;

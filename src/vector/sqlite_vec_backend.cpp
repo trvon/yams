@@ -106,18 +106,71 @@ inline bool saveTurboQuantPerCoordScales(sqlite3* db, size_t dim, uint8_t bits, 
     }
 
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(
-        db,
-        "INSERT OR REPLACE INTO turboquant_quantizer_meta (dim, bits, seed, per_coord_scales) "
-        "VALUES (?, ?, ?, ?)",
-        -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(db,
+                                "INSERT OR REPLACE INTO turboquant_quantizer_meta (dim, bits, "
+                                "seed, fit_version, per_coord_scales) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         return false;
     }
     sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
     sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
     sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
-    sqlite3_bind_blob(stmt, 4, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, 1); // fit_version = 1 (scales only)
+    sqlite3_bind_blob(stmt, 5, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+// Save the full fitted model (v2: scales + per-coord centroids).
+// Returns false if dim==0 or if centroids size doesn't match dim*num_centroids.
+inline bool saveTurboQuantFittedModel(sqlite3* db, size_t dim, uint8_t bits, uint64_t seed,
+                                      const std::vector<float>& scales,
+                                      const std::vector<float>& centroids) {
+    if (dim == 0 || scales.size() != dim) {
+        return false;
+    }
+    size_t num_centroids = 1u << bits;
+    if (!centroids.empty() && centroids.size() != dim * num_centroids) {
+        return false; // Mismatch
+    }
+
+    // Serialize scales
+    std::vector<uint8_t> scales_blob(scales.size() * sizeof(float));
+    for (size_t i = 0; i < scales.size(); ++i) {
+        float val = scales[i];
+        std::memcpy(&scales_blob[i * sizeof(float)], &val, sizeof(float));
+    }
+
+    // Serialize centroids (may be empty for v1 fallback)
+    std::vector<uint8_t> centroids_blob(centroids.size() * sizeof(float));
+    for (size_t i = 0; i < centroids.size(); ++i) {
+        float val = centroids[i];
+        std::memcpy(&centroids_blob[i * sizeof(float)], &val, sizeof(float));
+    }
+
+    int fit_version = centroids.empty() ? 1 : 2;
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc =
+        sqlite3_prepare_v2(db,
+                           "INSERT OR REPLACE INTO turboquant_quantizer_meta "
+                           "(dim, bits, seed, fit_version, per_coord_scales, per_coord_centroids) "
+                           "VALUES (?, ?, ?, ?, ?, ?)",
+                           -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+    sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
+    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
+    sqlite3_bind_int(stmt, 4, fit_version);
+    sqlite3_bind_blob(stmt, 5, scales_blob.data(), static_cast<int>(scales_blob.size()),
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_blob(stmt, 6, centroids_blob.data(), static_cast<int>(centroids_blob.size()),
+                      SQLITE_TRANSIENT);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
@@ -151,6 +204,60 @@ inline std::vector<float> loadTurboQuantPerCoordScales(sqlite3* db, size_t dim, 
     }
     sqlite3_finalize(stmt);
     return scales;
+}
+
+// Load the full fitted model (scales + optional per-coord centroids) from the DB.
+// Returns a blob that can be passed to TurboQuantMSE::loadFittedModel().
+inline std::vector<uint8_t> loadTurboQuantFittedModelBlob(sqlite3* db, size_t dim, uint8_t bits,
+                                                          uint64_t seed) {
+    // Query: scales, centroids, fit_version (optional column)
+    std::vector<uint8_t> blob;
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db,
+                                "SELECT per_coord_scales, per_coord_centroids, fit_version "
+                                "FROM turboquant_quantizer_meta "
+                                "WHERE dim = ? AND bits = ? AND seed = ?",
+                                -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        return blob;
+    }
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+    sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
+    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        // Column 0: scales blob
+        const void* scales_blob = sqlite3_column_blob(stmt, 0);
+        int scales_bytes = sqlite3_column_bytes(stmt, 0);
+        // Column 1: centroids blob (may be null)
+        const void* centroids_blob = sqlite3_column_blob(stmt, 1);
+        int centroids_bytes = sqlite3_column_blob(stmt, 1) ? sqlite3_column_bytes(stmt, 1) : 0;
+        // Column 2: fit_version (may be 0 for old rows without the column)
+        int fit_version = sqlite3_column_int(stmt, 2);
+
+        if (!scales_blob || scales_bytes == 0) {
+            sqlite3_finalize(stmt);
+            return blob;
+        }
+
+        // Build blob: version(4) | bits(1) | [padding(3)] | scales | centroids
+        size_t total = 8 + scales_bytes + centroids_bytes;
+        blob.resize(total);
+        size_t offset = 0;
+
+        uint32_t version = (fit_version > 0) ? static_cast<uint32_t>(fit_version) : 1;
+        std::memcpy(&blob[offset], &version, 4);
+        offset += 4;
+        blob[offset] = bits;
+        offset += 1;
+        offset += 3; // padding
+        std::memcpy(&blob[offset], scales_blob, scales_bytes);
+        offset += scales_bytes;
+        if (centroids_blob && centroids_bytes > 0) {
+            std::memcpy(&blob[offset], centroids_blob, centroids_bytes);
+        }
+    }
+    sqlite3_finalize(stmt);
+    return blob;
 }
 
 inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
@@ -337,14 +444,20 @@ CREATE INDEX IF NOT EXISTS idx_vectors_embedding_dim ON vectors(embedding_dim);
 
 // Global quantizer metadata table: stores per-coord scales once per quantizer config.
 // Per-coord scales are global (same for all vectors with the same seed+dim).
-// Scales are stored as a blob of dim floats (little-endian IEEE-754).
+// Fitted quantizer model metadata (v1: scales only; v2: scales + per-coord centroids).
+// The fit_version field enables forward-compatible loading:
+//   v1: per_coord_scales is non-null, per_coord_centroids is null
+//   v2: per_coord_scales is non-null, per_coord_centroids is non-null
+// Centroid storage: dim * num_centroids floats (little-endian IEEE-754), row-major per coord.
 constexpr const char* kCreateTurboQuantMeta = R"sql(
 CREATE TABLE IF NOT EXISTS turboquant_quantizer_meta (
     rowid INTEGER PRIMARY KEY,
     dim INTEGER NOT NULL,
     bits INTEGER NOT NULL,
     seed INTEGER NOT NULL,
+    fit_version INTEGER NOT NULL DEFAULT 1,
     per_coord_scales BLOB,
+    per_coord_centroids BLOB,
     UNIQUE(dim, bits, seed)
 ))sql";
 
@@ -4024,6 +4137,23 @@ Result<void> SqliteVecBackend::persistTurboQuantPerCoordScales(size_t dim, uint8
     bool ok = saveTurboQuantPerCoordScales(db, dim, bits, seed, scales);
     if (!ok) {
         return Error{ErrorCode::DatabaseError, "Failed to persist per-coord scales"};
+    }
+    return {};
+}
+
+Result<void> SqliteVecBackend::persistTurboQuantFittedModel(size_t dim, uint8_t bits, uint64_t seed,
+                                                            const std::vector<float>& scales,
+                                                            const std::vector<float>& centroids) {
+    if (scales.size() != dim) {
+        return Error{ErrorCode::InvalidArgument, "Scales dimension mismatch"};
+    }
+    auto* db = impl_->dbHandle();
+    if (!db) {
+        return Error{ErrorCode::NotInitialized, "Database not initialized"};
+    }
+    bool ok = saveTurboQuantFittedModel(db, dim, bits, seed, scales, centroids);
+    if (!ok) {
+        return Error{ErrorCode::DatabaseError, "Failed to persist fitted quantizer model"};
     }
     return {};
 }

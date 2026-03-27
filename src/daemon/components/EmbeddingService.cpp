@@ -189,6 +189,10 @@ void EmbeddingService::setProviders(
     getKgStore_ = std::move(kgGetter);
 }
 
+void EmbeddingService::setCompressedAnnInvalidator(std::function<void()> cb) {
+    compressedAnnInvalidator_ = std::move(cb);
+}
+
 std::size_t EmbeddingService::queuedJobs() const {
     const auto chPtr = std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
     const std::size_t ch = chPtr ? chPtr->size_approx() : 0;
@@ -1805,6 +1809,13 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     logPhase("metadata_update", tMeta,
              fmt::format("docs={} model='{}'", successHashes.size(), modelName));
+
+    // Milestone 11: invalidate compressed ANN index after each document ingest
+    // so the next query rebuilds from the current database state.
+    if (compressedAnnInvalidator_) {
+        compressedAnnInvalidator_();
+    }
+
     logPoolState("job_end");
 
     processed_.fetch_add(docsToEmbed.size());

@@ -288,7 +288,22 @@ private:
     /** Lloyd-Max centroids for current bit-width [centroid_index] */
     std::vector<float> centroids_;
 
-    /** Pre-computed decision boundaries for scalar quantization */
+    /**
+     * Pre-computed decision boundaries for scalar quantization.
+     * These are the shared centroid midpoints (shared for all coordinates).
+     * After fitPerCoordScales, ONLY the per_coord_scales_ are updated (for scoring).
+     * The quantization boundaries remain SHARED because:
+     *   1. Encoding: h_i / scale[i] is quantized against shared boundaries
+     *   2. The packed code stores only centroid indices, not scale[i]
+     *   3. Dequantization: scale[i] * centroid[code] recovers magnitude
+     *   4. Scoring: query_scale[i] * corpus_scale[i] * dot(product of centroids)
+     *   5. query_scale[i] = mean |h_q[i]| from the query's own transform
+     *
+     * Using per-coord boundaries during encoding would create a corpus/query mismatch:
+     * - Corpus uses corpus's per-coord scales (fitted during indexing)
+     * - Queries use query's per-coord scales (not available at encode time)
+     * This would make packed codes incompatible between indexing and search.
+     */
     std::vector<float> decision_boundaries_;
 
     /**
@@ -306,7 +321,7 @@ private:
 
     /**
      * Generate Lloyd-Max optimal centroids for Beta(d/2, d/2) distribution
-     * Pre-computed for bits = 1, 2, 3, 4
+     * Pre-computed for bits = 1..6 (static tables); bits 7-8 use k-means on N(0,1) samples.
      */
     void generateCentroids();
 
@@ -324,7 +339,89 @@ private:
      * Apply scalar dequantization to get centroid value
      */
     float scalarDequantize(uint8_t index) const;
-};
+
+public:
+    // ========================================================================
+    // Milestone 10: Persistent Fitted Quantizer Model
+    //
+    // Key insight: the corpus/query mismatch comes from encoding using fitted
+    // scales (corpus) but scoring against unfitted centroid tables (shared table).
+    // The fix is to persist the full fitted state (scales + per-coord centroids)
+    // and use it consistently at both encoding and search time.
+    // ========================================================================
+
+    /**
+     * Fitted quantizer model: all state needed for consistent encoding + scoring.
+     *
+     * Version 1 (legacy): only per_coord_scales stored. Per-coord centroids
+     *   fall back to the shared Lloyd-Max centroid table (misaligned with fitted scales).
+     * Version 2 (Milestone 10): per_coord_scales + per_coord_centroids stored.
+     *   Scoring uses the same per-coord centroids that were used for encoding,
+     *   eliminating the corpus/query mismatch.
+     *
+     * Schema:
+     *   version: uint32_t (2 = full fitted model)
+     *   bits: uint8_t
+     *   per_coord_scales: dim floats (little-endian IEEE-754)
+     *   per_coord_centroids: dim * num_centroids floats
+     */
+    struct FittedTurboQuantModel {
+        static constexpr uint32_t kVersion = 2;
+        uint32_t version = 0;
+        uint8_t bits = 0;
+        std::vector<float> per_coord_scales;    // dim floats
+        std::vector<float> per_coord_centroids; // dim * num_centroids floats
+        bool empty() const { return per_coord_scales.empty(); }
+    };
+
+    /**
+     * Fit per-coordinate centroids from training data via k-means.
+     * This is the core of Milestone 10: each Hadamard coordinate gets its own
+     * Lloyd-Max centroid table fitted to that coordinate's distribution.
+     *
+     * Run AFTER fitPerCoordScales (or call fit() which does both).
+     * @param vectors Training vectors (unit sphere)
+     * @param max_iters Maximum k-means iterations per coordinate (default: 25)
+     */
+    void fitPerCoordCentroids(const std::vector<std::vector<float>>& vectors,
+                              size_t max_iters = 25);
+
+    /**
+     * Fit both scales AND per-coord centroids in one call.
+     * This is the recommended entry point for Milestone 10.
+     * @param vectors Training vectors (unit sphere)
+     * @param max_iters k-means iterations per coordinate (default: 25)
+     */
+    void fit(const std::vector<std::vector<float>>& vectors, size_t max_iters = 25);
+
+    /**
+     * Serialize fitted model to a flat binary blob suitable for DB storage.
+     * @return Binary blob (empty on error)
+     */
+    std::vector<uint8_t> saveFittedModel() const;
+
+    /**
+     * Load fitted model from a binary blob produced by saveFittedModel().
+     * @return true on success
+     */
+    bool loadFittedModel(std::span<const uint8_t> blob);
+
+    /**
+     * Get the fitted model currently in use.
+     */
+    FittedTurboQuantModel fittedModel() const;
+
+private:
+    /**
+     * Per-coordinate fitted centroid tables.
+     * Indexed as [coord * num_centroids + centroid_idx].
+     * Only populated after fitPerCoordCentroids() is called.
+     * When empty: encode/scoreFromPacked fall back to shared centroids_ table.
+     * Milestone 11: encode() now uses per_coord_centroids_ when available,
+     *   closing the corpus/query mismatch that blocked higher bit-depth scoring.
+     */
+    std::vector<float> per_coord_centroids_;
+}; // end TurboQuantMSE
 
 /**
  * TurboQuant Inner Product Quantizer (Two-Stage) [EXPERIMENTAL — QJL correction incomplete]
@@ -417,11 +514,14 @@ private:
  * Lloyd-Max optimal centroids for Beta(α, α) with α = d/2
  * Indexed by [bits-1][centroid_index]
  *
- * Values from paper's pre-computed tables:
+ * Values from paper's pre-computed tables + midpoint-rule approximation for higher bits:
  *   b=1: 2 centroids
  *   b=2: 4 centroids
  *   b=3: 8 centroids
  *   b=4: 16 centroids
+ *   b=5: 32 centroids (midpoint-rule approximation for N(0,1))
+ *   b=6: 64 centroids (midpoint-rule approximation for N(0,1))
+ *   b=7–8: generated via k-means at runtime (static tables too large to embed)
  */
 extern const std::vector<std::vector<std::vector<float>>>& getLloydMaxCentroids();
 

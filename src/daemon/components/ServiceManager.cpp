@@ -2826,6 +2826,20 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
         engine->setReranker(rerankerAdapter_);
         spdlog::debug("[{}] Cross-encoder reranker wired to search engine", contextLabel);
     }
+
+    // Milestone 11: wire compressed ANN index invalidation so the search engine
+    // rebuilds its CompressedANNIndex whenever new vectors are ingested.
+    auto embSvc = std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embSvc) {
+        embSvc->setCompressedAnnInvalidator(
+            [weakEngine = std::weak_ptr<search::SearchEngine>(engine)]() {
+                if (auto se = weakEngine.lock()) {
+                    se->invalidateCompressedANNIndex();
+                }
+            });
+        spdlog::info("[{}] CompressedANN index invalidation wired to EmbeddingService",
+                     contextLabel);
+    }
 }
 
 bool ServiceManager::resizeWorkerPool(std::size_t target) {

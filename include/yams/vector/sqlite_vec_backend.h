@@ -166,6 +166,10 @@ public:
     Result<void> persistTurboQuantPerCoordScales(size_t dim, uint8_t bits, uint64_t seed,
                                                  const std::vector<float>& scales) override;
 
+    Result<void> persistTurboQuantFittedModel(size_t dim, uint8_t bits, uint64_t seed,
+                                              const std::vector<float>& scales,
+                                              const std::vector<float>& centroids) override;
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;
