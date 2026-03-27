@@ -1,6 +1,6 @@
 # TurboQuant Vector Quantization
 
-TurboQuant is a vector quantization method using a signed Hadamard transform approximation. This guide covers its use in YAMS.
+TurboQuant is the packed-vector compression path used by YAMS for vector storage, reranking, and opt-in compressed retrieval experiments.
 
 **Paper reference:** [arXiv:2504.19874](https://arxiv.org/pdf/2504.19874) (approximation)
 
@@ -9,8 +9,14 @@ TurboQuant is a vector quantization method using a signed Hadamard transform app
 TurboQuant improves upon naive 8-bit linear quantization by:
 
 1. **Distribution-aware quantization**: Uses signed Hadamard transform to approximately decorrelate vector coordinates
-2. **Variable bit-width**: Supports 1-4 bits per channel (vs fixed 8-bit)
+2. **Variable bit-width**: Supports 1-8 bits per channel
 3. **Inner product support**: Two-stage quantization with QJL residuals (approximation)
+
+## Shipping Status
+
+- `TurboQuantPackedReranker` is the default-on TurboQuant search feature.
+- Compressed ANN remains opt-in and is not the default retrieval path.
+- The current repo-facing decision record is `docs/tasks/turboquant-status.md`.
 
 **Important limitations:**
 - Uses signed Hadamard (O(d log d)) instead of the paper's full random orthogonal rotation (O(d²))
@@ -31,7 +37,7 @@ VectorDatabaseConfig config;
 config.database_path = ":memory:";
 config.embedding_dim = 384;
 config.enable_turboquant_storage = true;
-config.turboquant_bits = 4;      // 1-4 bits per channel
+config.turboquant_bits = 4;      // 1-8 bits per channel; keep aligned with stored sidecar
 config.turboquant_seed = 42;     // Reproducibility seed
 
 VectorDatabase db(config);
@@ -40,24 +46,19 @@ db.initialize();
 
 ## Bit-width Recommendations
 
-| Bits/Channel | Compression (vs 8-bit) | Approximate MSE | Use Case |
-|--------------|------------------------|-----------------|----------|
-| 4 | 50% | ~0.003 | High quality, moderate compression |
-| 2 | 75% | ~0.01 | Lower storage, some quality loss |
+| Bits/Channel | Compression (vs float32) | Typical role | Notes |
+|--------------|--------------------------|--------------|-------|
+| 4 | 8x smaller | Default packed storage/rerank baseline | Good storage trade-off; not strong enough for standalone compressed ANN |
+| 8 | 4x smaller | Opt-in compressed ANN experiments | Best current standalone packed-search quality, but still marginal |
 
 **Note:** Actual MSE varies with dimension and vector distribution. Run benchmarks for your workload.
 
-## Performance Characteristics
+## Current Behavior in YAMS
 
-**IMPORTANT:** The following numbers are from early benchmarking and may not reflect current performance. Always run benchmarks for your use case.
-
-| Dimension | Encode (approx.) | Decode (approx.) |
-|-----------|-----------------|------------------|
-| 128 | ~9μs | ~8μs |
-| 384 | ~35μs | ~32μs |
-| 768 | ~75μs | ~70μs |
-
-**vs Baseline 8-bit linear:** TurboQuant is currently ~3-4x slower in encode/decode due to the Hadamard transform overhead. Storage savings depend on bit-width.
+- Quantized-primary storage is supported: packed sidecars can be persisted and decoded on read.
+- `TurboQuantPackedReranker` runs after first-stage fusion and before optional cross-encoder reranking.
+- `CompressedANNIndex` exists for packed-space traversal, but it stays disabled by default.
+- If compressed ANN is enabled, keep its bit depth aligned with the stored TurboQuant sidecar.
 
 ## Algorithm Details
 
@@ -100,10 +101,10 @@ est = dot_mse + rho_res · √(||r1||² · ||r2||²)
 
 ## Current Limitations
 
-1. **Compressed search not yet integrated**: HNSW still indexes float embeddings. TurboQuant
-   sidecars are persisted (V2.2) but not yet used for search execution.
+1. **Compressed ANN is not the default path**: real-data benchmarks show 4-bit standalone packed
+   ANN is not viable, and 8-bit is only marginally viable.
 2. **estimateInnerProductFull() experimental**: Full QJL correction is research-only.
-   Benchmark before using for any production ranking.
+    Benchmark before using for any production ranking.
 3. **Thread-safety**: TurboQuant state is thread-local. Each thread must configure independently.
 4. **QJL on residuals, not original vectors**: This implementation applies QJL to the
    post-MSE quantization residual, not to the original vector directly. This differs
@@ -125,6 +126,9 @@ meson compile -C build/debug -j4 turboquant_bench
     --dims=128,384,768 \
     --bits=2,4 \
     --vectors=100
+
+# Decision benchmark for compressed ANN vs reranker
+./build/debug/tests/benchmarks/compressed_ann_decision_bench
 ```
 
 ## Tests
@@ -142,5 +146,5 @@ meson compile -C build/debug -j4 catch2_vector_submodule
 ## References
 
 - Zandieh et al., "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate", arXiv:2504.19874, 2025
-
-- Implementation note: This code uses a signed Hadamard approximation and does NOT claim paper-faithful implementation.
+- Implementation note: This code uses a signed Hadamard approximation and does not claim paper-faithful implementation.
+- Repo status note: `docs/tasks/turboquant-status.md`

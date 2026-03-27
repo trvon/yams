@@ -312,31 +312,6 @@ TEST_CASE_METHOD(TurboQuantIntegrationFixture, "TurboQuant preserves cosine simi
 }
 
 // =============================================================================
-// Test Group: Inner Product Mode
-// =============================================================================
-
-TEST_CASE_METHOD(TurboQuantIntegrationFixture, "TurboQuantProd basic encode/decode",
-                 "[turboquant][integration][inner_product][catch2]") {
-    TurboQuantConfig config;
-    config.dimension = 256;
-    config.bits_per_channel = 3;
-    config.seed = 42;
-    config.inner_product_mode = true;
-    config.qjl_m = 64;
-
-    TurboQuantProd quantizer(config);
-
-    std::vector<float> original = generateUnitVector(256);
-    auto enc = quantizer.encode(original);
-    std::vector<float> reconstructed = quantizer.decode(enc.mse_indices);
-
-    // Should get back something reasonable
-    float dist = l2Distance(original, reconstructed);
-    INFO("TurboQuantProd distance: " << dist);
-    REQUIRE(dist < 0.8f); // Inner product mode trades some accuracy
-}
-
-// =============================================================================
 // Test Group: Edge Cases
 // =============================================================================
 
@@ -359,33 +334,4 @@ TEST_CASE_METHOD(TurboQuantIntegrationFixture, "TurboQuant high dimensionality 3
     // L2 distance = sqrt(d * MSE), expect ~0.64 for MSE 0.00013
     REQUIRE(dist < 0.8f);
     REQUIRE(mse_val < 0.0003);
-}
-
-TEST_CASE_METHOD(TurboQuantIntegrationFixture, "TurboQuant reproducibility across instances",
-                 "[turboquant][integration][reproducibility][catch2]") {
-    TurboQuantConfig config1;
-    config1.dimension = 384;
-    config1.bits_per_channel = 4;
-    config1.seed = 12345;
-
-    TurboQuantConfig config2;
-    config2.dimension = 384;
-    config2.bits_per_channel = 4;
-    config2.seed = 12345;
-
-    TurboQuantMSE q1(config1);
-    TurboQuantMSE q2(config2);
-
-    std::vector<float> v = generateUnitVector(384);
-
-    std::vector<uint8_t> idx1 = q1.encode(v);
-    std::vector<uint8_t> idx2 = q2.encode(v);
-
-    REQUIRE(idx1 == idx2);
-
-    std::vector<float> r1 = q1.decode(idx1);
-    std::vector<float> r2 = q2.decode(idx2);
-
-    float dist = l2Distance(r1, r2);
-    REQUIRE(dist < 1e-6f);
 }

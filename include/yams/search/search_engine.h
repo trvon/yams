@@ -328,27 +328,29 @@ struct SearchEngineConfig {
     // Boosts documents that score well in BOTH text AND vector components
     bool useScoreBasedReranking = true; // Use score-based reranking (fast, default)
 
-    // TurboQuant packed-code reranking (compressed-space scoring, no decode needed)
-    // Operates on TurboQuant quantized-primary records without reconstructing floats
-    // Runs between first-stage retrieval and optional cross-encoder reranking
-    bool enableTurboQuantRerank = false;  // Enable TurboQuant vector reranking
+    // TurboQuant packed-code reranking: stable default for packed-code corpora.
+    // Runs after first-stage fusion and before optional cross-encoder reranking.
+    // Candidates without packed codes fall through unchanged when
+    // turboQuantRerankOnlyWhenPackedAvailable is true.
+    bool enableTurboQuantRerank = true;   // Enable TurboQuant vector reranking
     size_t turboQuantRerankWindow = 50;   // Max candidates to rerank with TurboQuant
     float turboQuantRerankWeight = 0.50f; // Blend weight for TurboQuant score (0-1)
-    uint8_t turboQuantRerankBits = 4;     // Bits per channel for reranking (1-4)
+    uint8_t turboQuantRerankBits = 4;     // Bits per channel expected in stored packed codes
     size_t turboQuantRerankDim = 384;     // Embedding dimension expected by reranker
     bool turboQuantRerankOnlyWhenPackedAvailable =
         true; // Only rerank candidates with packed codes; others fall through
 
-    // Compressed ANN traversal (Phase 9: Milestone 7 production integration)
-    // Uses CompressedANNIndex with NSW graph over packed codes for retrieval.
-    // When enabled, this path bypasses the float HNSW and uses packed scoring only.
+    // Compressed ANN traversal: opt-in packed-space retrieval path.
+    // Runs as an additional vector component; the regular vector path remains available.
+    // Callers must keep the bit depth aligned with the stored TurboQuant sidecar.
     bool enableCompressedANN = false;  // Enable compressed ANN traversal
     size_t compressedAnnTopK = 50;     // Number of results from compressed ANN search
     size_t compressedAnnEfSearch = 50; // ef_search parameter for CompressedANNIndex
     uint8_t compressedAnnBits = 4;     // Bits per channel for compressed ANN (must match storage)
     size_t compressedAnnDim = 384;     // Embedding dimension (must match stored vectors)
     bool compressedAnnFallbackToRerank =
-        true; // If compressed ANN fails/misses, fall back to TurboQuant rerank path
+        true; // Reserved for explicit fallback orchestration; current default path keeps vector
+              // search plus TurboQuant reranking active
 
     /**
      * @brief Get preset configuration for a corpus profile
