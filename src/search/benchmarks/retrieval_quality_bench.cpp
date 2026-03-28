@@ -51,6 +51,7 @@
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/search_runner.h>
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -626,6 +627,8 @@ struct QueryDiagnosticsSummary {
     std::uint64_t degradedQueryCount = 0;
     std::uint64_t traceEnabledQueryCount = 0;
     std::uint64_t graphRerankAppliedQueryCount = 0;
+    std::uint64_t turboQuantEnabledQueryCount = 0;
+    std::uint64_t turboQuantAppliedQueryCount = 0;
     std::uint64_t semanticRescueNonZeroQueryCount = 0;
     std::uint64_t missMissingPreFusionCount = 0;
     std::uint64_t missFusionCutoffCount = 0;
@@ -634,6 +637,10 @@ struct QueryDiagnosticsSummary {
     std::vector<double> semanticRescueRateSamples;
     std::vector<double> semanticRescueFinalCountSamples;
     std::vector<double> semanticRescueTargetSamples;
+    std::vector<double> turboQuantWindowSamples;
+    std::vector<double> turboQuantCandidateSamples;
+    std::vector<double> turboQuantPackedCandidatesScoredSamples;
+    std::unordered_map<std::string, std::uint64_t> turboQuantSkipReasonCounts;
     std::vector<double> fusionDroppedCountSamples;
     std::vector<double> vectorOnlyDocsSamples;
     std::vector<double> vectorOnlyBelowThresholdSamples;
@@ -1105,6 +1112,26 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     if (parseBoolStat(searchStats, "trace_graph_rerank_applied").value_or(false)) {
         summary.graphRerankAppliedQueryCount++;
     }
+    if (parseBoolStat(searchStats, "turboquant_enabled").value_or(false)) {
+        summary.turboQuantEnabledQueryCount++;
+    }
+    if (parseBoolStat(searchStats, "turboquant_rerank_applied").value_or(false)) {
+        summary.turboQuantAppliedQueryCount++;
+    }
+
+    if (auto v = parseDoubleStat(searchStats, "turboquant_rerank_window")) {
+        summary.turboQuantWindowSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "turboquant_candidate_count")) {
+        summary.turboQuantCandidateSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "turboquant_packed_candidates_scored")) {
+        summary.turboQuantPackedCandidatesScoredSamples.push_back(*v);
+    }
+    if (auto it = searchStats.find("turboquant_skip_reason");
+        it != searchStats.end() && !it->second.empty()) {
+        summary.turboQuantSkipReasonCounts[it->second]++;
+    }
 
     if (auto v = parseDoubleStat(searchStats, "semantic_rescue_rate")) {
         summary.semanticRescueRateSamples.push_back(*v);
@@ -1337,6 +1364,8 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"degraded_query_count", summary.degradedQueryCount},
         {"trace_enabled_query_count", summary.traceEnabledQueryCount},
         {"graph_rerank_applied_query_count", summary.graphRerankAppliedQueryCount},
+        {"turboquant_enabled_query_count", summary.turboQuantEnabledQueryCount},
+        {"turboquant_applied_query_count", summary.turboQuantAppliedQueryCount},
         {"semantic_rescue_nonzero_query_count", summary.semanticRescueNonZeroQueryCount},
         {"miss_missing_pre_fusion_count", summary.missMissingPreFusionCount},
         {"miss_fusion_cutoff_count", summary.missFusionCutoffCount},
@@ -1364,6 +1393,10 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"trace_coverage", static_cast<double>(summary.traceEnabledQueryCount) / queryCount},
         {"graph_rerank_apply_rate",
          static_cast<double>(summary.graphRerankAppliedQueryCount) / queryCount},
+        {"turboquant_enabled_rate",
+         static_cast<double>(summary.turboQuantEnabledQueryCount) / queryCount},
+        {"turboquant_apply_rate",
+         static_cast<double>(summary.turboQuantAppliedQueryCount) / queryCount},
         {"semantic_rescue_nonzero_rate",
          static_cast<double>(summary.semanticRescueNonZeroQueryCount) / queryCount},
         {"miss_missing_pre_fusion_rate",
@@ -1373,6 +1406,11 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"miss_rerank_window_drop_rate",
          static_cast<double>(summary.missRerankWindowDropCount) / queryCount},
         {"miss_topk_drop_rate", static_cast<double>(summary.missTopKDropCount) / queryCount},
+        {"turboquant_window", summarizeSamples(summary.turboQuantWindowSamples)},
+        {"turboquant_candidate_count", summarizeSamples(summary.turboQuantCandidateSamples)},
+        {"turboquant_packed_candidates_scored",
+         summarizeSamples(summary.turboQuantPackedCandidatesScoredSamples)},
+        {"turboquant_skip_reasons", summary.turboQuantSkipReasonCounts},
         {"semantic_rescue_rate", summarizeSamples(summary.semanticRescueRateSamples)},
         {"semantic_rescue_final_count", summarizeSamples(summary.semanticRescueFinalCountSamples)},
         {"semantic_rescue_target", summarizeSamples(summary.semanticRescueTargetSamples)},
@@ -1522,6 +1560,8 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
 // Store final metrics globally for summary after teardown
 static RetrievalMetrics g_final_metrics;
 static RetrievalMetrics g_keyword_metrics; // FTS5-only metrics for component isolation
+static QueryDiagnosticsSummary g_final_hybrid_diagnostics;
+static QueryDiagnosticsSummary g_final_keyword_diagnostics;
 
 struct EnvSetting {
     std::string key;
@@ -1725,11 +1765,14 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
     sqlite3* db = nullptr;
     if (sqlite3_open_v2(vectorsDbPath.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) !=
         SQLITE_OK) {
+        spdlog::warn("[Bench] Failed to open persisted HNSW DB {}: {}", vectorsDbPath.string(),
+                     db ? sqlite3_errmsg(db) : "open failed");
         if (db) {
             sqlite3_close(db);
         }
         return state;
     }
+    sqlite3_busy_timeout(db, 5000);
 
     auto closeDb = [&]() {
         if (db) {
@@ -1743,6 +1786,8 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
                            "(name='vectors_hnsw_meta' OR name='vectors_hnsw_nodes' OR "
                            " name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes')";
     if (sqlite3_prepare_v2(db, tableSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        spdlog::warn("[Bench] Failed to inspect persisted HNSW tables in {}: {}",
+                     vectorsDbPath.string(), sqlite3_errmsg(db));
         closeDb();
         return state;
     }
@@ -1759,6 +1804,8 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
     for (const auto& table : tables) {
         const std::string countSql = "SELECT COUNT(*) FROM \"" + table + "\"";
         if (sqlite3_prepare_v2(db, countSql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            spdlog::warn("[Bench] Failed to count persisted HNSW table {} in {}: {}", table,
+                         vectorsDbPath.string(), sqlite3_errmsg(db));
             continue;
         }
         if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -2070,6 +2117,40 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
              {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
          }},
+        {"diag_turboquant_off_mixed_precision",
+         "MIXED_PRECISION baseline with TurboQuant rerank forced off",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE", "1"},
+             {"YAMS_VECTOR_TURBOQUANT_BITS", "4"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "100"},
+             {"YAMS_SEARCH_TURBOQUANT_RERANK_WINDOW", "100"},
+             {"YAMS_SEARCH_TURBOQUANT_RERANK_DIM", "768"},
+             {"YAMS_SEARCH_ENABLE_TURBOQUANT_RERANK", "0"},
+         },
+         false,
+         true},
+        {"diag_turboquant_on_mixed_precision",
+         "MIXED_PRECISION baseline with TurboQuant rerank forced on",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE", "1"},
+             {"YAMS_VECTOR_TURBOQUANT_BITS", "4"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "100"},
+             {"YAMS_SEARCH_TURBOQUANT_RERANK_WINDOW", "100"},
+             {"YAMS_SEARCH_TURBOQUANT_RERANK_DIM", "768"},
+             {"YAMS_SEARCH_ENABLE_TURBOQUANT_RERANK", "1"},
+         },
+         false,
+         true},
         {"mixed_precision_semantic_recall_v1",
          "MIXED_PRECISION + looser vector gate + extra semantic rescue",
          {
@@ -4369,6 +4450,8 @@ struct BenchFixture {
         connectClientWithProbe("initial setup");
 
         const bool usingExternalBenchDataDir = harnessOptions.dataDir.has_value();
+        const fs::path effectiveDataDir =
+            harnessOptions.dataDir.has_value() ? *harnessOptions.dataDir : harness->dataDir();
         auto initialStatusResult = benchRunSync(client->status(true), 5s);
         const auto getInitialCount = [&](const std::string& key) -> uint64_t {
             if (!initialStatusResult) {
@@ -4408,9 +4491,7 @@ struct BenchFixture {
             warmCacheMetadataReusable ? 0 : getInitialCount("embed_svc_queued");
         const uint64_t initialEmbedInFlight =
             warmCacheMetadataReusable ? 0 : getInitialCount("embed_in_flight");
-        const PersistedHnswState initialPersistedHnsw =
-            usingExternalBenchDataDir ? inspectPersistedHnswState(*harnessOptions.dataDir)
-                                      : PersistedHnswState{};
+        const PersistedHnswState initialPersistedHnsw = inspectPersistedHnswState(effectiveDataDir);
         const bool cacheHasIndexedCorpus =
             usingExternalBenchDataDir &&
             initialIndexedDocCount >= static_cast<uint64_t>(corpusSize);
@@ -5249,74 +5330,108 @@ struct BenchFixture {
                          "vector index already present)");
         } // end if (!warmDataDir) / else
 
-        auto finalizeWarmCacheVectorIndex = [&]() -> bool {
-            if (warmDataDirPath.empty() || vectorsDisabled) {
+        auto ensureVectorIndexReady = [&]() -> bool {
+            if (vectorsDisabled) {
                 return true;
             }
 
-            auto persisted = inspectPersistedHnswState(warmDataDirPath);
-            if (persisted.reusable()) {
-                return true;
-            }
+            const fs::path vectorIndexDataDir =
+                harnessOptions.dataDir.has_value() ? *harnessOptions.dataDir : harness->dataDir();
 
             auto* daemon = harness ? harness->daemon() : nullptr;
             auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
             auto vectorDb = serviceManager ? serviceManager->getVectorDatabase() : nullptr;
             if (!vectorDb || !vectorDb->isInitialized()) {
-                spdlog::warn(
-                    "[Bench] Cannot finalize warm-cache vector index: vector DB unavailable");
+                spdlog::warn("[Bench] Cannot ensure vector index readiness: vector DB unavailable");
                 return false;
             }
+
+            auto persisted = vectorIndexDataDir.empty()
+                                 ? PersistedHnswState{}
+                                 : inspectPersistedHnswState(vectorIndexDataDir);
+            const auto updateVectorIndexReadiness = [&](bool ready) {
+                if (!daemon) {
+                    return;
+                }
+                daemon->state_.readiness.vectorIndexReady.store(ready, std::memory_order_relaxed);
+                daemon->state_.readiness.vectorIndexProgress.store(
+                    ready ? 100
+                          : (daemon->state_.readiness.vectorDbReady.load(std::memory_order_relaxed)
+                                 ? 50
+                                 : 0),
+                    std::memory_order_relaxed);
+            };
 
             const auto vectorRows = vectorDb->getVectorCount();
             if (vectorRows == 0) {
-                spdlog::warn("[Bench] Cannot finalize warm-cache vector index: vector DB is empty");
+                spdlog::warn("[Bench] Cannot ensure vector index readiness: vector DB is empty");
                 return false;
             }
 
-            spdlog::info(
-                "[Bench] Finalizing warm-cache vector index (vectors={} persisted_nodes={} "
-                "persisted_meta={})",
-                vectorRows, persisted.nodeRows, persisted.metaRows);
-            const auto start = std::chrono::steady_clock::now();
-            const bool optimized = vectorDb->optimizeIndex();
-            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                       std::chrono::steady_clock::now() - start)
-                                       .count();
-
-            if (!optimized) {
-                spdlog::warn("[Bench] Warm-cache vector index finalize failed after {} ms: {}",
-                             elapsedMs, vectorDb->getLastError());
-                return false;
-            }
-
-            persisted = inspectPersistedHnswState(warmDataDirPath);
-            const bool reusable = persisted.reusable();
-            daemon->state_.readiness.vectorIndexReady.store(reusable, std::memory_order_relaxed);
-            daemon->state_.readiness.vectorIndexProgress.store(
-                reusable
-                    ? 100
-                    : (daemon->state_.readiness.vectorDbReady.load(std::memory_order_relaxed) ? 50
-                                                                                              : 0),
-                std::memory_order_relaxed);
-
-            if (reusable) {
-                spdlog::info("[Bench] Warm-cache vector index finalized in {} ms "
-                             "(persisted_nodes={} persisted_meta={})",
-                             elapsedMs, persisted.nodeRows, persisted.metaRows);
-            } else {
-                spdlog::warn("[Bench] Warm-cache vector index finalize completed in {} ms but "
-                             "persisted HNSW is still unusable (persisted_nodes={} "
+            if (!persisted.reusable()) {
+                const char* modeLabel = warmDataDirPath.empty() ? "cold-run" : "warm-cache";
+                spdlog::info("[Bench] Finalizing {} vector index (vectors={} persisted_nodes={} "
                              "persisted_meta={})",
-                             elapsedMs, persisted.nodeRows, persisted.metaRows);
+                             modeLabel, vectorRows, persisted.nodeRows, persisted.metaRows);
+                const auto start = std::chrono::steady_clock::now();
+                const bool optimized = vectorDb->optimizeIndex();
+                const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - start)
+                                           .count();
+
+                if (!optimized) {
+                    spdlog::warn("[Bench] Vector index finalize failed after {} ms: {}", elapsedMs,
+                                 vectorDb->getLastError());
+                    return false;
+                }
+
+                persisted = vectorIndexDataDir.empty()
+                                ? PersistedHnswState{}
+                                : inspectPersistedHnswState(vectorIndexDataDir);
+                if (persisted.reusable()) {
+                    spdlog::info("[Bench] Vector index finalized in {} ms "
+                                 "(persisted_nodes={} persisted_meta={})",
+                                 elapsedMs, persisted.nodeRows, persisted.metaRows);
+                } else {
+                    spdlog::warn("[Bench] Vector index finalize completed in {} ms but persisted "
+                                 "HNSW is still unusable (persisted_nodes={} persisted_meta={})",
+                                 elapsedMs, persisted.nodeRows, persisted.metaRows);
+                }
             }
 
-            return reusable;
+            bool ready = persisted.reusable() || vectorDb->hasReusablePersistedSearchIndex();
+            updateVectorIndexReadiness(ready);
+
+            int readyTimeoutSec = 60;
+            if (const char* env = std::getenv("YAMS_BENCH_VECTOR_INDEX_READY_TIMEOUT")) {
+                readyTimeoutSec = std::max(0, std::stoi(env));
+            }
+            const auto readyDeadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(readyTimeoutSec);
+            while (!ready && std::chrono::steady_clock::now() < readyDeadline) {
+                auto statusCheck = benchRunSync(client->status(true), 5s);
+                if (statusCheck) {
+                    if (auto it = statusCheck.value().readinessStates.find("vector_index");
+                        it != statusCheck.value().readinessStates.end() && it->second) {
+                        ready = true;
+                    }
+                }
+                if (!ready && !vectorIndexDataDir.empty()) {
+                    persisted = inspectPersistedHnswState(vectorIndexDataDir);
+                    ready = persisted.reusable();
+                }
+                if (!ready) {
+                    std::this_thread::sleep_for(500ms);
+                }
+            }
+
+            updateVectorIndexReadiness(ready);
+            return ready;
         };
 
-        if (!finalizeWarmCacheVectorIndex()) {
-            throw std::runtime_error("Warm-cache vector index finalization failed; benchmark would "
-                                     "not produce a reusable vector cache.");
+        if (!ensureVectorIndexReady()) {
+            throw std::runtime_error("Vector index readiness not reached before benchmark queries; "
+                                     "benchmark would mix brute-force fallback with ANN timing.");
         }
 
         if (!warmDataDirPath.empty()) {
@@ -6135,6 +6250,7 @@ static int runOptimizationLoop() {
         std::cout << "    trace_cov=" << std::setprecision(3)
                   << hybridDiag["trace_coverage"].get<double>() << "  sem_rescue_mean="
                   << hybridDiag["semantic_rescue_rate"]["mean"].get<double>()
+                  << "  tq_apply_rate=" << hybridDiag["turboquant_apply_rate"].get<double>()
                   << "  vec_only_below_mean="
                   << hybridDiag["vector_only_below_threshold"]["mean"].get<double>()
                   << "  no_relevant_hit_rate="
@@ -6143,6 +6259,7 @@ static int runOptimizationLoop() {
                   << "  miss_pre_fusion_rate="
                   << hybridDiag["miss_missing_pre_fusion_rate"].get<double>() << "\n";
         std::cout << "    timing_tradeoffs=" << summarizeTimingTradeoffs(hybridDiag) << "\n";
+        std::cout << "    tq_skip_reasons=" << hybridDiag["turboquant_skip_reasons"].dump() << "\n";
         std::cout << "    stage_tradeoffs=" << summarizeStageTradeoffs(hybridDiag) << "\n";
         if (result.traceTopN > 0 || result.traceComponentTopN > 0) {
             std::cout << "    trace_top_n=" << result.traceTopN
@@ -6222,8 +6339,9 @@ void BM_RetrievalQuality(benchmark::State& state) {
     auto& fixture = *g_fixture;
     RetrievalMetrics metrics;
     for (auto _ : state) {
+        g_final_hybrid_diagnostics = QueryDiagnosticsSummary{};
         metrics = evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries,
-                                  fixture.topK, "hybrid");
+                                  fixture.topK, "hybrid", &g_final_hybrid_diagnostics);
         benchmark::DoNotOptimize(metrics);
     }
 
@@ -6240,8 +6358,9 @@ void BM_RetrievalQuality(benchmark::State& state) {
     // Also evaluate keyword-only (FTS5) for component isolation
     // This helps diagnose whether low MRR is from FTS5 or vector search
     spdlog::info("=== Evaluating KEYWORD-ONLY (FTS5) for component isolation ===");
+    g_final_keyword_diagnostics = QueryDiagnosticsSummary{};
     g_keyword_metrics = evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries,
-                                        fixture.topK, "keyword");
+                                        fixture.topK, "keyword", &g_final_keyword_diagnostics);
 
     state.counters["MRR_keyword"] = g_keyword_metrics.mrr;
     state.counters["Recall_keyword"] = g_keyword_metrics.recallAtK;
@@ -6281,6 +6400,12 @@ int main(int argc, char** argv) {
               << "\n";
     std::cout << "  MAP (Mean Average Precision):   " << std::setw(10) << g_final_metrics.map
               << "\n";
+    const auto hybridDiag = queryDiagnosticsToJson(g_final_hybrid_diagnostics);
+    std::cout << "  TurboQuant enabled/apply rate:  " << std::setw(10)
+              << hybridDiag["turboquant_enabled_rate"].get<double>() << " / " << std::setw(10)
+              << hybridDiag["turboquant_apply_rate"].get<double>() << "\n";
+    std::cout << "  TurboQuant packed cand mean:    " << std::setw(10)
+              << hybridDiag["turboquant_packed_candidates_scored"]["mean"].get<double>() << "\n";
 
     // Keyword-only search results (FTS5 isolation)
     std::cout << "\n  --- KEYWORD SEARCH (FTS5 only) ---\n";

@@ -29,6 +29,7 @@
 #include "tests/integration/daemon/test_async_helpers.h"
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/InternalEventBus.h>

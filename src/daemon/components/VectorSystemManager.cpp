@@ -237,6 +237,45 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 
     cfg.embedding_dim = *dim;
 
+    const auto envTruthy = [](const char* value) -> bool {
+        if (!value) {
+            return false;
+        }
+        std::string normalized(value);
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        });
+        return normalized == "1" || normalized == "true" || normalized == "yes" ||
+               normalized == "on";
+    };
+
+    if (const char* env = std::getenv("YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE")) {
+        cfg.enable_turboquant_storage = envTruthy(env);
+        spdlog::info("[VectorInit] turboquant storage overridden to {} via env",
+                     cfg.enable_turboquant_storage);
+    }
+    if (const char* env = std::getenv("YAMS_VECTOR_QUANTIZED_PRIMARY_STORAGE")) {
+        cfg.quantized_primary_storage = envTruthy(env);
+        spdlog::info("[VectorInit] quantized primary storage overridden to {} via env",
+                     cfg.quantized_primary_storage);
+    }
+    if (const char* env = std::getenv("YAMS_VECTOR_TURBOQUANT_BITS")) {
+        try {
+            cfg.turboquant_bits = static_cast<uint8_t>(std::clamp(std::stoi(env), 1, 8));
+            spdlog::info("[VectorInit] turboquant bits overridden to {} via env",
+                         static_cast<int>(cfg.turboquant_bits));
+        } catch (...) {
+        }
+    }
+    if (const char* env = std::getenv("YAMS_VECTOR_TURBOQUANT_SEED")) {
+        try {
+            cfg.turboquant_seed = static_cast<uint64_t>(std::stoull(env));
+            spdlog::info("[VectorInit] turboquant seed overridden to {} via env",
+                         cfg.turboquant_seed);
+        } catch (...) {
+        }
+    }
+
     // Log start
     auto tid = std::this_thread::get_id();
     spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={}",

@@ -436,6 +436,43 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.rerankAdaptiveFloor);
         }
 
+        if (auto turboQuantRerank = getEnvBool("YAMS_SEARCH_ENABLE_TURBOQUANT_RERANK")) {
+            cfg.enableTurboQuantRerank = *turboQuantRerank;
+            spdlog::info("SearchEngine enableTurboQuantRerank overridden to {} via env",
+                         cfg.enableTurboQuantRerank);
+        }
+
+        if (auto turboQuantWindow = getEnvInt("YAMS_SEARCH_TURBOQUANT_RERANK_WINDOW")) {
+            cfg.turboQuantRerankWindow = static_cast<size_t>(std::max(0, *turboQuantWindow));
+            spdlog::info("SearchEngine turboQuantRerankWindow overridden to {} via env",
+                         cfg.turboQuantRerankWindow);
+        }
+
+        if (auto turboQuantWeight = getEnvFloat("YAMS_SEARCH_TURBOQUANT_RERANK_WEIGHT")) {
+            cfg.turboQuantRerankWeight = std::clamp(*turboQuantWeight, 0.0f, 1.0f);
+            spdlog::info("SearchEngine turboQuantRerankWeight overridden to {:.3f} via env",
+                         cfg.turboQuantRerankWeight);
+        }
+
+        if (auto turboQuantBits = getEnvInt("YAMS_SEARCH_TURBOQUANT_RERANK_BITS")) {
+            cfg.turboQuantRerankBits = static_cast<uint8_t>(std::clamp(*turboQuantBits, 1, 8));
+            spdlog::info("SearchEngine turboQuantRerankBits overridden to {} via env",
+                         static_cast<int>(cfg.turboQuantRerankBits));
+        }
+
+        if (auto turboQuantDim = getEnvInt("YAMS_SEARCH_TURBOQUANT_RERANK_DIM")) {
+            cfg.turboQuantRerankDim = static_cast<size_t>(std::max(1, *turboQuantDim));
+            spdlog::info("SearchEngine turboQuantRerankDim overridden to {} via env",
+                         cfg.turboQuantRerankDim);
+        }
+
+        if (auto turboQuantRequirePacked = getEnvBool("YAMS_SEARCH_TURBOQUANT_REQUIRE_PACKED")) {
+            cfg.turboQuantRerankOnlyWhenPackedAvailable = *turboQuantRequirePacked;
+            spdlog::info(
+                "SearchEngine turboQuantRerankOnlyWhenPackedAvailable overridden to {} via env",
+                cfg.turboQuantRerankOnlyWhenPackedAvailable);
+        }
+
         if (auto fusionLimit = getEnvInt("YAMS_SEARCH_FUSION_CANDIDATE_LIMIT")) {
             cfg.fusionCandidateLimit = static_cast<size_t>(std::max(0, *fusionLimit));
             spdlog::info("SearchEngine fusionCandidateLimit overridden to {} via env",

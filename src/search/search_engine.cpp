@@ -11,8 +11,8 @@
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
-#include <yams/search/vector_reranker.h>
 #include <yams/search/turboquant_packed_reranker.h>
+#include <yams/search/vector_reranker.h>
 #include <yams/vector/compressed_ann.h>
 
 #include <algorithm>
@@ -1433,6 +1433,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::future<std::vector<float>> embeddingFuture;
     std::chrono::steady_clock::time_point embStart;
     bool embeddingStarted = false;
+    bool embeddingAwaited = false;
+    bool embeddingFailed = false;
+    std::string embeddingStatus = needsEmbedding ? "not_started" : "not_needed";
+    bool semanticTierSkipped = false;
+    std::string semanticTierSkipReason;
     auto launchEmbeddingIfNeeded = [&]() {
         if (!embeddingStarted && needsEmbedding && embeddingGen_) {
             traceCollector.markStageAttempted("embedding");
@@ -1444,14 +1449,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 },
                 executor_);
             embeddingStarted = true;
+            embeddingStatus = "launched";
         }
     };
 
-    // Preserve overlap for default behavior. When adaptive fallback is enabled in tiered mode,
-    // delay embedding work until we know Tier 2 is truly needed.
-    if (!(workingConfig.enableTieredExecution && workingConfig.enableAdaptiveVectorFallback)) {
-        launchEmbeddingIfNeeded();
-    }
+    // Preserve overlap with the lexical tiers by launching embedding work eagerly whenever the
+    // query may need a semantic signal later in the pipeline.
+    launchEmbeddingIfNeeded();
 
     std::future<Result<QueryConceptResult>> conceptFuture;
     std::chrono::steady_clock::time_point conceptStart;
@@ -1475,13 +1479,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     auto awaitEmbedding = [&]() {
         launchEmbeddingIfNeeded();
         if (embeddingFuture.valid() && !queryEmbedding.has_value()) {
+            embeddingAwaited = true;
             try {
                 auto embResult = embeddingFuture.get();
                 if (!embResult.empty()) {
                     queryEmbedding = std::move(embResult);
+                    embeddingStatus = "ready";
+                } else {
+                    embeddingStatus = "empty_result";
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("Failed to generate query embedding: {}", e.what());
+                embeddingFailed = true;
+                embeddingStatus = "failed";
                 auto embEnd = std::chrono::steady_clock::now();
                 traceCollector.markStageFailure(
                     "embedding",
@@ -1907,6 +1917,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                             hasStrongTextSignal;
 
             if (shouldSkipSemantic) {
+                semanticTierSkipped = true;
+                semanticTierSkipReason = "adaptive_vector_skip";
                 skipped.push_back("vector");
                 skipped.push_back("entity_vector");
                 traceCollector.markStageSkipped("vector", "adaptive_vector_skip");
@@ -1915,19 +1927,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                               ">= threshold={}, text_hits={}, top_text_score={:.3f})",
                               tier1CandidateCount, adaptiveSkipMinHits, tier1TextHits,
                               tier1TopTextScore);
-            } else {
-                if (workingConfig.enableAdaptiveVectorFallback &&
-                    tier1CandidateCount >= adaptiveSkipMinHits && !hasStrongTextSignal) {
-                    spdlog::debug("Tiered search: retaining semantic tier due to weak text signal "
-                                  "(tier1 candidates={}, text_hits={}, top_text_score={:.3f}, "
-                                  "min_text_hits={}, min_top_text_score={:.3f})",
-                                  tier1CandidateCount, tier1TextHits, tier1TopTextScore,
-                                  workingConfig.adaptiveVectorSkipMinTextHits,
-                                  workingConfig.adaptiveVectorSkipMinTopTextScore);
-                }
-                // Await embedding result (eager or lazily started depending on config).
-                awaitEmbedding();
+            } else if (workingConfig.enableAdaptiveVectorFallback &&
+                       tier1CandidateCount >= adaptiveSkipMinHits && !hasStrongTextSignal) {
+                spdlog::debug("Tiered search: retaining semantic tier due to weak text signal "
+                              "(tier1 candidates={}, text_hits={}, top_text_score={:.3f}, "
+                              "min_text_hits={}, min_top_text_score={:.3f})",
+                              tier1CandidateCount, tier1TextHits, tier1TopTextScore,
+                              workingConfig.adaptiveVectorSkipMinTextHits,
+                              workingConfig.adaptiveVectorSkipMinTopTextScore);
             }
+
+            // Always materialize the query embedding when semantic search is configured so later
+            // post-fusion steps are not blocked by adaptive lexical skipping.
+            awaitEmbedding();
 
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
@@ -2553,10 +2565,39 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     // TurboQuant packed-code reranking: operates on fused results using compressed codes
     // without full float reconstruction. Runs after fusion but before graph reranking.
     bool turboQuantRerankApplied = false;
-    if (workingConfig.enableTurboQuantRerank && queryEmbedding.has_value() && vectorDb_) {
+    const bool turboQuantRerankEnabled = workingConfig.enableTurboQuantRerank;
+    size_t turboQuantRequestedWindow = 0;
+    size_t turboQuantCandidateCount = 0;
+    size_t turboQuantPackedCandidatesScored = 0;
+    std::string turboQuantSkipReason = turboQuantRerankEnabled ? "not_attempted" : "disabled";
+    if (!workingConfig.enableTurboQuantRerank) {
+        turboQuantSkipReason = "disabled";
+    } else if (!queryEmbedding.has_value()) {
+        if (embeddingFailed) {
+            turboQuantSkipReason = "embedding_failed";
+        } else if (!needsEmbedding) {
+            turboQuantSkipReason = "embedding_not_needed";
+        } else if (!embeddingStarted) {
+            turboQuantSkipReason = "embedding_not_started";
+        } else if (!embeddingAwaited) {
+            turboQuantSkipReason = "embedding_not_awaited";
+        } else if (embeddingStatus == "empty_result") {
+            turboQuantSkipReason = "empty_query_embedding";
+        } else if (semanticTierSkipped) {
+            turboQuantSkipReason =
+                semanticTierSkipReason.empty() ? "semantic_tier_skipped" : semanticTierSkipReason;
+        } else {
+            turboQuantSkipReason = "no_query_embedding";
+        }
+    } else if (!vectorDb_) {
+        turboQuantSkipReason = "no_vector_db";
+    } else {
         const size_t window =
             std::min(workingConfig.turboQuantRerankWindow, response.results.size());
-        if (window > 0) {
+        turboQuantRequestedWindow = window;
+        if (window == 0) {
+            turboQuantSkipReason = "zero_window";
+        } else {
             // Lazy-init the reranker (built once per SearchEngine lifetime)
             if (!turboQuantReranker_) {
                 TurboQuantPackedRerankerConfig cfg;
@@ -2598,31 +2639,45 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                             static_cast<float>(topN[i].score);
                     }
                 }
+                turboQuantCandidateCount = input.candidates.size();
 
-                // Run reranking
-                auto rerankResult = turboQuantReranker_->rerank(input);
-                if (rerankResult) {
-                    const auto& ranked = rerankResult.value();
-                    // Update reranker scores in the top-N results
-                    for (size_t i = 0; i < window; ++i) {
-                        const auto& doc = topN[i].document;
-                        for (const auto& rc : ranked.candidates) {
-                            if (rc.chunk_id == doc.filePath) {
-                                response.results[i].rerankerScore =
-                                    static_cast<double>(rc.rerank_score);
-                                // Blend score into the result score if rerankReplaceScores is false
-                                if (!workingConfig.rerankReplaceScores) {
-                                    const float w = workingConfig.turboQuantRerankWeight;
-                                    response.results[i].score =
-                                        (1.0 - w) * response.results[i].score +
-                                        w * static_cast<double>(rc.rerank_score);
+                if (input.candidates.empty()) {
+                    turboQuantSkipReason = "no_vector_records";
+                } else {
+                    // Run reranking
+                    auto rerankResult = turboQuantReranker_->rerank(input);
+                    if (rerankResult) {
+                        const auto& ranked = rerankResult.value();
+                        turboQuantPackedCandidatesScored = ranked.packed_candidates_scored;
+                        // Update reranker scores in the top-N results
+                        for (size_t i = 0; i < window; ++i) {
+                            const auto& doc = topN[i].document;
+                            for (const auto& rc : ranked.candidates) {
+                                if (rc.chunk_id == doc.filePath) {
+                                    response.results[i].rerankerScore =
+                                        static_cast<double>(rc.rerank_score);
+                                    // Blend score into the result score if rerankReplaceScores is
+                                    // false
+                                    if (!workingConfig.rerankReplaceScores) {
+                                        const float w = workingConfig.turboQuantRerankWeight;
+                                        response.results[i].score =
+                                            (1.0 - w) * response.results[i].score +
+                                            w * static_cast<double>(rc.rerank_score);
+                                    }
+                                    break;
                                 }
-                                break;
                             }
                         }
+
+                        turboQuantRerankApplied = ranked.packed_candidates_scored > 0;
+                        turboQuantSkipReason =
+                            turboQuantRerankApplied ? "applied" : "no_packed_candidates";
+                    } else {
+                        turboQuantSkipReason = "rerank_failed";
                     }
-                    turboQuantRerankApplied = ranked.packed_candidates_scored > 0;
                 }
+            } else {
+                turboQuantSkipReason = "reranker_unready";
             }
         }
     }
@@ -3338,6 +3393,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(effectiveEntityVectorMaxResults);
     response.debugStats["compact_weak_query_fanout_boost_applied"] =
         weakQueryFanoutBoostApplied ? "1" : "0";
+    response.debugStats["turboquant_enabled"] = turboQuantRerankEnabled ? "1" : "0";
+    response.debugStats["turboquant_rerank_applied"] = turboQuantRerankApplied ? "1" : "0";
+    response.debugStats["turboquant_rerank_window"] = std::to_string(turboQuantRequestedWindow);
+    response.debugStats["turboquant_candidate_count"] = std::to_string(turboQuantCandidateCount);
+    response.debugStats["turboquant_packed_candidates_scored"] =
+        std::to_string(turboQuantPackedCandidatesScored);
+    response.debugStats["turboquant_skip_reason"] = turboQuantSkipReason;
+    response.debugStats["embedding_status"] = embeddingStatus;
 
     if (!concepts.empty() && workingConfig.conceptBoostWeight > 0.0f &&
         workingConfig.conceptMaxBoost > 0.0f && !response.results.empty()) {
@@ -4057,6 +4120,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::to_string(componentTopDefault);
         response.debugStats["trace_graph_rerank_applied"] = graphRerankApplied ? "1" : "0";
         response.debugStats["trace_cross_rerank_applied"] = crossRerankApplied ? "1" : "0";
+        response.debugStats["trace_turboquant_rerank_applied"] =
+            turboQuantRerankApplied ? "1" : "0";
 
         response.debugStats["trace_pre_fusion_unique_count"] =
             std::to_string(preFusionDocIds.size());

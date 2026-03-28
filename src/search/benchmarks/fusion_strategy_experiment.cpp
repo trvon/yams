@@ -19,6 +19,7 @@
 #include "tests/integration/daemon/test_async_helpers.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/cli/search_runner.h>
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
 
 #include <algorithm>

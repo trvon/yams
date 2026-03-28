@@ -1,7 +1,7 @@
 #include <yams/vector/sqlite_vec_backend.h>
-#include <yams/vector/vector_schema_migration.h>
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_index_manager.h>
+#include <yams/vector/vector_schema_migration.h>
 
 #include <yams/daemon/components/TuneAdvisor.h>
 
@@ -773,6 +773,15 @@ public:
                                  count_live_statements(db_));
 
         background_seed_cancel_requested_ = true;
+        std::thread backgroundSeedThread;
+        if (background_seed_thread_.joinable()) {
+            backgroundSeedThread = std::move(background_seed_thread_);
+        }
+        if (backgroundSeedThread.joinable()) {
+            lock.unlock();
+            backgroundSeedThread.join();
+            lock.lock();
+        }
 
         // Save all dirty HNSW indices
         if (db_) {
@@ -3212,6 +3221,10 @@ private:
             return;
         }
 
+        if (background_seed_thread_.joinable() && !background_seed_running_) {
+            background_seed_thread_.join();
+        }
+
         auto snapshot_result = collectBackgroundSeedSnapshotUnlocked(query_dim);
         if (!snapshot_result) {
             spdlog::warn("[HNSW] Failed to snapshot vectors for background seed (dim={}): {}",
@@ -3226,9 +3239,9 @@ private:
 
         background_seed_scheduled_ = true;
         background_seed_running_ = true;
-        std::thread([this, snapshot = std::move(snapshot)]() mutable {
+        background_seed_thread_ = std::thread([this, snapshot = std::move(snapshot)]() mutable {
             buildBackgroundSeedSnapshot(std::move(snapshot));
-        }).detach();
+        });
     }
 
     Result<std::vector<VectorRecord>>
@@ -3669,21 +3682,38 @@ ORDER BY rowid
             };
             std::unordered_map<size_t, PendingDimBuild> dim_builds;
 
-            // Query vectors grouped by dimension
+            // Query vectors grouped by dimension, including quantized-primary rows where the
+            // float embedding blob is absent.
             const char* select_by_dim =
-                "SELECT rowid, embedding, embedding_dim FROM vectors ORDER BY embedding_dim";
+                "SELECT rowid, embedding, embedding_dim, quantized_format, quantized_bits, "
+                "quantized_seed, quantized_packed_codes FROM vectors ORDER BY embedding_dim";
+            std::unique_ptr<TurboQuantMSE> rebuild_tq;
+            if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+                TurboQuantConfig cfg;
+                cfg.dimension = config_.embedding_dim;
+                cfg.bits_per_channel = config_.turboquant_bits;
+                cfg.seed = config_.turboquant_seed;
+                rebuild_tq = std::make_unique<TurboQuantMSE>(cfg);
+                auto scales = loadTurboQuantPerCoordScales(
+                    db_, config_.embedding_dim, config_.turboquant_bits, config_.turboquant_seed);
+                if (!scales.empty()) {
+                    rebuild_tq->setPerCoordScales(std::move(scales));
+                }
+            }
             if (sqlite3_prepare_v2(db_, select_by_dim, -1, &stmt, nullptr) == SQLITE_OK) {
                 while (sqlite3_step(stmt) == SQLITE_ROW) {
                     int64_t rowid = sqlite3_column_int64(stmt, 0);
                     const void* blob = sqlite3_column_blob(stmt, 1);
                     int blob_size = sqlite3_column_bytes(stmt, 1);
-                    size_t num_floats = blob_size / sizeof(float);
+                    size_t num_floats = (blob && blob_size > 0)
+                                            ? static_cast<size_t>(blob_size) / sizeof(float)
+                                            : 0;
 
                     // Get dimension from column or infer from blob
-                    size_t dim = sqlite3_column_int64(stmt, 2);
+                    size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 2));
                     if (dim == 0) {
                         dim = num_floats; // Fallback to blob size
-                    } else if (dim != num_floats) {
+                    } else if (num_floats > 0 && dim != num_floats) {
                         spdlog::warn(
                             "[HNSW] embedding_dim mismatch for rowid={} (col_dim={} blob_dim={}) "
                             "- using blob_dim",
@@ -3691,11 +3721,38 @@ ORDER BY rowid
                         dim = num_floats;
                     }
 
-                    if (dim == 0 || num_floats == 0)
+                    if (dim == 0) {
                         continue;
+                    }
 
-                    std::vector<float> embedding(num_floats);
-                    std::memcpy(embedding.data(), blob, blob_size);
+                    std::vector<float> embedding;
+                    if (blob && blob_size > 0 &&
+                        (blob_size % static_cast<int>(sizeof(float))) == 0) {
+                        embedding.resize(num_floats);
+                        std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
+                    } else {
+                        if (!rebuild_tq) {
+                            continue;
+                        }
+                        auto fmt =
+                            static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 3));
+                        if (fmt != VectorRecord::QuantizedFormat::TURBOquant_1) {
+                            continue;
+                        }
+                        const void* qblob = sqlite3_column_blob(stmt, 6);
+                        int qblob_size = sqlite3_column_bytes(stmt, 6);
+                        if (!qblob || qblob_size <= 0) {
+                            continue;
+                        }
+                        std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
+                        std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
+                        embedding =
+                            vector_utils::packedDequantizeVector(packed, dim, rebuild_tq.get());
+                    }
+
+                    if (embedding.empty()) {
+                        continue;
+                    }
 
                     // Skip zero-norm vectors during rebuild (they become dead-ends in HNSW)
                     if (isZeroNormEmbedding(embedding)) {
@@ -3766,8 +3823,11 @@ ORDER BY rowid
                 db_, "main", table_prefix.c_str(), *hnsw, &err);
             if (rc != SQLITE_OK) {
                 if (err) {
-                    spdlog::error("[HNSW] Failed to save index for dim={}: {}", dim, err);
+                    spdlog::error("[HNSW] Failed to save index for dim={} rc={}: {}", dim, rc, err);
                     sqlite3_free(err);
+                } else {
+                    spdlog::error("[HNSW] Failed to save index for dim={} rc={} sqlite_errmsg={}",
+                                  dim, rc, sqlite3_errmsg(db_));
                 }
             } else {
                 hnsw_dirty_[dim] = false;
@@ -3892,6 +3952,7 @@ ORDER BY rowid
     bool background_seed_running_ = false;
     bool background_seed_scheduled_ = false;
     bool background_seed_cancel_requested_ = false;
+    std::thread background_seed_thread_;
     HnswMaintenanceMode last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
     std::size_t last_hnsw_added_count_ = 0;
     std::size_t last_hnsw_removed_count_ = 0;
