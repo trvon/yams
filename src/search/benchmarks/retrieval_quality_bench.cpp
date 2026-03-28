@@ -627,6 +627,8 @@ struct QueryDiagnosticsSummary {
     std::uint64_t degradedQueryCount = 0;
     std::uint64_t traceEnabledQueryCount = 0;
     std::uint64_t graphRerankAppliedQueryCount = 0;
+    std::uint64_t compressedAnnEnabledQueryCount = 0;
+    std::uint64_t compressedAnnAppliedQueryCount = 0;
     std::uint64_t turboQuantEnabledQueryCount = 0;
     std::uint64_t turboQuantAppliedQueryCount = 0;
     std::uint64_t semanticRescueNonZeroQueryCount = 0;
@@ -637,6 +639,8 @@ struct QueryDiagnosticsSummary {
     std::vector<double> semanticRescueRateSamples;
     std::vector<double> semanticRescueFinalCountSamples;
     std::vector<double> semanticRescueTargetSamples;
+    std::vector<double> compressedAnnResultCountSamples;
+    std::unordered_map<std::string, std::uint64_t> compressedAnnSkipReasonCounts;
     std::vector<double> turboQuantWindowSamples;
     std::vector<double> turboQuantCandidateSamples;
     std::vector<double> turboQuantPackedCandidatesScoredSamples;
@@ -1112,6 +1116,19 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     if (parseBoolStat(searchStats, "trace_graph_rerank_applied").value_or(false)) {
         summary.graphRerankAppliedQueryCount++;
     }
+    if (parseBoolStat(searchStats, "compressed_ann_enabled").value_or(false)) {
+        summary.compressedAnnEnabledQueryCount++;
+    }
+    if (parseBoolStat(searchStats, "compressed_ann_applied").value_or(false)) {
+        summary.compressedAnnAppliedQueryCount++;
+    }
+    if (auto v = parseDoubleStat(searchStats, "compressed_ann_result_count")) {
+        summary.compressedAnnResultCountSamples.push_back(*v);
+    }
+    if (auto it = searchStats.find("compressed_ann_skip_reason");
+        it != searchStats.end() && !it->second.empty()) {
+        summary.compressedAnnSkipReasonCounts[it->second]++;
+    }
     if (parseBoolStat(searchStats, "turboquant_enabled").value_or(false)) {
         summary.turboQuantEnabledQueryCount++;
     }
@@ -1364,6 +1381,8 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"degraded_query_count", summary.degradedQueryCount},
         {"trace_enabled_query_count", summary.traceEnabledQueryCount},
         {"graph_rerank_applied_query_count", summary.graphRerankAppliedQueryCount},
+        {"compressed_ann_enabled_query_count", summary.compressedAnnEnabledQueryCount},
+        {"compressed_ann_applied_query_count", summary.compressedAnnAppliedQueryCount},
         {"turboquant_enabled_query_count", summary.turboQuantEnabledQueryCount},
         {"turboquant_applied_query_count", summary.turboQuantAppliedQueryCount},
         {"semantic_rescue_nonzero_query_count", summary.semanticRescueNonZeroQueryCount},
@@ -1393,6 +1412,10 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"trace_coverage", static_cast<double>(summary.traceEnabledQueryCount) / queryCount},
         {"graph_rerank_apply_rate",
          static_cast<double>(summary.graphRerankAppliedQueryCount) / queryCount},
+        {"compressed_ann_enabled_rate",
+         static_cast<double>(summary.compressedAnnEnabledQueryCount) / queryCount},
+        {"compressed_ann_apply_rate",
+         static_cast<double>(summary.compressedAnnAppliedQueryCount) / queryCount},
         {"turboquant_enabled_rate",
          static_cast<double>(summary.turboQuantEnabledQueryCount) / queryCount},
         {"turboquant_apply_rate",
@@ -1406,6 +1429,8 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"miss_rerank_window_drop_rate",
          static_cast<double>(summary.missRerankWindowDropCount) / queryCount},
         {"miss_topk_drop_rate", static_cast<double>(summary.missTopKDropCount) / queryCount},
+        {"compressed_ann_result_count", summarizeSamples(summary.compressedAnnResultCountSamples)},
+        {"compressed_ann_skip_reasons", summary.compressedAnnSkipReasonCounts},
         {"turboquant_window", summarizeSamples(summary.turboQuantWindowSamples)},
         {"turboquant_candidate_count", summarizeSamples(summary.turboQuantCandidateSamples)},
         {"turboquant_packed_candidates_scored",
@@ -2148,6 +2173,25 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_TURBOQUANT_RERANK_WINDOW", "100"},
              {"YAMS_SEARCH_TURBOQUANT_RERANK_DIM", "768"},
              {"YAMS_SEARCH_ENABLE_TURBOQUANT_RERANK", "1"},
+         },
+         false,
+         true},
+        {"diag_turboquant_on_compressed_ann_mixed_precision",
+         "MIXED_PRECISION with TurboQuant rerank and compressed ANN forced on",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE", "1"},
+             {"YAMS_VECTOR_TURBOQUANT_BITS", "4"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "100"},
+             {"YAMS_SEARCH_TURBOQUANT_RERANK_WINDOW", "100"},
+             {"YAMS_SEARCH_TURBOQUANT_RERANK_DIM", "768"},
+             {"YAMS_SEARCH_ENABLE_TURBOQUANT_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_COMPRESSED_ANN", "1"},
+             {"YAMS_SEARCH_COMPRESSED_ANN_TOPK", "100"},
          },
          false,
          true},
@@ -6250,6 +6294,7 @@ static int runOptimizationLoop() {
         std::cout << "    trace_cov=" << std::setprecision(3)
                   << hybridDiag["trace_coverage"].get<double>() << "  sem_rescue_mean="
                   << hybridDiag["semantic_rescue_rate"]["mean"].get<double>()
+                  << "  ca_apply_rate=" << hybridDiag["compressed_ann_apply_rate"].get<double>()
                   << "  tq_apply_rate=" << hybridDiag["turboquant_apply_rate"].get<double>()
                   << "  vec_only_below_mean="
                   << hybridDiag["vector_only_below_threshold"]["mean"].get<double>()
@@ -6259,6 +6304,8 @@ static int runOptimizationLoop() {
                   << "  miss_pre_fusion_rate="
                   << hybridDiag["miss_missing_pre_fusion_rate"].get<double>() << "\n";
         std::cout << "    timing_tradeoffs=" << summarizeTimingTradeoffs(hybridDiag) << "\n";
+        std::cout << "    ca_skip_reasons=" << hybridDiag["compressed_ann_skip_reasons"].dump()
+                  << "\n";
         std::cout << "    tq_skip_reasons=" << hybridDiag["turboquant_skip_reasons"].dump() << "\n";
         std::cout << "    stage_tradeoffs=" << summarizeStageTradeoffs(hybridDiag) << "\n";
         if (result.traceTopN > 0 || result.traceComponentTopN > 0) {

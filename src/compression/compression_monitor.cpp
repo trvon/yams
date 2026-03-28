@@ -78,7 +78,7 @@ public:
             // Prune old history
             auto cutoff = snapshot.timestamp - config_.historyRetention;
             history_.erase(std::ranges::remove_if(
-                               history_, [cutoff](const auto& s) { return s.timestamp < cutoff; })
+                               history_, [&](const auto& s) { return s.timestamp < cutoff; })
                                .begin(),
                            history_.end());
         }

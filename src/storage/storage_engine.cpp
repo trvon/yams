@@ -51,14 +51,12 @@ struct StorageEngine::Impl {
         : config(std::move(cfg)), writeMutexPool(config.mutexPoolSize) {
         // Initialize storage directory
         std::error_code ec;
-        yams::common::ensureDirectories(config.basePath / "objects");
-        if (ec) {
+        if (!yams::common::ensureDirectories(config.basePath / "objects", ec)) {
             throw std::runtime_error(
                 yamsfmt::format("Failed to create storage directory: {}", ec.message()));
         }
 
-        yams::common::ensureDirectories(config.basePath / "temp");
-        if (ec) {
+        if (!yams::common::ensureDirectories(config.basePath / "temp", ec)) {
             throw std::runtime_error(
                 yamsfmt::format("Failed to create temp directory: {}", ec.message()));
         }
@@ -124,9 +122,7 @@ std::filesystem::path StorageEngine::getTempPath() const {
 
 Result<void> StorageEngine::ensureDirectoryExists(const std::filesystem::path& path) const {
     std::error_code ec;
-    yams::common::ensureDirectories(path.parent_path());
-
-    if (ec) {
+    if (!yams::common::ensureDirectories(path.parent_path(), ec)) {
         spdlog::error("Failed to create directory {}: {}", path.parent_path().string(),
                       ec.message());
         return Result<void>(ErrorCode::PermissionDenied);
@@ -563,21 +559,16 @@ auto createStorageEngine(StorageConfig config) -> std::unique_ptr<IStorageEngine
 // Utility functions
 auto initializeStorage(const std::filesystem::path& basePath) -> Result<void> {
     try {
-        std::error_code errorCode;
-
         // Create directory structure
-        yams::common::ensureDirectories(basePath / "objects");
-        if (errorCode) {
+        if (!yams::common::ensureDirectories(basePath / "objects")) {
             return {ErrorCode::PermissionDenied};
         }
 
-        yams::common::ensureDirectories(basePath / "temp");
-        if (errorCode) {
+        if (!yams::common::ensureDirectories(basePath / "temp")) {
             return {ErrorCode::PermissionDenied};
         }
 
-        yams::common::ensureDirectories(basePath / "manifests");
-        if (errorCode) {
+        if (!yams::common::ensureDirectories(basePath / "manifests")) {
             return {ErrorCode::PermissionDenied};
         }
 

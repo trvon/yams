@@ -202,14 +202,12 @@ Result<void> FilesystemBackend::initialize(const BackendConfig& config) {
 
     // Create storage directories
     std::error_code ec;
-    yams::common::ensureDirectories(basePath_ / "objects");
-    if (ec) {
+    if (!yams::common::ensureDirectories(basePath_ / "objects", ec)) {
         return Result<void>(Error{ErrorCode::PermissionDenied,
                                   "Failed to create storage directory: " + ec.message()});
     }
 
-    yams::common::ensureDirectories(basePath_ / "temp");
-    if (ec) {
+    if (!yams::common::ensureDirectories(basePath_ / "temp", ec)) {
         return Result<void>(
             Error{ErrorCode::PermissionDenied, "Failed to create temp directory: " + ec.message()});
     }

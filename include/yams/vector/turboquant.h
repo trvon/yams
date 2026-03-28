@@ -29,6 +29,11 @@
 #include <random>
 #include <vector>
 
+// M_PI is not defined by default on Windows; define it for portability
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 namespace yams::vector {
 
 /**

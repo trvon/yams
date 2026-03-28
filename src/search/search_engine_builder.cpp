@@ -479,6 +479,18 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.fusionCandidateLimit);
         }
 
+        if (auto compressedAnnEnabled = getEnvBool("YAMS_SEARCH_ENABLE_COMPRESSED_ANN")) {
+            cfg.enableCompressedANN = *compressedAnnEnabled;
+            spdlog::info("SearchEngine enableCompressedANN overridden to {} via env",
+                         cfg.enableCompressedANN);
+        }
+
+        if (auto compressedAnnTopK = getEnvInt("YAMS_SEARCH_COMPRESSED_ANN_TOPK")) {
+            cfg.compressedAnnTopK = static_cast<size_t>(std::max(0, *compressedAnnTopK));
+            spdlog::info("SearchEngine compressedAnnTopK overridden to {} via env",
+                         cfg.compressedAnnTopK);
+        }
+
         if (auto graphRerankEnabled = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_RERANK")) {
             cfg.enableGraphRerank = *graphRerankEnabled;
             spdlog::info("SearchEngine enableGraphRerank overridden to {} via env",
