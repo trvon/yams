@@ -376,6 +376,7 @@ collectGraphSeedDocs(const std::vector<ComponentResult>& componentResults, size_
             case ComponentResult::Source::Text:
             case ComponentResult::Source::GraphText:
             case ComponentResult::Source::Vector:
+            case ComponentResult::Source::CompressedANN:
             case ComponentResult::Source::GraphVector:
             case ComponentResult::Source::EntityVector:
             case ComponentResult::Source::KnowledgeGraph:
@@ -788,6 +789,11 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
                     scoreScale = 0.65;
                     break;
                 case ComponentResult::Source::Vector:
+                    scoreScale = 0.45;
+                    break;
+                case ComponentResult::Source::CompressedANN:
+                    scoreScale = 0.25;
+                    break;
                 case ComponentResult::Source::GraphVector:
                     scoreScale = 0.45;
                     break;
@@ -901,6 +907,7 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
                 acc.symbolScore += contribution;
                 break;
             case ComponentResult::Source::Vector:
+            case ComponentResult::Source::CompressedANN:
             case ComponentResult::Source::EntityVector:
                 acc.vectorScore += contribution;
                 break;
@@ -1981,7 +1988,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
                 if (workingConfig.enableCompressedANN) {
                     compressedAnnFuture = schedule(
-                        "compressed_ann", workingConfig.vectorWeight, stats_.vectorQueries,
+                        "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
                         stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
                             YAMS_ZONE_SCOPED_N("component::compressed_ann");
                             return queryCompressedANN(queryEmbedding.value(), workingConfig,
@@ -2170,7 +2177,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         return queryCompressedANN(queryEmbedding.value(), workingConfig,
                                                   workingConfig.compressedAnnTopK);
                     },
-                    "compressed_ann", workingConfig.vectorWeight, stats_.vectorQueries,
+                    "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros);
             }
         }
@@ -2195,6 +2202,37 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     } else if (!vectorDb_) {
         compressedAnnSkipReason = "no_vector_db";
     } else {
+        std::unordered_set<std::string> exactVectorDocIds;
+        std::unordered_set<std::string> compressedAnnDocIds;
+        exactVectorDocIds.reserve(allComponentResults.size());
+        compressedAnnDocIds.reserve(allComponentResults.size());
+        for (const auto& comp : allComponentResults) {
+            if (comp.source == ComponentResult::Source::Vector) {
+                const auto docId = documentIdForTrace(comp.filePath, comp.documentHash);
+                if (!docId.empty()) {
+                    exactVectorDocIds.insert(docId);
+                }
+            }
+        }
+        if (!exactVectorDocIds.empty()) {
+            allComponentResults.erase(
+                std::remove_if(allComponentResults.begin(), allComponentResults.end(),
+                               [&](const ComponentResult& comp) {
+                                   if (comp.source != ComponentResult::Source::CompressedANN) {
+                                       return false;
+                                   }
+                                   const auto docId =
+                                       documentIdForTrace(comp.filePath, comp.documentHash);
+                                   if (docId.empty()) {
+                                       return false;
+                                   }
+                                   if (exactVectorDocIds.contains(docId)) {
+                                       return true;
+                                   }
+                                   return !compressedAnnDocIds.insert(docId).second;
+                               }),
+                allComponentResults.end());
+        }
         compressedAnnResultCount = static_cast<size_t>(std::count_if(
             allComponentResults.begin(), allComponentResults.end(), [](const auto& comp) {
                 auto it = comp.debugInfo.find("compressed_ann");
@@ -2355,6 +2393,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             for (const auto& cr : allComponentResults) {
                 if (cr.source == ComponentResult::Source::Vector ||
+                    cr.source == ComponentResult::Source::CompressedANN ||
                     cr.source == ComponentResult::Source::EntityVector) {
                     if (cr.documentHash.empty()) {
                         continue;
@@ -2550,6 +2589,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::vector<ComponentResult> traceMultiVectorResults;
         for (const auto& comp : allComponentResults) {
             if (comp.source == ComponentResult::Source::Vector ||
+                comp.source == ComponentResult::Source::CompressedANN ||
                 comp.source == ComponentResult::Source::EntityVector ||
                 comp.source == ComponentResult::Source::GraphVector) {
                 traceMultiVectorResults.push_back(comp);
@@ -5402,7 +5442,7 @@ SearchEngine::Impl::queryCompressedANN(const std::vector<float>& embedding,
         for (size_t rank = 0; rank < ann_search_results.results.size(); ++rank) {
             const auto& r = ann_search_results.results[rank];
             ComponentResult cr;
-            cr.source = ComponentResult::Source::Vector;
+            cr.source = ComponentResult::Source::CompressedANN;
             if (r.id >= compressedAnnDocumentHashes_.size()) {
                 continue;
             }

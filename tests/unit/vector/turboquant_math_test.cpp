@@ -22,6 +22,8 @@ using namespace yams::vector;
 
 namespace {
 
+constexpr double kPi = 3.14159265358979323846;
+
 // Verify E[sgn(a)·sgn(b)] = (2/π)·arcsin(ρ) for Gaussian pairs
 // by generating many trials and comparing empirical mean to theoretical value.
 TEST_CASE("QJL gamma contract: E[sgn·sgn] = (2/π)·arcsin(ρ)", "[turboquant][math][qjl][catch2]") {
@@ -41,7 +43,8 @@ TEST_CASE("QJL gamma contract: E[sgn·sgn] = (2/π)·arcsin(ρ)", "[turboquant][
             std::normal_distribution<float> dist(0.0f, 1.0f);
             float x = dist(rng);
             float z = dist(rng);
-            float y = static_cast<float>(rho) * x + std::sqrt(1.0 - rho * rho) * z;
+            float rhoFloat = static_cast<float>(rho);
+            float y = rhoFloat * x + std::sqrt(1.0f - rhoFloat * rhoFloat) * z;
 
             float sx = (x >= 0.0f) ? 1.0f : -1.0f;
             float sy = (y >= 0.0f) ? 1.0f : -1.0f;
@@ -52,7 +55,7 @@ TEST_CASE("QJL gamma contract: E[sgn·sgn] = (2/π)·arcsin(ρ)", "[turboquant][
         }
 
         double empirical = sum_sign_product / static_cast<double>(kTrials);
-        double theoretical = (2.0 / M_PI) * std::asin(rho);
+        double theoretical = (2.0 / kPi) * std::asin(rho);
 
         INFO("rho=" << rho << ": empirical=" << empirical << ", theoretical=" << theoretical
                     << ", diff=" << (empirical - theoretical));
@@ -77,7 +80,8 @@ TEST_CASE("QJL gamma contract: arcsin inversion recovers rho", "[turboquant][mat
         std::normal_distribution<float> dist(0.0f, 1.0f);
         float x = dist(rng);
         float z = dist(rng);
-        float y = static_cast<float>(rho) * x + std::sqrt(1.0 - rho * rho) * z;
+        float rhoFloat = static_cast<float>(rho);
+        float y = rhoFloat * x + std::sqrt(1.0f - rhoFloat * rhoFloat) * z;
 
         float sx = (x >= 0.0f) ? 1.0f : -1.0f;
         float sy = (y >= 0.0f) ? 1.0f : -1.0f;
@@ -85,7 +89,7 @@ TEST_CASE("QJL gamma contract: arcsin inversion recovers rho", "[turboquant][mat
     }
 
     double empirical_sp = sum_sign_product / static_cast<double>(kTrials);
-    double recovered_rho = std::sin(M_PI_2 * empirical_sp);
+    double recovered_rho = std::sin((kPi / 2.0) * empirical_sp);
 
     INFO("Input rho=" << rho << ", empirical E[sgn·sgn]=" << empirical_sp
                       << ", recovered rho=" << recovered_rho);
@@ -133,15 +137,15 @@ TEST_CASE("QJL gamma contract: raw agreement maps to rho via -cos(pi*gamma)",
         std::normal_distribution<float> dist(0.0f, 1.0f);
         float x = dist(rng);
         float y = dist(rng);
-        float sx = (x >= 0.0f) ? 1 : -1;
-        float sy = (y >= 0.0f) ? 1 : -1;
+        float sx = (x >= 0.0f) ? 1.0f : -1.0f;
+        float sy = (y >= 0.0f) ? 1.0f : -1.0f;
         if (sx == sy)
             matching++;
     }
 
     double gamma_raw = static_cast<double>(matching) / kTrials;
     // Correct formula: rho_res = -cos(pi*gamma) = sin(pi*gamma - pi/2)
-    double rho_res = -std::cos(M_PI * gamma_raw);
+    double rho_res = -std::cos(kPi * gamma_raw);
 
     INFO("Orthogonal: gamma_raw=" << gamma_raw << ", rho_res=" << rho_res);
     // For orthogonal: gamma_raw~0.5, rho_res = -cos(pi*0.5) = -cos(pi/2) = 0

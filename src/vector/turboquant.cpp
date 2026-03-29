@@ -88,7 +88,7 @@ static const std::vector<std::vector<std::vector<float>>> g_lloydMaxCentroids = 
  */
 static const std::vector<std::vector<float>> g_lloydMaxBoundaries = {
     // b=1 (1 boundary)
-    {{0.0f}},
+    {0.0f},
     // b=2 (3 boundaries)
     {{-0.9815954923026236f, 0.0f, 0.9815954923026236f}},
     // b=3 (7 boundaries)
@@ -492,8 +492,7 @@ std::vector<uint8_t> TurboQuantMSE::packedEncode(const std::vector<float>& vecto
 std::vector<float> TurboQuantMSE::packedDecode(const std::vector<uint8_t>& packed) {
     const size_t d = config_.dimension;
     const uint8_t bits = config_.bits_per_channel;
-    const size_t expected_bytes = (d * bits + 7) / 8;
-    assert(packed.size() == expected_bytes);
+    assert(packed.size() == (d * bits + 7) / 8);
 
     std::vector<uint8_t> indices(d);
 
@@ -635,8 +634,7 @@ float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query
     assert(transformed_query.size() == d);
     assert(!centroids_.empty());
 
-    const size_t expected_bytes = (d * bits + 7) / 8;
-    assert(packed_codes.size() == expected_bytes);
+    assert(packed_codes.size() == (d * bits + 7) / 8);
 
     const float* y_q = transformed_query.data();
     const float* scales = per_coord_scales_.data();
@@ -679,8 +677,7 @@ float TurboQuantMSE::scoreFromPacked(std::span<const float> transformed_query,
     const uint8_t bits = config_.bits_per_channel;
     assert(transformed_query.size() == d);
 
-    const size_t expected_bytes = (d * bits + 7) / 8;
-    assert(packed_codes.size() == expected_bytes);
+    assert(packed_codes.size() == (d * bits + 7) / 8);
 
     const float* y_q = transformed_query.data();
     const float* scales = per_coord_scales_.data();

@@ -485,10 +485,34 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.enableCompressedANN);
         }
 
+        if (auto compressedAnnWeight = getEnvFloat("YAMS_SEARCH_COMPRESSED_ANN_WEIGHT")) {
+            cfg.compressedAnnWeight = std::clamp(*compressedAnnWeight, 0.0f, 1.0f);
+            spdlog::info("SearchEngine compressedAnnWeight overridden to {:.3f} via env",
+                         cfg.compressedAnnWeight);
+        }
+
         if (auto compressedAnnTopK = getEnvInt("YAMS_SEARCH_COMPRESSED_ANN_TOPK")) {
             cfg.compressedAnnTopK = static_cast<size_t>(std::max(0, *compressedAnnTopK));
             spdlog::info("SearchEngine compressedAnnTopK overridden to {} via env",
                          cfg.compressedAnnTopK);
+        }
+
+        if (auto compressedAnnEfSearch = getEnvInt("YAMS_SEARCH_COMPRESSED_ANN_EF_SEARCH")) {
+            cfg.compressedAnnEfSearch = static_cast<size_t>(std::max(1, *compressedAnnEfSearch));
+            spdlog::info("SearchEngine compressedAnnEfSearch overridden to {} via env",
+                         cfg.compressedAnnEfSearch);
+        }
+
+        if (auto compressedAnnBits = getEnvInt("YAMS_SEARCH_COMPRESSED_ANN_BITS")) {
+            cfg.compressedAnnBits = static_cast<uint8_t>(std::clamp(*compressedAnnBits, 1, 8));
+            spdlog::info("SearchEngine compressedAnnBits overridden to {} via env",
+                         static_cast<int>(cfg.compressedAnnBits));
+        }
+
+        if (auto compressedAnnDim = getEnvInt("YAMS_SEARCH_COMPRESSED_ANN_DIM")) {
+            cfg.compressedAnnDim = static_cast<size_t>(std::max(1, *compressedAnnDim));
+            spdlog::info("SearchEngine compressedAnnDim overridden to {} via env",
+                         cfg.compressedAnnDim);
         }
 
         if (auto graphRerankEnabled = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_RERANK")) {

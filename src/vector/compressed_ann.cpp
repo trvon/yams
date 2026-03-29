@@ -204,7 +204,6 @@ Result<void> CompressedANNIndex::buildMetricAligned() {
 
     const size_t n = nodes_.size();
     const size_t dim = config_.dimension;
-    const uint8_t bits = config_.bits_per_channel;
     const size_t max_neighbors = std::min(config_.m, n > 0 ? n - 1 : 0);
 
     if (n == 0)

@@ -2191,6 +2191,8 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_TURBOQUANT_RERANK_DIM", "768"},
              {"YAMS_SEARCH_ENABLE_TURBOQUANT_RERANK", "1"},
              {"YAMS_SEARCH_ENABLE_COMPRESSED_ANN", "1"},
+             {"YAMS_SEARCH_COMPRESSED_ANN_DIM", "768"},
+             {"YAMS_SEARCH_COMPRESSED_ANN_BITS", "4"},
              {"YAMS_SEARCH_COMPRESSED_ANN_TOPK", "100"},
          },
          false,

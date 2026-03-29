@@ -344,6 +344,7 @@ struct SearchEngineConfig {
     // Runs as an additional vector component; the regular vector path remains available.
     // Callers must keep the bit depth aligned with the stored TurboQuant sidecar.
     bool enableCompressedANN = false;  // Enable compressed ANN traversal
+    float compressedAnnWeight = 0.10f; // Fusion weight for compressed ANN candidates
     size_t compressedAnnTopK = 50;     // Number of results from compressed ANN search
     size_t compressedAnnEfSearch = 50; // ef_search parameter for CompressedANNIndex
     uint8_t compressedAnnBits = 4;     // Bits per channel for compressed ANN (must match storage)
@@ -491,6 +492,7 @@ struct ComponentResult {
         PathTree,
         KnowledgeGraph,
         Vector,
+        CompressedANN,
         GraphVector,
         EntityVector,
         Tag,
@@ -515,6 +517,8 @@ inline constexpr const char* componentSourceToString(ComponentResult::Source sou
             return "kg";
         case ComponentResult::Source::Vector:
             return "vector";
+        case ComponentResult::Source::CompressedANN:
+            return "compressed_ann";
         case ComponentResult::Source::GraphVector:
             return "graph_vector";
         case ComponentResult::Source::EntityVector:
@@ -544,6 +548,8 @@ inline float componentSourceWeight(const SearchEngineConfig& config,
             return config.kgWeight;
         case ComponentResult::Source::Vector:
             return config.vectorWeight;
+        case ComponentResult::Source::CompressedANN:
+            return config.compressedAnnWeight;
         case ComponentResult::Source::GraphVector:
             return config.graphVectorWeight;
         case ComponentResult::Source::EntityVector:
@@ -561,6 +567,7 @@ inline float componentSourceWeight(const SearchEngineConfig& config,
 
 inline constexpr bool isVectorComponent(ComponentResult::Source source) noexcept {
     return source == ComponentResult::Source::Vector ||
+           source == ComponentResult::Source::CompressedANN ||
            source == ComponentResult::Source::GraphVector ||
            source == ComponentResult::Source::EntityVector;
 }
@@ -628,6 +635,7 @@ inline void accumulateComponentScore(SearchResult& r, ComponentResult::Source so
                                      double contribution) {
     switch (source) {
         case ComponentResult::Source::Vector:
+        case ComponentResult::Source::CompressedANN:
         case ComponentResult::Source::EntityVector:
             r.vectorScore = r.vectorScore.value_or(0.0) + contribution;
             break;
@@ -662,6 +670,7 @@ inline double componentSourceScoreInResult(const SearchResult& r,
                                            ComponentResult::Source source) noexcept {
     switch (source) {
         case ComponentResult::Source::Vector:
+        case ComponentResult::Source::CompressedANN:
         case ComponentResult::Source::EntityVector:
             return r.vectorScore.value_or(0.0);
         case ComponentResult::Source::GraphVector:
@@ -683,6 +692,84 @@ inline double componentSourceScoreInResult(const SearchResult& r,
             return 0.0;
     }
     return 0.0;
+}
+
+/**
+ * @brief Extract document ID from component result for deduplication
+ *
+ * Uses filePath as the primary dedup key (if non-empty), otherwise falls back
+ * to documentHash. This mirrors the dedup logic used in ResultFusion.
+ *
+ * @param comp Component result to extract ID from
+ * @return Document ID string, or empty string if neither is available
+ */
+inline std::string documentIdFromComponent(const ComponentResult& comp) noexcept {
+    if (!comp.filePath.empty()) {
+        return comp.filePath;
+    }
+    if (!comp.documentHash.empty()) {
+        return comp.documentHash;
+    }
+    return {};
+}
+
+/**
+ * @brief Prune duplicate compressed ANN results before fusion
+ *
+ * This function implements the pre-fusion dedup logic:
+ * 1. First pass: collect all exact Vector document IDs
+ * 2. Second pass: for each CompressedANN result:
+ *    - If doc ID is in exact Vector results -> remove (exact vector takes precedence)
+ *    - If doc ID was already seen in compressed ANN -> remove (dedup)
+ *    - If doc ID is novel -> keep it
+ *
+ * This ensures:
+ * - compressed-ANN doc duplicated by exact vector is removed
+ * - duplicate compressed-ANN docs collapse to one
+ * - exact vector docs remain untouched
+ * - unique compressed-ANN docs survive
+ *
+ * @param components Input vector of component results
+ * @return Pruned vector with duplicate compressed ANN results removed
+ */
+inline std::vector<ComponentResult>
+pruneDuplicateCompressedAnnResults(std::vector<ComponentResult> components) {
+    std::unordered_set<std::string> exactVectorDocIds;
+    exactVectorDocIds.reserve(components.size());
+
+    // First pass: collect exact Vector document IDs
+    for (const auto& comp : components) {
+        if (comp.source == ComponentResult::Source::Vector) {
+            const auto docId = documentIdFromComponent(comp);
+            if (!docId.empty()) {
+                exactVectorDocIds.insert(docId);
+            }
+        }
+    }
+
+    // Second pass: prune duplicate compressed ANN results
+    std::unordered_set<std::string> compressedAnnDocIds;
+    compressedAnnDocIds.reserve(components.size());
+
+    components.erase(std::remove_if(components.begin(), components.end(),
+                                    [&](const ComponentResult& comp) {
+                                        if (comp.source != ComponentResult::Source::CompressedANN) {
+                                            return false;
+                                        }
+                                        const auto docId = documentIdFromComponent(comp);
+                                        if (docId.empty()) {
+                                            return false;
+                                        }
+                                        // Remove if already covered by exact vector
+                                        if (exactVectorDocIds.contains(docId)) {
+                                            return true;
+                                        }
+                                        // Remove if duplicate compressed ANN
+                                        return !compressedAnnDocIds.insert(docId).second;
+                                    }),
+                     components.end());
+
+    return components;
 }
 
 inline double strongVectorOnlyReliefStrength(const SearchEngineConfig& config, double rawVector,
