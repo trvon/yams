@@ -18,8 +18,8 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/services.hpp>
-#include <yams/common/fs_utils.h>
 #include <yams/app/services/session_service.hpp>
+#include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -40,7 +40,6 @@ namespace yams::daemon {
 
 namespace {
 
-std::atomic<int> g_queryTraceEnabledCached{-1};
 std::atomic<uint32_t> g_inflightListRequests{0};
 std::atomic<uint32_t> g_inflightGrepRequests{0};
 std::atomic<bool> g_forceListUnknownExceptionOnce{false};
@@ -606,16 +605,6 @@ int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) 
     }
 }
 
-bool query_trace_enabled() {
-    int v = g_queryTraceEnabledCached.load(std::memory_order_relaxed);
-    if (v >= 0)
-        return v == 1;
-    const char* env = std::getenv("YAMS_QUERY_TRACE");
-    bool enabled = env && *env && std::string_view(env) != "0";
-    g_queryTraceEnabledCached.store(enabled ? 1 : 0, std::memory_order_relaxed);
-    return enabled;
-}
-
 struct ListInflightGuard {
     ~ListInflightGuard() { g_inflightListRequests.fetch_sub(1, std::memory_order_acq_rel); }
 };
@@ -740,10 +729,6 @@ void RequestDispatcher::__test_forceCatNativeMissingContentOnce() {
     g_forceCatNativeMissingContentOnce.store(true, std::memory_order_release);
 }
 
-void RequestDispatcher::__test_resetDocumentsQueryTraceCache() {
-    g_queryTraceEnabledCached.store(-1, std::memory_order_release);
-}
-
 void RequestDispatcher::__test_forceDocumentsHashFailureOnce() {
     g_forceDocumentsHashFailureOnce.store(true, std::memory_order_release);
 }
@@ -824,7 +809,6 @@ RequestDispatcher::handlePrepareSessionRequest(const PrepareSessionRequest& req)
 boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
         "get", [this, req]() -> boost::asio::awaitable<Response> {
-            const auto requestStart = std::chrono::steady_clock::now();
             auto appContext = serviceManager_->getAppContext();
             auto documentService = app::services::makeDocumentService(appContext);
             app::services::RetrieveDocumentRequest serviceReq;
@@ -848,14 +832,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             spdlog::debug("RequestDispatcher: Mapping GetRequest to DocumentService (hash='{}', "
                           "name='{}', metadataOnly={})",
                           req.hash, req.name, req.metadataOnly);
-            const auto serviceStart = std::chrono::steady_clock::now();
             auto result = co_await yams::daemon::dispatch::offload_to_worker(
                 serviceManager_, [documentService, serviceReq = std::move(serviceReq)]() mutable {
                     return documentService->retrieve(serviceReq);
                 });
-            const auto serviceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                       std::chrono::steady_clock::now() - serviceStart)
-                                       .count();
             if (!result) {
                 spdlog::warn("RequestDispatcher: DocumentService::retrieve failed: {}",
                              result.error().message);
@@ -872,7 +852,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                 serviceResp.documents.clear();
             }
 
-            const auto mapStart = std::chrono::steady_clock::now();
             GetResponse response;
             if (serviceResp.document.has_value()) {
                 response = yams::daemon::dispatch::GetResponseMapper::fromServiceDoc(
@@ -900,20 +879,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             }
             response.totalBytes = serviceResp.totalBytes;
             response.outputWritten = serviceResp.outputPath.has_value();
-
-            const auto mapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   std::chrono::steady_clock::now() - mapStart)
-                                   .count();
-            const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                     std::chrono::steady_clock::now() - requestStart)
-                                     .count();
-            if (query_trace_enabled()) {
-                spdlog::info(
-                    "[query-trace] op=get total_ms={} service_ms={} map_ms={} graph_related={} "
-                    "total_bytes={} hash='{}' name='{}'",
-                    totalMs, serviceMs, mapMs, response.related.size(), response.totalBytes,
-                    req.hash, req.name);
-            }
 
             co_return response;
         });
@@ -1150,14 +1115,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
         response.listStats["phase_dispatch_map_us"] = std::to_string(mapUs);
         response.listStats["phase_dispatch_total_ms"] = std::to_string(totalMs);
         response.listStats["phase_dispatch_total_us"] = std::to_string(totalUs);
-        if (query_trace_enabled()) {
-            spdlog::info(
-                "[query-trace] op=list total_ms={} service_ms={} map_ms={} items={} total_count={} "
-                "limit={} offset={} recent={}",
-                totalMs, serviceMs, mapMs, response.items.size(), response.totalCount, req.limit,
-                req.offset, req.recentCount);
-        }
-
         co_return response;
     } catch (const std::exception& e) {
         spdlog::error("[handleListRequest] Exception: {}", e.what());

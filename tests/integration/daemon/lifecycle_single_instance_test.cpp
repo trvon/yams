@@ -413,7 +413,6 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
           "[daemon][lifecycle][repair-hysteresis]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    EnvGuard tickGuard("YAMS_STATUS_TICK_MS", "5");
     EnvGuard degradeGuard("YAMS_REPAIR_DEGRADE_HOLD_MS", "400");
     EnvGuard readyGuard("YAMS_REPAIR_READY_HOLD_MS", "400");
 

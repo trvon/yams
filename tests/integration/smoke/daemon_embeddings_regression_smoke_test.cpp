@@ -312,11 +312,9 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
 #if defined(_WIN32)
     _putenv_s("YAMS_DAEMON_KILL_OTHERS", "0");
     _putenv_s("YAMS_DISABLE_VECTOR_DB", "0");
-    _putenv_s("YAMS_STREAM_TRACE", "1");
 #else
     setenv("YAMS_DAEMON_KILL_OTHERS", "0", 1);
     unsetenv("YAMS_DISABLE_VECTOR_DB");
-    setenv("YAMS_STREAM_TRACE", "1", 1);
 #endif
     // Skip content store stats queries that can race when embedding loads are slow.
 #if defined(_WIN32)

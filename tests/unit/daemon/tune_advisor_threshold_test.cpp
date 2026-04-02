@@ -771,28 +771,11 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
 // =============================================================================
 
 TEST_CASE("statusTickMs defaults to 5", "[daemon][governance][catch2]") {
-    // Ensure no env override is active
-    EnvGuard envGuard("YAMS_STATUS_TICK_MS", "0"); // 0 fails validation, falls through to default
-    // Actually 0 is rejected by the > 0 check, so we need to unset it
-    unsetenv("YAMS_STATUS_TICK_MS");
     CHECK(TuneAdvisor::statusTickMs() == 5);
 }
 
-TEST_CASE("statusTickMs env var override", "[daemon][governance][catch2]") {
-    SECTION("Valid override is respected") {
-        EnvGuard envGuard("YAMS_STATUS_TICK_MS", "100");
-        CHECK(TuneAdvisor::statusTickMs() == 100);
-    }
-
-    SECTION("Zero is rejected, falls back to default") {
-        EnvGuard envGuard("YAMS_STATUS_TICK_MS", "0");
-        CHECK(TuneAdvisor::statusTickMs() == 5);
-    }
-
-    SECTION("10000 or above is rejected") {
-        EnvGuard envGuard("YAMS_STATUS_TICK_MS", "10000");
-        CHECK(TuneAdvisor::statusTickMs() == 5);
-    }
+TEST_CASE("statusTickMs remains fixed at 5ms", "[daemon][governance][catch2]") {
+    CHECK(TuneAdvisor::statusTickMs() == 5);
 }
 
 // =============================================================================

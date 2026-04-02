@@ -66,28 +66,11 @@ bool isExpectedDisconnectMessage(const std::string& message) {
 }
 
 bool ipc_wait_trace_enabled() {
-    static const bool enabled = [] {
-        if (const char* raw = std::getenv("YAMS_IPC_WAIT_TRACE")) {
-            std::string v(raw);
-            for (auto& ch : v)
-                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            return (v == "1" || v == "true" || v == "on");
-        }
-        return false;
-    }();
-    return enabled;
+    return false;
 }
 
 int ipc_wait_warn_ms() {
-    static const int warn_ms = [] {
-        if (const char* raw = std::getenv("YAMS_IPC_WAIT_WARN_MS")) {
-            try {
-                return std::max(1, std::stoi(raw));
-            } catch (...) {
-            }
-        }
-        return 250;
-    }();
+    static constexpr int warn_ms = 250;
     return warn_ms;
 }
 

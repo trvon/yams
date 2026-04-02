@@ -19,19 +19,6 @@
 
 namespace yams::daemon {
 
-namespace {
-bool query_trace_enabled() {
-    static std::atomic<int> cached{-1};
-    int v = cached.load(std::memory_order_relaxed);
-    if (v >= 0)
-        return v == 1;
-    const char* env = std::getenv("YAMS_QUERY_TRACE");
-    bool enabled = env && *env && std::string_view(env) != "0";
-    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
-    return enabled;
-}
-} // namespace
-
 boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
     YAMS_ZONE_SCOPED_N("handleSearchRequest");
     try {
@@ -234,14 +221,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         response.searchStats["phase_dispatch_response_us"] = std::to_string(responseUs);
         response.searchStats["phase_dispatch_total_ms"] = std::to_string(totalMs);
         response.searchStats["phase_dispatch_total_us"] = std::to_string(totalUs);
-        if (query_trace_enabled()) {
-            spdlog::info(
-                "[query-trace] op=search trace_id={} total_ms={} service_ms={} map_sort_ms={} "
-                "feedback_ms={} response_ms={} service_elapsed_ms={} results={} total_count={}",
-                traceId, totalMs, serviceMs, mapSortMs, feedbackMs, responseMs,
-                serviceResp.executionTimeMs, response.results.size(), response.totalCount);
-        }
-
         co_return response;
     } catch (const std::exception& e) {
         co_return ErrorResponse{ErrorCode::InternalError,

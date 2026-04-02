@@ -91,16 +91,7 @@ bool cli_one_shot_shutdown_enabled() {
 }
 
 bool ipc_wait_trace_enabled() {
-    static const bool enabled = [] {
-        if (const char* raw = std::getenv("YAMS_IPC_WAIT_TRACE")) {
-            std::string v(raw);
-            for (auto& ch : v)
-                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            return (v == "1" || v == "true" || v == "on");
-        }
-        return false;
-    }();
-    return enabled;
+    return false;
 }
 
 void log_pool_debug(const char* message) noexcept {
@@ -118,16 +109,7 @@ void log_pool_debug(const char* message, const std::exception& e) noexcept {
 }
 
 int ipc_wait_warn_ms() {
-    static const int warn_ms = [] {
-        if (const char* raw = std::getenv("YAMS_IPC_WAIT_WARN_MS")) {
-            try {
-                return std::max(1, std::stoi(raw));
-            } catch (const std::exception& e) {
-                log_pool_debug("Invalid YAMS_IPC_WAIT_WARN_MS value", e);
-            }
-        }
-        return 250;
-    }();
+    static constexpr int warn_ms = 250;
     return warn_ms;
 }
 
@@ -139,15 +121,7 @@ async_connect_with_timeout(const TransportOptions& opts) {
         co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
     }
 
-    static bool trace = [] {
-        if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
-            std::string v(raw);
-            for (auto& ch : v)
-                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            return (v == "1" || v == "true" || v == "on");
-        }
-        return false;
-    }();
+    static constexpr bool trace = false;
     auto executor = co_await this_coro::executor;
     auto socket = std::make_unique<AsioConnection::socket_t>(executor);
     boost::asio::local::stream_protocol::endpoint endpoint(opts.socketPath.string());

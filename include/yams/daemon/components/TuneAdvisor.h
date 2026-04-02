@@ -448,36 +448,13 @@ public:
     // Status/metrics tick cadence for daemon main loop. Default 5 ms.
     // ResourceGovernor /proc caching (100ms min interval) prevents excessive
     // filesystem I/O even at 200 ticks/sec.
-    static uint32_t statusTickMs() {
-        uint32_t def = 5;
-        if (const char* s = std::getenv("YAMS_STATUS_TICK_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v > 0 && v < 10000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t statusTickMs() { return 5; }
 
     // Idle-mode tick cadence for daemon tuning loop. Default 1000 ms.
     // When the daemon has no real work (zero non-health connections, empty queues),
     // the tuning loop sleeps for this duration instead of the active-mode 5 ms.
     // Dramatically reduces CPU wake-ups during idle periods.
-    static uint32_t idleTickMs() {
-        if (const char* s = std::getenv("YAMS_IDLE_TICK_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v > 0 && v < 60000)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 1000;
-    }
+    static uint32_t idleTickMs() { return 1000; }
 
 #ifdef YAMS_TESTING
     /// Test-only accessor: returns idle tick cadence.
@@ -1790,20 +1767,10 @@ public:
     }
 
     /// Request timeout in queue (default 30000ms)
-    /// Environment: YAMS_REQUEST_TIMEOUT_MS
     static uint32_t requestQueueTimeoutMs() {
         uint32_t ov = requestQueueTimeoutMsOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_REQUEST_TIMEOUT_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1000 && v <= 300000)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
         return 30000;
     }
     static void setRequestQueueTimeoutMs(uint32_t v) {

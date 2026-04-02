@@ -548,34 +548,6 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
 #ifdef YAMS_TESTING
     pImpl->config_.autoStart = false;
 #endif
-    // Timeout overrides: prefer explicit env, else bump conservative defaults to 120s
-    auto parse_ms = [](const char* v) -> std::optional<std::chrono::milliseconds> {
-        if (!v)
-            return std::nullopt;
-        try {
-            long ms = std::stol(std::string(v));
-            if (ms > 0)
-                return std::chrono::milliseconds(ms);
-        } catch (const std::exception& e) {
-            spdlog::debug("DaemonClient init: failed to parse timeout value '{}': {}", v, e.what());
-        }
-        return std::nullopt;
-    };
-    // Unified request timeout sets both header/body
-    if (auto rt = parse_ms(std::getenv("YAMS_REQUEST_TIMEOUT_MS"))) {
-        pImpl->headerTimeout_ = *rt;
-        pImpl->bodyTimeout_ = *rt;
-    }
-    if (auto ht = parse_ms(std::getenv("YAMS_HEADER_TIMEOUT_MS"))) {
-        pImpl->headerTimeout_ = *ht;
-    }
-    if (auto bt = parse_ms(std::getenv("YAMS_BODY_TIMEOUT_MS"))) {
-        pImpl->bodyTimeout_ = *bt;
-    }
-    // Re-sync transport options (and the pooled connection opts) after env-var
-    // overrides — the initial refresh_transport() above ran before these were
-    // parsed, so the connection pool was created with default 30s header timeout.
-    pImpl->refresh_transport();
     // Note: Request-type-aware timeouts are now applied per-request in
     // sendRequest/sendRequestStreaming Fast ops (ping/status): 5s, Medium ops (search/list): 30s,
     // Slow ops (add/embed): 120s

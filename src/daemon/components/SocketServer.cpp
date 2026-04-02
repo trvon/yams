@@ -1,3 +1,4 @@
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -11,22 +12,11 @@
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/ipc/request_handler.h>
-#include <yams/common/fs_utils.h>
 #include <yams/profiling.h>
 
 namespace {
 bool stream_trace_enabled() {
-    static int enabled = [] {
-        if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
-            std::string v(raw);
-            for (auto& ch : v)
-                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            if (v == "1" || v == "true" || v == "on")
-                return 1;
-        }
-        return 0;
-    }();
-    return enabled != 0;
+    return false;
 }
 
 bool isControlRequest(const yams::daemon::Request& request) {
@@ -485,7 +475,6 @@ void SocketServer::setWriterBudget(std::size_t bytes) {
 
 awaitable<void> SocketServer::accept_loop(bool isProxy) {
     static const bool trace = stream_trace_enabled();
-    static std::atomic<bool> trace_env_logged{false};
     static std::atomic<bool> logged_entry{false};
 
     const char* loopLabel = isProxy ? "proxy" : "main";
@@ -494,13 +483,6 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
     spdlog::debug("{} accept loop started", loopLabel);
     if (!logged_entry.exchange(true, std::memory_order_relaxed)) {
         spdlog::info("SocketServer: accept_loop coroutine entered");
-    }
-    if (!trace && !trace_env_logged.exchange(true, std::memory_order_relaxed)) {
-        if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
-            spdlog::info("stream-trace: accept_loop env present but disabled ('{}')", raw);
-        } else {
-            spdlog::info("stream-trace: accept_loop env not set");
-        }
     }
     if (trace) {
         std::string sockStr;
@@ -597,17 +579,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                                 }
                             }
                             static std::atomic<bool> s_warned_once{false};
-                            static const bool s_quiet = []() {
-                                if (const char* v = std::getenv("YAMS_QUIET_EINVAL_REBUILD")) {
-                                    return *v != '\0' && std::string(v) != "0" &&
-                                           strcasecmp(v, "false") != 0;
-                                }
-                                return true;
-                            }();
-                            if (!s_quiet && !s_warned_once.exchange(true)) {
-                                spdlog::warn("Rebuilt IPC acceptor after repeated EINVAL on {}",
-                                             config_.socketPath.string());
-                            } else {
+                            if (!s_warned_once.exchange(true)) {
                                 spdlog::debug("Rebuilt IPC acceptor after repeated EINVAL on {}",
                                               config_.socketPath.string());
                             }

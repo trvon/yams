@@ -96,17 +96,7 @@ bool is_heavy_request(const Request& request) {
            std::holds_alternative<ListRequest>(request);
 }
 bool stream_trace_enabled_local() {
-    static int enabled = [] {
-        if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
-            std::string v(raw);
-            for (auto& ch : v)
-                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            if (v == "1" || v == "true" || v == "on")
-                return 1;
-        }
-        return 0;
-    }();
-    return enabled != 0;
+    return false;
 }
 
 // Adapter class to convert RequestDispatcher to RequestProcessor interface
@@ -887,17 +877,8 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
         spdlog::debug("write_message: socket is not open, aborting write");
         co_return Error{ErrorCode::NetworkError, "Socket is closed"};
     }
-    // Optional per-request streaming trace (env: YAMS_STREAM_TRACE)
     {
-        static int trace = []() {
-            if (const char* s = std::getenv("YAMS_STREAM_TRACE")) {
-                std::string t(s);
-                for (auto& c : t)
-                    c = static_cast<char>(std::tolower(c));
-                return (t == "1" || t == "true" || t == "on") ? 1 : 0;
-            }
-            return 0;
-        }();
+        static constexpr int trace = 0;
         if (trace) {
             const int mt =
                 std::holds_alternative<Request>(message.payload)

@@ -304,9 +304,6 @@ TEST(DaemonCliStartStatusRegression, StopTimeoutPathDoesNotEmitWarnNoise) {
     ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
     ScopedEnvVar runtimeEnv("XDG_RUNTIME_DIR", runtimeDir.string());
     ScopedEnvVar maxConnEnv("YAMS_MAX_ACTIVE_CONN", "1");
-    ScopedEnvVar reqTimeoutEnv("YAMS_REQUEST_TIMEOUT_MS", "1");
-    ScopedEnvVar headerTimeoutEnv("YAMS_HEADER_TIMEOUT_MS", "1");
-    ScopedEnvVar bodyTimeoutEnv("YAMS_BODY_TIMEOUT_MS", "1");
 
     const std::string yams = shellQuote(yamsBinary->string());
 

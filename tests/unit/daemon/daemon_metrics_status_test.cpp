@@ -2252,7 +2252,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(getResp.related.front().relationship == "same_content");
     }
 
-    SECTION("get request hits query trace branch when cache is reset") {
+    SECTION("get request still succeeds without query trace env") {
         auto repoPath = makeTempDir("yams_get_query_trace_repo_") / "metadata.db";
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
@@ -2266,11 +2266,6 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         store->setBlob(doc.sha256Hash, "query trace content");
         svc.__test_setMetadataRepo(repo);
         svc.__test_setContentStore(store);
-
-        EnvGuard traceGuard("YAMS_QUERY_TRACE", "1");
-        auto resetTraceGuard =
-            ScopeExit([] { RequestDispatcher::__test_resetDocumentsQueryTraceCache(); });
-        RequestDispatcher::__test_resetDocumentsQueryTraceCache();
 
         GetRequest req;
         req.hash = doc.sha256Hash;
@@ -2493,7 +2488,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(listResp.items.front().tags.empty());
     }
 
-    SECTION("list request emits query trace stats when enabled") {
+    SECTION("list request emits dispatch timing stats by default") {
         auto repoPath = makeTempDir("yams_list_query_trace_repo_") / "metadata.db";
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
@@ -2503,11 +2498,6 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         auto doc = makeDoc(56, "/tmp/list/query-trace.md", "list-query-trace-hash");
         REQUIRE(repo->insertDocument(doc).has_value());
         svc.__test_setMetadataRepo(repo);
-
-        EnvGuard traceGuard("YAMS_QUERY_TRACE", "1");
-        auto resetTraceGuard =
-            ScopeExit([] { RequestDispatcher::__test_resetDocumentsQueryTraceCache(); });
-        RequestDispatcher::__test_resetDocumentsQueryTraceCache();
 
         ListRequest req;
         req.limit = 3;

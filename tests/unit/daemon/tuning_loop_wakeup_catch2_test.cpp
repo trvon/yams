@@ -82,15 +82,12 @@ TEST_CASE("statusTickMs returns longer interval when idle hint is set",
 }
 
 // =============================================================================
-// Test 2: Idle tick cadence is configurable via environment
+// Test 2: Idle tick cadence uses the fixed default
 // =============================================================================
 
-TEST_CASE("Idle tick cadence respects YAMS_IDLE_TICK_MS environment variable",
-          "[daemon][tune][tick-cadence][catch2]") {
-    EnvGuard envIdleTick("YAMS_IDLE_TICK_MS", "2000");
-
+TEST_CASE("Idle tick cadence defaults to 1000ms", "[daemon][tune][tick-cadence][catch2]") {
     const uint32_t idleTick = TuneAdvisor::testing_idleTickMs();
-    CHECK(idleTick == 2000);
+    CHECK(idleTick == 1000);
 }
 
 // =============================================================================
@@ -99,9 +96,6 @@ TEST_CASE("Idle tick cadence respects YAMS_IDLE_TICK_MS environment variable",
 
 TEST_CASE("Active tick cadence remains 5ms regardless of idle settings",
           "[daemon][tune][tick-cadence][catch2]") {
-    EnvGuard envIdleTick("YAMS_IDLE_TICK_MS", "5000");
-
-    // Active tick should still be 5ms (or whatever YAMS_STATUS_TICK_MS says)
     const uint32_t activeTick = TuneAdvisor::statusTickMs();
     CHECK(activeTick == 5);
 }
