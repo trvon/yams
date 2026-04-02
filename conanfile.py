@@ -8,7 +8,7 @@ from conan.tools.build import check_min_cppstd
 
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.11.0"  # x-release-please-version
+    version = "0.12.0"  # x-release-please-version
     license = "GPL-3.0-or-later"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"
