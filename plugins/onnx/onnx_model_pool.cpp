@@ -256,6 +256,22 @@ std::unordered_map<std::string, size_t>& sharedBatchLimitMap() {
     return *caps;
 }
 
+std::recursive_mutex& sharedProviderSkipLogMutex() {
+    static auto* mu = new std::recursive_mutex();
+    return *mu;
+}
+
+std::unordered_map<std::string, bool>& sharedProviderSkipLogMap() {
+    static auto* seen = new std::unordered_map<std::string, bool>();
+    return *seen;
+}
+
+bool markProviderSkipLogged(const std::string& modelName, const std::string& provider) {
+    const std::string key = providerBatchLimitKey(modelName, provider);
+    std::lock_guard<std::recursive_mutex> lock(sharedProviderSkipLogMutex());
+    return sharedProviderSkipLogMap().emplace(key, true).second;
+}
+
 size_t loadSharedBatchLimit(const std::string& modelName, const std::string& provider) {
     const std::string key = providerBatchLimitKey(modelName, provider);
     std::lock_guard<std::recursive_mutex> lock(sharedBatchLimitMutex());
@@ -810,35 +826,12 @@ public:
         }
 
         // Try real ONNX path first (preferred)
-        if (auto r = runOnnx(text); r) {
+        if (auto r = withCoreMLFallback([&]() { return runOnnx(text); }); r) {
             return r.value();
         }
 
-        try {
-#ifdef YAMS_ENABLE_ONNX_GENAI
-            if (genai_ && genai_->available()) {
-                auto v = genai_->embed(text);
-                if (!v.empty())
-                    return v;
-            }
-#endif
-            // TODO: Implement tokenization and actual embedding generation
-            // For now, return a dummy embedding
-            std::vector<float> embedding(embeddingDim_, 0.0f);
-
-            // Simple hash-based dummy embedding for testing
-            std::hash<std::string> hasher;
-            size_t hash = hasher(text);
-            for (size_t i = 0; i < embeddingDim_; ++i) {
-                embedding[i] = static_cast<float>((hash >> i) & 1) * 0.1f;
-            }
-
-            return embedding;
-
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::InternalError,
-                         std::string("Failed to generate embedding: ") + e.what()};
-        }
+        return Error{ErrorCode::InternalError,
+                     "ONNX embedding inference failed and no fallback backend is available"};
     }
 
     // Public batch API that uses the optimized batched ONNX path
@@ -860,7 +853,7 @@ public:
                 return result.error();
             }
         }
-        return runOnnxBatch(texts);
+        return withCoreMLFallback([&]() { return runOnnxBatch(texts); });
     }
 
     bool isValid() const { return test_mode_ ? isLoaded_ : (isLoaded_ && session_ != nullptr); }
@@ -871,6 +864,153 @@ public:
 
     size_t getLearnedBatchLimit() const {
         return providerBatchLimit_.load(std::memory_order_relaxed);
+    }
+
+    bool prefersExplicitSentenceEmbeddingOutput() const {
+        return modelName_.find("embeddinggemma") != std::string::npos ||
+               modelName_.find("gemma") != std::string::npos;
+    }
+
+    bool prefersStaticShapesOnCoreML() const {
+        return actualExecutionProvider_ == "coreml" &&
+               (modelName_.find("embeddinggemma") != std::string::npos ||
+                modelName_.find("gemma") != std::string::npos);
+    }
+
+    bool supportsCpuFallbackForCurrentModel() const {
+        return modelName_.find("embeddinggemma") != std::string::npos ||
+               modelName_.find("gemma") != std::string::npos;
+    }
+
+    bool shouldPreferCpuOverCoreMLForCurrentModel() const {
+#if defined(__APPLE__)
+        if (!supportsCpuFallbackForCurrentModel()) {
+            return false;
+        }
+        return !envTruthy(std::getenv("YAMS_ONNX_ALLOW_GEMMA_COREML"));
+#else
+        return false;
+#endif
+    }
+
+    bool isCoreMLMaskFeatureFailure(const std::string& message) const {
+        return message.find("_model_st_pool_0_mask_unsqueeze_output_0") != std::string::npos ||
+               message.find("required but not specified") != std::string::npos;
+    }
+
+    Result<void> reinitializeSessionOnCpu() {
+        if (!supportsCpuFallbackForCurrentModel()) {
+            return Error{ErrorCode::InternalError, "CPU fallback is not enabled for this model"};
+        }
+
+        if (actualExecutionProvider_ == "cpu") {
+            return Result<void>();
+        }
+
+        try {
+            session_.reset();
+            sessionOptions_ = std::make_unique<Ort::SessionOptions>();
+            actualExecutionProvider_ = "cpu";
+
+            sessionOptions_->SetIntraOpNumThreads(configuredIntraThreads_);
+            sessionOptions_->SetInterOpNumThreads(configuredInterThreads_);
+
+            const bool allowSpinning = []() {
+                if (const char* s = std::getenv("YAMS_ONNX_ALLOW_SPINNING")) {
+                    std::string val(s);
+                    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+                    if (val == "0" || val == "false" || val == "no")
+                        return false;
+                    if (val == "1" || val == "true" || val == "yes")
+                        return true;
+                }
+#ifdef _WIN32
+                return false;
+#else
+                return true;
+#endif
+            }();
+            sessionOptions_->AddConfigEntry("session.intra_op.allow_spinning",
+                                            allowSpinning ? "1" : "0");
+            sessionOptions_->AddConfigEntry("session.inter_op.allow_spinning",
+                                            allowSpinning ? "1" : "0");
+
+#ifdef _WIN32
+            sessionOptions_->SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+#endif
+
+            GraphOptimizationLevel optLevel = GraphOptimizationLevel::ORT_ENABLE_BASIC;
+            if (const char* opt = std::getenv("YAMS_ONNX_OPT_LEVEL")) {
+                std::string level(opt);
+                std::transform(level.begin(), level.end(), level.begin(), ::tolower);
+                if (level == "all") {
+                    optLevel = GraphOptimizationLevel::ORT_ENABLE_ALL;
+                } else if (level == "extended") {
+                    optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
+                }
+            }
+            sessionOptions_->SetGraphOptimizationLevel(optLevel);
+            sessionOptions_->EnableMemPattern();
+            sessionOptions_->EnableCpuMemArena();
+
+            auto options = sessionOptions_->Clone();
+#ifdef _WIN32
+            options.SetIntraOpNumThreads(1);
+            options.SetInterOpNumThreads(1);
+#endif
+            session_ = std::make_unique<Ort::Session>(
+                *env_, std::filesystem::path(modelPath_).c_str(), options);
+            spdlog::warn("[ONNX] Reinitialized '{}' on CPU after CoreML inference failure",
+                         modelName_);
+            return Result<void>();
+        } catch (const Ort::Exception& e) {
+            return Error{ErrorCode::InternalError,
+                         std::string("CPU fallback session init failed: ") + e.what()};
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError,
+                         std::string("CPU fallback session init failed: ") + e.what()};
+        }
+    }
+
+    template <typename Fn> auto withCoreMLFallback(Fn&& fn) -> decltype(fn()) {
+        auto result = fn();
+        if (result || actualExecutionProvider_ != "coreml" ||
+            !supportsCpuFallbackForCurrentModel()) {
+            return result;
+        }
+
+        const auto& message = result.error().message;
+        if (!isCoreMLMaskFeatureFailure(message)) {
+            return result;
+        }
+
+        auto fallback = reinitializeSessionOnCpu();
+        if (!fallback) {
+            return decltype(fn())(fallback.error());
+        }
+        return fn();
+    }
+
+    std::vector<const char*> resolveOutputNames() const {
+        if (outputNames_.empty()) {
+            static const char* default_out = "sentence_embedding";
+            return {default_out};
+        }
+
+        if (prefersExplicitSentenceEmbeddingOutput()) {
+            for (const auto& name : outputNames_) {
+                if (name == "sentence_embedding") {
+                    return {name.c_str()};
+                }
+            }
+        }
+
+        std::vector<const char*> output_names_c;
+        output_names_c.reserve(outputNames_.size());
+        for (const auto& n : outputNames_) {
+            output_names_c.push_back(n.c_str());
+        }
+        return output_names_c;
     }
 
     Result<void> setThreading(int intraThreads, int interThreads) {
@@ -909,6 +1049,19 @@ public:
 
 private:
     void appendGpuExecutionProvider() {
+        if (shouldPreferCpuOverCoreMLForCurrentModel()) {
+            actualExecutionProvider_ = "cpu";
+            if (markProviderSkipLogged(modelName_, "coreml")) {
+                spdlog::warn("[ONNX] Skipping CoreML for '{}' on Apple; using CPU by default. "
+                             "Set YAMS_ONNX_ALLOW_GEMMA_COREML=1 to retry CoreML.",
+                             modelName_);
+            } else {
+                spdlog::debug("[ONNX] CoreML skip already recorded for '{}'; using CPU",
+                              modelName_);
+            }
+            return;
+        }
+
         std::string cacheDir;
         if (!modelPath_.empty()) {
             auto parentDir = fs::path(modelPath_).parent_path();
@@ -999,12 +1152,15 @@ private:
 
         // Dynamic padding: pad to aligned actual length instead of model max
         size_t effective_seq_len = seq_len;
-        if (dynamicPaddingEnabled_ && !hasFixedInputShape_) {
+        if (dynamicPaddingEnabled_ && !hasFixedInputShape_ && !prefersStaticShapesOnCoreML()) {
             effective_seq_len = std::min(alignSeqLen(tokens.size()), seq_len);
             if (effective_seq_len == 0)
                 effective_seq_len = 1;
             spdlog::debug("[ONNX] Dynamic padding (single): actual={} effective={} (model_max={})",
                           tokens.size(), effective_seq_len, seq_len);
+        } else if (prefersStaticShapesOnCoreML()) {
+            spdlog::debug("[ONNX] Static padding forced for '{}' on CoreML: seq_len={}", modelName_,
+                          effective_seq_len);
         }
 
         tokens = preprocessor_.padTokens(tokens, effective_seq_len);
@@ -1047,13 +1203,7 @@ private:
         std::vector<const char*> input_names_c;
         for (auto& n : inputNames_)
             input_names_c.push_back(n.c_str());
-        std::vector<const char*> output_names_c;
-        for (auto& n : outputNames_)
-            output_names_c.push_back(n.c_str());
-        if (output_names_c.empty()) {
-            static const char* default_out = "sentence_embedding";
-            output_names_c.push_back(default_out);
-        }
+        auto output_names_c = resolveOutputNames();
 
         auto outputs =
             session_->Run(Ort::RunOptions{nullptr}, input_names_c.data(), input_tensors.data(),
@@ -1201,7 +1351,7 @@ private:
 
         // Determine effective padding length
         size_t effective_seq_len = seq_len;
-        if (dynamicPaddingEnabled_ && !hasFixedInputShape_) {
+        if (dynamicPaddingEnabled_ && !hasFixedInputShape_ && !prefersStaticShapesOnCoreML()) {
             size_t max_actual = 0;
             for (const auto& toks : token_seqs)
                 max_actual = std::max(max_actual, toks.size());
@@ -1210,6 +1360,9 @@ private:
                 effective_seq_len = 1;
             spdlog::debug("[ONNX] Dynamic padding: B={} max_actual={} effective={} (model_max={})",
                           texts.size(), max_actual, effective_seq_len, seq_len);
+        } else if (prefersStaticShapesOnCoreML()) {
+            spdlog::debug("[ONNX] Static padding forced for '{}' batch on CoreML: B={} seq_len={}",
+                          modelName_, texts.size(), effective_seq_len);
         }
 
         // Pass 2: pad to effective_seq_len + generate masks
@@ -1271,13 +1424,7 @@ private:
         std::vector<const char*> in_names;
         for (auto& n : inputNames_)
             in_names.push_back(n.c_str());
-        std::vector<const char*> out_names;
-        for (auto& n : outputNames_)
-            out_names.push_back(n.c_str());
-        if (out_names.empty()) {
-            static const char* def = "sentence_embedding";
-            out_names.push_back(def);
-        }
+        auto out_names = resolveOutputNames();
 
         // Wrap ONNX Run in try/catch to prevent exceptions from bubbling through ABI boundary
         // On Windows, ORT can throw std::system_error("resource deadlock would occur") when

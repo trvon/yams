@@ -31,7 +31,12 @@ namespace yams::daemon::test {
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
-static const std::string kModelName = "nomic-embed-text-v1.5"; // NOLINT(cert-err58-cpp)
+static std::string testModelName() {
+    if (const char* env = std::getenv("YAMS_TEST_MODEL_NAME"); env && *env) {
+        return env;
+    }
+    return "nomic-embed-text-v1.5";
+}
 
 // Resolve models root: YAMS_MODELS_ROOT env > /Volumes/picaso/yams/models > ~/.yams/models
 static std::string resolveModelsRoot() {
@@ -155,9 +160,10 @@ TEST_CASE("ONNX Diagnostic: available providers", "[daemon][onnx][diagnostic][.r
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Diagnostic: GPU model load and embed",
           "[daemon][onnx][diagnostic][.requires_model]") {
-    if (!checkModelAvailable(kModelName)) {
-        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
-             "/model.onnx. Download with: yams model --download " + kModelName);
+    const auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
     }
 
     DiagnosticFixture fix(/* gpu = */ true);
@@ -172,7 +178,7 @@ TEST_CASE("ONNX Diagnostic: GPU model load and embed",
 
     Result<OnnxModelPool::ModelHandle> h{yams::Error{ErrorCode::Unknown, "not attempted"}};
     try {
-        h = fix.pool_->acquireModel(kModelName, 60s);
+        h = fix.pool_->acquireModel(modelName, 60s);
     } catch (const std::exception& ex) {
         UNSCOPED_INFO("  EXCEPTION during acquireModel: " << ex.what());
         FAIL("acquireModel threw: " + std::string(ex.what()));
@@ -249,9 +255,10 @@ TEST_CASE("ONNX Diagnostic: GPU model load and embed",
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Diagnostic: CPU model load and embed",
           "[daemon][onnx][diagnostic][.requires_model]") {
-    if (!checkModelAvailable(kModelName)) {
-        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
-             "/model.onnx. Download with: yams model --download " + kModelName);
+    const auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
     }
 
     DiagnosticFixture fix(/* gpu = */ false);
@@ -266,7 +273,7 @@ TEST_CASE("ONNX Diagnostic: CPU model load and embed",
 
     Result<OnnxModelPool::ModelHandle> h{yams::Error{ErrorCode::Unknown, "not attempted"}};
     try {
-        h = fix.pool_->acquireModel(kModelName, 60s);
+        h = fix.pool_->acquireModel(modelName, 60s);
     } catch (const std::exception& ex) {
         UNSCOPED_INFO("  EXCEPTION during acquireModel: " << ex.what());
         FAIL("acquireModel threw: " + std::string(ex.what()));
@@ -325,9 +332,10 @@ TEST_CASE("ONNX Diagnostic: CPU model load and embed",
 // 4. Side-by-side GPU vs CPU comparison
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][.requires_model]") {
-    if (!checkModelAvailable(kModelName)) {
-        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
-             "/model.onnx. Download with: yams model --download " + kModelName);
+    const auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
     }
 
     const std::vector<std::string> texts = {"hello world", "diagnostic comparison"};
@@ -348,7 +356,7 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
 
         auto t0 = std::chrono::steady_clock::now();
         try {
-            auto h = fix.pool_->acquireModel(kModelName, 60s);
+            auto h = fix.pool_->acquireModel(modelName, 60s);
             gpuLoadMs =
                 static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                               std::chrono::steady_clock::now() - t0)
@@ -398,7 +406,7 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
 
         auto t0 = std::chrono::steady_clock::now();
         try {
-            auto h = fix.pool_->acquireModel(kModelName, 60s);
+            auto h = fix.pool_->acquireModel(modelName, 60s);
             cpuLoadMs =
                 static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                               std::chrono::steady_clock::now() - t0)
@@ -434,7 +442,7 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
 
     // ---- Report ----
     UNSCOPED_INFO("========================================");
-    UNSCOPED_INFO("  GPU vs CPU Comparison for " << kModelName);
+    UNSCOPED_INFO("  GPU vs CPU Comparison for " << modelName);
     UNSCOPED_INFO("========================================");
     UNSCOPED_INFO("  GPU load:  " << (gpuLoadOk ? "OK" : "FAIL") << "  (" << gpuLoadMs << " ms)"
                                   << "  EP=" << gpuEP);
@@ -467,6 +475,105 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
     }
 }
 
+TEST_CASE("ONNX Diagnostic: single vs batch embedding path",
+          "[daemon][onnx][diagnostic][.requires_model]") {
+    const auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
+    }
+
+    struct ModeResult {
+        std::string label;
+        std::string ep;
+        bool singleOk{false};
+        bool batchOk{false};
+        size_t singleDim{0};
+        size_t batchSize{0};
+        size_t batchDim{0};
+        std::string singleError;
+        std::string batchError;
+    };
+
+    auto runMode = [&](bool enableGpu) {
+        ModeResult result;
+        result.label = enableGpu ? "gpu" : "cpu";
+
+        try {
+            DiagnosticFixture fix(enableGpu);
+            fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
+            auto init = fix.pool_->initialize();
+            REQUIRE(init);
+
+            auto h = fix.pool_->acquireModel(modelName, 60s);
+            REQUIRE(h);
+            auto& session = *h.value();
+            result.ep = session.getExecutionProvider();
+
+            try {
+                auto single =
+                    const_cast<OnnxModelSession&>(session).generateEmbedding("hello world");
+                if (single) {
+                    result.singleOk = true;
+                    result.singleDim = single.value().size();
+                } else {
+                    result.singleError = single.error().message;
+                }
+            } catch (const std::exception& ex) {
+                result.singleError = ex.what();
+            }
+
+            try {
+                auto batch = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(
+                    {"hello world", "diagnostic text"});
+                if (batch) {
+                    result.batchOk = true;
+                    result.batchSize = batch.value().size();
+                    result.batchDim = batch.value().empty() ? 0 : batch.value().front().size();
+                } else {
+                    result.batchError = batch.error().message;
+                }
+            } catch (const std::exception& ex) {
+                result.batchError = ex.what();
+            }
+        } catch (const std::exception& ex) {
+            if (result.singleError.empty()) {
+                result.singleError = ex.what();
+            }
+            if (result.batchError.empty()) {
+                result.batchError = ex.what();
+            }
+        }
+
+        return result;
+    };
+
+    const auto gpu = runMode(true);
+    const auto cpu = runMode(false);
+
+    UNSCOPED_INFO("========================================");
+    UNSCOPED_INFO("  Single vs Batch Path for " << modelName);
+    UNSCOPED_INFO("========================================");
+    UNSCOPED_INFO("  GPU EP: " << gpu.ep << " single=" << (gpu.singleOk ? "OK" : "FAIL")
+                               << " batch=" << (gpu.batchOk ? "OK" : "FAIL"));
+    if (!gpu.singleError.empty())
+        UNSCOPED_INFO("  GPU single error: " << gpu.singleError);
+    if (!gpu.batchError.empty())
+        UNSCOPED_INFO("  GPU batch error:  " << gpu.batchError);
+    UNSCOPED_INFO("  CPU EP: " << cpu.ep << " single=" << (cpu.singleOk ? "OK" : "FAIL")
+                               << " batch=" << (cpu.batchOk ? "OK" : "FAIL"));
+    if (!cpu.singleError.empty())
+        UNSCOPED_INFO("  CPU single error: " << cpu.singleError);
+    if (!cpu.batchError.empty())
+        UNSCOPED_INFO("  CPU batch error:  " << cpu.batchError);
+
+    CHECK(cpu.singleOk);
+    CHECK(cpu.batchOk);
+    CHECK(cpu.batchSize == 2);
+    CHECK(cpu.singleDim > 0);
+    CHECK(cpu.batchDim > 0);
+}
+
 // ---------------------------------------------------------------------------
 // 5. CoreML configuration variants benchmark
 //    Separates compilation (first inference triggers lazy CoreML compile)
@@ -474,6 +581,7 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Diagnostic: CoreML config variants",
           "[daemon][onnx][diagnostic][.requires_model]") {
+    const auto modelName = testModelName();
     const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
     REQUIRE(runtimeInfo.available);
     auto providers = yams::onnx_util::OrtRuntimeLoader::instance().availableProviders();
@@ -483,9 +591,9 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
         SKIP("CoreMLExecutionProvider not available (non-macOS build)");
     }
 
-    if (!checkModelAvailable(kModelName)) {
-        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
-             "/model.onnx. Download with: yams model --download " + kModelName);
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
     }
 
     const std::vector<std::string> texts = {"hello world", "diagnostic benchmark text"};
@@ -501,7 +609,7 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
     };
 
     std::string modelsRoot = resolveModelsRoot();
-    std::string modelDir = (fs::path(modelsRoot) / kModelName).string();
+    std::string modelDir = (fs::path(modelsRoot) / modelName).string();
 
     std::vector<ConfigVariant> variants = {
         {"OLD: ALL + NeuralNetwork", "ALL", "NeuralNetwork", "", true},
@@ -550,7 +658,7 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
             REQUIRE(init);
 
             try {
-                auto h = fix.pool_->acquireModel(kModelName, 120s);
+                auto h = fix.pool_->acquireModel(modelName, 120s);
 
                 if (h) {
                     auto& s = *h.value();
@@ -633,6 +741,7 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
           "[daemon][onnx][diagnostic][.requires_model]") {
+    const auto modelName = testModelName();
     const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
     REQUIRE(runtimeInfo.available);
     auto providers = yams::onnx_util::OrtRuntimeLoader::instance().availableProviders();
@@ -642,9 +751,9 @@ TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
         SKIP("MIGraphXExecutionProvider not available (no ROCm / no MIGraphX EP)");
     }
 
-    if (!checkModelAvailable(kModelName)) {
-        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
-             "/model.onnx. Download with: yams model --download " + kModelName);
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
     }
 
     const std::vector<std::string> texts = {"hello world", "diagnostic benchmark text"};
@@ -707,7 +816,7 @@ TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
 
             try {
                 auto tLoad = now();
-                auto h = fix.pool_->acquireModel(kModelName, 120s);
+                auto h = fix.pool_->acquireModel(modelName, 120s);
                 row.loadMs = elapsedMs(tLoad);
                 if (!h) {
                     row.error = "load: " + h.error().message;
@@ -815,9 +924,10 @@ TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
 //    Measures throughput across batch sizes to identify optimal batching.
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Benchmark: batch size sweep", "[daemon][onnx][benchmark][.requires_model]") {
-    if (!checkModelAvailable(kModelName)) {
-        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
-             "/model.onnx. Download with: yams model --download " + kModelName);
+    const auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
     }
 
     // Build a 64-text corpus
@@ -834,7 +944,7 @@ TEST_CASE("ONNX Benchmark: batch size sweep", "[daemon][onnx][benchmark][.requir
     fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
     REQUIRE(fix.pool_->initialize());
 
-    auto h = fix.pool_->acquireModel(kModelName, 60s);
+    auto h = fix.pool_->acquireModel(modelName, 60s);
     REQUIRE(h);
     auto& session = *h.value();
 
@@ -901,9 +1011,10 @@ TEST_CASE("ONNX Benchmark: batch size sweep", "[daemon][onnx][benchmark][.requir
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Benchmark: concurrent inference throughput",
           "[daemon][onnx][benchmark][.requires_model]") {
-    if (!checkModelAvailable(kModelName)) {
-        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
-             "/model.onnx. Download with: yams model --download " + kModelName);
+    const auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
     }
 
     constexpr int kInferenceCycles = 3;
@@ -933,7 +1044,7 @@ TEST_CASE("ONNX Benchmark: concurrent inference throughput",
 
         // Warmup
         {
-            auto h = fix.pool_->acquireModel(kModelName, 60s);
+            auto h = fix.pool_->acquireModel(modelName, 60s);
             REQUIRE(h);
             auto& s = *h.value();
             auto r = const_cast<OnnxModelSession&>(s).generateBatchEmbeddings({"warmup"});
@@ -946,7 +1057,7 @@ TEST_CASE("ONNX Benchmark: concurrent inference throughput",
         std::vector<std::thread> threads;
         for (int i = 0; i < nThreads; ++i) {
             threads.emplace_back([&]() {
-                auto h = fix.pool_->acquireModel(kModelName, 30s);
+                auto h = fix.pool_->acquireModel(modelName, 30s);
                 if (!h)
                     return;
 
@@ -1005,9 +1116,10 @@ TEST_CASE("ONNX Benchmark: concurrent inference throughput",
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Benchmark: session reuse performance",
           "[daemon][onnx][benchmark][.requires_model]") {
-    if (!checkModelAvailable(kModelName)) {
-        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
-             "/model.onnx. Download with: yams model --download " + kModelName);
+    const auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
     }
 
     constexpr int kCycles = 5;
@@ -1029,7 +1141,7 @@ TEST_CASE("ONNX Benchmark: session reuse performance",
 
     for (int i = 0; i < kCycles; ++i) {
         auto t0 = now();
-        auto h = fix.pool_->acquireModel(kModelName, 60s);
+        auto h = fix.pool_->acquireModel(modelName, 60s);
         auto acquireMs =
             static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::steady_clock::now() - t0)
@@ -1075,9 +1187,10 @@ TEST_CASE("ONNX Benchmark: session reuse performance",
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Benchmark: dynamic padding throughput",
           "[daemon][onnx][benchmark][.requires_model]") {
-    if (!checkModelAvailable(kModelName)) {
-        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
-             "/model.onnx. Download with: yams model --download " + kModelName);
+    const auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
     }
 
     // Build a 64-text corpus of SHORT texts (dynamic padding shines here)
@@ -1106,7 +1219,7 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
         fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
         REQUIRE(fix.pool_->initialize());
 
-        auto h = fix.pool_->acquireModel(kModelName, 60s);
+        auto h = fix.pool_->acquireModel(modelName, 60s);
         REQUIRE(h);
         auto& session = *h.value();
 
@@ -1143,7 +1256,7 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
         fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
         REQUIRE(fix.pool_->initialize());
 
-        auto h = fix.pool_->acquireModel(kModelName, 60s);
+        auto h = fix.pool_->acquireModel(modelName, 60s);
         REQUIRE(h);
         auto& session = *h.value();
 

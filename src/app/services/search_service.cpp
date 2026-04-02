@@ -578,7 +578,7 @@ static boost::asio::awaitable<bool> metadataHasTags(metadata::MetadataRepository
         }
         spdlog::info(
             "metadataHasTags: docId={} searching for tags=[{}] matchAll={} found_metadata=[{}]",
-            docId, fmt::join(tags, ","), matchAll, keys);
+            docId, tags.size(), matchAll, keys);
     }
 
     auto hasTag = [&](const std::string& t) {

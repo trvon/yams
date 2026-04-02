@@ -2473,7 +2473,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     spdlog::info("RepairService::generateMissingEmbeddings candidates: total_docs={} eligible={} "
                  "eligible_by_mime={} eligible_by_extracted_text={} excluded_samples=[{}]",
                  docs.value().size(), hashes.size(), eligibleByMime, eligibleByExtractedText,
-                 fmt::join(excludedSamples, "; "));
+                 excludedSamples.size());
 
     // Incremental mode: skip documents that already have embeddings.
     // Batch-fetch all embedded hashes in a single query for efficiency.

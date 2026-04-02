@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,36 @@
 #if defined(__APPLE__)
 
 #include "plugins/onnx/onnx_gpu_provider.h"
+
+namespace {
+
+class EnvGuard {
+public:
+    explicit EnvGuard(const char* name) : name_(name) {
+        if (const char* value = std::getenv(name)) {
+            originalValue_ = value;
+            hadValue_ = true;
+        }
+    }
+
+    ~EnvGuard() {
+        if (hadValue_) {
+            ::setenv(name_, originalValue_.c_str(), 1);
+        } else {
+            ::unsetenv(name_);
+        }
+    }
+
+    void set(const char* value) { ::setenv(name_, value, 1); }
+    void unset() { ::unsetenv(name_); }
+
+private:
+    const char* name_;
+    std::string originalValue_;
+    bool hadValue_{false};
+};
+
+} // namespace
 
 TEST_CASE("CoreMLExecutionProvider is available in linked ONNX Runtime",
           "[daemon][gpu][onnx][coreml][catch2]") {
@@ -44,6 +75,19 @@ TEST_CASE("appendGpuProvider accepts optional cache directory",
     REQUIRE(runtimeInfo.available);
     Ort::SessionOptions opts;
     REQUIRE_NOTHROW((void)yams::onnx_util::appendGpuProvider(opts, "/tmp"));
+}
+
+TEST_CASE("Gemma CoreML can be explicitly re-enabled on macOS",
+          "[daemon][gpu][onnx][coreml][catch2]") {
+    const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+    REQUIRE(runtimeInfo.available);
+
+    EnvGuard allowGemmaCoreML("YAMS_ONNX_ALLOW_GEMMA_COREML");
+    allowGemmaCoreML.set("1");
+
+    Ort::SessionOptions opts;
+    const auto provider = yams::onnx_util::appendGpuProvider(opts);
+    CHECK(provider == "coreml");
 }
 
 #if defined(__aarch64__) || defined(__arm64__)

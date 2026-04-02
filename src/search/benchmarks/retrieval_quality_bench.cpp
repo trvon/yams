@@ -1011,6 +1011,17 @@ static std::optional<bool> parseBoolStat(const std::map<std::string, std::string
     return std::nullopt;
 }
 
+static std::optional<json> parseJsonStat(const std::map<std::string, std::string>& stats,
+                                         const std::string& key) {
+    if (auto it = stats.find(key); it != stats.end() && !it->second.empty()) {
+        try {
+            return json::parse(it->second);
+        } catch (...) {
+        }
+    }
+    return std::nullopt;
+}
+
 static double computePercentile(std::vector<double> samples, double percentile) {
     if (samples.empty()) {
         return 0.0;
@@ -1116,18 +1127,44 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     if (parseBoolStat(searchStats, "trace_graph_rerank_applied").value_or(false)) {
         summary.graphRerankAppliedQueryCount++;
     }
-    if (parseBoolStat(searchStats, "compressed_ann_enabled").value_or(false)) {
+    bool compressedAnnEnabled =
+        parseBoolStat(searchStats, "compressed_ann_enabled").value_or(false);
+    bool compressedAnnApplied =
+        parseBoolStat(searchStats, "compressed_ann_applied").value_or(false);
+    std::optional<std::string> compressedAnnSkipReason;
+    if (auto it = searchStats.find("compressed_ann_skip_reason");
+        it != searchStats.end() && !it->second.empty()) {
+        compressedAnnSkipReason = it->second;
+    }
+    if (auto stageSummary = parseJsonStat(searchStats, "trace_stage_summary_json");
+        stageSummary && stageSummary->is_object()) {
+        if (auto stageIt = stageSummary->find("compressed_ann");
+            stageIt != stageSummary->end() && stageIt->is_object()) {
+            compressedAnnEnabled = stageIt->value("enabled", compressedAnnEnabled);
+            compressedAnnApplied = stageIt->value("contributed", compressedAnnApplied);
+            if (stageIt->value("skipped", false)) {
+                auto stageSkipReason = stageIt->value("skip_reason", std::string{});
+                if (!stageSkipReason.empty()) {
+                    compressedAnnSkipReason = stageSkipReason;
+                }
+            } else if (stageIt->value("attempted", false) &&
+                       compressedAnnSkipReason == "adaptive_vector_skip") {
+                compressedAnnSkipReason.reset();
+            }
+        }
+    }
+
+    if (compressedAnnEnabled) {
         summary.compressedAnnEnabledQueryCount++;
     }
-    if (parseBoolStat(searchStats, "compressed_ann_applied").value_or(false)) {
+    if (compressedAnnApplied) {
         summary.compressedAnnAppliedQueryCount++;
     }
     if (auto v = parseDoubleStat(searchStats, "compressed_ann_result_count")) {
         summary.compressedAnnResultCountSamples.push_back(*v);
     }
-    if (auto it = searchStats.find("compressed_ann_skip_reason");
-        it != searchStats.end() && !it->second.empty()) {
-        summary.compressedAnnSkipReasonCounts[it->second]++;
+    if (compressedAnnSkipReason.has_value() && !compressedAnnSkipReason->empty()) {
+        summary.compressedAnnSkipReasonCounts[*compressedAnnSkipReason]++;
     }
     if (parseBoolStat(searchStats, "turboquant_enabled").value_or(false)) {
         summary.turboQuantEnabledQueryCount++;
@@ -3686,8 +3723,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
         // Detailed result logging for debugging retrieval quality
         if (benchDiagEnabled) {
-            spdlog::debug("  [{}] Expected relevant: {}", searchType,
-                          fmt::join(tq.relevantDocIds, ", "));
+            spdlog::debug("  [{}] Expected relevant: {} docs", searchType,
+                          tq.relevantDocIds.size());
             for (size_t i = 0; i < std::min((size_t)5, results.size()); ++i) {
                 std::string filename = fs::path(results[i].path).filename().string();
                 std::string docId = filename;
@@ -4261,10 +4298,10 @@ struct BenchFixture {
 
                 if (fs::exists(localOnnxPlugin)) {
                     harnessOptions.pluginDir = localOnnxPlugin.parent_path();
-                } else if (fs::exists(defaultOnnxPlugin)) {
-                    harnessOptions.pluginDir = defaultOnnxPlugin.parent_path();
                 } else if (fs::exists(nosanOnnxPlugin)) {
                     harnessOptions.pluginDir = nosanOnnxPlugin.parent_path();
+                } else if (fs::exists(defaultOnnxPlugin)) {
+                    harnessOptions.pluginDir = defaultOnnxPlugin.parent_path();
                 } else if (fs::exists(installedOnnxPlugin)) {
                     const fs::path stagedPluginDir =
                         fs::temp_directory_path() / "yams_retrieval_bench_plugins";
@@ -4345,8 +4382,12 @@ struct BenchFixture {
             }
 
             if (useIsolatedBenchmarkConfig) {
-                const fs::path configPath =
-                    fs::temp_directory_path() / "yams_retrieval_bench_config.toml";
+                std::string configSuffix = "yams_retrieval_bench_config.toml";
+                if (g_debugRunContext.has_value() && !g_debugRunContext->candidate.empty()) {
+                    configSuffix =
+                        "yams_retrieval_bench_config_" + g_debugRunContext->candidate + ".toml";
+                }
+                const fs::path configPath = fs::temp_directory_path() / configSuffix;
                 std::ofstream configOut(configPath, std::ios::trunc);
                 if (!configOut) {
                     spdlog::warn("Failed to write isolated benchmark config: {}",

@@ -431,6 +431,9 @@ struct ProviderCtx {
         if (auto val = parse_bool_env("YAMS_ONNX_ASYNC_LOAD")) {
             cfg.asyncLoading = *val;
         }
+        if (parse_bool_env("YAMS_ONNX_FORCE_CPU").value_or(false)) {
+            cfg.enableGPU = false;
+        }
         const bool eagerPreload = parse_bool_env("YAMS_ONNX_EAGER_PRELOAD").value_or(false);
         cfg.lazyLoading = !eagerPreload;
         if (const char* w = std::getenv("YAMS_ONNX_LOAD_WORKERS")) {

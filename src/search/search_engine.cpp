@@ -1542,6 +1542,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     traceCollector.markStageConfigured("path", workingConfig.pathTreeWeight > 0.0f);
     traceCollector.markStageConfigured("vector", workingConfig.vectorWeight > 0.0f);
     traceCollector.markStageConfigured("entity_vector", workingConfig.entityVectorWeight > 0.0f);
+    traceCollector.markStageConfigured("compressed_ann",
+                                       workingConfig.enableCompressedANN && vectorDb_ != nullptr);
     traceCollector.markStageConfigured("tag",
                                        workingConfig.tagWeight > 0.0f && !params.tags.empty());
     traceCollector.markStageConfigured("metadata", workingConfig.metadataWeight > 0.0f);
@@ -1713,6 +1715,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const bool compressedAnnEnabled = workingConfig.enableCompressedANN;
     size_t compressedAnnResultCount = 0;
     bool compressedAnnApplied = false;
+    bool compressedAnnAttempted = false;
     std::string compressedAnnSkipReason = compressedAnnEnabled ? "not_attempted" : "disabled";
 
     // Component result collection helper with timing
@@ -1985,16 +1988,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         return queryEntityVectors(queryEmbedding.value(), workingConfig,
                                                   effectiveEntityVectorMaxResults);
                     });
+            }
 
-                if (workingConfig.enableCompressedANN) {
-                    compressedAnnFuture = schedule(
-                        "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
-                        stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
-                            YAMS_ZONE_SCOPED_N("component::compressed_ann");
-                            return queryCompressedANN(queryEmbedding.value(), workingConfig,
-                                                      workingConfig.compressedAnnTopK);
-                        });
-                }
+            if (workingConfig.enableCompressedANN && queryEmbedding.has_value() && vectorDb_) {
+                compressedAnnFuture = schedule(
+                    "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
+                    stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
+                        YAMS_ZONE_SCOPED_N("component::compressed_ann");
+                        return queryCompressedANN(queryEmbedding.value(), workingConfig,
+                                                  workingConfig.compressedAnnTopK);
+                    });
             }
 
             if (kgStore_) {
@@ -2010,6 +2013,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             collectIf(vectorFuture, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
             collectIf(entityVectorFuture, "entity_vector", stats_.entityVectorQueries,
                       stats_.avgEntityVectorTimeMicros);
+            compressedAnnAttempted = compressedAnnFuture.valid();
             collectIf(compressedAnnFuture, "compressed_ann", stats_.vectorQueries,
                       stats_.avgVectorTimeMicros);
             collectIf(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
@@ -2081,7 +2085,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 // allComponentResults
                 if (workingConfig.enableCompressedANN) {
                     compressedAnnFuture = schedule(
-                        "compressed_ann", workingConfig.vectorWeight, stats_.vectorQueries,
+                        "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
                         stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
                             YAMS_ZONE_SCOPED_N("component::compressed_ann");
                             return queryCompressedANN(queryEmbedding.value(), workingConfig,
@@ -2098,6 +2102,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                       stats_.avgEntityVectorTimeMicros);
             collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
+            compressedAnnAttempted = compressedAnnFuture.valid();
             collectIf(compressedAnnFuture, "compressed_ann", stats_.vectorQueries,
                       stats_.avgVectorTimeMicros);
         }
@@ -2201,7 +2206,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         compressedAnnSkipReason = "no_query_embedding";
     } else if (!vectorDb_) {
         compressedAnnSkipReason = "no_vector_db";
+    } else if (semanticTierSkipped && !compressedAnnAttempted) {
+        compressedAnnSkipReason = "adaptive_vector_skip";
     } else {
+        size_t preDedupCompressedAnnCount = static_cast<size_t>(std::count_if(
+            allComponentResults.begin(), allComponentResults.end(), [](const auto& comp) {
+                auto it = comp.debugInfo.find("compressed_ann");
+                return it != comp.debugInfo.end() && it->second == "true";
+            }));
         std::unordered_set<std::string> exactVectorDocIds;
         std::unordered_set<std::string> compressedAnnDocIds;
         exactVectorDocIds.reserve(allComponentResults.size());
@@ -2239,7 +2251,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 return it != comp.debugInfo.end() && it->second == "true";
             }));
         compressedAnnApplied = compressedAnnResultCount > 0;
-        compressedAnnSkipReason = compressedAnnApplied ? "applied" : "no_results";
+        if (compressedAnnApplied) {
+            compressedAnnSkipReason = "applied";
+        } else if (preDedupCompressedAnnCount > 0) {
+            compressedAnnSkipReason = "all_deduped";
+        } else {
+            compressedAnnSkipReason = "no_results";
+        }
     }
 
     if (workingConfig.enableGraphQueryExpansion && kgStore_ && metadataRepo_ &&
@@ -2683,86 +2701,104 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (window == 0) {
             turboQuantSkipReason = "zero_window";
         } else {
-            // Lazy-init the reranker (built once per SearchEngine lifetime)
-            if (!turboQuantReranker_) {
-                TurboQuantPackedRerankerConfig cfg;
-                cfg.dimension = workingConfig.turboQuantRerankDim;
-                cfg.bits_per_channel = workingConfig.turboQuantRerankBits;
-                cfg.seed = 42;
-                cfg.rerank_weight = workingConfig.turboQuantRerankWeight;
-                cfg.require_packed_codes = workingConfig.turboQuantRerankOnlyWhenPackedAvailable;
-                turboQuantReranker_ = createTurboQuantPackedReranker(cfg);
-            }
-            if (turboQuantReranker_ && turboQuantReranker_->isReady()) {
-                YAMS_ZONE_SCOPED_N("turboquant::rerank");
-                // Transform query once
-                yams::vector::TurboQuantConfig tq_cfg;
-                tq_cfg.dimension = workingConfig.turboQuantRerankDim;
-                tq_cfg.bits_per_channel = workingConfig.turboQuantRerankBits;
-                tq_cfg.seed = 42;
-                yams::vector::TurboQuantMSE quantizer(tq_cfg);
-                auto y_q = quantizer.transformQuery(queryEmbedding.value());
-
-                // Collect top-N candidates
-                std::vector<SearchResult> topN;
-                topN.reserve(window);
-                for (size_t i = 0; i < window; ++i) {
-                    topN.push_back(response.results[i]);
+            const bool turboQuantHasCompressedAnnSignal =
+                std::any_of(allComponentResults.begin(), allComponentResults.end(),
+                            [](const ComponentResult& comp) {
+                                return comp.source == ComponentResult::Source::CompressedANN;
+                            });
+            const bool turboQuantHasVectorSignal = std::any_of(
+                response.results.begin(), response.results.begin() + static_cast<ptrdiff_t>(window),
+                [](const SearchResult& result) {
+                    return result.vectorScore.value_or(0.0) > 0.0 ||
+                           result.graphVectorScore.value_or(0.0) > 0.0;
+                });
+            if (!turboQuantHasCompressedAnnSignal) {
+                turboQuantSkipReason = "no_compressed_ann_signal";
+            } else if (!turboQuantHasVectorSignal) {
+                turboQuantSkipReason = "no_vector_signal";
+            } else {
+                // Lazy-init the reranker (built once per SearchEngine lifetime)
+                if (!turboQuantReranker_) {
+                    TurboQuantPackedRerankerConfig cfg;
+                    cfg.dimension = workingConfig.turboQuantRerankDim;
+                    cfg.bits_per_channel = workingConfig.turboQuantRerankBits;
+                    cfg.seed = 42;
+                    cfg.rerank_weight = workingConfig.turboQuantRerankWeight;
+                    cfg.require_packed_codes =
+                        workingConfig.turboQuantRerankOnlyWhenPackedAvailable;
+                    turboQuantReranker_ = createTurboQuantPackedReranker(cfg);
                 }
+                if (turboQuantReranker_ && turboQuantReranker_->isReady()) {
+                    YAMS_ZONE_SCOPED_N("turboquant::rerank");
+                    // Transform query once
+                    yams::vector::TurboQuantConfig tq_cfg;
+                    tq_cfg.dimension = workingConfig.turboQuantRerankDim;
+                    tq_cfg.bits_per_channel = workingConfig.turboQuantRerankBits;
+                    tq_cfg.seed = 42;
+                    yams::vector::TurboQuantMSE quantizer(tq_cfg);
+                    auto y_q = quantizer.transformQuery(queryEmbedding.value());
 
-                // Build reranker input
-                VectorRerankInput input;
-                input.transformed_query = std::move(y_q);
-                for (size_t i = 0; i < topN.size(); ++i) {
-                    const auto& doc = topN[i].document;
-                    // Try to get vector records for this document
-                    auto records = vectorDb_->getVectorsByDocument(doc.sha256Hash);
-                    if (!records.empty()) {
-                        // Use the best-matching chunk for this document
-                        input.candidates[topN[i].document.filePath] = records[0];
-                        input.initial_scores[topN[i].document.filePath] =
-                            static_cast<float>(topN[i].score);
+                    // Collect top-N candidates
+                    std::vector<SearchResult> topN;
+                    topN.reserve(window);
+                    for (size_t i = 0; i < window; ++i) {
+                        topN.push_back(response.results[i]);
                     }
-                }
-                turboQuantCandidateCount = input.candidates.size();
 
-                if (input.candidates.empty()) {
-                    turboQuantSkipReason = "no_vector_records";
-                } else {
-                    // Run reranking
-                    auto rerankResult = turboQuantReranker_->rerank(input);
-                    if (rerankResult) {
-                        const auto& ranked = rerankResult.value();
-                        turboQuantPackedCandidatesScored = ranked.packed_candidates_scored;
-                        // Update reranker scores in the top-N results
-                        for (size_t i = 0; i < window; ++i) {
-                            const auto& doc = topN[i].document;
-                            for (const auto& rc : ranked.candidates) {
-                                if (rc.chunk_id == doc.filePath) {
-                                    response.results[i].rerankerScore =
-                                        static_cast<double>(rc.rerank_score);
-                                    // Blend score into the result score if rerankReplaceScores is
-                                    // false
-                                    if (!workingConfig.rerankReplaceScores) {
-                                        const float w = workingConfig.turboQuantRerankWeight;
-                                        response.results[i].score =
-                                            (1.0 - w) * response.results[i].score +
-                                            w * static_cast<double>(rc.rerank_score);
+                    // Build reranker input
+                    VectorRerankInput input;
+                    input.transformed_query = std::move(y_q);
+                    for (size_t i = 0; i < topN.size(); ++i) {
+                        const auto& doc = topN[i].document;
+                        // Try to get vector records for this document
+                        auto records = vectorDb_->getVectorsByDocument(doc.sha256Hash);
+                        if (!records.empty()) {
+                            // Use the best-matching chunk for this document
+                            input.candidates[topN[i].document.filePath] = records[0];
+                            input.initial_scores[topN[i].document.filePath] =
+                                static_cast<float>(topN[i].score);
+                        }
+                    }
+                    turboQuantCandidateCount = input.candidates.size();
+
+                    if (input.candidates.empty()) {
+                        turboQuantSkipReason = "no_vector_records";
+                    } else {
+                        // Run reranking
+                        auto rerankResult = turboQuantReranker_->rerank(input);
+                        if (rerankResult) {
+                            const auto& ranked = rerankResult.value();
+                            turboQuantPackedCandidatesScored = ranked.packed_candidates_scored;
+                            // Update reranker scores in the top-N results
+                            for (size_t i = 0; i < window; ++i) {
+                                const auto& doc = topN[i].document;
+                                for (const auto& rc : ranked.candidates) {
+                                    if (rc.chunk_id == doc.filePath) {
+                                        response.results[i].rerankerScore =
+                                            static_cast<double>(rc.rerank_score);
+                                        // Blend score into the result score if rerankReplaceScores
+                                        // is false
+                                        if (!workingConfig.rerankReplaceScores) {
+                                            const float w = workingConfig.turboQuantRerankWeight;
+                                            response.results[i].score =
+                                                (1.0 - w) * response.results[i].score +
+                                                w * static_cast<double>(rc.rerank_score);
+                                        }
+                                        break;
                                     }
-                                    break;
                                 }
                             }
-                        }
 
-                        turboQuantRerankApplied = ranked.packed_candidates_scored > 0;
-                        turboQuantSkipReason =
-                            turboQuantRerankApplied ? "applied" : "no_packed_candidates";
-                    } else {
-                        turboQuantSkipReason = "rerank_failed";
+                            turboQuantRerankApplied = ranked.packed_candidates_scored > 0;
+                            turboQuantSkipReason =
+                                turboQuantRerankApplied ? "applied" : "no_packed_candidates";
+                        } else {
+                            turboQuantSkipReason = "rerank_failed";
+                        }
                     }
+                } else {
+                    turboQuantSkipReason = "reranker_unready";
                 }
-            } else {
-                turboQuantSkipReason = "reranker_unready";
             }
         }
     }
@@ -3479,6 +3515,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["compact_weak_query_fanout_boost_applied"] =
         weakQueryFanoutBoostApplied ? "1" : "0";
     response.debugStats["compressed_ann_enabled"] = compressedAnnEnabled ? "1" : "0";
+    response.debugStats["compressed_ann_attempted"] = compressedAnnAttempted ? "1" : "0";
     response.debugStats["compressed_ann_applied"] = compressedAnnApplied ? "1" : "0";
     response.debugStats["compressed_ann_result_count"] = std::to_string(compressedAnnResultCount);
     response.debugStats["compressed_ann_skip_reason"] = compressedAnnSkipReason;
@@ -4657,7 +4694,7 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
                 spdlog::debug("queryFullText aggressive fallback: base_succeeded={} base_hits={} "
                               "clauses={} added_hits={} query='{}' clauses='{}'",
                               baseFtsSucceeded ? 1 : 0, baseFtsHitCount, aggressiveClauses.size(),
-                              results.size(), query, fmt::join(debugClauses, " || "));
+                              results.size(), query, debugClauses.size());
             }
         }
 
@@ -4706,7 +4743,7 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
                 spdlog::debug("queryFullText graph expansion: base_hits={} graph_terms={} "
                               "graph_hits={} final_hits={} query='{}' terms='{}'",
                               baseFtsHitCount, graphTerms.size(), totalGraphHits, results.size(),
-                              query, fmt::join(debugTerms, " || "));
+                              query, debugTerms.size());
             }
         }
 
@@ -5388,6 +5425,13 @@ SearchEngine::Impl::queryCompressedANN(const std::vector<float>& embedding,
             if (!build_result) {
                 spdlog::warn("[CompressedANN] Build failed: {}", build_result.error().message);
                 ++stats_.compressedAnnBuildErrors;
+                ++stats_.compressedAnnFallback;
+                return results;
+            }
+
+            if (compressedAnnIndex_->size() == 0) {
+                spdlog::warn("[CompressedANN] Built index is empty (0 vectors); will retry on next "
+                             "query");
                 ++stats_.compressedAnnFallback;
                 return results;
             }

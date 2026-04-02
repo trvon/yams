@@ -557,8 +557,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         if (modelProvider && modelProvider->isAvailable()) {
             auto loadedModels = modelProvider->getLoadedModels();
             spdlog::info("Model provider: {} model(s) loaded: {}", loadedModels.size(),
-                         loadedModels.empty() ? "none"
-                                              : fmt::format("{}", fmt::join(loadedModels, ", ")));
+                         loadedModels.empty() ? "none" : std::to_string(loadedModels.size()));
         } else {
             spdlog::warn("Model provider not available");
         }

@@ -63,8 +63,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         lifecycle.started = true;
 
         spdlog::debug("[RequestDispatcher] Received SearchRequest with {} pathPatterns: {}",
-                      req.pathPatterns.size(),
-                      fmt::format("{}", fmt::join(req.pathPatterns, ", ")));
+                      req.pathPatterns.size(), req.pathPatterns.size());
 
         auto appContext = serviceManager_->getAppContext();
         appContext.workerExecutor = getWorkerExecutor();
