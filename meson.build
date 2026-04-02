@@ -120,6 +120,13 @@ if enable_asan
   endif
 endif
 
+sanitizer_mode = get_option('b_sanitize')
+if host_machine.system() == 'darwin' and cpp.get_id() == 'clang' and sanitizer_mode != 'none'
+  # Apple clang + external fmt/spdlog can fail in sanitizer builds when fmt enables
+  # consteval format-string checking inside spdlog headers.
+  add_project_arguments('-DFMT_CONSTEVAL=', language: 'cpp')
+endif
+
 # --- C++20 Modules Support (Experimental) ---
 # Detect and configure C++20 module compilation when enabled
 yams_modules_enabled = get_option('enable-modules')

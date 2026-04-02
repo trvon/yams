@@ -23,6 +23,13 @@ Use this file for YAMS repo specifics, local conventions, and repo-scoped safety
 - Index work before `git push`, and before deleting files.
 - If blackboard tools are unavailable, continue with YAMS-only workflow without blocking.
 
+## CLI Philosophy
+
+- Prefer clean default behavior over feature flags and one-off environment variables.
+- Add a new env knob only when it materially improves usability, debugging, or performance.
+- When a behavior can be selected automatically and safely, prefer that over exposing another user-facing switch.
+- Temporary diagnostics are fine during investigation, but remove bloat once the product behavior is clear.
+
 ## Repo Agent ID
 
 - Canonical format: `opencode-<task-slug>`

@@ -2,8 +2,17 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <string>
 
 namespace yams::daemon {
+
+namespace {
+
+void logRegistry(spdlog::level::level_enum level, const std::string& message) {
+    spdlog::default_logger_raw()->log(level, message);
+}
+
+} // namespace
 
 // ============================================================================
 // Singleton
@@ -31,7 +40,8 @@ OnnxConcurrencyRegistry::OnnxConcurrencyRegistry()
     // Default max slots: 8 (4 shared + 4 reserved across lanes)
     maxSlots_.store(8);
 
-    spdlog::debug("[OnnxConcurrencyRegistry] Initialized with {} max slots", maxSlots_.load());
+    logRegistry(spdlog::level::debug, "[OnnxConcurrencyRegistry] Initialized with " +
+                                          std::to_string(maxSlots_.load()) + " max slots");
 }
 
 // ============================================================================
@@ -71,8 +81,9 @@ bool OnnxConcurrencyRegistry::acquireSlot(OnnxLane lane, std::chrono::millisecon
             // Over budget — don't even try the semaphore
             state.queued.fetch_sub(1, std::memory_order_relaxed);
             state.timeouts.fetch_add(1, std::memory_order_relaxed);
-            spdlog::debug("[OnnxConcurrencyRegistry] Over budget ({}/{}) for lane {}", total, max,
-                          laneIdx);
+            logRegistry(spdlog::level::debug,
+                        "[OnnxConcurrencyRegistry] Over budget (" + std::to_string(total) + "/" +
+                            std::to_string(max) + ") for lane " + std::to_string(laneIdx));
             return false;
         }
     }
@@ -90,7 +101,9 @@ bool OnnxConcurrencyRegistry::acquireSlot(OnnxLane lane, std::chrono::millisecon
 
     // Timeout
     state.timeouts.fetch_add(1, std::memory_order_relaxed);
-    spdlog::debug("[OnnxConcurrencyRegistry] Slot acquisition timeout for lane {}", laneIdx);
+    logRegistry(spdlog::level::debug,
+                "[OnnxConcurrencyRegistry] Slot acquisition timeout for lane " +
+                    std::to_string(laneIdx));
     return false;
 }
 
@@ -131,8 +144,10 @@ void OnnxConcurrencyRegistry::setMaxSlots(std::uint32_t total) {
     // For now, log the change and let natural slot recycling handle it
 
     if (total != oldMax) {
-        spdlog::info("[OnnxConcurrencyRegistry] Max slots changed: {} -> {} (reserved={})", oldMax,
-                     total, totalReserved);
+        logRegistry(spdlog::level::info,
+                    "[OnnxConcurrencyRegistry] Max slots changed: " + std::to_string(oldMax) +
+                        " -> " + std::to_string(total) +
+                        " (reserved=" + std::to_string(totalReserved) + ")");
     }
 }
 
@@ -141,8 +156,10 @@ void OnnxConcurrencyRegistry::setReservedSlots(OnnxLane lane, std::uint32_t rese
     std::uint32_t oldReserved =
         laneStates_[laneIdx].reserved.exchange(reserved, std::memory_order_release);
     if (reserved != oldReserved) {
-        spdlog::debug("[OnnxConcurrencyRegistry] Lane {} reserved slots: {} -> {}", laneIdx,
-                      oldReserved, reserved);
+        logRegistry(spdlog::level::debug, "[OnnxConcurrencyRegistry] Lane " +
+                                              std::to_string(laneIdx) +
+                                              " reserved slots: " + std::to_string(oldReserved) +
+                                              " -> " + std::to_string(reserved));
     }
 
     // Note: callers may update maxSlots and reserved slots in separate operations.
@@ -154,8 +171,10 @@ void OnnxConcurrencyRegistry::setReservedSlots(OnnxLane lane, std::uint32_t rese
     std::uint32_t currentMax = maxSlots_.load(std::memory_order_acquire);
     if (currentMax < totalReserved) {
         maxSlots_.store(totalReserved, std::memory_order_release);
-        spdlog::warn("[OnnxConcurrencyRegistry] maxSlots raised to {} to satisfy reserved={}",
-                     totalReserved, totalReserved);
+        logRegistry(spdlog::level::warn,
+                    "[OnnxConcurrencyRegistry] maxSlots raised to " +
+                        std::to_string(totalReserved) +
+                        " to satisfy reserved=" + std::to_string(totalReserved));
     }
 }
 

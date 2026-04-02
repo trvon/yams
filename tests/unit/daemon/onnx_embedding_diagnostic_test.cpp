@@ -64,6 +64,11 @@ static bool checkModelAvailable(const std::string& modelName) {
     return fs::exists(fs::path(root) / modelName / "model.onnx");
 }
 
+static bool isGemmaModel(const std::string& modelName) {
+    return modelName.find("embeddinggemma") != std::string::npos ||
+           modelName.find("gemma") != std::string::npos;
+}
+
 // ---------------------------------------------------------------------------
 // Latency stats helpers
 // ---------------------------------------------------------------------------
@@ -574,6 +579,86 @@ TEST_CASE("ONNX Diagnostic: single vs batch embedding path",
     CHECK(cpu.batchDim > 0);
 }
 
+TEST_CASE("ONNX Diagnostic: Gemma GPU fallback behavior",
+          "[daemon][onnx][diagnostic][gemma-fallback][.requires_model]") {
+    const auto modelName = testModelName();
+    if (!isGemmaModel(modelName)) {
+        SKIP("Diagnostic is only relevant for Gemma-family embedding models");
+    }
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found at ~/.yams/models/" + modelName +
+             "/model.onnx. Download with: yams model --download " + modelName);
+    }
+
+    struct ModeResult {
+        std::string label;
+        std::string initialEp;
+        std::string finalEp;
+        bool ok{false};
+        size_t batchSize{0};
+        size_t dim{0};
+        std::string error;
+    };
+
+    auto runMode = [&](bool enableGpu) {
+        ModeResult result;
+        result.label = enableGpu ? "gpu" : "cpu";
+
+        try {
+            DiagnosticFixture fix(enableGpu);
+            fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
+            auto init = fix.pool_->initialize();
+            REQUIRE(init);
+
+            auto h = fix.pool_->acquireModel(modelName, 120s);
+            REQUIRE(h);
+            auto& session = *h.value();
+            result.initialEp = session.getExecutionProvider();
+
+            auto batch = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(
+                {"hello world", "diagnostic text"});
+            result.finalEp = session.getExecutionProvider();
+            if (batch) {
+                result.ok = true;
+                result.batchSize = batch.value().size();
+                result.dim = batch.value().empty() ? 0 : batch.value().front().size();
+            } else {
+                result.error = batch.error().message;
+            }
+        } catch (const std::exception& ex) {
+            result.error = ex.what();
+        }
+
+        return result;
+    };
+
+    const auto gpu = runMode(true);
+    const auto cpu = runMode(false);
+
+    UNSCOPED_INFO("============================================================");
+    UNSCOPED_INFO("  Gemma GPU fallback behavior for " << modelName);
+    UNSCOPED_INFO("============================================================");
+    for (const auto& row : {gpu, cpu}) {
+        UNSCOPED_INFO("  " << row.label << " initial_ep=" << row.initialEp
+                           << " final_ep=" << row.finalEp << " ok=" << (row.ok ? "YES" : "NO")
+                           << " batch=" << row.batchSize << " dim=" << row.dim);
+        if (!row.error.empty()) {
+            UNSCOPED_INFO("    error: " << row.error);
+        }
+    }
+
+    CHECK(gpu.ok);
+    CHECK(cpu.ok);
+    CHECK(gpu.initialEp == "coreml");
+    CHECK(gpu.finalEp == "cpu");
+    CHECK(gpu.batchSize == 2);
+    CHECK(gpu.dim > 0);
+    CHECK(cpu.initialEp == "cpu");
+    CHECK(cpu.finalEp == "cpu");
+    CHECK(cpu.batchSize == 2);
+    CHECK(cpu.dim > 0);
+}
+
 // ---------------------------------------------------------------------------
 // 5. CoreML configuration variants benchmark
 //    Separates compilation (first inference triggers lazy CoreML compile)
@@ -605,25 +690,33 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
         std::string computeUnits;
         std::string modelFormat;
         std::string cacheDir;
+        bool disableCache{false};
         bool enableGpu;
     };
 
     std::string modelsRoot = resolveModelsRoot();
     std::string modelDir = (fs::path(modelsRoot) / modelName).string();
+    std::string diagCacheRoot =
+        (fs::temp_directory_path() / "yams-coreml-diagnostic-cache").string();
 
     std::vector<ConfigVariant> variants = {
-        {"OLD: ALL + NeuralNetwork", "ALL", "NeuralNetwork", "", true},
-        {"NEW: CPUAndNE + MLProgram", "CPUAndNeuralEngine", "MLProgram", "", true},
-        {"NEW + Cache (cold)", "CPUAndNeuralEngine", "MLProgram", modelDir, true},
-        {"NEW + Cache (warm)", "CPUAndNeuralEngine", "MLProgram", modelDir, true},
-        {"CoreML CPUOnly + MLProgram", "CPUOnly", "MLProgram", "", true},
-        {"CPU-only (control)", "", "", "", false},
+        {"OLD: ALL + NeuralNetwork (no cache)", "ALL", "NeuralNetwork", "", true, true},
+        {"NEW: CPUAndNE + MLProgram (no cache)", "CPUAndNeuralEngine", "MLProgram", "", true, true},
+        {"NEW + isolated cache A", "CPUAndNeuralEngine", "MLProgram",
+         (fs::path(diagCacheRoot) / "variant-a").string(), false, true},
+        {"NEW + isolated cache B", "CPUAndNeuralEngine", "MLProgram",
+         (fs::path(diagCacheRoot) / "variant-b").string(), false, true},
+        {"CoreML CPUOnly + MLProgram (no cache)", "CPUOnly", "MLProgram", "", true, true},
+        {"CPU-only (control)", "", "", "", false, false},
     };
 
     struct TimingResult {
         std::string label;
         std::int64_t compileMs = 0; // First inference (includes lazy CoreML compilation)
         std::int64_t embedMs = 0;   // Steady-state inference average
+        std::string initialEp;
+        std::string finalEp;
+        bool stayedOnInitialEp = false;
         bool ok = false;
         std::string error;
     };
@@ -636,7 +729,6 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
                                              std::chrono::steady_clock::now() - start)
                                              .count());
     };
-
     for (const auto& variant : variants) {
         TimingResult timing;
         timing.label = variant.label;
@@ -649,6 +741,9 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
                 ::setenv("YAMS_COREML_MODEL_FORMAT", variant.modelFormat.c_str(), 1);
             if (!variant.cacheDir.empty())
                 ::setenv("YAMS_COREML_CACHE_DIR", variant.cacheDir.c_str(), 1);
+            if (variant.disableCache) {
+                ::setenv("YAMS_COREML_DISABLE_CACHE", "1", 1);
+            }
         }
 
         {
@@ -662,14 +757,20 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
 
                 if (h) {
                     auto& s = *h.value();
+                    timing.initialEp = s.getExecutionProvider();
 
                     // --- Warmup / compilation pass ---
                     // The first generateBatchEmbeddings() triggers lazy CoreML
                     // model compilation. Measure this separately.
                     auto tCompile = now();
+                    std::vector<std::string> warmupTexts = {"warmup"};
+                    std::vector<std::string> iterationTexts = texts;
                     auto warmup =
-                        const_cast<OnnxModelSession&>(s).generateBatchEmbeddings({"warmup"});
+                        const_cast<OnnxModelSession&>(s).generateBatchEmbeddings(warmupTexts);
                     timing.compileMs = elapsedMs(tCompile);
+                    timing.finalEp = s.getExecutionProvider();
+                    timing.stayedOnInitialEp =
+                        !timing.initialEp.empty() && timing.initialEp == timing.finalEp;
 
                     if (!warmup) {
                         timing.error = "compile warmup: " + warmup.error().message;
@@ -679,9 +780,12 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
                         bool allOk = true;
                         for (int i = 0; i < kIterations; ++i) {
                             auto t1 = now();
-                            auto r =
-                                const_cast<OnnxModelSession&>(s).generateBatchEmbeddings(texts);
+                            auto r = const_cast<OnnxModelSession&>(s).generateBatchEmbeddings(
+                                iterationTexts);
                             totalEmbedMs += elapsedMs(t1);
+                            timing.finalEp = s.getExecutionProvider();
+                            timing.stayedOnInitialEp =
+                                !timing.initialEp.empty() && timing.initialEp == timing.finalEp;
                             if (!r) {
                                 allOk = false;
                                 timing.error =
@@ -704,6 +808,7 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
         ::unsetenv("YAMS_COREML_COMPUTE_UNITS");
         ::unsetenv("YAMS_COREML_MODEL_FORMAT");
         ::unsetenv("YAMS_COREML_CACHE_DIR");
+        ::unsetenv("YAMS_COREML_DISABLE_CACHE");
 
         results.push_back(timing);
     }
@@ -713,19 +818,25 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
     UNSCOPED_INFO("  CoreML Config Variants Benchmark (" << kIterations << " iterations each)");
     UNSCOPED_INFO("  Compile = first inference (includes lazy CoreML compilation)");
     UNSCOPED_INFO("  Embed   = avg steady-state inference (post-compilation)");
+    if (isGemmaModel(modelName)) {
+        UNSCOPED_INFO("  Gemma rows may fall back from CoreML to CPU automatically");
+    }
     UNSCOPED_INFO("================================================================");
     UNSCOPED_INFO("  " << std::left << std::setw(35) << "Config" << std::setw(14) << "Compile(ms)"
-                       << std::setw(14) << "Embed(ms)"
+                       << std::setw(14) << "Embed(ms)" << std::setw(12) << "InitialEP"
+                       << std::setw(12) << "FinalEP"
                        << "Status");
     UNSCOPED_INFO("  " << std::string(76, '-'));
     for (const auto& r : results) {
         if (r.ok) {
             UNSCOPED_INFO("  " << std::left << std::setw(35) << r.label << std::setw(14)
-                               << r.compileMs << std::setw(14) << r.embedMs << "OK");
+                               << r.compileMs << std::setw(14) << r.embedMs << std::setw(12)
+                               << r.initialEp << std::setw(12) << r.finalEp
+                               << (r.stayedOnInitialEp ? "OK" : "EP-CHANGED"));
         } else {
             UNSCOPED_INFO("  " << std::left << std::setw(35) << r.label << std::setw(14)
-                               << r.compileMs << std::setw(14) << "-"
-                               << "FAIL: " << r.error);
+                               << r.compileMs << std::setw(14) << "-" << std::setw(12)
+                               << r.initialEp << std::setw(12) << r.finalEp << "FAIL: " << r.error);
         }
     }
     UNSCOPED_INFO("================================================================");

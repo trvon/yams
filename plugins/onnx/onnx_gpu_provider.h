@@ -182,7 +182,10 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
             coreml_opts["ModelFormat"] = detail::envOr("YAMS_COREML_MODEL_FORMAT", "MLProgram");
 
             // Model cache eliminates ~2s CoreML recompilation per session.
-            std::string cacheDir = detail::envOr("YAMS_COREML_CACHE_DIR", modelCacheDir);
+            std::string cacheDir;
+            if (!detail::envBool("YAMS_COREML_DISABLE_CACHE", false)) {
+                cacheDir = detail::envOr("YAMS_COREML_CACHE_DIR", modelCacheDir);
+            }
             if (!cacheDir.empty()) {
                 coreml_opts["ModelCacheDirectory"] = cacheDir;
             }

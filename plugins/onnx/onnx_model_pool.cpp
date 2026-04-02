@@ -256,22 +256,6 @@ std::unordered_map<std::string, size_t>& sharedBatchLimitMap() {
     return *caps;
 }
 
-std::recursive_mutex& sharedProviderSkipLogMutex() {
-    static auto* mu = new std::recursive_mutex();
-    return *mu;
-}
-
-std::unordered_map<std::string, bool>& sharedProviderSkipLogMap() {
-    static auto* seen = new std::unordered_map<std::string, bool>();
-    return *seen;
-}
-
-bool markProviderSkipLogged(const std::string& modelName, const std::string& provider) {
-    const std::string key = providerBatchLimitKey(modelName, provider);
-    std::lock_guard<std::recursive_mutex> lock(sharedProviderSkipLogMutex());
-    return sharedProviderSkipLogMap().emplace(key, true).second;
-}
-
 size_t loadSharedBatchLimit(const std::string& modelName, const std::string& provider) {
     const std::string key = providerBatchLimitKey(modelName, provider);
     std::lock_guard<std::recursive_mutex> lock(sharedBatchLimitMutex());
@@ -598,6 +582,7 @@ public:
                     options.SetInterOpNumThreads(1);
 #endif
                     // Non-Windows: use configured threads from sessionOptions_ (default intra=4)
+                    applyCoreMLFreeDimensionOverrides(options);
 
                     // Create session directly - no async wrapper needed for local file operations
                     spdlog::debug("[ONNX] Creating Ort::Session for '{}' at '{}'", modelName_,
@@ -719,6 +704,13 @@ public:
             // Respect configured max from EmbeddingConfig if provided
             if (config_.max_sequence_length > 0) {
                 maxSequenceLength_ = std::min(maxSequenceLength_, config_.max_sequence_length);
+            }
+
+            if (gemmaCoreMLStaticBatchOneEnabled()) {
+                providerBatchLimit_.store(1, std::memory_order_relaxed);
+                spdlog::info("[ONNX] Enabled static batch_size=1 CoreML path for '{}'; larger "
+                             "embedding batches will be chunked per item",
+                             modelName_);
             }
 
             isLoaded_ = true;
@@ -877,20 +869,47 @@ public:
                 modelName_.find("gemma") != std::string::npos);
     }
 
+    bool gemmaCoreMLStaticBatchOneEnabled() const { return prefersStaticShapesOnCoreML(); }
+
+    bool shouldApplyCoreMLFreeDimensionOverrides() const {
+        return gemmaCoreMLStaticBatchOneEnabled();
+    }
+
+    int64_t resolveCoreMLStaticSequenceLength() const {
+        if (config_.max_sequence_length > 0) {
+            return std::max<int64_t>(1, std::min<int64_t>(config_.max_sequence_length, 2048));
+        }
+        if (maxSequenceLength_ > 512) {
+            return static_cast<int64_t>(maxSequenceLength_);
+        }
+        return int64_t{2048};
+    }
+
+    void applyCoreMLFreeDimensionOverrides(Ort::SessionOptions& options) {
+        if (!shouldApplyCoreMLFreeDimensionOverrides()) {
+            return;
+        }
+
+        const int64_t effectiveBatchSize = 1;
+        const int64_t sequenceLength = resolveCoreMLStaticSequenceLength();
+        const int64_t tripleSequenceLength =
+            sequenceLength > (std::numeric_limits<int64_t>::max() / 3) ? sequenceLength
+                                                                       : (sequenceLength * 3);
+
+        Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(options, "batch_size",
+                                                                       effectiveBatchSize));
+        Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(
+            options, "total_sequence_length", sequenceLength));
+        Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(
+            options, "3*total_sequence_length", tripleSequenceLength));
+        spdlog::info("[ONNX] Applied Gemma CoreML static-shape overrides for '{}': batch_size={} "
+                     "total_sequence_length={} triple_total_sequence_length={}",
+                     modelName_, effectiveBatchSize, sequenceLength, tripleSequenceLength);
+    }
+
     bool supportsCpuFallbackForCurrentModel() const {
         return modelName_.find("embeddinggemma") != std::string::npos ||
                modelName_.find("gemma") != std::string::npos;
-    }
-
-    bool shouldPreferCpuOverCoreMLForCurrentModel() const {
-#if defined(__APPLE__)
-        if (!supportsCpuFallbackForCurrentModel()) {
-            return false;
-        }
-        return !envTruthy(std::getenv("YAMS_ONNX_ALLOW_GEMMA_COREML"));
-#else
-        return false;
-#endif
     }
 
     bool isCoreMLMaskFeatureFailure(const std::string& message) const {
@@ -911,6 +930,7 @@ public:
             session_.reset();
             sessionOptions_ = std::make_unique<Ort::SessionOptions>();
             actualExecutionProvider_ = "cpu";
+            providerBatchLimit_.store(0, std::memory_order_relaxed);
 
             sessionOptions_->SetIntraOpNumThreads(configuredIntraThreads_);
             sessionOptions_->SetInterOpNumThreads(configuredInterThreads_);
@@ -1049,19 +1069,6 @@ public:
 
 private:
     void appendGpuExecutionProvider() {
-        if (shouldPreferCpuOverCoreMLForCurrentModel()) {
-            actualExecutionProvider_ = "cpu";
-            if (markProviderSkipLogged(modelName_, "coreml")) {
-                spdlog::warn("[ONNX] Skipping CoreML for '{}' on Apple; using CPU by default. "
-                             "Set YAMS_ONNX_ALLOW_GEMMA_COREML=1 to retry CoreML.",
-                             modelName_);
-            } else {
-                spdlog::debug("[ONNX] CoreML skip already recorded for '{}'; using CPU",
-                              modelName_);
-            }
-            return;
-        }
-
         std::string cacheDir;
         if (!modelPath_.empty()) {
             auto parentDir = fs::path(modelPath_).parent_path();
@@ -1315,7 +1322,11 @@ private:
         }
 
         const size_t requestedBatchSize = texts.size();
-        const size_t learnedBatchCap = providerBatchLimit_.load(std::memory_order_relaxed);
+        size_t learnedBatchCap = providerBatchLimit_.load(std::memory_order_relaxed);
+        if (gemmaCoreMLStaticBatchOneEnabled() && requestedBatchSize > 1 && learnedBatchCap == 0) {
+            providerBatchLimit_.store(1, std::memory_order_relaxed);
+            learnedBatchCap = 1;
+        }
         if (learnedBatchCap > 0 && requestedBatchSize > learnedBatchCap) {
             std::vector<std::vector<float>> merged;
             merged.reserve(requestedBatchSize);
@@ -2455,6 +2466,9 @@ Result<void> OnnxModelPool::loadModelSync(const std::string& modelName) {
     embConfig.model_name = modelName;
     embConfig.enable_gpu = gpuEnabled;
     embConfig.num_threads = config_.numThreads;
+    // Leave max_sequence_length unset so session/model metadata can determine the native limit.
+    // The OnnxTextConfig default of 512 would otherwise silently clamp models like Gemma.
+    embConfig.max_sequence_length = 0;
 
     // Create ResourcePool WITHOUT holding mutex_ - the factory lambda will be called
     // later during acquire(), also without holding mutex_.
@@ -3126,6 +3140,7 @@ OnnxModelPool::createModelSession(const std::string& modelName) {
     config.model_name = modelName;
     config.enable_gpu = config_.enableGPU;
     config.num_threads = config_.numThreads;
+    config.max_sequence_length = 0;
 
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
