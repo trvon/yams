@@ -109,11 +109,6 @@ public:
             return Error{ErrorCode::NotInitialized, "Session service not available"};
         }
 
-        if (envTruthy(std::getenv("YAMS_DISABLE_PROJECT_SESSION"))) {
-            return Error{ErrorCode::InvalidState,
-                         "Project sessions are disabled (YAMS_DISABLE_PROJECT_SESSION=1)"};
-        }
-
         std::error_code ec;
         fs::path cwd = fs::current_path(ec);
         if (ec)

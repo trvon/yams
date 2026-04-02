@@ -40,7 +40,6 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/use_future.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -51,8 +50,8 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
-#include <yams/compat/thread_stop_compat.h>
 #include <yams/common/fs_utils.h>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
@@ -885,39 +884,6 @@ void ServiceManager::shutdown() {
 
     spdlog::info("[ServiceManager] Shutdown initiated");
     auto shutdownStart = std::chrono::steady_clock::now();
-
-    if (std::getenv("YAMS_TRACE_SERVICE_LIFETIME")) {
-        auto tracedContentStore =
-            std::atomic_load_explicit(&contentStore_, std::memory_order_acquire);
-        auto tracedMetadataRepo = loadMetadataRepo();
-        auto tracedKgStore = loadKgStore();
-        auto tracedGraphComponent = loadGraphComponent();
-        auto tracedVectorDb = loadVectorDatabase();
-        auto tracedSearchEngine =
-            std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
-        std::shared_ptr<metadata::ConnectionPool> tracedReadPool;
-        std::shared_ptr<metadata::ConnectionPool> tracedWritePool;
-        {
-            std::lock_guard<std::mutex> lk(poolMutex_);
-            tracedReadPool = readConnectionPool_;
-            tracedWritePool = connectionPool_;
-        }
-        std::fprintf(stderr,
-                     "[ServiceManager::shutdown] contentStore=%ld metadataRepo=%ld kgStore=%ld "
-                     "graphComponent=%ld vectorDb=%ld searchEngine=%ld database=%ld "
-                     "readPool=%ld writePool=%ld\n",
-                     tracedContentStore ? static_cast<long>(tracedContentStore.use_count()) : 0L,
-                     tracedMetadataRepo ? static_cast<long>(tracedMetadataRepo.use_count()) : 0L,
-                     tracedKgStore ? static_cast<long>(tracedKgStore.use_count()) : 0L,
-                     tracedGraphComponent ? static_cast<long>(tracedGraphComponent.use_count())
-                                          : 0L,
-                     tracedVectorDb ? static_cast<long>(tracedVectorDb.use_count()) : 0L,
-                     tracedSearchEngine ? static_cast<long>(tracedSearchEngine.use_count()) : 0L,
-                     database_ ? static_cast<long>(database_.use_count()) : 0L,
-                     tracedReadPool ? static_cast<long>(tracedReadPool.use_count()) : 0L,
-                     tracedWritePool ? static_cast<long>(tracedWritePool.use_count()) : 0L);
-        std::fflush(stderr);
-    }
 
     // Signal plugin providers to fast-fail long acquire paths while shutdown drains work.
     setOnnxShutdownMarker(true);
@@ -3112,7 +3078,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
 
     // Populate degraded/repair flags for search.
     // Do NOT degrade just because embeddings are missing; hybrid falls back to keyword/KG.
-    // Only degrade when core metadata repository is unavailable or when explicitly forced.
+    // Only degrade when core metadata repository is unavailable.
     try {
         bool degraded = (metadataRepo == nullptr);
         int prog = 0;
@@ -3124,15 +3090,6 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
         } catch (...) {
         }
 
-        // Environment overrides to force degraded mode and provide detail (non-blocking)
-        if (const char* env = std::getenv("YAMS_SEARCH_DEGRADED")) {
-            std::string v(env);
-            if (!v.empty() && v != "0" && v != "false" && v != "False" && v != "FALSE")
-                degraded = true;
-        }
-        if (const char* reason = std::getenv("YAMS_SEARCH_DEGRADED_REASON")) {
-            details = reason;
-        }
         if (degraded && details.empty()) {
             details = "Metadata repository unavailable";
         }

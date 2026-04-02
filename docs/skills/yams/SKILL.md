@@ -314,7 +314,7 @@ The MCP server exposes a small composite tool surface.
 | `query` | Read-only pipeline: `search`, `grep`, `list`, `list_collections`, `list_snapshots`, `graph`, `get`, `status`, `describe` |
 | `execute` | Write batch: `add`, `update`, `delete`, `restore`, `download` |
 | `session` | Session lifecycle: `start`, `stop`, `pin`, `unpin`, `watch` (extensions enabled) |
-| `mcp.echo` | Echo utility (optional alias: `mcp_echo` when `YAMS_MCP_RENAME_DOTTED_TOOLS=1`) |
+| `mcp.echo` | Echo utility |
 
 Notes:
 - `query` and `execute` accept arrays (`steps` / `operations`) and run them in order.
@@ -352,8 +352,6 @@ Example (pipeline: search -> get):
 
 | Variable | Effect |
 |----------|--------|
-| `YAMS_MCP_MINIMAL_TOOLS=1` | Expose only `mcp.echo` (diagnostic mode) |
-| `YAMS_MCP_RENAME_DOTTED_TOOLS=1` | Hide dotted tool names from `tools/list` and register `mcp_echo` alias |
 | `YAMS_DISABLE_EXTENSIONS=1` | Disable YAMS extensions (removes `session`, disables some methods like `logging/setLevel`) |
 | `YAMS_DAEMON_SOCKET=/path.sock` | Override daemon socket path used by MCP server |
 

@@ -13,10 +13,10 @@
 // ============================================================================
 
 #include <nlohmann/json.hpp>
-#include <catch2/catch_test_macros.hpp>
-#include <yams/mcp/mcp_server.h>
 #include <cstdlib>
 #include <string>
+#include <catch2/catch_test_macros.hpp>
+#include <yams/mcp/mcp_server.h>
 
 using namespace yams::mcp;
 using json = nlohmann::json;
@@ -384,10 +384,8 @@ TEST_CASE("MCP 2024-10-07 - tools/list omits post-version metadata fields",
     }
 }
 
-TEST_CASE("MCP strict-name compat - hides dotted tools and exposes underscore alias",
+TEST_CASE("MCP echo tool remains dotted and callable",
           "[mcp][protocol][compat][tool-name][catch2]") {
-    EnvGuard renameGuard("YAMS_MCP_RENAME_DOTTED_TOOLS", "1");
-
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
@@ -411,29 +409,23 @@ TEST_CASE("MCP strict-name compat - hides dotted tools and exposes underscore al
     REQUIRE(tools.is_array());
 
     bool foundDotted = false;
-    bool foundAlias = false;
     for (const auto& tool : tools) {
         const std::string name = tool.value("name", "");
         if (name == "mcp.echo") {
             foundDotted = true;
         }
-        if (name == "mcp_echo") {
-            foundAlias = true;
-        }
     }
-    CHECK_FALSE(foundDotted);
-    CHECK(foundAlias);
+    CHECK(foundDotted);
 
-    // Alias should be callable.
-    json aliasCall = {{"jsonrpc", "2.0"},
-                      {"id", 3},
-                      {"method", "tools/call"},
-                      {"params", {{"name", "mcp_echo"}, {"arguments", {{"text", "hello"}}}}}};
+    json echoCall = {{"jsonrpc", "2.0"},
+                     {"id", 3},
+                     {"method", "tools/call"},
+                     {"params", {{"name", "mcp.echo"}, {"arguments", {{"text", "hello"}}}}}};
 
-    auto aliasResponse = server->handleRequestPublic(aliasCall);
-    REQUIRE(aliasResponse.has_value());
-    REQUIRE(aliasResponse.value().contains("result"));
-    REQUIRE(aliasResponse.value()["result"].contains("content"));
+    auto echoResponse = server->handleRequestPublic(echoCall);
+    REQUIRE(echoResponse.has_value());
+    REQUIRE(echoResponse.value().contains("result"));
+    REQUIRE(echoResponse.value()["result"].contains("content"));
 }
 
 // ============================================================================

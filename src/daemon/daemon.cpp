@@ -3,11 +3,11 @@
 #include <spdlog/spdlog.h>
 
 #include <cstdio>
-#include <yams/common/fs_utils.h>
 #include <fstream>
 #include <future>
 #include <mutex>
 #include <thread>
+#include <yams/common/fs_utils.h>
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/un.h>
@@ -968,11 +968,6 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
 }
 
 Result<void> YamsDaemon::stop() {
-    if (std::getenv("YAMS_TRACE_DAEMON_STOP")) {
-        std::fprintf(stderr, "[YamsDaemon::stop] enter running=%d stopRequested=%d\n",
-                     running_.load() ? 1 : 0, stopRequested_.load() ? 1 : 0);
-        std::fflush(stderr);
-    }
     if (!running_.exchange(false)) {
         const auto snapshot = lifecycleFsm_.snapshot();
         const bool shutdownInProgress = stopRequested_.load(std::memory_order_acquire) ||
@@ -1072,11 +1067,6 @@ Result<void> YamsDaemon::stop() {
 
     // Stop ServiceManager (this will stop WorkCoordinator's io_context in Phase 4)
     if (serviceManager_) {
-        if (std::getenv("YAMS_TRACE_DAEMON_STOP")) {
-            std::fprintf(stderr, "[YamsDaemon::stop] before serviceManager shutdown ptr=%p\n",
-                         static_cast<void*>(serviceManager_.get()));
-            std::fflush(stderr);
-        }
         spdlog::debug("Shutting down service manager...");
         serviceManager_->shutdown();
         spdlog::debug("Service manager shutdown complete");
@@ -1102,10 +1092,6 @@ Result<void> YamsDaemon::stop() {
     lifecycleFsm_.dispatch(StoppedEvent{});
 
     spdlog::info("YAMS daemon stopped.");
-    if (std::getenv("YAMS_TRACE_DAEMON_STOP")) {
-        std::fprintf(stderr, "[YamsDaemon::stop] exit\n");
-        std::fflush(stderr);
-    }
     return Result<void>();
 }
 

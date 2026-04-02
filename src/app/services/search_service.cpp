@@ -684,22 +684,11 @@ class SearchServiceImpl final : public ISearchService,
                                 public std::enable_shared_from_this<SearchServiceImpl> {
 public:
     explicit SearchServiceImpl(const AppContext& ctx) : ctx_(ctx) {
-        // Initialize degraded mode from AppContext repair flags (preferred), falling back to env
-        // vars
+        // Initialize degraded mode from AppContext repair flags.
         degraded_ = ctx_.searchRepairInProgress || (ctx_.searchEngine == nullptr);
-        if (const char* d = std::getenv("YAMS_SEARCH_DEGRADED")) {
-            std::string v(d);
-            std::transform(v.begin(), v.end(), v.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (v == "1" || v == "true" || v == "yes" || v == "on")
-                degraded_ = true;
-        }
-        // Prefer details from AppContext; overrideable via env
+        // Prefer details from AppContext.
         if (!ctx_.searchRepairDetails.empty()) {
             repairDetails_ = ctx_.searchRepairDetails;
-        }
-        if (const char* r = std::getenv("YAMS_SEARCH_DEGRADED_REASON")) {
-            repairDetails_ = r;
         }
 
         // Enhanced search config (best-effort; off by default). Keep lightweight and safe.

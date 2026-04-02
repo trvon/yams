@@ -199,24 +199,16 @@ private:
     // Exposed capability flags (snapshotted during initialize)
     bool cancellationSupported_{true};
     bool progressSupported_{true}; // progress notifications scaffold enabled
-    // --- Handshake / protocol behavior flags (env-configurable) ---
-    bool eagerReadyEnabled_{
-        false}; // YAMS_MCP_EAGER_READY=1 -> send ready immediately after initialize response
-    bool autoReadyEnabled_{true}; // YAMS_MCP_AUTO_READY=0 to disable auto-ready fallback
-    int autoReadyDelayMs_{150};   // YAMS_MCP_READY_DELAY_MS (minimum 20ms)
+    // --- Handshake / protocol behavior flags ---
     bool strictProtocol_{
         false}; // YAMS_MCP_STRICT_PROTOCOL=1 to require explicit supported protocolVersion or fail
     bool limitToolResultDup_{
         true}; // YAMS_MCP_LIMIT_DUP_CONTENT=0 to allow full data duplication for large tool results
-    bool handshakeTrace_{
-        false}; // YAMS_MCP_HANDSHAKE_TRACE=1 to emit notifications/log lifecycle traces
     bool enableYamsExtensions_{true}; // YAMS_DISABLE_EXTENSIONS=1 to disable YAMS-specific features
 
     // Throttle concurrent MCP add/store operations (stability under high add rates)
     std::atomic<int> addInFlight_{0};
     // Handshake state / diagnostics
-    std::atomic<int> readyEagerCount_{0};
-    std::atomic<int> readyAutoCount_{0};
     std::atomic<int> readyClientCount_{0};
     std::atomic<bool> initializedNotificationSeen_{false};
     std::atomic<bool> earlyFeatureUse_{

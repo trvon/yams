@@ -503,8 +503,6 @@ private:
     }
 
     void maybeBootstrapProjectSession() {
-        if (envTruthy(std::getenv("YAMS_DISABLE_PROJECT_SESSION")))
-            return;
         if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT"); envSession && *envSession)
             return;
 

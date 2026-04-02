@@ -28,9 +28,9 @@
 #if !defined(YAMS_WASI)
 #include <yams/downloader/downloader.hpp>
 #endif
+#include <yams/common/fs_utils.h>
 #include <yams/core/uuid.h>
 #include <yams/mcp/error_handling.h>
-#include <yams/common/fs_utils.h>
 #include <yams/mcp/mcp_server.h>
 #if !defined(YAMS_WASI)
 #include <yams/metadata/connection_pool.h>
@@ -451,8 +451,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
                      std::filesystem::path overrideSocket,
                      std::optional<boost::asio::any_io_executor> executor)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown), exitRequested_{false},
-      shutdownRequested_{false}, eagerReadyEnabled_(false), autoReadyEnabled_(false),
-      strictProtocol_(false), limitToolResultDup_(true),
+      shutdownRequested_{false}, strictProtocol_(false), limitToolResultDup_(true),
       daemonSocketOverride_(std::move(overrideSocket)) {
     (void)executor; // Reserved for future use
     // Generate unique instance ID for this MCP server connection
@@ -508,27 +507,8 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     if (const char* env = std::getenv("YAMS_DISABLE_EXTENSIONS")) {
         enableYamsExtensions_ = !(std::string(env) == "1" || std::string(env) == "true");
     }
-    // Environment variable support for handshake behavior
-    if (const char* env = std::getenv("YAMS_MCP_EAGER_READY")) {
-        eagerReadyEnabled_ = (std::string(env) == "1" || std::string(env) == "true");
-    }
-    if (const char* env = std::getenv("YAMS_MCP_AUTO_READY")) {
-        autoReadyEnabled_ = !(std::string(env) == "0" || std::string(env) == "false");
-    }
     if (const char* env = std::getenv("YAMS_MCP_STRICT_PROTOCOL")) {
         strictProtocol_ = (std::string(env) == "1" || std::string(env) == "true");
-    }
-    if (const char* env = std::getenv("YAMS_MCP_HANDSHAKE_TRACE")) {
-        handshakeTrace_ = (std::string(env) == "1" || std::string(env) == "true");
-    }
-    if (const char* env = std::getenv("YAMS_MCP_READY_DELAY_MS")) {
-        try {
-            autoReadyDelayMs_ = std::stoi(env);
-            if (autoReadyDelayMs_ < 20)
-                autoReadyDelayMs_ = 20;
-        } catch (...) {
-            autoReadyDelayMs_ = 100;
-        }
     }
 
     if (const char* env = std::getenv("YAMS_MCP_LIMIT_DUP_CONTENT")) {
@@ -705,15 +685,6 @@ void MCPServer::start() {
                 }
 
                 spdlog::debug("MCP server received message: {}", request.dump());
-                if (this->handshakeTrace_) {
-                    try {
-                        std::string meth = request.value("method", "");
-                        std::string id = request.contains("id") ? request["id"].dump() : "null";
-                        spdlog::trace("MCP handshake trace: recv method={} id={}", meth, id);
-                    } catch (...) {
-                    }
-                }
-
                 const bool isNotification = !request.contains("id");
                 auto id_val = request.value("id", json{});
                 if (!isNotification && this->isCanceled(id_val)) {
@@ -971,10 +942,6 @@ json MCPServer::listTools() {
     const bool supportsAnnotations = negotiatedProtocolVersion_ >= "2024-11-05";
     const bool supportsTitle = negotiatedProtocolVersion_ >= "2025-03-26";
 
-    // Optional compatibility mode: hide dotted tool names from tools/list.
-    // This is useful for clients that validate tool names with a strict regex.
-    const bool hideDottedToolNames = envTruthy(std::getenv("YAMS_MCP_RENAME_DOTTED_TOOLS"));
-
     if (out.is_object() && out.contains("tools") && out["tools"].is_array()) {
         json shapedTools = json::array();
         shapedTools.get_ref<json::array_t&>().reserve(out["tools"].size());
@@ -983,13 +950,6 @@ json MCPServer::listTools() {
             if (!tool.is_object()) {
                 continue;
             }
-            if (hideDottedToolNames && tool.contains("name") && tool["name"].is_string()) {
-                const auto name = tool["name"].get<std::string>();
-                if (name.find('.') != std::string::npos) {
-                    continue;
-                }
-            }
-
             if (!supportsAnnotations) {
                 tool.erase("annotations");
             }
@@ -3684,11 +3644,6 @@ MCPServer::handleSessionUnpin(const MCPSessionUnpinRequest& req) {
 
 boost::asio::awaitable<Result<MCPSessionWatchResponse>>
 MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
-    if (envTruthy(std::getenv("YAMS_DISABLE_PROJECT_SESSION"))) {
-        co_return Error{ErrorCode::InvalidState,
-                        "Project sessions are disabled (YAMS_DISABLE_PROJECT_SESSION=1)"};
-    }
-
     auto sessionSvc = app::services::makeSessionService(nullptr);
     std::error_code ec;
     std::filesystem::path cwd = std::filesystem::current_path(ec);
@@ -4024,24 +3979,6 @@ void MCPServer::initializeToolRegistry() {
         "mcp.echo", makeEchoHandler(),
         json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
         "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
-
-    // Optional strict-name compatibility alias for clients that reject dotted tool names.
-    if (envTruthy(std::getenv("YAMS_MCP_RENAME_DOTTED_TOOLS"))) {
-        toolRegistry_->registerRawTool(
-            "mcp_echo", makeEchoHandler(),
-            json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
-            "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
-    }
-
-    // Debug/compat mode: expose only a minimal tool surface.
-    // Some MCP clients validate tool schemas strictly and will drop the entire tools/list
-    // response if a single tool descriptor is malformed.
-    if (const char* env = std::getenv("YAMS_MCP_MINIMAL_TOOLS")) {
-        if (env && *env && env[0] != '0') {
-            spdlog::warn("YAMS_MCP_MINIMAL_TOOLS enabled: only exposing mcp.echo");
-            return;
-        }
-    }
 
 #if defined(YAMS_WASI)
     // WASI builds currently don't support the daemon-backed tool surface.
@@ -4801,19 +4738,6 @@ void MCPServer::initializeToolRegistry() {
                     },
                     json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
                     "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
-
-                // Strict-name alias for code mode too
-                if (envTruthy(std::getenv("YAMS_MCP_RENAME_DOTTED_TOOLS"))) {
-                    toolRegistry_->registerRawTool(
-                        "mcp_echo",
-                        [fullReg = fullRegistry.get()](
-                            const json& args) mutable -> boost::asio::awaitable<json> {
-                            co_return co_await fullReg->callTool("mcp.echo", args);
-                        },
-                        json{{"type", "object"},
-                             {"properties", {{"text", json{{"type", "string"}}}}}},
-                        "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
-                }
 
                 // 1. query — read-only pipeline
                 toolRegistry_->registerRawTool(

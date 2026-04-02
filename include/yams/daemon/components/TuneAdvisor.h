@@ -736,19 +736,7 @@ public:
     }
 
     // Max inflight per connection on client/adapter. Default 128.
-    static size_t maxInflight() {
-        size_t def = 128;
-        if (const char* s = std::getenv("YAMS_MAX_INFLIGHT")) {
-            try {
-                size_t v = static_cast<size_t>(std::stoul(s));
-                if (v > 0)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static size_t maxInflight() { return 128; }
 
     // -------- Central CPU budget and thread caps --------
     // Global CPU budget percent (10..100). Defaults adapt to profile posture.

@@ -16,7 +16,6 @@ export YAMS_STORAGE="$HOME/.local/share/yams"
 yams init --non-interactive
 
 # Init also bootstraps a per-project session (scoping + watch) unless
-# YAMS_DISABLE_PROJECT_SESSION=1.
 
 # Enable auto-ingest for an existing project
 yams watch

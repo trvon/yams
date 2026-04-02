@@ -1,8 +1,8 @@
 #define _CRT_SECURE_NO_WARNINGS
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/client_transport.h>
-#include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/in_process_transport.h>
@@ -458,26 +458,6 @@ Result<std::shared_ptr<EmbeddedServiceHost>> ensure_embedded_host(daemon::Client
     options.autoLoadPlugins = false;
     options.enableModelProvider = false;
 
-    if (const char* threads = std::getenv("YAMS_EMBEDDED_IO_THREADS"); threads && *threads) {
-        try {
-            auto parsed = std::stoul(threads);
-            if (parsed > 0) {
-                options.ioThreads = static_cast<std::size_t>(parsed);
-            }
-        } catch (...) {
-        }
-    }
-    if (const char* initTimeout = std::getenv("YAMS_EMBEDDED_INIT_TIMEOUT_S");
-        initTimeout && *initTimeout) {
-        try {
-            auto parsed = std::stoi(initTimeout);
-            if (parsed > 0) {
-                options.initTimeoutSeconds = parsed;
-            }
-        } catch (...) {
-        }
-    }
-
     return EmbeddedServiceHost::getOrCreate(options);
 }
 
@@ -568,24 +548,6 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
 #ifdef YAMS_TESTING
     pImpl->config_.autoStart = false;
 #endif
-    // Honor env toggle to disable auto-start (useful in tests/CI to avoid forking)
-    if (const char* noauto = std::getenv("YAMS_DISABLE_AUTOSTART")) {
-        std::string v(noauto);
-        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-        if (v == "1" || v == "true" || v == "on" || v == "yes") {
-            pImpl->config_.autoStart = false;
-        }
-    }
-    // Optional env override for max inflight (load testing): YAMS_MAX_INFLIGHT
-    if (const char* mi = std::getenv("YAMS_MAX_INFLIGHT")) {
-        try {
-            auto v = std::stoul(mi);
-            if (v > 0)
-                pImpl->config_.maxInflight = v;
-        } catch (const std::exception& e) {
-            spdlog::debug("DaemonClient init: failed to parse YAMS_MAX_INFLIGHT: {}", e.what());
-        }
-    }
     // Timeout overrides: prefer explicit env, else bump conservative defaults to 120s
     auto parse_ms = [](const char* v) -> std::optional<std::chrono::milliseconds> {
         if (!v)

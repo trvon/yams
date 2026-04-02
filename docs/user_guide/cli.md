@@ -104,7 +104,7 @@ Notes:
 - The storage directory can be set globally via --storage/--data-dir or YAMS_STORAGE.
 - On first run, initialization will create the storage directory, database, and configuration.
 - Interactive mode prompts for tree-sitter grammar downloads for symbol extraction.
-- Init also bootstraps a per-project session (scoping + watch) unless `YAMS_DISABLE_PROJECT_SESSION=1`.
+- Init also bootstraps a per-project session (scoping + watch).
 - Use `yams watch` to enable auto-ingest for existing projects.
 
 Examples:
@@ -157,7 +157,6 @@ Notes:
 - If the session does not exist, `yams watch` creates it and sets watch settings.
 - If no root is provided, the git root is used when available.
 - `yams watch` waits for daemon readiness by default to avoid ingesting while the daemon is still initializing.
-- Set `YAMS_DISABLE_PROJECT_SESSION=1` to disable project session automation.
 
 Examples:
 ```bash

@@ -1042,9 +1042,6 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: degraded fallback structure",
                  "[integration][services][ui-cli][batch2]") {
     start();
 
-    ScopedEnvVar degradedEnv("YAMS_SEARCH_DEGRADED", "1");
-    ScopedEnvVar degradedReasonEnv("YAMS_SEARCH_DEGRADED_REASON", "maintenance");
-
     fs::create_directories(root() / "ingest" / "deg");
     std::ofstream(root() / "ingest" / "deg" / "d.md") << "maintenance window";
 
@@ -1063,6 +1060,9 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: degraded fallback structure",
     auto ctx = sm->getAppContext();
     REQUIRE(yams::test::waitForDocumentsByPath(ctx.metadataRepo, (root() / "ingest").string(), 1,
                                                5000ms));
+    ctx.searchEngine.reset();
+    ctx.searchRepairInProgress = true;
+    ctx.searchRepairDetails = "maintenance";
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
     yams::app::services::SearchRequest searchReq;
