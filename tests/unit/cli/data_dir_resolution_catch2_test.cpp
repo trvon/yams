@@ -165,6 +165,10 @@ TEST_CASE("DataDirResolution - get_config_dir contains yams", "[cli][data_dir][c
 TEST_CASE("DataDirResolution - env YAMS_STORAGE takes precedence", "[cli][data_dir][catch2]") {
     ScopedEnv storage("YAMS_STORAGE", "/env/storage/path");
     ScopedEnv dataDir("YAMS_DATA_DIR", "/env/data/path");
+    ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
+
+    REQUIRE(std::getenv("YAMS_STORAGE") != nullptr);
+    CHECK(std::string(std::getenv("YAMS_STORAGE")) == "/env/storage/path");
 
     auto resolved = yams::config::resolve_data_dir_from_config();
     CHECK(resolved == fs::path("/env/storage/path"));
@@ -173,6 +177,10 @@ TEST_CASE("DataDirResolution - env YAMS_STORAGE takes precedence", "[cli][data_d
 TEST_CASE("DataDirResolution - env YAMS_DATA_DIR used if no storage", "[cli][data_dir][catch2]") {
     ScopedEnv storage("YAMS_STORAGE", "");
     ScopedEnv dataDir("YAMS_DATA_DIR", "/env/data/path");
+    ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
+
+    REQUIRE(std::getenv("YAMS_DATA_DIR") != nullptr);
+    CHECK(std::string(std::getenv("YAMS_DATA_DIR")) == "/env/data/path");
 
     auto resolved = yams::config::resolve_data_dir_from_config();
     CHECK(resolved == fs::path("/env/data/path"));
@@ -192,7 +200,7 @@ data_dir = "/from/config/file"
     CHECK(resolved == fs::path("/from/config/file"));
 }
 
-TEST_CASE("DataDirResolution - env takes precedence over config", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - config takes precedence over env", "[cli][data_dir][catch2]") {
     TempConfig config(R"(
 [core]
 data_dir = "/from/config/file"
@@ -201,7 +209,7 @@ data_dir = "/from/config/file"
     ScopedEnv configEnv("YAMS_CONFIG", config.pathStr().c_str());
 
     auto resolved = yams::config::resolve_data_dir_from_config();
-    CHECK(resolved == fs::path("/env/wins"));
+    CHECK(resolved == fs::path("/from/config/file"));
 }
 
 TEST_CASE("DataDirResolution - falls back to platform default", "[cli][data_dir][catch2]") {
@@ -212,6 +220,52 @@ TEST_CASE("DataDirResolution - falls back to platform default", "[cli][data_dir]
     auto resolved = yams::config::resolve_data_dir_from_config();
     CHECK_FALSE(resolved.empty());
     CHECK(resolved.string().find("yams") != std::string::npos);
+}
+
+TEST_CASE("DataDirResolution - explicit CLI data dir overrides config and env",
+          "[cli][data_dir][catch2]") {
+    TempConfig config(R"(
+[core]
+data_dir = "/from/config/file"
+)");
+    ScopedEnv storage("YAMS_STORAGE", "/env/storage/path");
+    ScopedEnv dataDir("YAMS_DATA_DIR", "/env/data/path");
+    ScopedEnv configEnv("YAMS_CONFIG", config.pathStr().c_str());
+
+    yams::cli::YamsCLI cli;
+    std::string arg0 = "yams";
+    std::string arg1 = "--data-dir";
+    std::string arg2 = "/from/cli/flag";
+    std::string arg3 = "completion";
+    std::string arg4 = "bash";
+    char* argv[] = {arg0.data(), arg1.data(), arg2.data(), arg3.data(), arg4.data()};
+
+    const int rc = cli.run(5, argv);
+    REQUIRE(rc == 0);
+    CHECK(cli.hasExplicitDataDir());
+    CHECK(cli.getDataPath() == fs::path("/from/cli/flag"));
+}
+
+TEST_CASE("DataDirResolution - CLI uses config before env when no explicit override",
+          "[cli][data_dir][catch2]") {
+    TempConfig config(R"(
+[core]
+data_dir = "/from/config/file"
+)");
+    ScopedEnv storage("YAMS_STORAGE", "/env/storage/path");
+    ScopedEnv dataDir("YAMS_DATA_DIR", "/env/data/path");
+    ScopedEnv configEnv("YAMS_CONFIG", config.pathStr().c_str());
+
+    yams::cli::YamsCLI cli;
+    std::string arg0 = "yams";
+    std::string arg1 = "completion";
+    std::string arg2 = "bash";
+    char* argv[] = {arg0.data(), arg1.data(), arg2.data()};
+
+    const int rc = cli.run(3, argv);
+    REQUIRE(rc == 0);
+    CHECK_FALSE(cli.hasExplicitDataDir());
+    CHECK(cli.getDataPath() == fs::path("/from/config/file"));
 }
 
 TEST_CASE("DataDirResolution - daemon pid file uses config when present",

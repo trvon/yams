@@ -286,15 +286,7 @@ std::filesystem::path resolve_pid_file_from_config() {
 }
 
 std::filesystem::path resolve_data_dir_from_config() {
-    // 1) YAMS_STORAGE or YAMS_DATA_DIR env
-    if (const char* env = std::getenv("YAMS_STORAGE"); env && *env) {
-        return std::filesystem::path(env);
-    }
-    if (const char* env = std::getenv("YAMS_DATA_DIR"); env && *env) {
-        return std::filesystem::path(env);
-    }
-
-    // 2) config.toml core.data_dir
+    // 1) config.toml core.data_dir
     std::filesystem::path config_path;
     if (const char* cfg_env = std::getenv("YAMS_CONFIG"); cfg_env && *cfg_env) {
         config_path = std::filesystem::path(cfg_env);
@@ -309,7 +301,15 @@ std::filesystem::path resolve_data_dir_from_config() {
         }
     }
 
-    // 3) Use platform-specific data directory
+    // 2) Environment overrides when config does not set a data dir.
+    if (const char* env = std::getenv("YAMS_STORAGE"); env && *env) {
+        return std::filesystem::path(env);
+    }
+    if (const char* env = std::getenv("YAMS_DATA_DIR"); env && *env) {
+        return std::filesystem::path(env);
+    }
+
+    // 3) Platform-specific default
     return get_data_dir();
 }
 

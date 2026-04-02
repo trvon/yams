@@ -215,7 +215,8 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
         // Ignore config errors and keep env-based fallback
     }
 
-    // We intentionally do not bind envname() here so we can enforce precedence (config > env > CLI)
+    // We intentionally do not bind envname() here so we can enforce precedence
+    // (explicit CLI > config > env > default).
     storageOpt_ = app_->add_option("--data-dir,--storage", dataPath_, "Data directory for storage")
                       ->default_val(defaultDataPath.string());
 
@@ -586,23 +587,22 @@ int YamsCLI::run(int argc, char* argv[]) {
 #endif
         }
 
-        // Enforce data directory precedence after parsing options
-        // Order: config (if present) > env (YAMS_STORAGE/YAMS_DATA_DIR) > CLI-provided > default
+        // Enforce data directory precedence after parsing options.
+        // Order: explicit CLI > config (if present) > env (YAMS_STORAGE/YAMS_DATA_DIR) > default
         try {
-            // If config provided data dir, force it
-            if (configProvidesDataDir_) {
+            if (storageOpt_ && storageOpt_->count() > 0) {
+                // Explicit CLI choice should never be silently overridden.
+            } else if (configProvidesDataDir_) {
                 // Ensure dataPath_ reflects the config-derived default
-                // (already set via default_val in constructor)
+                // (already set via default_val in constructor).
             } else {
-                // If no config value, allow environment to override
+                // If neither CLI nor config set a value, allow environment to override.
                 const char* envStorage = std::getenv("YAMS_STORAGE");
                 const char* envDataDir = std::getenv("YAMS_DATA_DIR");
                 if (envStorage && *envStorage) {
                     dataPath_ = fs::path(envStorage);
                 } else if (envDataDir && *envDataDir) {
                     dataPath_ = fs::path(envDataDir);
-                } else if (storageOpt_ && storageOpt_->count() > 0) {
-                    // CLI was explicitly provided; leave dataPath_ as set by CLI11
                 } else {
                     // Keep constructor default (XDG/HOME-based)
                 }

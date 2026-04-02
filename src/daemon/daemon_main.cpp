@@ -160,7 +160,7 @@ int main(int argc, char* argv[]) {
     yams::daemon::DaemonConfig config;
     std::string configPath;
 
-    // Capture CLI-provided data dir separately to enforce precedence (config > env > CLI)
+    // Capture CLI-provided data dir separately so explicit CLI can win over config and env.
     std::filesystem::path cliDataDir;
 
     bool cliProvidedDataDir = false;
