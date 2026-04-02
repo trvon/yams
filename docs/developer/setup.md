@@ -20,6 +20,10 @@ See `../BUILD.md#prerequisites` for compilers, build tools, and system package i
 conan profile detect --force
 ```
 
+On macOS, `./setup.sh` now defaults to the repo's checked-in Conan host profile and
+uses C++20 unless `YAMS_CPPSTD` is explicitly set. This keeps local Conan and Meson
+configuration aligned with the supported CI path.
+
 ## Quick Start
 
 ### Linux/macOS

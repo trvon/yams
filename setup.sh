@@ -134,12 +134,18 @@ if [[ "${ENABLE_COVERAGE}" == "true" ]] && [[ "${BUILD_TYPE}" != "Debug" ]]; the
   exit 1
 fi
 
-# Select desired C++ standard (defaults to C++23 if compiler supports it, otherwise C++20).
+# Select desired C++ standard.
 # Override with YAMS_CPPSTD=20/23.
-# Auto-detection: test compiler for C++23 support (constexpr containers)
+# macOS defaults to C++20 to stay aligned with the repo's supported Conan host
+# profiles and current CI dependency graph. Other platforms prefer C++23 when
+# the compiler supports constexpr containers.
 if [[ -z "${YAMS_CPPSTD:-}" ]]; then
-  # Test if compiler supports C++23 with constexpr containers
-  if echo '#include <vector>
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    CPPSTD_INPUT="20"
+    echo "macOS defaulting to C++20 for Conan/Meson compatibility"
+  else
+    # Test if compiler supports C++23 with constexpr containers
+    if echo '#include <vector>
 #if __cplusplus >= 202302L && defined(__cpp_lib_constexpr_vector) && __cpp_lib_constexpr_vector >= 201907L
 #define HAS_CPP23_CONTAINERS 1
 #else
@@ -148,11 +154,12 @@ if [[ -z "${YAMS_CPPSTD:-}" ]]; then
 #if !HAS_CPP23_CONTAINERS
 #error "No C++23 constexpr containers"
 #endif' | "${CXX:-c++}" -std=c++23 -fsyntax-only -x c++ - >/dev/null 2>&1; then
-    CPPSTD_INPUT="23"
-    echo "Auto-detected C++23 compiler support (constexpr containers available)"
-  else
-    CPPSTD_INPUT="20"
-    echo "C++23 not fully supported, using C++20"
+      CPPSTD_INPUT="23"
+      echo "Auto-detected C++23 compiler support (constexpr containers available)"
+    else
+      CPPSTD_INPUT="20"
+      echo "C++23 not fully supported, using C++20"
+    fi
   fi
 else
   CPPSTD_INPUT="${YAMS_CPPSTD}"
@@ -206,6 +213,15 @@ CONAN_HOST_PROFILE=${YAMS_CONAN_HOST_PROFILE:-}
 CONAN_ARCH=${YAMS_CONAN_ARCH:-}
 CONAN_EXTRA_OPTIONS=${YAMS_CONAN_EXTRA_OPTIONS:-}
 USE_PROFILE=false
+
+if [[ -z "${CONAN_HOST_PROFILE}" ]] && [[ "$(uname -s)" == "Darwin" ]]; then
+  uname_machine=$(uname -m)
+  if [[ "${uname_machine}" == "x86_64" ]]; then
+    CONAN_HOST_PROFILE="./conan/profiles/host-macos-apple-clang-x86"
+  else
+    CONAN_HOST_PROFILE="./conan/profiles/host-macos-apple-clang"
+  fi
+fi
 
 if [[ -n "${CONAN_HOST_PROFILE}" ]]; then
   if [[ ! -f "${CONAN_HOST_PROFILE}" ]]; then
@@ -266,6 +282,8 @@ if [[ "${USE_PROFILE}" == "true" ]]; then
   fi
   # Add profile to Conan args
   CONAN_ARGS+=(-pr:h "${CONAN_HOST_PROFILE}" -pr:b default)
+  CONAN_ARGS+=(-s:h "build_type=${BUILD_TYPE}")
+  CONAN_ARGS+=(-s:h "compiler.cppstd=${CPPSTD}")
   # Add architecture if specified
   if [[ -n "${CONAN_ARCH}" ]]; then
     CONAN_ARGS+=(-s:h "arch=${CONAN_ARCH}")

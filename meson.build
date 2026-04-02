@@ -120,9 +120,8 @@ if enable_asan
   endif
 endif
 
-sanitizer_mode = get_option('b_sanitize')
-if host_machine.system() == 'darwin' and cpp.get_id() == 'clang' and sanitizer_mode != 'none'
-  # Apple clang + external fmt/spdlog can fail in sanitizer builds when fmt enables
+if host_machine.system() == 'darwin' and cpp.get_id() == 'clang'
+  # Apple clang + external fmt/spdlog can fail when fmt enables
   # consteval format-string checking inside spdlog headers.
   add_project_arguments('-DFMT_CONSTEVAL=', language: 'cpp')
 endif

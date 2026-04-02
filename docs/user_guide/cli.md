@@ -16,9 +16,9 @@ yams [OPTIONS] <command> [command-options]
 
 ## Environment Variables
 
-**Precedence:** configuration file > environment variables > CLI flags
+**Precedence:** explicit CLI flags > configuration file > environment variables > defaults
 
-- **YAMS_STORAGE** - Storage root directory (overrides `--data-dir` unless config specifies otherwise)
+- **YAMS_STORAGE** - Storage root directory when `--data-dir` is not provided and config does not set `core.data_dir`
 - **XDG_DATA_HOME** - Default storage location (`~/.local/share` if unset)
 - **XDG_CONFIG_HOME** - Default config location (`~/.config` if unset)
 - **HOME** - Fallback when XDG paths are not set
