@@ -56,11 +56,10 @@ jobs:
 
           tag_sha=""
           for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" --jq '.object.sha' 2>/dev/null || true)"
-            if [ -n "$tag_sha" ]; then
-              tag_type="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" --jq '.object.type' 2>/dev/null || true)"
+            if tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" --jq '.object.sha' 2>/dev/null)"; then
+              tag_type="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" --jq '.object.type' 2>/dev/null)"
               if [ "$tag_type" = "tag" ]; then
-                tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.object.sha' 2>/dev/null || true)"
+                tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.object.sha' 2>/dev/null)"
               fi
               echo "Resolved release tag ${TAG_NAME} -> ${tag_sha}"
               break
@@ -100,4 +99,4 @@ jobs:
           fi
 
           echo "Dispatching fallback Release workflow for ${TAG_NAME}."
-          gh workflow run ".github/workflows/release.yml" --ref "${TAG_NAME}" -f channel=stable
+          gh workflow run "release.yml" --repo "${GITHUB_REPOSITORY}" --ref "${TAG_NAME}" -f channel=stable
