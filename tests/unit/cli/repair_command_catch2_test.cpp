@@ -138,6 +138,7 @@ TEST_CASE("RepairCommand - help displays without errors", "[cli][repair][catch2]
     CHECK(output.find("--orphans") != std::string::npos);
     CHECK(output.find("--fts5") != std::string::npos);
     CHECK(output.find("--embeddings") != std::string::npos);
+    CHECK(output.find("--dedupe") != std::string::npos);
 }
 
 TEST_CASE("RepairCommand - verbose flag is documented correctly", "[cli][repair][catch2]") {
@@ -158,7 +159,7 @@ TEST_CASE("RepairCommand - verbose flag is documented correctly", "[cli][repair]
 
 TEST_CASE("RepairCommand - option flags parse correctly", "[cli][repair][catch2]") {
     parseRepairCommandWithHelp({"yams", "repair", "--orphans", "--mime", "--chunks", "--downloads",
-                                "--path-tree", "--stuck", "--help"});
+                                "--path-tree", "--stuck", "--dedupe", "--help"});
 }
 
 // Note: Tests that actually run repair operations (--fts5, --embeddings, --all, etc.)
@@ -176,7 +177,8 @@ TEST_CASE("RepairCommand - embeddings flag with verbose parses correctly",
 }
 
 TEST_CASE("RepairCommand - all flag and refs parse correctly", "[cli][repair][catch2]") {
-    parseRepairCommandWithHelp({"yams", "repair", "--all", "--refs", "--graph", "--help"});
+    parseRepairCommandWithHelp(
+        {"yams", "repair", "--all", "--refs", "--graph", "--dedupe", "--help"});
 }
 
 TEST_CASE("RepairCommand - model option accepts value", "[cli][repair][catch2]") {

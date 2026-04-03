@@ -5,6 +5,7 @@ namespace yams::daemon::repair {
 RepairRequest RepairPlanBuilder::buildFast(const RepairHealthSnapshot& health) {
     RepairRequest req;
     req.repairGraph = (!health.graphIntegrityOk || health.graphDocNodeGap > 0);
+    req.repairDedupe = (health.missingEmbeddings == 0);
     return req;
 }
 
@@ -14,6 +15,7 @@ RepairRequest RepairPlanBuilder::buildWarm(const RepairHealthSnapshot& health, i
     req.repairEmbeddings = (health.missingEmbeddings > 0);
     req.repairGraph = (!health.graphIntegrityOk || health.graphDocNodeGap > 0);
     req.repairStuckDocs = true;
+    req.repairDedupe = (health.missingEmbeddings == 0);
     if (maxRetries > 0)
         req.maxRetries = maxRetries;
     return req;
@@ -27,6 +29,7 @@ RepairRequest RepairPlanBuilder::buildCold() {
     req.repairPathTree = true;
     req.repairChunks = true;
     req.repairBlockRefs = true;
+    req.repairDedupe = true;
     req.optimizeDb = true;
     return req;
 }
@@ -35,7 +38,7 @@ bool RepairPlanBuilder::hasWork(const RepairRequest& request) {
     return request.repairOrphans || request.repairMime || request.repairDownloads ||
            request.repairPathTree || request.repairChunks || request.repairBlockRefs ||
            request.repairFts5 || request.repairEmbeddings || request.repairStuckDocs ||
-           request.repairGraph || request.optimizeDb;
+           request.repairGraph || request.repairDedupe || request.optimizeDb;
 }
 
 } // namespace yams::daemon::repair

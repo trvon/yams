@@ -26,6 +26,7 @@
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
+#include <yams/vector/vector_index_manager.h>
 
 #include "yams/cli/prompt_util.h"
 #include <sqlite3.h>
@@ -167,9 +168,107 @@ private:
     struct sigaction oldTerm_{};
 #endif
 };
+
 } // namespace
 
 namespace yams::cli {
+
+namespace {
+
+struct SemanticDedupeMatch {
+    size_t lhs{0};
+    size_t rhs{0};
+    double cosine{0.0};
+    double titleOverlap{0.0};
+    double pathOverlap{0.0};
+    double score{0.0};
+};
+
+struct SemanticDedupeGroupPlan {
+    std::vector<size_t> members;
+    size_t canonicalIndex{0};
+};
+
+struct SemanticDedupeAnalysis {
+    struct Row {
+        metadata::DocumentInfo doc;
+        std::string normalizedTitle;
+        std::string normalizedPath;
+    };
+
+    std::vector<Row> docs;
+    std::vector<SemanticDedupeMatch> accepted;
+    std::vector<SemanticDedupeGroupPlan> groups;
+};
+
+float cosineSimilarity(const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.empty() || b.empty() || a.size() != b.size()) {
+        return 0.0f;
+    }
+
+    const auto na = yams::vector::vector_utils::normalize(a);
+    const auto nb = yams::vector::vector_utils::normalize(b);
+    float dot = 0.0f;
+    for (size_t i = 0; i < na.size(); ++i) {
+        dot += na[i] * nb[i];
+    }
+    return dot;
+}
+
+std::string normalizeTextForTokens(std::string value) {
+    for (char& c : value) {
+        if (!std::isalnum(static_cast<unsigned char>(c))) {
+            c = ' ';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+
+    std::ostringstream out;
+    std::istringstream in(value);
+    std::string token;
+    bool first = true;
+    while (in >> token) {
+        if (!first) {
+            out << ' ';
+        }
+        out << token;
+        first = false;
+    }
+    return out.str();
+}
+
+std::unordered_set<std::string> tokenSet(std::string_view text) {
+    std::unordered_set<std::string> tokens;
+    std::istringstream in{std::string(text)};
+    std::string token;
+    while (in >> token) {
+        tokens.insert(token);
+    }
+    return tokens;
+}
+
+double jaccardOverlap(std::string_view lhs, std::string_view rhs) {
+    const auto lt = tokenSet(lhs);
+    const auto rt = tokenSet(rhs);
+    if (lt.empty() || rt.empty()) {
+        return 0.0;
+    }
+
+    size_t intersection = 0;
+    for (const auto& token : lt) {
+        if (rt.contains(token)) {
+            ++intersection;
+        }
+    }
+    const size_t uni = lt.size() + rt.size() - intersection;
+    if (uni == 0) {
+        return 0.0;
+    }
+    return static_cast<double>(intersection) / static_cast<double>(uni);
+}
+
+} // namespace
 
 // Note: vecutil (yams::cli::vecutil) and plugin (yams::cli::plugin) namespaces
 // are available from vector_db_util.h and plugin_util.h respectively
@@ -349,6 +448,11 @@ public:
     }
 
 private:
+    std::optional<SemanticDedupeAnalysis>
+    analyzeSemanticDuplicates(metadata::MetadataRepository& metadataRepo,
+                              vector::VectorDatabase& vectorDb) const;
+    Result<void> persistSemanticDuplicateAnalysis(metadata::MetadataRepository& metadataRepo,
+                                                  const SemanticDedupeAnalysis& analysis) const;
     // ============ UI Helpers ============
     struct StepResult {
         std::string name;
@@ -2274,6 +2378,16 @@ private:
 
         std::cout << "\nHint: run 'yams doctor plugin <path|name>' for a deep plugin check.\n";
 
+        try {
+            std::cout << "\n" << yams::cli::ui::section_header("Semantic Dedupe") << "\n\n";
+            yams::cli::ui::SpinnerRunner spinner;
+            spinner.start("Scanning for semantic duplicates");
+            const_cast<DoctorCommand*>(this)->dedupeMode_ = "semantic";
+            const_cast<DoctorCommand*>(this)->runDedupe();
+            spinner.stop();
+        } catch (...) {
+        }
+
         // Compact live repair progress (short poll). Non-blocking when no repair activity.
         try {
             using namespace yams::daemon;
@@ -2338,8 +2452,6 @@ private:
             // Ignore doctor progress errors; keep doctor quick
         }
     }
-
-    // Legacy prompt removed; using prompt_yes_no from prompt_util.h
 
     static void checkInstalledModels(YamsCLI* cli) {
         namespace fs = std::filesystem;
@@ -2714,6 +2826,10 @@ private:
     std::string dedupeStrategy_{"keep-newest"};
     bool dedupeForce_{false};
     bool dedupeVerbose_{false};
+    bool dedupeList_{false};
+    int dedupeListLimit_{25};
+    std::string dedupeGroupKey_;
+    double dedupeSemanticThreshold_{0.92};
     Result<void> repairGraph();
     Result<void> validateGraph();
     void runDedupe();
@@ -2742,6 +2858,244 @@ private:
     std::filesystem::path getConfigPath() const;
     Result<void> writeConfigValue(const std::string& key, const std::string& value);
 };
+
+std::optional<SemanticDedupeAnalysis>
+DoctorCommand::analyzeSemanticDuplicates(metadata::MetadataRepository& metadataRepo,
+                                         vector::VectorDatabase& vectorDb) const {
+    auto docsResult = metadataRepo.queryDocuments(metadata::DocumentQueryOptions{});
+    if (!docsResult) {
+        return std::nullopt;
+    }
+
+    SemanticDedupeAnalysis analysis;
+    analysis.docs.reserve(docsResult.value().size());
+    for (const auto& doc : docsResult.value()) {
+        if (doc.sha256Hash.empty() || !vectorDb.hasEmbedding(doc.sha256Hash)) {
+            continue;
+        }
+        analysis.docs.push_back(SemanticDedupeAnalysis::Row{
+            doc, normalizeTextForTokens(doc.fileName), normalizeTextForTokens(doc.filePath)});
+    }
+
+    if (analysis.docs.empty()) {
+        return analysis;
+    }
+
+    std::vector<int> parent(analysis.docs.size());
+    std::iota(parent.begin(), parent.end(), 0);
+    auto findRoot = [&](int idx) {
+        int root = idx;
+        while (parent[root] != root) {
+            root = parent[root];
+        }
+        while (parent[idx] != idx) {
+            int next = parent[idx];
+            parent[idx] = root;
+            idx = next;
+        }
+        return root;
+    };
+    auto unite = [&](int lhs, int rhs) {
+        lhs = findRoot(lhs);
+        rhs = findRoot(rhs);
+        if (lhs != rhs) {
+            parent[rhs] = lhs;
+        }
+    };
+
+    for (size_t i = 0; i < analysis.docs.size(); ++i) {
+        vector::VectorSearchParams params;
+        params.k = 6;
+        params.similarity_threshold = static_cast<float>(dedupeSemanticThreshold_ - 0.08);
+        auto neighbors = vectorDb.searchSimilarToDocument(analysis.docs[i].doc.sha256Hash, params);
+        auto baseVectors = vectorDb.getVectorsByDocument(analysis.docs[i].doc.sha256Hash);
+        if (baseVectors.empty()) {
+            continue;
+        }
+
+        for (const auto& neighbor : neighbors) {
+            if (neighbor.document_hash.empty() ||
+                neighbor.document_hash == analysis.docs[i].doc.sha256Hash) {
+                continue;
+            }
+
+            auto it =
+                std::find_if(analysis.docs.begin(), analysis.docs.end(), [&](const auto& row) {
+                    return row.doc.sha256Hash == neighbor.document_hash;
+                });
+            if (it == analysis.docs.end()) {
+                continue;
+            }
+
+            const size_t j = static_cast<size_t>(std::distance(analysis.docs.begin(), it));
+            if (j <= i) {
+                continue;
+            }
+
+            auto neighborVectors = vectorDb.getVectorsByDocument(it->doc.sha256Hash);
+            if (neighborVectors.empty()) {
+                continue;
+            }
+
+            const double cosine =
+                cosineSimilarity(baseVectors.front().embedding, neighborVectors.front().embedding);
+            const double titleOverlap =
+                jaccardOverlap(analysis.docs[i].normalizedTitle, it->normalizedTitle);
+            const double pathOverlap =
+                jaccardOverlap(analysis.docs[i].normalizedPath, it->normalizedPath);
+            const double score = cosine * 0.8 + titleOverlap * 0.15 + pathOverlap * 0.05;
+
+            if (cosine < dedupeSemanticThreshold_) {
+                continue;
+            }
+            if (titleOverlap == 0.0 && pathOverlap == 0.0 && cosine < 0.975) {
+                continue;
+            }
+
+            analysis.accepted.push_back(
+                SemanticDedupeMatch{i, j, cosine, titleOverlap, pathOverlap, score});
+            unite(static_cast<int>(i), static_cast<int>(j));
+        }
+    }
+
+    std::unordered_map<int, std::vector<size_t>> groupedMembers;
+    for (size_t i = 0; i < analysis.docs.size(); ++i) {
+        groupedMembers[findRoot(static_cast<int>(i))].push_back(i);
+    }
+
+    for (auto& [root, members] : groupedMembers) {
+        (void)root;
+        if (members.size() < 2) {
+            continue;
+        }
+
+        auto cmpNewest = [&](size_t lhs, size_t rhs) {
+            return analysis.docs[lhs].doc.modifiedTime > analysis.docs[rhs].doc.modifiedTime;
+        };
+        auto cmpOldest = [&](size_t lhs, size_t rhs) {
+            return analysis.docs[lhs].doc.modifiedTime < analysis.docs[rhs].doc.modifiedTime;
+        };
+        auto cmpLargest = [&](size_t lhs, size_t rhs) {
+            return analysis.docs[lhs].doc.fileSize > analysis.docs[rhs].doc.fileSize;
+        };
+        if (dedupeStrategy_ == "keep-oldest") {
+            std::sort(members.begin(), members.end(), cmpOldest);
+        } else if (dedupeStrategy_ == "keep-largest") {
+            std::sort(members.begin(), members.end(), cmpLargest);
+        } else {
+            std::sort(members.begin(), members.end(), cmpNewest);
+        }
+
+        analysis.groups.push_back(SemanticDedupeGroupPlan{members, members.front()});
+    }
+
+    return analysis;
+}
+
+Result<void>
+DoctorCommand::persistSemanticDuplicateAnalysis(metadata::MetadataRepository& metadataRepo,
+                                                const SemanticDedupeAnalysis& analysis) const {
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+
+    for (const auto& groupPlan : analysis.groups) {
+        nlohmann::json evidence;
+        evidence["strategy"] = dedupeStrategy_;
+        evidence["threshold"] = dedupeSemanticThreshold_;
+        evidence["documents"] = nlohmann::json::array();
+
+        std::vector<std::string> hashes;
+        hashes.reserve(groupPlan.members.size());
+        double maxPairScore = 0.0;
+        for (size_t memberIndex : groupPlan.members) {
+            const auto& doc = analysis.docs[memberIndex].doc;
+            hashes.push_back(doc.sha256Hash);
+            evidence["documents"].push_back(
+                {{"id", doc.id}, {"hash", doc.sha256Hash}, {"path", doc.filePath}});
+        }
+        std::sort(hashes.begin(), hashes.end());
+
+        for (const auto& match : analysis.accepted) {
+            const bool lhsInGroup = std::find(groupPlan.members.begin(), groupPlan.members.end(),
+                                              match.lhs) != groupPlan.members.end();
+            const bool rhsInGroup = std::find(groupPlan.members.begin(), groupPlan.members.end(),
+                                              match.rhs) != groupPlan.members.end();
+            if (lhsInGroup && rhsInGroup) {
+                maxPairScore = std::max(maxPairScore, match.score);
+            }
+        }
+
+        std::ostringstream keyBuilder;
+        keyBuilder << "semantic:" << dedupeStrategy_ << ':' << std::fixed << std::setprecision(3)
+                   << dedupeSemanticThreshold_ << ':';
+        for (size_t i = 0; i < hashes.size(); ++i) {
+            if (i > 0)
+                keyBuilder << ',';
+            keyBuilder << hashes[i];
+        }
+
+        metadata::SemanticDuplicateGroup group;
+        group.groupKey = keyBuilder.str();
+        group.algorithmVersion = "semantic-dedupe-v1";
+        group.status = "suggested";
+        group.reviewState = "pending";
+        group.canonicalDocumentId = analysis.docs[groupPlan.canonicalIndex].doc.id;
+        group.memberCount = static_cast<int64_t>(groupPlan.members.size());
+        group.maxPairScore = maxPairScore;
+        group.threshold = dedupeSemanticThreshold_;
+        group.evidenceJson = evidence.dump();
+        group.createdAt = now;
+        if (auto existing = metadataRepo.getSemanticDuplicateGroupByKey(group.groupKey);
+            existing && existing.value().has_value()) {
+            group.createdAt = existing.value()->createdAt;
+        }
+        group.updatedAt = now;
+        group.lastComputedAt = now;
+
+        auto groupId = metadataRepo.upsertSemanticDuplicateGroup(group);
+        if (!groupId) {
+            return groupId.error();
+        }
+
+        std::vector<metadata::SemanticDuplicateGroupMember> members;
+        members.reserve(groupPlan.members.size());
+        for (size_t memberIndex : groupPlan.members) {
+            metadata::SemanticDuplicateGroupMember member;
+            member.groupId = groupId.value();
+            member.documentId = analysis.docs[memberIndex].doc.id;
+            member.role = (memberIndex == groupPlan.canonicalIndex) ? "canonical" : "duplicate";
+            member.decision = (memberIndex == groupPlan.canonicalIndex) ? "keep" : "unknown";
+            member.reason = (memberIndex == groupPlan.canonicalIndex) ? dedupeStrategy_ : "";
+            member.createdAt = now;
+            member.updatedAt = now;
+
+            if (memberIndex != groupPlan.canonicalIndex) {
+                for (const auto& match : analysis.accepted) {
+                    const bool directPair =
+                        (match.lhs == groupPlan.canonicalIndex && match.rhs == memberIndex) ||
+                        (match.lhs == memberIndex && match.rhs == groupPlan.canonicalIndex);
+                    if (directPair) {
+                        member.similarityToCanonical = match.cosine;
+                        member.titleOverlap = match.titleOverlap;
+                        member.pathOverlap = match.pathOverlap;
+                        member.pairScore = match.score;
+                        break;
+                    }
+                }
+            }
+
+            members.push_back(std::move(member));
+        }
+
+        auto memberResult =
+            metadataRepo.replaceSemanticDuplicateGroupMembers(groupId.value(), members);
+        if (!memberResult) {
+            return memberResult.error();
+        }
+    }
+
+    return Result<void>();
+}
 
 // Factory
 std::unique_ptr<ICommand> createDoctorCommand() {
@@ -2841,16 +3195,30 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
 
     auto* dd = doctor->add_subcommand(
         "dedupe", "Detect (and optionally remove) duplicate documents (metadata)");
+    auto* ddList = dd->add_subcommand("list", "List persisted semantic duplicate suggestions");
+    ddList->add_option("--limit", dedupeListLimit_, "Maximum groups to show")->default_val(25);
+    ddList->add_option("--group-key", dedupeGroupKey_, "Show only a specific semantic group key");
+    ddList->add_flag("-v,--verbose", dedupeVerbose_, "Show member details for each group");
+    ddList->callback([this]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
+        dedupeList_ = true;
+        dedupeMode_ = "semantic";
+        runDedupe();
+    });
     dd->add_flag("--apply", dedupeApply_, "Apply deletions (default: dry-run)");
     dd->add_option("--mode", dedupeMode_, "Grouping mode: path | name | hash")
         ->default_val("path")
-        ->check(CLI::IsMember({"path", "name", "hash"}));
+        ->check(CLI::IsMember({"path", "name", "hash", "semantic"}));
     dd->add_option("--strategy", dedupeStrategy_,
                    "Keep strategy: keep-newest | keep-oldest | keep-largest")
         ->default_val("keep-newest")
         ->check(CLI::IsMember({"keep-newest", "keep-oldest", "keep-largest"}));
     dd->add_flag("--force", dedupeForce_,
                  "Allow deletion even when differing hashes (treat as duplicates)");
+    dd->add_option("--semantic-threshold", dedupeSemanticThreshold_,
+                   "Cosine threshold for semantic dedupe report mode")
+        ->default_val(0.92);
     dd->add_flag("-v,--verbose", dedupeVerbose_, "Verbose listing of each group");
     dd->callback([this]() {
         subcommandInvoked_ = true;
@@ -3143,6 +3511,98 @@ void DoctorCommand::runDedupe() {
             std::cout << "  " << ui::status_error("CLI context unavailable") << "\n";
             return;
         }
+
+        if (dedupeMode_ == "semantic") {
+            auto ensured = cli_->ensureStorageInitialized();
+            if (!ensured) {
+                std::cout << "  "
+                          << ui::status_error("Storage init failed: " + ensured.error().message)
+                          << "\n";
+                return;
+            }
+
+            auto metadataRepo = cli_->getMetadataRepository();
+            auto vectorDb = cli_->getVectorDatabase();
+            if (!metadataRepo || !vectorDb) {
+                std::cout << "  " << ui::status_error("Metadata or vector database unavailable")
+                          << "\n";
+                return;
+            }
+
+            auto analysis = analyzeSemanticDuplicates(*metadataRepo, *vectorDb);
+            if (!analysis.has_value()) {
+                std::cout << "  " << ui::status_error("Semantic dedupe query failed") << "\n";
+                return;
+            }
+            if (analysis->docs.empty()) {
+                std::cout << "  "
+                          << ui::status_ok("No embedded documents available for semantic dedupe")
+                          << "\n";
+                return;
+            }
+            if (analysis->groups.empty()) {
+                std::cout << "  " << ui::status_ok("No semantic duplicate groups") << "\n";
+                return;
+            }
+
+            size_t candDel = 0;
+            for (const auto& group : analysis->groups) {
+                candDel += group.members.size() - 1;
+                if (dedupeVerbose_) {
+                    std::cout << "Group: semantic keep="
+                              << analysis->docs[group.canonicalIndex].doc.id
+                              << " total=" << group.members.size() << "\n";
+                    for (size_t rank = 0; rank < group.members.size(); ++rank) {
+                        const auto& doc = analysis->docs[group.members[rank]].doc;
+                        std::cout << (rank == 0 ? "  KEEP" : "  DEL ") << " id=" << doc.id
+                                  << " hash=" << doc.sha256Hash.substr(0, 8)
+                                  << " size=" << doc.fileSize << " path=" << doc.filePath << "\n";
+                    }
+                }
+            }
+
+            auto persistResult = persistSemanticDuplicateAnalysis(*metadataRepo, *analysis);
+            if (!persistResult) {
+                std::cout << "  "
+                          << ui::status_error("Persist failed: " + persistResult.error().message)
+                          << "\n";
+                return;
+            }
+
+            printStatusLine("Embedded documents", std::to_string(analysis->docs.size()));
+            printStatusLine("Semantic duplicate groups", std::to_string(analysis->groups.size()));
+            printStatusLine("Deletion candidates", std::to_string(candDel));
+            printStatusLine("Semantic threshold", std::to_string(dedupeSemanticThreshold_));
+            std::cout << "  " << ui::status_ok("Saved semantic duplicate suggestions to metadata")
+                      << "\n";
+            if (candDel > 0) {
+                std::cout << "  "
+                          << ui::status_info(
+                                 "Use 'yams repair --dedupe' to remove semantic duplicates.")
+                          << "\n";
+            }
+
+            if (dedupeVerbose_ && !analysis->accepted.empty()) {
+                auto accepted = analysis->accepted;
+                std::sort(accepted.begin(), accepted.end(),
+                          [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
+                size_t shown = 0;
+                for (const auto& match : accepted) {
+                    const auto& lhs = analysis->docs[match.lhs].doc;
+                    const auto& rhs = analysis->docs[match.rhs].doc;
+                    std::cout << "Pair: " << lhs.id << " <-> " << rhs.id << " cosine=" << std::fixed
+                              << std::setprecision(3) << match.cosine
+                              << " title_overlap=" << match.titleOverlap
+                              << " path_overlap=" << match.pathOverlap << " score=" << match.score
+                              << "\n";
+                    if (++shown >= 10) {
+                        break;
+                    }
+                }
+            }
+            return;
+        }
+
         namespace fs = std::filesystem;
         fs::path dataDir = cli_->getDataPath();
 

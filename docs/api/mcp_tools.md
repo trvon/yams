@@ -15,7 +15,7 @@ yams serve
 
 | Tool | Purpose | Operations |
 |------|---------|------------|
-| `query` | Read-only pipeline | `search`, `grep`, `list`, `list_collections`, `list_snapshots`, `graph`, `get`, `status`, `describe` |
+| `query` | Read-only pipeline | `search`, `grep`, `list`, `list_collections`, `list_snapshots`, `suggest_context`, `semantic_dedupe`, `graph`, `get`, `status`, `describe` |
 | `execute` | Write batch | `add`, `update`, `delete`, `restore`, `download` |
 | `session` | Session lifecycle | `start`, `stop`, `pin`, `unpin`, `watch` |
 
@@ -94,7 +94,7 @@ Read-only operations with multi-step pipeline support. Each step's result is ava
         "properties": {
           "op": {
             "type": "string",
-            "enum": ["search", "grep", "list", "list_collections", "list_snapshots", "graph", "get", "status", "describe"]
+            "enum": ["search", "grep", "list", "list_collections", "list_snapshots", "suggest_context", "semantic_dedupe", "graph", "get", "status", "describe"]
           },
           "params": { "type": "object" }
         },
@@ -124,6 +124,90 @@ String values in `params` can reference the previous step's result:
 If resolution fails (missing field, out-of-bounds index), the param receives `null`. `$prev` is `{}` for the first step.
 
 ### Query Operations Reference
+
+#### suggest_context
+
+Suggest relevant memory snapshots for a draft topic or query by grouping existing search evidence by `snapshot_id`.
+
+**Key Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | string | *(required)* | Draft topic or query text |
+| `limit` | integer | 5 | Maximum snapshot suggestions |
+| `use_session` | boolean | false | Scope evidence to current or provided session |
+| `session` | string | — | Specific session name |
+| `global_search` | boolean | false | Bypass session isolation when session scoping is enabled |
+
+**Example:**
+```json
+{
+  "steps": [{"op": "suggest_context", "params": {"query": "auth middleware refresh tokens", "limit": 3}}]
+}
+```
+
+**Response:**
+```json
+{
+  "query": "auth middleware refresh tokens",
+  "total": 2,
+  "suggestions": [
+    {
+      "snapshot_id": "2026-04-02T12:00:00Z",
+      "label": "auth rollout",
+      "directory_path": "/repo/auth",
+      "score": 2.1,
+      "supporting_result_count": 2,
+      "supporting_results": [
+        {"id": "123", "hash": "abc...", "title": "Auth ADR", "path": "/repo/auth/adr.md", "score": 1.1}
+      ]
+    }
+  ]
+}
+```
+
+#### semantic_dedupe
+
+Inspect persisted semantic duplicate groups and their member documents.
+
+**Key Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `group_key` | string | — | Return one specific semantic duplicate group |
+| `document_ids` | array<int> | — | Return groups containing these documents |
+| `limit` | integer | 25 | Maximum groups to return |
+
+**Example:**
+```json
+{
+  "steps": [{"op": "semantic_dedupe", "params": {"limit": 10}}]
+}
+```
+
+**Response:**
+```json
+{
+  "total": 1,
+  "groups": [
+    {
+      "group_key": "semantic:keep-newest:0.920:hash-a,hash-b",
+      "algorithm_version": "semantic-dedupe-v1",
+      "status": "suggested",
+      "review_state": "pending",
+      "canonical_document_id": 12,
+      "member_count": 2,
+      "max_pair_score": 0.97,
+      "threshold": 0.92,
+      "evidence_json": "{...}",
+      "members": [
+        {"document_id": 12, "role": "canonical", "decision": "keep"},
+        {"document_id": 19, "role": "duplicate", "pair_score": 0.93}
+      ]
+    }
+  ]
+}
+```
 
 #### search
 

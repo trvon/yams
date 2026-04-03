@@ -14,11 +14,11 @@
 #include <cstdlib>
 #include <filesystem>
 
-#include <yams/compat/unistd.h>
 #include <future>
 #include <memory>
 #include <optional>
 #include <string>
+#include <yams/compat/unistd.h>
 
 #include <nlohmann/json.hpp>
 #include <yams/daemon/client/global_io_context.h>
@@ -467,6 +467,18 @@ TEST_CASE_METHOD(CompositeDispatchFixture,
                  "query - list_snapshots op dispatches to internal handler",
                  "[mcp][composite][query]") {
     json args = {{"steps", json::array({{{"op", "list_snapshots"}}})}};
+
+    auto result = callTool("query", args);
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "query - semantic_dedupe op dispatches to internal handler",
+                 "[mcp][composite][query]") {
+    json args = {"steps", json::array({{{"op", "semantic_dedupe"}, {"params", {{"limit", 5}}}}})};
 
     auto result = callTool("query", args);
 

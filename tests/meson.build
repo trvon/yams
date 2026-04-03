@@ -1404,6 +1404,8 @@ if catch2_dep.found()
       'unit/mcp/mcp_daemon_dto_parsing_catch2_test.cpp',
       'unit/mcp/mcp_daemon_dto_parsing_more_catch2_test.cpp',
       'unit/mcp/mcp_error_handling_catch2_test.cpp',
+      'unit/mcp/mcp_context_suggestion_catch2_test.cpp',
+      'unit/mcp/mcp_semantic_dedupe_catch2_test.cpp',
       'unit/mcp/mcp_disconnect_uniform_errors_catch2_test.cpp',
       'unit/mcp/mcp_doctor_flags_catch2_test.cpp',
       'unit/mcp/mcp_jsonrpc_roundtrip_catch2_test.cpp',

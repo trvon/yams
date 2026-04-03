@@ -345,7 +345,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             optimizeValueCountsQuery(),
             createFeedbackEventsSchema(),
             addListSortCompositeIndex(),
-            migrateLegacyPathNodePrefixes()};
+            migrateLegacyPathNodePrefixes(),
+            createSemanticDuplicateSchema()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2550,6 +2551,73 @@ Migration YamsMetadataMigrations::migrateLegacyPathNodePrefixes() {
 
         return Result<void>();
     };
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createSemanticDuplicateSchema() {
+    Migration m;
+    m.version = 31;
+    m.name = "Create semantic duplicate persistence schema";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        CREATE TABLE IF NOT EXISTS semantic_duplicate_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_key TEXT NOT NULL UNIQUE,
+            algorithm_version TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'suggested',
+            review_state TEXT NOT NULL DEFAULT 'pending',
+            canonical_document_id INTEGER,
+            member_count INTEGER NOT NULL DEFAULT 0,
+            max_pair_score REAL DEFAULT 0,
+            threshold REAL,
+            evidence_json TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_computed_at INTEGER NOT NULL,
+            FOREIGN KEY (canonical_document_id) REFERENCES documents(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_semantic_duplicate_groups_status
+            ON semantic_duplicate_groups(status);
+        CREATE INDEX IF NOT EXISTS idx_semantic_duplicate_groups_review_state
+            ON semantic_duplicate_groups(review_state);
+        CREATE INDEX IF NOT EXISTS idx_semantic_duplicate_groups_canonical_document
+            ON semantic_duplicate_groups(canonical_document_id);
+        CREATE INDEX IF NOT EXISTS idx_semantic_duplicate_groups_updated_at
+            ON semantic_duplicate_groups(updated_at DESC, id DESC);
+
+        CREATE TABLE IF NOT EXISTS semantic_duplicate_group_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            document_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            similarity_to_canonical REAL,
+            title_overlap REAL,
+            path_overlap REAL,
+            pair_score REAL,
+            decision TEXT NOT NULL DEFAULT 'unknown',
+            reason TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (group_id) REFERENCES semantic_duplicate_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+            UNIQUE(group_id, document_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_semantic_duplicate_group_members_group
+            ON semantic_duplicate_group_members(group_id);
+        CREATE INDEX IF NOT EXISTS idx_semantic_duplicate_group_members_document
+            ON semantic_duplicate_group_members(document_id);
+        CREATE INDEX IF NOT EXISTS idx_semantic_duplicate_group_members_role
+            ON semantic_duplicate_group_members(role);
+    )";
+
+    m.downSQL = R"(
+        DROP TABLE IF EXISTS semantic_duplicate_group_members;
+        DROP TABLE IF EXISTS semantic_duplicate_groups;
+    )";
 
     return m;
 }

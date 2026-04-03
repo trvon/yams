@@ -179,6 +179,8 @@ TEST_CASE("DoctorCommand - dedupe help displays correctly", "[cli][doctor][catch
     CHECK(output.find("--mode") != std::string::npos);
     CHECK(output.find("--strategy") != std::string::npos);
     CHECK(output.find("--apply") != std::string::npos);
+    CHECK(output.find("semantic") != std::string::npos);
+    CHECK(output.find("--semantic-threshold") != std::string::npos);
 }
 
 TEST_CASE("DoctorCommand - repair subcommand help displays correctly", "[cli][doctor][catch2]") {

@@ -279,6 +279,19 @@ public:
     virtual Result<std::vector<DocumentRelationship>> getRelationships(int64_t documentId) = 0;
     virtual Result<void> deleteRelationship(int64_t relationshipId) = 0;
 
+    // Semantic duplicate persistence
+    virtual Result<int64_t> upsertSemanticDuplicateGroup(const SemanticDuplicateGroup& group) = 0;
+    virtual Result<void> replaceSemanticDuplicateGroupMembers(
+        int64_t groupId, const std::vector<SemanticDuplicateGroupMember>& members) = 0;
+    virtual Result<std::optional<SemanticDuplicateGroup>>
+    getSemanticDuplicateGroupByKey(const std::string& groupKey) = 0;
+    virtual Result<std::vector<SemanticDuplicateGroup>>
+    listSemanticDuplicateGroups(int limit = 100) = 0;
+    virtual Result<std::unordered_map<int64_t, SemanticDuplicateGroupDetail>>
+    getSemanticDuplicateGroupsForDocuments(std::span<const int64_t> documentIds) = 0;
+    virtual Result<void> updateSemanticDuplicateGroupStatus(const std::string& groupKey,
+                                                            const std::string& status) = 0;
+
     // Search history operations
     virtual Result<int64_t> insertSearchHistory(const SearchHistoryEntry& entry) = 0;
     virtual Result<std::vector<SearchHistoryEntry>> getRecentSearches(int limit = 50) = 0;
@@ -530,6 +543,19 @@ public:
     Result<int64_t> insertRelationship(const DocumentRelationship& relationship) override;
     Result<std::vector<DocumentRelationship>> getRelationships(int64_t documentId) override;
     Result<void> deleteRelationship(int64_t relationshipId) override;
+
+    // Semantic duplicate persistence
+    Result<int64_t> upsertSemanticDuplicateGroup(const SemanticDuplicateGroup& group) override;
+    Result<void> replaceSemanticDuplicateGroupMembers(
+        int64_t groupId, const std::vector<SemanticDuplicateGroupMember>& members) override;
+    Result<std::optional<SemanticDuplicateGroup>>
+    getSemanticDuplicateGroupByKey(const std::string& groupKey) override;
+    Result<std::vector<SemanticDuplicateGroup>>
+    listSemanticDuplicateGroups(int limit = 100) override;
+    Result<std::unordered_map<int64_t, SemanticDuplicateGroupDetail>>
+    getSemanticDuplicateGroupsForDocuments(std::span<const int64_t> documentIds) override;
+    Result<void> updateSemanticDuplicateGroupStatus(const std::string& groupKey,
+                                                    const std::string& status) override;
 
     // Search history operations
     Result<int64_t> insertSearchHistory(const SearchHistoryEntry& entry) override;

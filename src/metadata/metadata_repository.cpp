@@ -49,6 +49,51 @@ using repository::runMetadataValueCountQuery;
 using repository::scope_exit;
 
 namespace {
+std::chrono::sys_seconds nowSysSeconds() {
+    return std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+}
+
+SemanticDuplicateGroup mapSemanticDuplicateGroupRow(const Statement& stmt) {
+    SemanticDuplicateGroup group;
+    group.id = stmt.getInt64(0);
+    group.groupKey = stmt.getString(1);
+    group.algorithmVersion = stmt.getString(2);
+    group.status = stmt.getString(3);
+    group.reviewState = stmt.getString(4);
+    if (!stmt.isNull(5))
+        group.canonicalDocumentId = stmt.getInt64(5);
+    group.memberCount = stmt.getInt64(6);
+    group.maxPairScore = stmt.getDouble(7);
+    if (!stmt.isNull(8))
+        group.threshold = stmt.getDouble(8);
+    group.evidenceJson = stmt.isNull(9) ? "" : stmt.getString(9);
+    group.setCreatedAt(stmt.getInt64(10));
+    group.setUpdatedAt(stmt.getInt64(11));
+    group.setLastComputedAt(stmt.getInt64(12));
+    return group;
+}
+
+SemanticDuplicateGroupMember mapSemanticDuplicateGroupMemberRow(const Statement& stmt) {
+    SemanticDuplicateGroupMember member;
+    member.id = stmt.getInt64(0);
+    member.groupId = stmt.getInt64(1);
+    member.documentId = stmt.getInt64(2);
+    member.role = stmt.getString(3);
+    if (!stmt.isNull(4))
+        member.similarityToCanonical = stmt.getDouble(4);
+    if (!stmt.isNull(5))
+        member.titleOverlap = stmt.getDouble(5);
+    if (!stmt.isNull(6))
+        member.pathOverlap = stmt.getDouble(6);
+    if (!stmt.isNull(7))
+        member.pairScore = stmt.getDouble(7);
+    member.decision = stmt.getString(8);
+    member.reason = stmt.isNull(9) ? "" : stmt.getString(9);
+    member.setCreatedAt(stmt.getInt64(10));
+    member.setUpdatedAt(stmt.getInt64(11));
+    return member;
+}
+
 constexpr const char* kDocumentColumnListNew =
     "id, file_path, file_name, file_extension, file_size, sha256_hash, mime_type, "
     "created_time, modified_time, indexed_time, content_extracted, extraction_status, "
@@ -1889,6 +1934,344 @@ Result<void> MetadataRepository::deleteRelationship(int64_t relationshipId) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
         repository::CrudOps<DocumentRelationship> ops;
         return ops.deleteById(db, relationshipId);
+    });
+}
+
+Result<int64_t>
+MetadataRepository::upsertSemanticDuplicateGroup(const SemanticDuplicateGroup& group) {
+    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        auto stmtResult = db.prepare(R"(
+            INSERT INTO semantic_duplicate_groups (
+                group_key, algorithm_version, status, review_state,
+                canonical_document_id, member_count, max_pair_score, threshold,
+                evidence_json, created_at, updated_at, last_computed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(group_key) DO UPDATE SET
+                algorithm_version = excluded.algorithm_version,
+                status = excluded.status,
+                review_state = excluded.review_state,
+                canonical_document_id = excluded.canonical_document_id,
+                member_count = excluded.member_count,
+                max_pair_score = excluded.max_pair_score,
+                threshold = excluded.threshold,
+                evidence_json = excluded.evidence_json,
+                updated_at = excluded.updated_at,
+                last_computed_at = excluded.last_computed_at
+        )");
+        if (!stmtResult)
+            return stmtResult.error();
+
+        Statement stmt = std::move(stmtResult).value();
+        YAMS_TRY(stmt.bind(1, group.groupKey));
+        YAMS_TRY(stmt.bind(2, group.algorithmVersion));
+        YAMS_TRY(stmt.bind(3, group.status));
+        YAMS_TRY(stmt.bind(4, group.reviewState));
+        if (group.canonicalDocumentId.has_value())
+            YAMS_TRY(stmt.bind(5, *group.canonicalDocumentId));
+        else
+            YAMS_TRY(stmt.bind(5, nullptr));
+        YAMS_TRY(stmt.bind(6, group.memberCount));
+        YAMS_TRY(stmt.bind(7, group.maxPairScore));
+        if (group.threshold.has_value())
+            YAMS_TRY(stmt.bind(8, *group.threshold));
+        else
+            YAMS_TRY(stmt.bind(8, nullptr));
+        if (group.evidenceJson.empty())
+            YAMS_TRY(stmt.bind(9, nullptr));
+        else
+            YAMS_TRY(stmt.bind(9, group.evidenceJson));
+        YAMS_TRY(stmt.bind(10, group.createdAt));
+        YAMS_TRY(stmt.bind(11, group.updatedAt));
+        YAMS_TRY(stmt.bind(12, group.lastComputedAt));
+        YAMS_TRY(stmt.execute());
+
+        auto selectResult =
+            db.prepare("SELECT id FROM semantic_duplicate_groups WHERE group_key = ?");
+        if (!selectResult)
+            return selectResult.error();
+        Statement selectStmt = std::move(selectResult).value();
+        YAMS_TRY(selectStmt.bind(1, group.groupKey));
+        YAMS_TRY_UNWRAP(hasRow, selectStmt.step());
+        if (!hasRow) {
+            return Error{ErrorCode::NotFound, "Failed to resolve semantic duplicate group id"};
+        }
+        return selectStmt.getInt64(0);
+    });
+}
+
+Result<void> MetadataRepository::replaceSemanticDuplicateGroupMembers(
+    int64_t groupId, const std::vector<SemanticDuplicateGroupMember>& members) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        YAMS_TRY(db.execute("BEGIN IMMEDIATE"));
+
+        auto deleteResult =
+            db.prepare("DELETE FROM semantic_duplicate_group_members WHERE group_id = ?");
+        if (!deleteResult) {
+            db.execute("ROLLBACK");
+            return deleteResult.error();
+        }
+
+        Statement deleteStmt = std::move(deleteResult).value();
+        if (auto r = deleteStmt.bind(1, groupId); !r) {
+            db.execute("ROLLBACK");
+            return r.error();
+        }
+        if (auto r = deleteStmt.execute(); !r) {
+            db.execute("ROLLBACK");
+            return r.error();
+        }
+
+        auto insertResult = db.prepare(R"(
+            INSERT INTO semantic_duplicate_group_members (
+                group_id, document_id, role, similarity_to_canonical,
+                title_overlap, path_overlap, pair_score, decision, reason,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        )");
+        if (!insertResult) {
+            db.execute("ROLLBACK");
+            return insertResult.error();
+        }
+
+        Statement insertStmt = std::move(insertResult).value();
+        for (const auto& member : members) {
+            insertStmt.reset();
+            if (auto r = insertStmt.bind(1, groupId); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = insertStmt.bind(2, member.documentId); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = insertStmt.bind(3, member.role); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (member.similarityToCanonical.has_value()) {
+                if (auto r = insertStmt.bind(4, *member.similarityToCanonical); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+            } else if (auto r = insertStmt.bind(4, nullptr); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (member.titleOverlap.has_value()) {
+                if (auto r = insertStmt.bind(5, *member.titleOverlap); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+            } else if (auto r = insertStmt.bind(5, nullptr); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (member.pathOverlap.has_value()) {
+                if (auto r = insertStmt.bind(6, *member.pathOverlap); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+            } else if (auto r = insertStmt.bind(6, nullptr); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (member.pairScore.has_value()) {
+                if (auto r = insertStmt.bind(7, *member.pairScore); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+            } else if (auto r = insertStmt.bind(7, nullptr); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = insertStmt.bind(8, member.decision); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (member.reason.empty()) {
+                if (auto r = insertStmt.bind(9, nullptr); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+            } else if (auto r = insertStmt.bind(9, member.reason); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = insertStmt.bind(10, member.createdAt); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = insertStmt.bind(11, member.updatedAt); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = insertStmt.execute(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+        }
+
+        auto commitResult = db.execute("COMMIT");
+        if (!commitResult) {
+            db.execute("ROLLBACK");
+            return commitResult.error();
+        }
+        return Result<void>();
+    });
+}
+
+Result<std::optional<SemanticDuplicateGroup>>
+MetadataRepository::getSemanticDuplicateGroupByKey(const std::string& groupKey) {
+    return executeReadQuery<std::optional<SemanticDuplicateGroup>>(
+        [&](Database& db) -> Result<std::optional<SemanticDuplicateGroup>> {
+            auto stmtResult = db.prepare(R"(
+                SELECT id, group_key, algorithm_version, status, review_state,
+                       canonical_document_id, member_count, max_pair_score, threshold,
+                       evidence_json, created_at, updated_at, last_computed_at
+                FROM semantic_duplicate_groups
+                WHERE group_key = ?
+            )");
+            if (!stmtResult)
+                return stmtResult.error();
+            Statement stmt = std::move(stmtResult).value();
+            YAMS_TRY(stmt.bind(1, groupKey));
+            YAMS_TRY_UNWRAP(hasRow, stmt.step());
+            if (!hasRow)
+                return std::optional<SemanticDuplicateGroup>{};
+            return std::optional<SemanticDuplicateGroup>{mapSemanticDuplicateGroupRow(stmt)};
+        });
+}
+
+Result<std::vector<SemanticDuplicateGroup>>
+MetadataRepository::listSemanticDuplicateGroups(int limit) {
+    return executeReadQuery<std::vector<SemanticDuplicateGroup>>(
+        [&](Database& db) -> Result<std::vector<SemanticDuplicateGroup>> {
+            auto stmtResult = db.prepare(R"(
+                SELECT id, group_key, algorithm_version, status, review_state,
+                       canonical_document_id, member_count, max_pair_score, threshold,
+                       evidence_json, created_at, updated_at, last_computed_at
+                FROM semantic_duplicate_groups
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+            )");
+            if (!stmtResult)
+                return stmtResult.error();
+            Statement stmt = std::move(stmtResult).value();
+            YAMS_TRY(stmt.bind(1, limit));
+
+            std::vector<SemanticDuplicateGroup> groups;
+            while (true) {
+                YAMS_TRY_UNWRAP(hasRow, stmt.step());
+                if (!hasRow)
+                    break;
+                groups.push_back(mapSemanticDuplicateGroupRow(stmt));
+            }
+            return groups;
+        });
+}
+
+Result<std::unordered_map<int64_t, SemanticDuplicateGroupDetail>>
+MetadataRepository::getSemanticDuplicateGroupsForDocuments(std::span<const int64_t> documentIds) {
+    if (documentIds.empty()) {
+        return std::unordered_map<int64_t, SemanticDuplicateGroupDetail>{};
+    }
+
+    return executeReadQuery<std::unordered_map<int64_t, SemanticDuplicateGroupDetail>>(
+        [&](Database& db) -> Result<std::unordered_map<int64_t, SemanticDuplicateGroupDetail>> {
+            std::string placeholders;
+            placeholders.reserve(documentIds.size() * 2);
+            for (size_t i = 0; i < documentIds.size(); ++i) {
+                if (i > 0)
+                    placeholders += ',';
+                placeholders += '?';
+            }
+
+            auto groupStmtResult = db.prepare(
+                "SELECT DISTINCT g.id, g.group_key, g.algorithm_version, g.status, g.review_state, "
+                "g.canonical_document_id, g.member_count, g.max_pair_score, g.threshold, "
+                "g.evidence_json, g.created_at, g.updated_at, g.last_computed_at "
+                "FROM semantic_duplicate_groups g "
+                "JOIN semantic_duplicate_group_members m ON m.group_id = g.id "
+                "WHERE m.document_id IN (" +
+                placeholders + ") ORDER BY g.updated_at DESC, g.id DESC");
+            if (!groupStmtResult)
+                return groupStmtResult.error();
+            Statement groupStmt = std::move(groupStmtResult).value();
+            for (size_t i = 0; i < documentIds.size(); ++i) {
+                YAMS_TRY(groupStmt.bind(static_cast<int>(i + 1), documentIds[i]));
+            }
+
+            std::unordered_map<int64_t, SemanticDuplicateGroupDetail> groupsById;
+            while (true) {
+                YAMS_TRY_UNWRAP(hasRow, groupStmt.step());
+                if (!hasRow)
+                    break;
+                auto group = mapSemanticDuplicateGroupRow(groupStmt);
+                groupsById.emplace(group.id, SemanticDuplicateGroupDetail{group, {}});
+            }
+
+            if (groupsById.empty()) {
+                return groupsById;
+            }
+
+            std::string memberPlaceholders;
+            memberPlaceholders.reserve(groupsById.size() * 2);
+            std::vector<int64_t> groupIds;
+            groupIds.reserve(groupsById.size());
+            for (const auto& [groupId, _] : groupsById) {
+                if (!memberPlaceholders.empty())
+                    memberPlaceholders += ',';
+                memberPlaceholders += '?';
+                groupIds.push_back(groupId);
+            }
+
+            auto memberStmtResult = db.prepare(
+                "SELECT id, group_id, document_id, role, similarity_to_canonical, title_overlap, "
+                "path_overlap, pair_score, decision, reason, created_at, updated_at "
+                "FROM semantic_duplicate_group_members WHERE group_id IN (" +
+                memberPlaceholders + ") ORDER BY group_id ASC, id ASC");
+            if (!memberStmtResult)
+                return memberStmtResult.error();
+            Statement memberStmt = std::move(memberStmtResult).value();
+            for (size_t i = 0; i < groupIds.size(); ++i) {
+                YAMS_TRY(memberStmt.bind(static_cast<int>(i + 1), groupIds[i]));
+            }
+
+            while (true) {
+                YAMS_TRY_UNWRAP(hasRow, memberStmt.step());
+                if (!hasRow)
+                    break;
+                auto member = mapSemanticDuplicateGroupMemberRow(memberStmt);
+                auto it = groupsById.find(member.groupId);
+                if (it != groupsById.end()) {
+                    it->second.members.push_back(std::move(member));
+                }
+            }
+
+            std::unordered_map<int64_t, SemanticDuplicateGroupDetail> byDocumentId;
+            for (auto& [groupId, detail] : groupsById) {
+                (void)groupId;
+                for (const auto& member : detail.members) {
+                    byDocumentId.emplace(member.documentId, detail);
+                }
+            }
+            return byDocumentId;
+        });
+}
+
+Result<void> MetadataRepository::updateSemanticDuplicateGroupStatus(const std::string& groupKey,
+                                                                    const std::string& status) {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        auto stmtResult = db.prepare(
+            "UPDATE semantic_duplicate_groups SET status = ?, updated_at = ? WHERE group_key = ?");
+        if (!stmtResult)
+            return stmtResult.error();
+        Statement stmt = std::move(stmtResult).value();
+        YAMS_TRY(stmt.bind(1, status));
+        YAMS_TRY(stmt.bind(2, nowSysSeconds()));
+        YAMS_TRY(stmt.bind(3, groupKey));
+        YAMS_TRY(stmt.execute());
+        return Result<void>();
     });
 }
 

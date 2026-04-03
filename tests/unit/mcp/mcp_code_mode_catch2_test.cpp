@@ -157,6 +157,28 @@ TEST_CASE("describeOp - known op returns schema", "[mcp][codemode][describe]") {
     CHECK(schema["properties"].contains("query"));
 }
 
+TEST_CASE("describeOp - suggest_context returns schema", "[mcp][codemode][describe]") {
+    auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());
+    auto result = server->testDescribeOp("suggest_context");
+    CHECK(result["op"] == "suggest_context");
+    CHECK(result["category"] == "query");
+    CHECK(result["readOnly"] == true);
+    auto& schema = result["paramsSchema"];
+    CHECK(schema["properties"].contains("query"));
+    CHECK(schema["required"].is_array());
+}
+
+TEST_CASE("describeOp - semantic_dedupe returns schema", "[mcp][codemode][describe]") {
+    auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());
+    auto result = server->testDescribeOp("semantic_dedupe");
+    CHECK(result["op"] == "semantic_dedupe");
+    CHECK(result["category"] == "query");
+    CHECK(result["readOnly"] == true);
+    auto& schema = result["paramsSchema"];
+    CHECK(schema["properties"].contains("group_key"));
+    CHECK(schema["properties"].contains("document_ids"));
+}
+
 TEST_CASE("describeOp - unknown op returns error with available ops", "[mcp][codemode][describe]") {
     auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());
     auto result = server->testDescribeOp("nonexistent");
@@ -208,11 +230,19 @@ TEST_CASE("describeAllOps - returns all categories", "[mcp][codemode][describe]"
     auto& queryOps = result["query_ops"];
     CHECK(queryOps.is_array());
     bool hasSearch = false;
+    bool hasSuggestContext = false;
+    bool hasSemanticDedupe = false;
     for (const auto& op : queryOps) {
         if (op == "search")
             hasSearch = true;
+        if (op == "suggest_context")
+            hasSuggestContext = true;
+        if (op == "semantic_dedupe")
+            hasSemanticDedupe = true;
     }
     CHECK(hasSearch);
+    CHECK(hasSuggestContext);
+    CHECK(hasSemanticDedupe);
 
     auto& execOps = result["execute_ops"];
     CHECK(execOps.is_array());

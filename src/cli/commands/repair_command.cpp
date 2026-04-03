@@ -49,6 +49,8 @@ public:
                       "Recover stuck documents (failed extraction, ghost success, stalled)");
         cmd->add_flag("--graph", repairGraph_,
                       "Rebuild knowledge graph nodes/edges and clean orphaned KG entries");
+        cmd->add_flag("--dedupe", repairDedupe_,
+                      "Remove semantic duplicates using persisted doctor suggestions");
         cmd->add_option("--include-mime", includeMime_,
                         "Additional MIME types to embed (e.g., application/pdf). Repeatable.")
             ->type_size(-1);
@@ -92,7 +94,8 @@ public:
         // If no specific repair requested, default to orphans
         if (!repairOrphans_ && !repairMime_ && !repairChunks_ && !repairEmbeddings_ &&
             !repairFts5_ && !optimizeDb_ && !repairDownloads_ && !repairPathTree_ &&
-            !repairBlockRefs_ && !repairStuckDocs_ && !repairGraph_ && !repairAll_) {
+            !repairBlockRefs_ && !repairStuckDocs_ && !repairGraph_ && !repairDedupe_ &&
+            !repairAll_) {
             repairOrphans_ = true;
         }
 
@@ -111,6 +114,7 @@ public:
         req.repairEmbeddings = repairEmbeddings_ || effectiveAll;
         req.repairStuckDocs = repairStuckDocs_ || effectiveAll;
         req.repairGraph = repairGraph_ || effectiveAll;
+        req.repairDedupe = repairDedupe_ || effectiveAll;
         req.optimizeDb = optimizeDb_ || effectiveAll;
         req.repairAll = false;
         req.dryRun = dryRun_;
@@ -385,6 +389,7 @@ private:
     bool repairBlockRefs_ = false;
     bool repairStuckDocs_ = false;
     bool repairGraph_ = false;
+    bool repairDedupe_ = false;
     bool foreground_ = false;
     std::vector<std::string> includeMime_;
     std::string embeddingModel_;

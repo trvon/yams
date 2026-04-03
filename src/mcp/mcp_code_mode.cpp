@@ -214,6 +214,45 @@ json MCPServer::describeOp(const std::string& target) const {
                      {"default", true}}}}}},
             "query", true};
 
+        ops["suggest_context"] = {
+            "Suggest relevant memory snapshots for a draft topic or query",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"query", {{"type", "string"}, {"description", "Draft topic or query"}}},
+                   {"limit",
+                    {{"type", "integer"},
+                     {"description", "Maximum snapshot suggestions"},
+                     {"default", 5}}},
+                   {"use_session",
+                    {{"type", "boolean"},
+                     {"description", "Scope to the current or provided session"},
+                     {"default", false}}},
+                   {"session",
+                    {{"type", "string"},
+                     {"description", "Specific session name when use_session is enabled"}}},
+                   {"global_search",
+                    {{"type", "boolean"},
+                     {"description", "Bypass session isolation when session scoping is used"},
+                     {"default", false}}}}},
+                 {"required", json::array({"query"})}},
+            "query", true};
+
+        ops["semantic_dedupe"] = {
+            "Inspect persisted semantic duplicate groups and members",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"group_key",
+                    {{"type", "string"}, {"description", "Specific semantic duplicate group"}}},
+                   {"document_ids",
+                    {{"type", "array"},
+                     {"items", {{"type", "integer"}}},
+                     {"description", "Filter groups by member document ids"}}},
+                   {"limit",
+                    {{"type", "integer"},
+                     {"description", "Maximum groups to return"},
+                     {"default", 25}}}}}},
+            "query", true};
+
         ops["graph"] = {
             "Query the knowledge graph for relationships and entities",
             json{{"type", "object"},
@@ -412,11 +451,11 @@ json MCPServer::describeOp(const std::string& target) const {
 }
 
 json MCPServer::describeAllOps() const {
-    return json{
-        {"query_ops", json::array({"search", "grep", "list", "list_collections", "list_snapshots",
-                                   "graph", "get", "status", "describe"})},
-        {"execute_ops", json::array({"add", "update", "delete", "restore", "download"})},
-        {"session_ops", json::array({"start", "stop", "pin", "unpin", "watch"})}};
+    return json{{"query_ops", json::array({"search", "grep", "list", "list_collections",
+                                           "list_snapshots", "suggest_context", "semantic_dedupe",
+                                           "graph", "get", "status", "describe"})},
+                {"execute_ops", json::array({"add", "update", "delete", "restore", "download"})},
+                {"session_ops", json::array({"start", "stop", "pin", "unpin", "watch"})}};
 }
 
 boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
@@ -436,8 +475,10 @@ boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
 
         // Allowed read-only ops for the query tool
         static const std::unordered_set<std::string> allowedOps = {
-            "search", "grep", "list",   "list_collections", "list_snapshots",
-            "graph",  "get",  "status", "describe"};
+            "search",           "grep",           "list",
+            "list_collections", "list_snapshots", "suggest_context",
+            "semantic_dedupe",  "graph",          "get",
+            "status",           "describe"};
 
         auto extractResultData = [](json&& toolResult) -> json {
             if (toolResult.contains("structuredContent") &&
@@ -546,6 +587,26 @@ boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
                 } else if (op == "list_snapshots") {
                     auto req = MCPListSnapshotsRequest::fromJson(params);
                     auto result = co_await handleListSnapshots(req);
+                    if (!result) {
+                        hasError = true;
+                        primaryError = result.error().message;
+                        finalResult = json{{"error", result.error().message}};
+                    } else {
+                        finalResult = result.value().toJson();
+                    }
+                } else if (op == "suggest_context") {
+                    auto req = MCPSuggestContextRequest::fromJson(params);
+                    auto result = co_await handleSuggestContext(req);
+                    if (!result) {
+                        hasError = true;
+                        primaryError = result.error().message;
+                        finalResult = json{{"error", result.error().message}};
+                    } else {
+                        finalResult = result.value().toJson();
+                    }
+                } else if (op == "semantic_dedupe") {
+                    auto req = MCPSemanticDedupeRequest::fromJson(params);
+                    auto result = co_await handleSemanticDedupe(req);
                     if (!result) {
                         hasError = true;
                         primaryError = result.error().message;

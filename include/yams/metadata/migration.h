@@ -216,14 +216,13 @@ private:
     // Version 23: Metadata aggregation indexes for key/value counts
     static Migration createMetadataAggregationIndexes();
 
+    // NOTE: Pre-v1.0 migration policy
+    // Keep additive migrations while the schema is still moving, but squash the
+    // full chain into a new baseline before the v1.0 release instead of carrying
+    // every prerelease hop forever.
+
     // Version 24: SymSpell fuzzy search tables for fast edit-distance queries
     static Migration createSymSpellSchema();
-
-    // Version 29: Composite index for dominant list sort path (indexed_time, id)
-    static Migration addListSortCompositeIndex();
-
-    // Version 30: Migrate legacy file:/dir: KG node keys to path:* namespace
-    static Migration migrateLegacyPathNodePrefixes();
 
     // Version 25: Term statistics for IDF computation and query weighting
     static Migration createTermStatsSchema();
@@ -236,6 +235,15 @@ private:
 
     // Version 28: Append-only feedback event log for retrieval control loop
     static Migration createFeedbackEventsSchema();
+
+    // Version 29: Composite index for dominant list sort path (indexed_time, id)
+    static Migration addListSortCompositeIndex();
+
+    // Version 30: Migrate legacy file:/dir: KG node keys to path:* namespace
+    static Migration migrateLegacyPathNodePrefixes();
+
+    // Version 31: Semantic duplicate persistence for doctor/report workflows
+    static Migration createSemanticDuplicateSchema();
 };
 
 /**

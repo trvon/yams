@@ -1340,6 +1340,173 @@ json MCPListSnapshotsResponse::toJson() const {
     return json{{"snapshots", snapshots}};
 }
 
+MCPSuggestContextRequest MCPSuggestContextRequest::fromJson(const json& j) {
+    MCPSuggestContextRequest req;
+    req.query = normalize_query(j.value("query", std::string{}));
+    req.limit = parse_size_tolerant(j, "limit", 5);
+    req.useSession = detail::jsonValueOr(j, "use_session", false);
+    req.sessionName = j.value("session", std::string{});
+    req.globalSearch = detail::jsonValueOr(j, "global_search", false);
+    return req;
+}
+
+json MCPSuggestContextRequest::toJson() const {
+    return json{{"query", query},
+                {"limit", limit},
+                {"use_session", useSession},
+                {"session", sessionName},
+                {"global_search", globalSearch}};
+}
+
+MCPSuggestContextResponse MCPSuggestContextResponse::fromJson(const json& j) {
+    MCPSuggestContextResponse resp;
+    resp.query = j.value("query", std::string{});
+    resp.total = j.value("total", size_t{0});
+
+    if (j.contains("suggestions") && j["suggestions"].is_array()) {
+        for (const auto& item : j["suggestions"]) {
+            MCPSuggestContextResponse::Suggestion suggestion;
+            suggestion.snapshotId = item.value("snapshot_id", std::string{});
+            suggestion.label = item.value("label", std::string{});
+            suggestion.directoryPath = item.value("directory_path", std::string{});
+            suggestion.score = item.value("score", 0.0);
+            suggestion.supportingResultCount = item.value("supporting_result_count", size_t{0});
+
+            if (item.contains("supporting_results") && item["supporting_results"].is_array()) {
+                for (const auto& sr : item["supporting_results"]) {
+                    MCPSuggestContextResponse::SupportingResult supporting;
+                    supporting.id = sr.value("id", std::string{});
+                    supporting.hash = sr.value("hash", std::string{});
+                    supporting.title = sr.value("title", std::string{});
+                    supporting.path = sr.value("path", std::string{});
+                    supporting.score = sr.value("score", 0.0f);
+                    supporting.snippet = sr.value("snippet", std::string{});
+                    suggestion.supportingResults.push_back(std::move(supporting));
+                }
+            }
+
+            resp.suggestions.push_back(std::move(suggestion));
+        }
+    }
+
+    return resp;
+}
+
+json MCPSuggestContextResponse::toJson() const {
+    json suggestionsJson = json::array();
+    for (const auto& suggestion : suggestions) {
+        json supportingJson = json::array();
+        for (const auto& supporting : suggestion.supportingResults) {
+            json item{{"id", supporting.id}, {"score", supporting.score}};
+            if (!supporting.hash.empty())
+                item["hash"] = supporting.hash;
+            if (!supporting.title.empty())
+                item["title"] = supporting.title;
+            if (!supporting.path.empty())
+                item["path"] = supporting.path;
+            if (!supporting.snippet.empty())
+                item["snippet"] = supporting.snippet;
+            supportingJson.push_back(std::move(item));
+        }
+
+        json item{{"snapshot_id", suggestion.snapshotId},
+                  {"score", suggestion.score},
+                  {"supporting_result_count", suggestion.supportingResultCount},
+                  {"supporting_results", std::move(supportingJson)}};
+        if (!suggestion.label.empty())
+            item["label"] = suggestion.label;
+        if (!suggestion.directoryPath.empty())
+            item["directory_path"] = suggestion.directoryPath;
+        suggestionsJson.push_back(std::move(item));
+    }
+
+    return json{{"query", query}, {"total", total}, {"suggestions", std::move(suggestionsJson)}};
+}
+
+MCPSemanticDedupeRequest MCPSemanticDedupeRequest::fromJson(const json& j) {
+    MCPSemanticDedupeRequest req;
+    req.groupKey = j.value("group_key", std::string{});
+    req.limit = parse_size_tolerant(j, "limit", 25);
+    if (j.contains("document_ids") && j["document_ids"].is_array()) {
+        for (const auto& id : j["document_ids"]) {
+            if (id.is_number_integer()) {
+                req.documentIds.push_back(id.get<int64_t>());
+            }
+        }
+    }
+    return req;
+}
+
+json MCPSemanticDedupeRequest::toJson() const {
+    return json{{"group_key", groupKey}, {"document_ids", documentIds}, {"limit", limit}};
+}
+
+MCPSemanticDedupeResponse MCPSemanticDedupeResponse::fromJson(const json& j) {
+    MCPSemanticDedupeResponse resp;
+    resp.total = j.value("total", size_t{0});
+    if (j.contains("groups") && j["groups"].is_array()) {
+        for (const auto& item : j["groups"]) {
+            MCPSemanticDedupeResponse::Group group;
+            group.groupKey = item.value("group_key", std::string{});
+            group.algorithmVersion = item.value("algorithm_version", std::string{});
+            group.status = item.value("status", std::string{});
+            group.reviewState = item.value("review_state", std::string{});
+            group.canonicalDocumentId = item.value("canonical_document_id", int64_t{0});
+            group.memberCount = item.value("member_count", int64_t{0});
+            group.maxPairScore = item.value("max_pair_score", 0.0);
+            group.threshold = item.value("threshold", 0.0);
+            group.evidenceJson = item.value("evidence_json", std::string{});
+
+            if (item.contains("members") && item["members"].is_array()) {
+                for (const auto& memberItem : item["members"]) {
+                    MCPSemanticDedupeResponse::Member member;
+                    member.documentId = memberItem.value("document_id", int64_t{0});
+                    member.role = memberItem.value("role", std::string{});
+                    member.decision = memberItem.value("decision", std::string{});
+                    member.reason = memberItem.value("reason", std::string{});
+                    member.similarityToCanonical = memberItem.value("similarity_to_canonical", 0.0);
+                    member.titleOverlap = memberItem.value("title_overlap", 0.0);
+                    member.pathOverlap = memberItem.value("path_overlap", 0.0);
+                    member.pairScore = memberItem.value("pair_score", 0.0);
+                    group.members.push_back(std::move(member));
+                }
+            }
+
+            resp.groups.push_back(std::move(group));
+        }
+    }
+    return resp;
+}
+
+json MCPSemanticDedupeResponse::toJson() const {
+    json groupsJson = json::array();
+    for (const auto& group : groups) {
+        json membersJson = json::array();
+        for (const auto& member : group.members) {
+            membersJson.push_back(json{{"document_id", member.documentId},
+                                       {"role", member.role},
+                                       {"decision", member.decision},
+                                       {"reason", member.reason},
+                                       {"similarity_to_canonical", member.similarityToCanonical},
+                                       {"title_overlap", member.titleOverlap},
+                                       {"path_overlap", member.pathOverlap},
+                                       {"pair_score", member.pairScore}});
+        }
+
+        groupsJson.push_back(json{{"group_key", group.groupKey},
+                                  {"algorithm_version", group.algorithmVersion},
+                                  {"status", group.status},
+                                  {"review_state", group.reviewState},
+                                  {"canonical_document_id", group.canonicalDocumentId},
+                                  {"member_count", group.memberCount},
+                                  {"max_pair_score", group.maxPairScore},
+                                  {"threshold", group.threshold},
+                                  {"evidence_json", group.evidenceJson},
+                                  {"members", std::move(membersJson)}});
+    }
+    return json{{"total", total}, {"groups", std::move(groupsJson)}};
+}
+
 // MCPGraphRequest implementation
 MCPGraphRequest MCPGraphRequest::fromJson(const json& j) {
     MCPGraphRequest req;

@@ -197,6 +197,114 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     sm->shutdown();
 }
 
+TEST_CASE_METHOD(
+    ServiceManagerFixture,
+    "RepairService: semantic dedupe removes duplicate members and marks groups applied",
+    "[daemon][repair][dedupe]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    for (int i = 0; i < 100 && meta == nullptr; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        meta = sm->getMetadataRepo();
+    }
+    REQUIRE(meta != nullptr);
+
+    metadata::DocumentInfo canonical{};
+    canonical.fileName = "canonical.txt";
+    canonical.filePath = (config_.dataDir / "canonical.txt").string();
+    canonical.fileExtension = ".txt";
+    canonical.fileSize = 1;
+    canonical.sha256Hash = std::string(64, 'c');
+    canonical.mimeType = "text/plain";
+    canonical.setCreatedTime(1);
+    canonical.setModifiedTime(1);
+    canonical.setIndexedTime(1);
+
+    metadata::DocumentInfo duplicate = canonical;
+    duplicate.fileName = "duplicate.txt";
+    duplicate.filePath = (config_.dataDir / "duplicate.txt").string();
+    duplicate.sha256Hash = std::string(64, 'd');
+
+    auto canonicalId = meta->insertDocument(canonical);
+    auto duplicateId = meta->insertDocument(duplicate);
+    REQUIRE(canonicalId.has_value());
+    REQUIRE(duplicateId.has_value());
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    metadata::SemanticDuplicateGroup group;
+    group.groupKey = "semantic:repair-test";
+    group.algorithmVersion = "semantic-dedupe-v1";
+    group.status = "suggested";
+    group.reviewState = "pending";
+    group.canonicalDocumentId = canonicalId.value();
+    group.memberCount = 2;
+    group.maxPairScore = 0.97;
+    group.threshold = 0.92;
+    group.evidenceJson = R"({"source":"repair-test"})";
+    group.createdAt = now;
+    group.updatedAt = now;
+    group.lastComputedAt = now;
+    auto groupId = meta->upsertSemanticDuplicateGroup(group);
+    REQUIRE(groupId.has_value());
+
+    metadata::SemanticDuplicateGroupMember canonicalMember;
+    canonicalMember.documentId = canonicalId.value();
+    canonicalMember.role = "canonical";
+    canonicalMember.decision = "keep";
+    canonicalMember.createdAt = now;
+    canonicalMember.updatedAt = now;
+
+    metadata::SemanticDuplicateGroupMember duplicateMember;
+    duplicateMember.documentId = duplicateId.value();
+    duplicateMember.role = "duplicate";
+    duplicateMember.decision = "unknown";
+    duplicateMember.createdAt = now;
+    duplicateMember.updatedAt = now;
+    REQUIRE(meta->replaceSemanticDuplicateGroupMembers(groupId.value(),
+                                                       {canonicalMember, duplicateMember})
+                .has_value());
+
+    RepairService::Config cfg;
+    cfg.enable = false;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+
+    RepairRequest req;
+    req.repairDedupe = true;
+    req.dryRun = false;
+
+    auto resp = repair.executeRepair(req, nullptr);
+    auto dedupeResult = findOperationResult(resp, "dedupe");
+    REQUIRE(dedupeResult.has_value());
+    CHECK(dedupeResult->succeeded >= 1);
+
+    auto duplicateDoc = meta->getDocument(duplicateId.value());
+    REQUIRE(duplicateDoc.has_value());
+    CHECK_FALSE(duplicateDoc.value().has_value());
+
+    auto updatedGroup = meta->getSemanticDuplicateGroupByKey("semantic:repair-test");
+    REQUIRE(updatedGroup.has_value());
+    REQUIRE(updatedGroup.value().has_value());
+    CHECK(updatedGroup.value()->status == "applied");
+
+    sm->shutdown();
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "RepairService: stop waits for in-flight executeRepair",
                  "[daemon][repair][shutdown][regression]") {
     yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",

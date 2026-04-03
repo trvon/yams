@@ -389,6 +389,86 @@ TEST_CASE("MetadataRepository: metadata value counts materialized view stays con
     CHECK(it->second.front().count == 1);
 }
 
+TEST_CASE("MetadataRepository: semantic duplicate groups round-trip",
+          "[unit][metadata][repository][semantic-dedupe]") {
+    MetadataRepositoryFixture fix;
+
+    auto docA = makeDocumentWithPath("/tmp/semantic-a.txt", "semantic-a");
+    auto docB = makeDocumentWithPath("/tmp/semantic-b.txt", "semantic-b");
+    auto aId = fix.repository_->insertDocument(docA);
+    auto bId = fix.repository_->insertDocument(docB);
+    REQUIRE(aId.has_value());
+    REQUIRE(bId.has_value());
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+
+    SemanticDuplicateGroup group;
+    group.groupKey = "semantic:test-group";
+    group.algorithmVersion = "semantic-dedupe-v1";
+    group.status = "suggested";
+    group.reviewState = "pending";
+    group.canonicalDocumentId = aId.value();
+    group.memberCount = 2;
+    group.maxPairScore = 0.97;
+    group.threshold = 0.92;
+    group.evidenceJson = R"({"source":"test"})";
+    group.createdAt = now;
+    group.updatedAt = now;
+    group.lastComputedAt = now;
+
+    auto groupId = fix.repository_->upsertSemanticDuplicateGroup(group);
+    REQUIRE(groupId.has_value());
+
+    SemanticDuplicateGroupMember canonical;
+    canonical.documentId = aId.value();
+    canonical.role = "canonical";
+    canonical.decision = "keep";
+    canonical.reason = "keep-newest";
+    canonical.createdAt = now;
+    canonical.updatedAt = now;
+
+    SemanticDuplicateGroupMember duplicate;
+    duplicate.documentId = bId.value();
+    duplicate.role = "duplicate";
+    duplicate.similarityToCanonical = 0.98;
+    duplicate.titleOverlap = 0.75;
+    duplicate.pathOverlap = 0.25;
+    duplicate.pairScore = 0.93;
+    duplicate.decision = "unknown";
+    duplicate.createdAt = now;
+    duplicate.updatedAt = now;
+
+    REQUIRE(fix.repository_
+                ->replaceSemanticDuplicateGroupMembers(groupId.value(), {canonical, duplicate})
+                .has_value());
+
+    auto fetched = fix.repository_->getSemanticDuplicateGroupByKey("semantic:test-group");
+    REQUIRE(fetched.has_value());
+    REQUIRE(fetched.value().has_value());
+    CHECK(fetched.value()->canonicalDocumentId == aId.value());
+    CHECK(fetched.value()->memberCount == 2);
+
+    auto listed = fix.repository_->listSemanticDuplicateGroups();
+    REQUIRE(listed.has_value());
+    REQUIRE_FALSE(listed.value().empty());
+
+    auto byDoc = fix.repository_->getSemanticDuplicateGroupsForDocuments(
+        std::array<int64_t, 2>{aId.value(), bId.value()});
+    REQUIRE(byDoc.has_value());
+    REQUIRE(byDoc.value().contains(aId.value()));
+    REQUIRE(byDoc.value().contains(bId.value()));
+    CHECK(byDoc.value().at(aId.value()).group.groupKey == "semantic:test-group");
+    CHECK(byDoc.value().at(aId.value()).members.size() == 2);
+
+    REQUIRE(fix.repository_->updateSemanticDuplicateGroupStatus("semantic:test-group", "applied")
+                .has_value());
+    auto updated = fix.repository_->getSemanticDuplicateGroupByKey("semantic:test-group");
+    REQUIRE(updated.has_value());
+    REQUIRE(updated.value().has_value());
+    CHECK(updated.value()->status == "applied");
+}
+
 TEST_CASE("MetadataRepository: metadata value counts falls back when path FTS join fails",
           "[unit][metadata][repository][fts-fallback]") {
     MetadataRepositoryFixture fix;

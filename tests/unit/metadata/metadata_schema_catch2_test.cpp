@@ -1186,3 +1186,73 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 21 repair tracking",
 
     REQUIRE(result.has_value());
 }
+
+TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 31 semantic duplicate schema",
+                 "[unit][metadata][schema][migration]") {
+    auto result = pool_->withConnection([](Database& db) -> Result<void> {
+        MigrationManager mm(db);
+        auto initResult = mm.initialize();
+        if (!initResult)
+            return initResult.error();
+
+        auto versionResult = mm.getCurrentVersion();
+        if (!versionResult)
+            return versionResult.error();
+        if (versionResult.value() < 31) {
+            return Error{ErrorCode::InvalidData, "Migration v31 not applied"};
+        }
+
+        const char* groupColumns[] = {"group_key",
+                                      "algorithm_version",
+                                      "status",
+                                      "review_state",
+                                      "canonical_document_id",
+                                      "member_count",
+                                      "max_pair_score",
+                                      "threshold",
+                                      "evidence_json",
+                                      "created_at",
+                                      "updated_at",
+                                      "last_computed_at"};
+        for (const char* col : groupColumns) {
+            auto stmt = db.prepare("SELECT " + std::string(col) +
+                                   " FROM semantic_duplicate_groups LIMIT 0");
+            if (!stmt) {
+                return Error{ErrorCode::NotFound, std::string("Column not found: ") + col};
+            }
+        }
+
+        const char* memberColumns[] = {"group_id", "document_id", "role",       "pair_score",
+                                       "decision", "reason",      "created_at", "updated_at"};
+        for (const char* col : memberColumns) {
+            auto stmt = db.prepare("SELECT " + std::string(col) +
+                                   " FROM semantic_duplicate_group_members LIMIT 0");
+            if (!stmt) {
+                return Error{ErrorCode::NotFound, std::string("Column not found: ") + col};
+            }
+        }
+
+        const char* indices[] = {"idx_semantic_duplicate_groups_status",
+                                 "idx_semantic_duplicate_groups_canonical_document",
+                                 "idx_semantic_duplicate_group_members_group",
+                                 "idx_semantic_duplicate_group_members_document"};
+        for (const char* idx : indices) {
+            auto idxStmt =
+                db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?");
+            if (!idxStmt)
+                return idxStmt.error();
+            if (auto r = idxStmt.value().bind(1, idx); !r)
+                return r.error();
+            auto step = idxStmt.value().step();
+            if (!step)
+                return step.error();
+            if (!step.value()) {
+                return Error{ErrorCode::NotFound, std::string("Index not found: ") + idx};
+            }
+        }
+
+        return Result<void>();
+    });
+
+    REQUIRE(result.has_value());
+}

@@ -325,6 +325,51 @@ struct FeedbackEvent {
     void setCreatedAt(int64_t unixTime) { createdAt = yams::features::fromUnixTime(unixTime); }
 };
 
+struct SemanticDuplicateGroup {
+    int64_t id = 0;
+    std::string groupKey;
+    std::string algorithmVersion;
+    std::string status{"suggested"};
+    std::string reviewState{"pending"};
+    std::optional<int64_t> canonicalDocumentId;
+    int64_t memberCount = 0;
+    double maxPairScore = 0.0;
+    std::optional<double> threshold;
+    std::string evidenceJson;
+    std::chrono::sys_seconds createdAt;
+    std::chrono::sys_seconds updatedAt;
+    std::chrono::sys_seconds lastComputedAt;
+
+    void setCreatedAt(int64_t unixTime) { createdAt = yams::features::fromUnixTime(unixTime); }
+    void setUpdatedAt(int64_t unixTime) { updatedAt = yams::features::fromUnixTime(unixTime); }
+    void setLastComputedAt(int64_t unixTime) {
+        lastComputedAt = yams::features::fromUnixTime(unixTime);
+    }
+};
+
+struct SemanticDuplicateGroupMember {
+    int64_t id = 0;
+    int64_t groupId = 0;
+    int64_t documentId = 0;
+    std::string role{"duplicate"};
+    std::optional<double> similarityToCanonical;
+    std::optional<double> titleOverlap;
+    std::optional<double> pathOverlap;
+    std::optional<double> pairScore;
+    std::string decision{"unknown"};
+    std::string reason;
+    std::chrono::sys_seconds createdAt;
+    std::chrono::sys_seconds updatedAt;
+
+    void setCreatedAt(int64_t unixTime) { createdAt = yams::features::fromUnixTime(unixTime); }
+    void setUpdatedAt(int64_t unixTime) { updatedAt = yams::features::fromUnixTime(unixTime); }
+};
+
+struct SemanticDuplicateGroupDetail {
+    SemanticDuplicateGroup group;
+    std::vector<SemanticDuplicateGroupMember> members;
+};
+
 /**
  * @brief Saved search query
  */

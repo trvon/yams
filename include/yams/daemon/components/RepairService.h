@@ -148,6 +148,7 @@ private:
     RepairOperationResult cleanOrphanedChunks(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult repairBlockReferences(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult repairKnowledgeGraph(const RepairRequest& req, ProgressFn progress);
+    RepairOperationResult applySemanticDedupe(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult rebuildFts5Index(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult generateMissingEmbeddings(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult optimizeDatabase(bool dryRun, bool verbose, ProgressFn progress);

@@ -146,21 +146,6 @@ public:
     MCPServer(const MCPServer&) = delete;
     MCPServer& operator=(const MCPServer&) = delete;
 
-#if defined(YAMS_TESTING) && !defined(YAMS_WASI)
-    // Testing hooks: allow unit tests to intercept daemon client creation and
-    // validate the resolved socket path and dataDir without making a real connection.
-    void
-    setEnsureDaemonClientHook(std::function<Result<void>(const yams::daemon::ClientConfig&)> fn) {
-        testEnsureDaemonClientHook_ = std::move(fn);
-    }
-    void setDaemonClientSocketPathForTest(const std::filesystem::path& p) {
-        daemon_client_config_.socketPath = p;
-        daemon_client_shared_.reset();
-        daemon_client_ = nullptr;
-        yams::cli::cli_pool_reset_for_test();
-    }
-#endif
-
     // Public wrappers for HTTP mode (bridge to internal handlers)
     MessageResult handleRequestPublic(const nlohmann::json& request) {
         return handleRequest(request);
@@ -181,6 +166,13 @@ public:
 
     private:
         MCPServer& server_;
+    };
+
+    struct SuggestContextOverride {
+        std::string snapshotId;
+        std::string label;
+        std::string directoryPath;
+        std::vector<MCPSearchResponse::Result> supportingResults;
     };
 
 private:
@@ -249,6 +241,7 @@ private:
     yams::daemon::ClientConfig daemon_client_config_{};
     std::filesystem::path daemonSocketOverride_;
     std::function<Result<void>(const yams::daemon::ClientConfig&)> testEnsureDaemonClientHook_{};
+    std::vector<SuggestContextOverride> testSuggestContextOverrides_;
 
     // Service facades sharing daemon_client_shared_
     std::unique_ptr<app::services::RetrievalService> retrieval_svc_;
@@ -345,6 +338,27 @@ public:
 
 #if defined(YAMS_TESTING) && !defined(YAMS_WASI)
 public:
+    // Testing hooks: allow unit tests to intercept daemon client creation and
+    // validate the resolved socket path and dataDir without making a real connection.
+    void
+    setEnsureDaemonClientHook(std::function<Result<void>(const yams::daemon::ClientConfig&)> fn) {
+        testEnsureDaemonClientHook_ = std::move(fn);
+    }
+    void setDaemonClientSocketPathForTest(const std::filesystem::path& p) {
+        daemon_client_config_.socketPath = p;
+        daemon_client_shared_.reset();
+        daemon_client_ = nullptr;
+        yams::cli::cli_pool_reset_for_test();
+    }
+    void testSetDaemonClientDataDir(const std::filesystem::path& p) {
+        daemon_client_config_.dataDir = p;
+        daemon_client_shared_.reset();
+        daemon_client_ = nullptr;
+    }
+    void testSetSuggestContextOverrides(std::vector<SuggestContextOverride> overrides) {
+        testSuggestContextOverrides_ = std::move(overrides);
+    }
+
     // Public testing interface - only available when building tests
     json testListTools() { return listTools(); }
     json testListInternalTools() {
@@ -386,6 +400,14 @@ public:
     boost::asio::awaitable<Result<MCPStatsResponse>>
     testHandleGetStats(const MCPStatsRequest& req) {
         return handleGetStats(req);
+    }
+    boost::asio::awaitable<Result<MCPSuggestContextResponse>>
+    testHandleSuggestContext(const MCPSuggestContextRequest& req) {
+        return handleSuggestContext(req);
+    }
+    boost::asio::awaitable<Result<MCPSemanticDedupeResponse>>
+    testHandleSemanticDedupe(const MCPSemanticDedupeRequest& req) {
+        return handleSemanticDedupe(req);
     }
 
     void testSetEnsureDaemonClientHook(
@@ -450,6 +472,10 @@ private:
     handleListCollections(const MCPListCollectionsRequest& req);
     boost::asio::awaitable<Result<MCPListSnapshotsResponse>>
     handleListSnapshots(const MCPListSnapshotsRequest& req);
+    boost::asio::awaitable<Result<MCPSuggestContextResponse>>
+    handleSuggestContext(const MCPSuggestContextRequest& req);
+    boost::asio::awaitable<Result<MCPSemanticDedupeResponse>>
+    handleSemanticDedupe(const MCPSemanticDedupeRequest& req);
     boost::asio::awaitable<Result<MCPGraphResponse>> handleGraphQuery(const MCPGraphRequest& req);
     boost::asio::awaitable<Result<MCPGraphResponse>> handleKgIngest(const MCPGraphRequest& req);
 

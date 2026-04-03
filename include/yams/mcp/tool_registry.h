@@ -1007,6 +1007,93 @@ struct MCPListSnapshotsResponse {
     json toJson() const;
 };
 
+struct MCPSuggestContextRequest {
+    using RequestType = MCPSuggestContextRequest;
+
+    std::string query;
+    size_t limit = 5;
+    bool useSession = false;
+    std::string sessionName;
+    bool globalSearch = false;
+
+    static MCPSuggestContextRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPSuggestContextResponse {
+    using ResponseType = MCPSuggestContextResponse;
+
+    struct SupportingResult {
+        std::string id;
+        std::string hash;
+        std::string title;
+        std::string path;
+        float score = 0.0f;
+        std::string snippet;
+    };
+
+    struct Suggestion {
+        std::string snapshotId;
+        std::string label;
+        std::string directoryPath;
+        double score = 0.0;
+        size_t supportingResultCount = 0;
+        std::vector<SupportingResult> supportingResults;
+    };
+
+    std::string query;
+    size_t total = 0;
+    std::vector<Suggestion> suggestions;
+
+    static MCPSuggestContextResponse fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPSemanticDedupeRequest {
+    using RequestType = MCPSemanticDedupeRequest;
+
+    std::string groupKey;
+    std::vector<int64_t> documentIds;
+    size_t limit = 25;
+
+    static MCPSemanticDedupeRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPSemanticDedupeResponse {
+    using ResponseType = MCPSemanticDedupeResponse;
+
+    struct Member {
+        int64_t documentId = 0;
+        std::string role;
+        std::string decision;
+        std::string reason;
+        double similarityToCanonical = 0.0;
+        double titleOverlap = 0.0;
+        double pathOverlap = 0.0;
+        double pairScore = 0.0;
+    };
+
+    struct Group {
+        std::string groupKey;
+        std::string algorithmVersion;
+        std::string status;
+        std::string reviewState;
+        int64_t canonicalDocumentId = 0;
+        int64_t memberCount = 0;
+        double maxPairScore = 0.0;
+        double threshold = 0.0;
+        std::string evidenceJson;
+        std::vector<Member> members;
+    };
+
+    size_t total = 0;
+    std::vector<Group> groups;
+
+    static MCPSemanticDedupeResponse fromJson(const json& j);
+    json toJson() const;
+};
+
 // KG ingest sub-types (used by MCPGraphRequest when action == "ingest")
 struct MCPKgIngestNodeInput {
     std::string nodeKey;

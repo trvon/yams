@@ -33,6 +33,7 @@
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
 #if !defined(YAMS_WASI)
+#include <yams/config/config_helpers.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/migration.h>
@@ -47,6 +48,7 @@
 #include <boost/asio/system_executor.hpp>
 #include <boost/asio/this_coro.hpp>
 
+#include <cmath>
 #include <future>
 #include <iomanip>
 #include <mutex>
@@ -98,6 +100,50 @@ inline int setenv(const char* name, const char* value, int overwrite) {
 namespace yams::mcp {
 
 namespace {
+std::string normalizedTokenString(std::string value) {
+    for (char& c : value) {
+        if (!std::isalnum(static_cast<unsigned char>(c))) {
+            c = ' ';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+
+    std::ostringstream out;
+    std::istringstream in(value);
+    std::string token;
+    bool first = true;
+    while (in >> token) {
+        if (!first) {
+            out << ' ';
+        }
+        out << token;
+        first = false;
+    }
+    return out.str();
+}
+
+bool containsNormalizedToken(std::string_view haystack, std::string_view needle) {
+    if (needle.empty()) {
+        return false;
+    }
+    if (haystack == needle) {
+        return true;
+    }
+    std::string paddedHaystack;
+    paddedHaystack.reserve(haystack.size() + 2);
+    paddedHaystack.push_back(' ');
+    paddedHaystack.append(haystack);
+    paddedHaystack.push_back(' ');
+
+    std::string paddedNeedle;
+    paddedNeedle.reserve(needle.size() + 2);
+    paddedNeedle.push_back(' ');
+    paddedNeedle.append(needle);
+    paddedNeedle.push_back(' ');
+    return paddedHaystack.find(paddedNeedle) != std::string::npos;
+}
+
 static bool envTruthy(const char* val) {
     if (!val || !*val)
         return false;
@@ -4592,6 +4638,47 @@ void MCPServer::initializeToolRegistry() {
                      {"default", true}}}}}},
             "List available snapshots", "List Snapshots", readOnlyAnnotation);
 
+        toolRegistry_->registerTool<MCPSuggestContextRequest, MCPSuggestContextResponse>(
+            "suggest_context",
+            [this](const MCPSuggestContextRequest& req) { return handleSuggestContext(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"query", {{"type", "string"}, {"description", "Draft topic or query"}}},
+                   {"limit",
+                    {{"type", "integer"},
+                     {"description", "Maximum snapshot suggestions"},
+                     {"default", 5}}},
+                   {"use_session",
+                    {{"type", "boolean"},
+                     {"description", "Scope to the current or provided session"},
+                     {"default", false}}},
+                   {"session",
+                    {{"type", "string"},
+                     {"description", "Specific session name when use_session is enabled"}}},
+                   {"global_search",
+                    {{"type", "boolean"},
+                     {"description", "Bypass session isolation when session scoping is used"},
+                     {"default", false}}}}},
+                 {"required", json::array({"query"})}},
+            "Suggest relevant snapshots for a draft topic", "Suggest Context", readOnlyAnnotation);
+
+        toolRegistry_->registerTool<MCPSemanticDedupeRequest, MCPSemanticDedupeResponse>(
+            "semantic_dedupe",
+            [this](const MCPSemanticDedupeRequest& req) { return handleSemanticDedupe(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"group_key",
+                    {{"type", "string"}, {"description", "Specific semantic group key"}}},
+                   {"document_ids",
+                    {{"type", "array"},
+                     {"items", {{"type", "integer"}}},
+                     {"description", "Filter groups by member document ids"}}},
+                   {"limit",
+                    {{"type", "integer"},
+                     {"description", "Maximum groups to return"},
+                     {"default", 25}}}}}},
+            "Inspect persisted semantic duplicate groups", "Semantic Dedupe", readOnlyAnnotation);
+
         toolRegistry_->registerTool<MCPGraphRequest, MCPGraphResponse>(
             "graph", [this](const MCPGraphRequest& req) { return handleGraphQuery(req); },
             json{{"type", "object"},
@@ -5548,6 +5635,336 @@ void MCPServer::initializeToolRegistry() {
                                                   {"document_count", snap.documentCount}});
             }
             co_return response;
+        }
+
+        boost::asio::awaitable<Result<MCPSuggestContextResponse>> MCPServer::handleSuggestContext(
+            const MCPSuggestContextRequest& req) {
+#if defined(YAMS_WASI)
+            (void)req;
+            co_return Error{ErrorCode::NotSupported,
+                            "suggest_context is not supported on WASI build"};
+#else
+    auto query = normalizedTokenString(req.query);
+    if (query.empty()) {
+        co_return Error{ErrorCode::InvalidArgument, "query is required"};
+    }
+
+    MCPSuggestContextResponse response;
+    response.query = req.query;
+
+    if (!testSuggestContextOverrides_.empty()) {
+        for (const auto& overrideEntry : testSuggestContextOverrides_) {
+            MCPSuggestContextResponse::Suggestion suggestion;
+            suggestion.snapshotId = overrideEntry.snapshotId;
+            suggestion.label = overrideEntry.label;
+            suggestion.directoryPath = overrideEntry.directoryPath;
+            suggestion.supportingResultCount = overrideEntry.supportingResults.size();
+            for (const auto& supporting : overrideEntry.supportingResults) {
+                suggestion.score += supporting.score;
+                suggestion.supportingResults.push_back(MCPSuggestContextResponse::SupportingResult{
+                    supporting.id, supporting.hash, supporting.title, supporting.path,
+                    supporting.score, supporting.snippet});
+            }
+            response.suggestions.push_back(std::move(suggestion));
+        }
+        std::sort(response.suggestions.begin(), response.suggestions.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
+        if (response.suggestions.size() > req.limit) {
+            response.suggestions.resize(req.limit);
+        }
+        response.total = response.suggestions.size();
+        co_return response;
+    }
+
+    MCPSearchRequest searchReq;
+    searchReq.query = req.query;
+    searchReq.limit = std::max<size_t>(req.limit * 8, size_t{20});
+    searchReq.type = "hybrid";
+    searchReq.useSession = req.useSession;
+    searchReq.sessionName = req.sessionName;
+
+    auto searchResult = co_await handleSearchDocuments(searchReq);
+    if (!searchResult) {
+        co_return searchResult.error();
+    }
+
+    struct SnapshotAccumulator {
+        std::string snapshotId;
+        std::string label;
+        std::string directoryPath;
+        double score{0.0};
+        std::vector<MCPSuggestContextResponse::SupportingResult> supportingResults;
+    };
+
+    std::vector<std::string> hashes;
+    hashes.reserve(searchResult.value().results.size());
+    for (const auto& result : searchResult.value().results) {
+        if (!result.hash.empty()) {
+            hashes.push_back(result.hash);
+        }
+    }
+
+    std::unordered_map<std::string, metadata::DocumentInfo> docsByHash;
+    std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
+        metadataById;
+    if (!hashes.empty()) {
+        const auto dataDir = !daemon_client_config_.dataDir.empty() ? daemon_client_config_.dataDir
+                                                                    : yams::config::get_data_dir();
+        metadata::ConnectionPoolConfig poolConfig;
+        poolConfig.minConnections = 1;
+        poolConfig.maxConnections = 2;
+        poolConfig.readOnly = true;
+        auto pool =
+            std::make_shared<metadata::ConnectionPool>((dataDir / "yams.db").string(), poolConfig);
+        auto init = pool->initialize();
+        if (!init) {
+            co_return Error{ErrorCode::DatabaseError,
+                            "Failed to initialize metadata pool: " + init.error().message};
+        }
+        metadata::MetadataRepository repo(*pool);
+        auto docsResult = repo.batchGetDocumentsByHash(hashes);
+        if (!docsResult) {
+            co_return Error{ErrorCode::DatabaseError,
+                            "Failed to load documents for suggest_context: " +
+                                docsResult.error().message};
+        }
+        docsByHash = std::move(docsResult.value());
+
+        std::vector<int64_t> docIds;
+        docIds.reserve(docsByHash.size());
+        for (const auto& [hash, doc] : docsByHash) {
+            (void)hash;
+            docIds.push_back(doc.id);
+        }
+        auto mdResult = repo.getMetadataForDocuments(docIds);
+        if (!mdResult) {
+            co_return Error{ErrorCode::DatabaseError,
+                            "Failed to load metadata for suggest_context: " +
+                                mdResult.error().message};
+        }
+        metadataById = std::move(mdResult.value());
+    }
+
+    std::unordered_map<std::string, SnapshotAccumulator> accumulators;
+    for (const auto& result : searchResult.value().results) {
+        std::string snapshotId;
+        std::string snapshotLabel;
+        std::string directoryPath;
+
+        if (!result.hash.empty()) {
+            auto docIt = docsByHash.find(result.hash);
+            if (docIt != docsByHash.end()) {
+                auto mdIt = metadataById.find(docIt->second.id);
+                if (mdIt != metadataById.end()) {
+                    auto snapshotIt = mdIt->second.find("snapshot_id");
+                    if (snapshotIt != mdIt->second.end()) {
+                        snapshotId = snapshotIt->second.asString();
+                    }
+                    auto labelIt = mdIt->second.find("snapshot_label");
+                    if (labelIt != mdIt->second.end()) {
+                        snapshotLabel = labelIt->second.asString();
+                    }
+                    auto dirIt = mdIt->second.find("directory_path");
+                    if (dirIt != mdIt->second.end()) {
+                        directoryPath = dirIt->second.asString();
+                    }
+                }
+                if (directoryPath.empty()) {
+                    directoryPath = docIt->second.filePath;
+                }
+            }
+        }
+
+        if (snapshotId.empty()) {
+            continue;
+        }
+
+        auto& acc = accumulators[snapshotId];
+        if (acc.snapshotId.empty()) {
+            acc.snapshotId = snapshotId;
+        }
+        if (acc.label.empty()) {
+            acc.label = snapshotLabel;
+        }
+        if (acc.directoryPath.empty()) {
+            acc.directoryPath = directoryPath;
+        }
+
+        double score = static_cast<double>(result.score);
+        const auto labelNorm = normalizedTokenString(acc.label);
+        const auto dirNorm = normalizedTokenString(acc.directoryPath);
+        if (containsNormalizedToken(labelNorm, query)) {
+            score += 0.35;
+        }
+        if (containsNormalizedToken(dirNorm, query)) {
+            score += 0.2;
+        }
+        if (!result.title.empty() &&
+            containsNormalizedToken(normalizedTokenString(result.title), query)) {
+            score += 0.15;
+        }
+        if (!std::isfinite(score)) {
+            score = 0.0;
+        }
+
+        acc.score += score;
+        if (acc.supportingResults.size() < 3) {
+            acc.supportingResults.push_back(MCPSuggestContextResponse::SupportingResult{
+                result.id, result.hash, result.title, result.path, static_cast<float>(score),
+                result.snippet});
+        }
+    }
+
+    std::vector<MCPSuggestContextResponse::Suggestion> suggestions;
+    suggestions.reserve(accumulators.size());
+    for (auto& [snapshotId, acc] : accumulators) {
+        (void)snapshotId;
+        std::sort(acc.supportingResults.begin(), acc.supportingResults.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
+        suggestions.push_back(MCPSuggestContextResponse::Suggestion{
+            acc.snapshotId, acc.label, acc.directoryPath, acc.score, acc.supportingResults.size(),
+            std::move(acc.supportingResults)});
+    }
+
+    std::sort(suggestions.begin(), suggestions.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
+    if (suggestions.size() > req.limit) {
+        suggestions.resize(req.limit);
+    }
+
+    response.total = suggestions.size();
+    response.suggestions = std::move(suggestions);
+    co_return response;
+#endif
+        }
+
+        boost::asio::awaitable<Result<MCPSemanticDedupeResponse>> MCPServer::handleSemanticDedupe(
+            const MCPSemanticDedupeRequest& req) {
+#if defined(YAMS_WASI)
+            (void)req;
+            co_return Error{ErrorCode::NotSupported,
+                            "semantic_dedupe is not supported on WASI build"};
+#else
+    const auto dataDir = !daemon_client_config_.dataDir.empty() ? daemon_client_config_.dataDir
+                                                                : yams::config::get_data_dir();
+    metadata::ConnectionPoolConfig poolConfig;
+    poolConfig.minConnections = 1;
+    poolConfig.maxConnections = 2;
+    poolConfig.readOnly = true;
+    auto pool =
+        std::make_shared<metadata::ConnectionPool>((dataDir / "yams.db").string(), poolConfig);
+    auto init = pool->initialize();
+    if (!init) {
+        co_return Error{ErrorCode::DatabaseError,
+                        "Failed to initialize metadata pool: " + init.error().message};
+    }
+
+    metadata::MetadataRepository repo(*pool);
+    MCPSemanticDedupeResponse response;
+
+    std::vector<metadata::SemanticDuplicateGroupDetail> details;
+    if (!req.groupKey.empty()) {
+        auto groupResult = repo.getSemanticDuplicateGroupByKey(req.groupKey);
+        if (!groupResult) {
+            co_return Error{ErrorCode::DatabaseError, "Failed to load semantic duplicate group: " +
+                                                          groupResult.error().message};
+        }
+        if (groupResult.value().has_value()) {
+            std::vector<int64_t> docIds;
+            if (groupResult.value()->canonicalDocumentId.has_value()) {
+                docIds.push_back(*groupResult.value()->canonicalDocumentId);
+            }
+            auto grouped = repo.getSemanticDuplicateGroupsForDocuments(docIds);
+            if (!grouped) {
+                co_return Error{ErrorCode::DatabaseError,
+                                "Failed to load semantic duplicate members: " +
+                                    grouped.error().message};
+            }
+            auto it = grouped.value().find(docIds.empty() ? 0 : docIds.front());
+            if (it != grouped.value().end()) {
+                details.push_back(it->second);
+            } else {
+                details.push_back(metadata::SemanticDuplicateGroupDetail{*groupResult.value(), {}});
+            }
+        }
+    } else if (!req.documentIds.empty()) {
+        auto grouped = repo.getSemanticDuplicateGroupsForDocuments(req.documentIds);
+        if (!grouped) {
+            co_return Error{ErrorCode::DatabaseError,
+                            "Failed to load semantic duplicate groups: " + grouped.error().message};
+        }
+        std::unordered_set<std::string> seen;
+        for (auto& [docId, detail] : grouped.value()) {
+            (void)docId;
+            if (seen.insert(detail.group.groupKey).second) {
+                details.push_back(std::move(detail));
+            }
+        }
+    } else {
+        auto groupsResult = repo.listSemanticDuplicateGroups(static_cast<int>(req.limit));
+        if (!groupsResult) {
+            co_return Error{ErrorCode::DatabaseError, "Failed to list semantic duplicate groups: " +
+                                                          groupsResult.error().message};
+        }
+        std::vector<int64_t> canonicalIds;
+        canonicalIds.reserve(groupsResult.value().size());
+        for (const auto& group : groupsResult.value()) {
+            if (group.canonicalDocumentId.has_value()) {
+                canonicalIds.push_back(*group.canonicalDocumentId);
+            }
+        }
+        auto grouped = repo.getSemanticDuplicateGroupsForDocuments(canonicalIds);
+        if (!grouped) {
+            co_return Error{ErrorCode::DatabaseError,
+                            "Failed to load semantic duplicate group members: " +
+                                grouped.error().message};
+        }
+        std::unordered_set<std::string> seen;
+        for (const auto& group : groupsResult.value()) {
+            if (group.canonicalDocumentId.has_value()) {
+                auto it = grouped.value().find(*group.canonicalDocumentId);
+                if (it != grouped.value().end() && seen.insert(it->second.group.groupKey).second) {
+                    details.push_back(it->second);
+                    continue;
+                }
+            }
+            if (seen.insert(group.groupKey).second) {
+                details.push_back(metadata::SemanticDuplicateGroupDetail{group, {}});
+            }
+        }
+    }
+
+    std::sort(details.begin(), details.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.group.groupKey < rhs.group.groupKey;
+    });
+    if (details.size() > req.limit) {
+        details.resize(req.limit);
+    }
+
+    response.total = details.size();
+    response.groups.reserve(details.size());
+    for (const auto& detail : details) {
+        MCPSemanticDedupeResponse::Group group;
+        group.groupKey = detail.group.groupKey;
+        group.algorithmVersion = detail.group.algorithmVersion;
+        group.status = detail.group.status;
+        group.reviewState = detail.group.reviewState;
+        group.canonicalDocumentId = detail.group.canonicalDocumentId.value_or(0);
+        group.memberCount = detail.group.memberCount;
+        group.maxPairScore = detail.group.maxPairScore;
+        group.threshold = detail.group.threshold.value_or(0.0);
+        group.evidenceJson = detail.group.evidenceJson;
+        for (const auto& member : detail.members) {
+            group.members.push_back(MCPSemanticDedupeResponse::Member{
+                member.documentId, member.role, member.decision, member.reason,
+                member.similarityToCanonical.value_or(0.0), member.titleOverlap.value_or(0.0),
+                member.pathOverlap.value_or(0.0), member.pairScore.value_or(0.0)});
+        }
+        response.groups.push_back(std::move(group));
+    }
+
+    co_return response;
+#endif
         }
 
         // ---------------- Lifecycle helper implementations ----------------

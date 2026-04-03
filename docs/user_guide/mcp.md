@@ -119,7 +119,7 @@ The MCP server exposes **3 composite tools** to AI assistants. All operations ar
 
 | Tool | Purpose | Operations |
 |------|---------|------------|
-| `query` | Read-only pipeline | `search`, `grep`, `list`, `list_collections`, `list_snapshots`, `graph`, `get`, `status`, `describe` |
+| `query` | Read-only pipeline | `search`, `grep`, `list`, `list_collections`, `list_snapshots`, `suggest_context`, `semantic_dedupe`, `graph`, `get`, `status`, `describe` |
 | `execute` | Write batch | `add`, `update`, `delete`, `restore`, `download` |
 | `session` | Session lifecycle | `start`, `stop`, `pin`, `unpin`, `watch` |
 
@@ -165,6 +165,34 @@ Supports multi-step pipelines where each step can reference the previous result 
   }
 }
 ```
+
+**Context suggestion example:**
+```json
+{
+  "name": "query",
+  "arguments": {
+    "steps": [
+      {"op": "suggest_context", "params": {"query": "auth token refresh flow", "limit": 3}}
+    ]
+  }
+}
+```
+
+This returns ranked snapshot suggestions plus a few supporting search hits for each snapshot. Hosts can call it before a model turn to implement advisory proactive retrieval without leaving MCP's normal `tools/call` flow.
+
+**Semantic dedupe inspection example:**
+```json
+{
+  "name": "query",
+  "arguments": {
+    "steps": [
+      {"op": "semantic_dedupe", "params": {"limit": 10}}
+    ]
+  }
+}
+```
+
+This returns persisted semantic duplicate groups and their member documents so hosts can review duplicate suggestions without adding more CLI-only surfaces.
 
 ### execute — Write Batch
 
