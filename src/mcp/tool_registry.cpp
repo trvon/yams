@@ -323,7 +323,11 @@ MCPGrepRequest MCPGrepRequest::fromJson(const json& j) {
 json MCPGrepRequest::toJson() const {
     json j;
     j["pattern"] = pattern;
+    if (!name.empty())
+        j["name"] = name;
+    j["subpath"] = subpath;
     j["paths"] = paths;
+    j["include_patterns"] = includePatterns;
     j["ignore_case"] = ignoreCase;
     j["word"] = word;
     j["invert"] = invert;
@@ -343,6 +347,9 @@ json MCPGrepRequest::toJson() const {
         j["tags"] = tags;
     if (matchAllTags)
         j["match_all_tags"] = matchAllTags;
+    j["use_session"] = useSession;
+    if (!sessionName.empty())
+        j["session"] = sessionName;
     if (!cwd.empty())
         j["cwd"] = cwd;
     return j;

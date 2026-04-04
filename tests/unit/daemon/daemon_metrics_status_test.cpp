@@ -42,6 +42,7 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_database.h>
+#include <yams/version.hpp>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
@@ -6145,6 +6146,19 @@ TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",
         INFO("missing readiness key: " << key);
         REQUIRE(snap->readinessStates.count(std::string(key)) > 0);
     }
+}
+
+TEST_CASE("DaemonMetrics: snapshot reports generated build version", "[daemon][metrics][version]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_version_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    CHECK(snap->version == yams::version::string_v);
 }
 
 TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",

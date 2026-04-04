@@ -559,7 +559,7 @@ TEST_CASE("SearchTuner: adaptive observation trims KG under latency pressure",
     telemetry.topWindow = 25;
     telemetry.stages["kg"] = {.enabled = true,
                               .attempted = true,
-                              .contributed = false,
+                              .contributed = true,
                               .skipped = false,
                               .durationMs = 55.0,
                               .rawHitCount = 20,

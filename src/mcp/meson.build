@@ -32,16 +32,18 @@ if not get_option('wasi')
   yams_mcp_deps += dependency('OpenSSL')
 endif
 
+yams_mcp_inc_dirs = [include_directories('../../include'), generated_inc]
+
 yams_mcp_lib = static_library('yams_mcp',
   yams_mcp_sources,
-  include_directories: include_directories('../../include'),
+  include_directories: yams_mcp_inc_dirs,
   dependencies: yams_mcp_deps,
   install: true,
 )
 
 yams_mcp_dep = declare_dependency(
   link_with: yams_mcp_lib,
-  include_directories: include_directories('../../include'),
+  include_directories: yams_mcp_inc_dirs,
 )
 
 meson.override_dependency('yams_mcp', yams_mcp_dep)

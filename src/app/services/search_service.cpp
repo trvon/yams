@@ -969,6 +969,8 @@ public:
                 for (const auto& [name, micros] : resp.componentTimingMicros) {
                     resp.searchStats[std::string("timing_") + name + "_ms"] =
                         fmt::format("{:.3f}", static_cast<double>(micros) / 1000.0);
+                    resp.searchStats[std::string("timing_") + name + "_us"] =
+                        std::to_string(micros);
                 }
             }
             resp.searchStats["metadata_operations"] =

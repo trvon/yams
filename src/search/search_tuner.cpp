@@ -252,7 +252,7 @@ void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
     const double kgLatencyShare =
         kgStage ? shareOf(std::max(0.0, kgStage->durationMs), latencyMs) : 0.0;
     const double kgContributionRate =
-        kgStage && kgStage->enabled ? (kgStage->contributed ? 1.0 : 0.0) : 0.0;
+        kgFusion && kgFusion->enabled ? (kgFusion->contributedToFinal ? 1.0 : 0.0) : 0.0;
     const double kgScoreMassShare = kgFusion ? std::clamp(kgFusion->finalScoreMass, 0.0, 1.0) : 0.0;
     const double kgFinalDocShare =
         kgFusion ? shareOf(static_cast<double>(kgFusion->finalTopDocCount),

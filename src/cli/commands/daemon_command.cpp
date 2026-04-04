@@ -598,20 +598,6 @@ private:
         return out;
     }
 
-    static std::string shellEscapeArg(const std::string& value) {
-        std::string out;
-        out.reserve(value.size() + 2);
-        out.push_back('"');
-        for (char ch : value) {
-            if (ch == '\\' || ch == '"' || ch == '$' || ch == '`') {
-                out.push_back('\\');
-            }
-            out.push_back(ch);
-        }
-        out.push_back('"');
-        return out;
-    }
-
     static std::string runCommandCapture(const std::string& cmd) {
         std::string output;
         FILE* pipe = popen(cmd.c_str(), "r");
@@ -626,10 +612,47 @@ private:
         return output;
     }
 
+    static std::optional<std::string> readProcCommandLine(pid_t pid) {
+#if defined(__linux__)
+        std::ifstream input("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
+        if (!input.is_open()) {
+            return std::nullopt;
+        }
+
+        std::ostringstream buffer;
+        buffer << input.rdbuf();
+        std::string commandLine = buffer.str();
+        if (commandLine.empty()) {
+            return std::nullopt;
+        }
+
+        for (char& ch : commandLine) {
+            if (ch == '\0') {
+                ch = ' ';
+            }
+        }
+        while (!commandLine.empty() && commandLine.back() == ' ') {
+            commandLine.pop_back();
+        }
+        if (commandLine.empty()) {
+            return std::nullopt;
+        }
+        return commandLine;
+#else
+        (void)pid;
+        return std::nullopt;
+#endif
+    }
+
     static std::string describeProcess(pid_t pid) {
         if (pid <= 0) {
             return "";
         }
+
+        if (auto commandLine = readProcCommandLine(pid); commandLine && !commandLine->empty()) {
+            return std::to_string(pid) + " " + *commandLine;
+        }
+
         std::string cmd = "ps -o pid=,ppid=,stat=,command= -p " + std::to_string(pid);
         auto output = runCommandCapture(cmd);
         while (!output.empty() &&
@@ -654,39 +677,87 @@ private:
         return std::nullopt;
     }
 
+    static std::vector<pid_t> collectDaemonPidsForPattern(const std::string& pattern) {
+        std::vector<pid_t> pids;
+        std::set<pid_t> seen;
+        const std::regex daemonRegex(pattern);
+
+#if defined(__linux__)
+        std::error_code procEc;
+        for (const auto& entry : std::filesystem::directory_iterator("/proc", procEc)) {
+            if (procEc) {
+                break;
+            }
+
+            std::error_code entryEc;
+            if (!entry.is_directory(entryEc) || entryEc) {
+                continue;
+            }
+
+            const std::string name = entry.path().filename().string();
+            if (name.empty() || !std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+                    return std::isdigit(ch) != 0;
+                })) {
+                continue;
+            }
+
+            pid_t pid = -1;
+            try {
+                pid = static_cast<pid_t>(std::stol(name));
+            } catch (...) {
+                continue;
+            }
+
+            auto commandLine = readProcCommandLine(pid);
+            if (!commandLine || !std::regex_search(*commandLine, daemonRegex)) {
+                continue;
+            }
+
+            if (seen.insert(pid).second) {
+                pids.push_back(pid);
+            }
+        }
+
+        if (!pids.empty()) {
+            return pids;
+        }
+#endif
+
+        std::istringstream lines(runCommandCapture("ps -ax -o pid=,command="));
+        std::string line;
+        while (std::getline(lines, line)) {
+            const auto first = line.find_first_not_of(" \t");
+            if (first == std::string::npos) {
+                continue;
+            }
+
+            const auto pidEnd = line.find_first_of(" \t", first);
+            const std::string pidToken = line.substr(first, pidEnd - first);
+
+            pid_t pid = -1;
+            try {
+                pid = static_cast<pid_t>(std::stol(pidToken));
+            } catch (...) {
+                continue;
+            }
+
+            const std::string command =
+                pidEnd == std::string::npos ? std::string{} : line.substr(pidEnd + 1);
+            if (command.empty() || !std::regex_search(command, daemonRegex)) {
+                continue;
+            }
+
+            if (seen.insert(pid).second) {
+                pids.push_back(pid);
+            }
+        }
+
+        return pids;
+    }
+
     std::string resolveSocketPathForLiveDaemon(const std::string& preferredSocket,
                                                const std::string& pidFilePath,
                                                bool allowAnyDaemonFallback = true) {
-        const auto collectMatchingDaemonPids = [](const std::string& pattern) {
-            std::vector<pid_t> pids;
-            std::string cmd = "pgrep -f " + shellEscapeArg(pattern);
-            FILE* pipe = popen(cmd.c_str(), "r");
-            if (!pipe) {
-                return pids;
-            }
-            std::string output;
-            char buffer[64];
-            while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-                output.append(buffer);
-            }
-            pclose(pipe);
-            std::istringstream iss(output);
-            std::string line;
-            while (std::getline(iss, line)) {
-                if (line.empty()) {
-                    continue;
-                }
-                try {
-                    auto value = static_cast<pid_t>(std::stol(line));
-                    if (value > 0) {
-                        pids.push_back(value);
-                    }
-                } catch (...) {
-                }
-            }
-            return pids;
-        };
-
         std::vector<pid_t> candidatePids;
         std::set<pid_t> seen;
 
@@ -699,8 +770,8 @@ private:
         }
 
         if (!preferredSocket.empty()) {
-            for (auto pid : collectMatchingDaemonPids(std::string("yams-daemon.*") +
-                                                      escapeRegexLiteral(preferredSocket))) {
+            for (auto pid : collectDaemonPidsForPattern(std::string("yams-daemon.*") +
+                                                        escapeRegexLiteral(preferredSocket))) {
                 if (seen.insert(pid).second) {
                     candidatePids.push_back(pid);
                 }
@@ -708,7 +779,7 @@ private:
         }
 
         if (allowAnyDaemonFallback) {
-            for (auto pid : collectMatchingDaemonPids("yams-daemon")) {
+            for (auto pid : collectDaemonPidsForPattern("yams-daemon")) {
                 if (seen.insert(pid).second) {
                     candidatePids.push_back(pid);
                 }
@@ -740,36 +811,6 @@ private:
         return preferredSocket;
     }
 
-    static std::vector<pid_t> collectDaemonPidsForPattern(const std::string& pattern) {
-        std::vector<pid_t> pids;
-        std::string cmd = "pgrep -f " + shellEscapeArg(pattern);
-        FILE* pipe = popen(cmd.c_str(), "r");
-        if (!pipe) {
-            return pids;
-        }
-        std::string output;
-        char buffer[64];
-        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            output.append(buffer);
-        }
-        pclose(pipe);
-        std::istringstream iss(output);
-        std::string line;
-        while (std::getline(iss, line)) {
-            if (line.empty()) {
-                continue;
-            }
-            try {
-                auto value = static_cast<pid_t>(std::stol(line));
-                if (value > 0) {
-                    pids.push_back(value);
-                }
-            } catch (...) {
-            }
-        }
-        return pids;
-    }
-
     static bool isDaemonProcessRunningForSocket(const std::string& socketPath) {
         if (socketPath.empty()) {
             return false;
@@ -787,8 +828,7 @@ private:
     }
 
     static bool isAnyDaemonProcessRunning() {
-        int rc = std::system("pgrep -f \"yams-daemon\" >/dev/null 2>&1");
-        return rc == 0;
+        return !collectDaemonPidsForPattern("yams-daemon").empty();
     }
 #else
     std::string resolveSocketPathForLiveDaemon(const std::string& preferredSocket,

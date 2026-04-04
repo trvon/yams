@@ -606,33 +606,34 @@ public:
 
 protected:
     size_t runIteration() override {
-        constexpr size_t kBatchIterations = 250;
+        constexpr size_t kRunBatchIterations = 50000;
         TreeDiffer differ;
         DiffOptions options;
         options.compareSubtrees = true;
 
         // The current implementation short-circuits identical trees via root-hash comparison.
-        for (size_t i = 0; i < kBatchIterations; ++i) {
+        for (size_t i = 0; i < kRunBatchIterations; ++i) {
             auto result = differ.computeDiff(baseTree_, unchangedTree_, options);
             if (!result) {
                 return 0;
             }
         }
 
-        return kBatchIterations;
+        return kRunBatchIterations;
     }
 
     void collectCustomMetrics(std::map<std::string, double>& metrics) override {
         constexpr size_t kTrials = 25;
-        constexpr size_t kBatchIterations = 250;
+        constexpr size_t kMetricBatchIterations = 250;
+        constexpr size_t kChangedTreeTrials = 5;
         TreeDiffer differ;
 
         auto measureAverageMs = [&](const TreeNode& lhs, const TreeNode& rhs,
-                                    const DiffOptions& options) -> double {
+                                    const DiffOptions& options, size_t batchIterations) -> double {
             double totalMs = 0.0;
             for (size_t trial = 0; trial < kTrials; ++trial) {
                 auto start = std::chrono::high_resolution_clock::now();
-                for (size_t iter = 0; iter < kBatchIterations; ++iter) {
+                for (size_t iter = 0; iter < batchIterations; ++iter) {
                     auto result = differ.computeDiff(lhs, rhs, options);
                     if (!result) {
                         return 0.0;
@@ -643,20 +644,22 @@ protected:
                     std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() /
                     1000.0;
             }
-            return totalMs / static_cast<double>(kTrials * kBatchIterations);
+            return totalMs / static_cast<double>(kTrials * batchIterations);
         };
 
         // Measure the optimization on identical trees, which is the only current fast path.
         DiffOptions optOn;
         optOn.compareSubtrees = true;
-        const double durationOnMs = measureAverageMs(baseTree_, unchangedTree_, optOn);
+        const double durationOnMs =
+            measureAverageMs(baseTree_, unchangedTree_, optOn, kMetricBatchIterations);
         if (durationOnMs <= 0.0) {
             return;
         }
 
         DiffOptions optOff;
         optOff.compareSubtrees = false;
-        const double durationOffMs = measureAverageMs(baseTree_, unchangedTree_, optOff);
+        const double durationOffMs =
+            measureAverageMs(baseTree_, unchangedTree_, optOff, kMetricBatchIterations);
         if (durationOffMs <= 0.0) {
             return;
         }
@@ -665,20 +668,25 @@ protected:
         // cost.
         DiffOptions changedTreeOpts;
         changedTreeOpts.compareSubtrees = true;
-        auto changedStart = std::chrono::high_resolution_clock::now();
-        auto changedResult = differ.computeDiff(baseTree_, targetTree_, changedTreeOpts);
-        auto changedEnd = std::chrono::high_resolution_clock::now();
-        if (!changedResult) {
-            return;
+        double changedTreeMs = 0.0;
+        for (size_t i = 0; i < kChangedTreeTrials; ++i) {
+            auto changedStart = std::chrono::high_resolution_clock::now();
+            auto changedResult = differ.computeDiff(baseTree_, targetTree_, changedTreeOpts);
+            auto changedEnd = std::chrono::high_resolution_clock::now();
+            if (!changedResult) {
+                return;
+            }
+            changedTreeMs +=
+                std::chrono::duration_cast<std::chrono::microseconds>(changedEnd - changedStart)
+                    .count() /
+                1000.0;
         }
-        const double changedTreeMs =
-            std::chrono::duration_cast<std::chrono::microseconds>(changedEnd - changedStart)
-                .count() /
-            1000.0;
+        changedTreeMs /= static_cast<double>(kChangedTreeTrials);
 
         double speedup = durationOnMs > 0.0 ? durationOffMs / durationOnMs : 1.0;
 
-        metrics["batch_iterations"] = static_cast<double>(kBatchIterations);
+        metrics["batch_iterations"] = 50000.0;
+        metrics["metric_batch_iterations"] = static_cast<double>(kMetricBatchIterations);
         metrics["with_opt_ms"] = durationOnMs;
         metrics["without_opt_ms"] = durationOffMs;
         metrics["changed_tree_ms"] = changedTreeMs;

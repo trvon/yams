@@ -1411,6 +1411,7 @@ if catch2_dep.found()
       'unit/mcp/mcp_jsonrpc_roundtrip_catch2_test.cpp',
       'unit/mcp/mcp_protocol_version_features_test.cpp',
       'unit/mcp/mcp_prompts_catch2_test.cpp',
+      'unit/mcp/mcp_resource_read_catch2_test.cpp',
       'unit/mcp/mcp_request_routing_catch2_test.cpp',
       'unit/mcp/mcp_search_dto_catch2_test.cpp',
       'unit/mcp/mcp_tool_registry_dto_roundtrip_catch2_test.cpp',

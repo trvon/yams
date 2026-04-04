@@ -981,6 +981,8 @@ public:
         std::vector<WorkerBreakdown> workerBreakdowns;
         workerBreakdowns.reserve(workers);
 
+        constexpr size_t kHotContentBatchSize = 32;
+
         auto worker = [&]() {
             YAMS_ZONE_SCOPED_N("grep_service::worker_thread");
             std::uint64_t localDocsScanned = 0;
@@ -991,6 +993,8 @@ public:
             std::uint64_t localRegexScanNs = 0;
             std::uint64_t localContentRetrievalMs = 0;
             const auto workerStart = GrepClock::now();
+            std::vector<size_t> docBatchIndices;
+            docBatchIndices.reserve(kHotContentBatchSize);
 
             while (true) {
                 if (stop.load(std::memory_order_relaxed))
@@ -1003,306 +1007,354 @@ public:
                         break;
                     }
                 }
-                size_t i = next.fetch_add(1);
-                if (i >= docs.size())
+                docBatchIndices.clear();
+                while (docBatchIndices.size() < kHotContentBatchSize) {
+                    size_t i = next.fetch_add(1);
+                    if (i >= docs.size())
+                        break;
+                    docBatchIndices.push_back(i);
+                }
+                if (docBatchIndices.empty())
                     break;
-                const auto& doc = docs[i];
-                ++localDocsScanned;
 
-                // NOTE: path and include-pattern filtering already applied before
-                // docs entered the worker pool (lines ~663-702). No re-check needed.
-
-                bool forceCold = false;
-                if (metadataForceColdEnabled) {
-                    auto metadataIt = docMetadata.find(doc.id);
-                    if (metadataIt != docMetadata.end()) {
-                        const auto& metadataSnapshot = metadataIt->second;
-                        auto it = metadataSnapshot.find("force_cold");
-                        if (it != metadataSnapshot.end()) {
-                            auto v = it->second.asString();
-                            std::string lv = v;
-                            std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
-                            forceCold = (lv == "1" || lv == "true" || lv == "yes");
+                std::unordered_map<int64_t, metadata::DocumentContent> hotContentBatch;
+                if ((mode == Mode::HotOnly || mode == Mode::Auto) && ctx_.metadataRepo) {
+                    std::vector<int64_t> hotDocIds;
+                    hotDocIds.reserve(docBatchIndices.size());
+                    for (size_t docIndex : docBatchIndices) {
+                        const auto& candidate = docs[docIndex];
+                        const bool candidateIsHot = candidate.contentExtracted ||
+                                                    (!candidate.mimeType.empty() &&
+                                                     candidate.mimeType.rfind("text/", 0) == 0);
+                        bool forceCold = false;
+                        if (metadataForceColdEnabled) {
+                            auto metadataIt = docMetadata.find(candidate.id);
+                            if (metadataIt != docMetadata.end()) {
+                                const auto& metadataSnapshot = metadataIt->second;
+                                auto it = metadataSnapshot.find("force_cold");
+                                if (it != metadataSnapshot.end()) {
+                                    auto v = it->second.asString();
+                                    std::string lv = v;
+                                    std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
+                                    forceCold = (lv == "1" || lv == "true" || lv == "yes");
+                                }
+                                if (!forceCold && metadataSnapshot.find("tag:force_cold") !=
+                                                      metadataSnapshot.end()) {
+                                    forceCold = true;
+                                }
+                            }
                         }
-                        if (!forceCold &&
-                            metadataSnapshot.find("tag:force_cold") != metadataSnapshot.end()) {
-                            forceCold = true;
+                        if (candidateIsHot && !forceCold) {
+                            hotDocIds.push_back(candidate.id);
+                        }
+                    }
+                    if (!hotDocIds.empty()) {
+                        const auto batchStart = GrepClock::now();
+                        auto batchResult = retryMetadataOp(
+                            [&]() { return ctx_.metadataRepo->batchGetContent(hotDocIds); }, 4,
+                            std::chrono::milliseconds(25), &metadataTelemetry);
+                        localContentRetrievalMs += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(GrepClock::now() -
+                                                                                  batchStart)
+                                .count());
+                        if (batchResult) {
+                            hotContentBatch = std::move(batchResult.value());
                         }
                     }
                 }
 
-                auto isWordCharExtended = [](char c) -> bool {
-                    // Treat '-' as part of a word to avoid counting 'foo' in 'foo-bar'
-                    return std::isalnum(static_cast<unsigned char>(c)) || c == '-';
-                };
-                auto boundaryOk = [&](const std::string& line, size_t pos, size_t len) -> bool {
-                    if (!req.word)
-                        return true;
-                    bool beforeOk = (pos == 0) || !isWordCharExtended(line[pos - 1]);
-                    bool afterOk =
-                        (pos + len >= line.size()) || !isWordCharExtended(line[pos + len]);
-                    return beforeOk && afterOk;
-                };
-                auto countMatches = [&](const std::string& line) -> size_t {
-                    size_t count = 0;
+                for (size_t docIndex : docBatchIndices) {
+                    const auto& doc = docs[docIndex];
+                    ++localDocsScanned;
 
-                    // Two-phase matching: BMH literal pre-filter → regex validation
-                    if (bmhSearcher && !req.literalText) {
-                        if (bmhSearcher->find(line) == std::string::npos) {
-                            ++localBmhPrefilterSkips;
-                            return 0;
+                    // NOTE: path and include-pattern filtering already applied before
+                    // docs entered the worker pool (lines ~663-702). No re-check needed.
+
+                    bool forceCold = false;
+                    if (metadataForceColdEnabled) {
+                        auto metadataIt = docMetadata.find(doc.id);
+                        if (metadataIt != docMetadata.end()) {
+                            const auto& metadataSnapshot = metadataIt->second;
+                            auto it = metadataSnapshot.find("force_cold");
+                            if (it != metadataSnapshot.end()) {
+                                auto v = it->second.asString();
+                                std::string lv = v;
+                                std::transform(lv.begin(), lv.end(), lv.begin(), ::tolower);
+                                forceCold = (lv == "1" || lv == "true" || lv == "yes");
+                            }
+                            if (!forceCold &&
+                                metadataSnapshot.find("tag:force_cold") != metadataSnapshot.end()) {
+                                forceCold = true;
+                            }
                         }
                     }
 
-                    if (req.literalText && bmhSearcher) {
-                        size_t from = 0;
-                        while (true) {
-                            auto pos = bmhSearcher->find(line, from);
-                            if (pos == std::string::npos)
-                                break;
-                            if (boundaryOk(line, pos, rawPattern.size()))
-                                ++count;
-                            from = pos + 1;
-                        }
-                        return count;
-                    }
+                    auto isWordCharExtended = [](char c) -> bool {
+                        // Treat '-' as part of a word to avoid counting 'foo' in 'foo-bar'
+                        return std::isalnum(static_cast<unsigned char>(c)) || c == '-';
+                    };
+                    auto boundaryOk = [&](const std::string& line, size_t pos, size_t len) -> bool {
+                        if (!req.word)
+                            return true;
+                        bool beforeOk = (pos == 0) || !isWordCharExtended(line[pos - 1]);
+                        bool afterOk =
+                            (pos + len >= line.size()) || !isWordCharExtended(line[pos + len]);
+                        return beforeOk && afterOk;
+                    };
+                    auto countMatches = [&](const std::string& line) -> size_t {
+                        size_t count = 0;
 
-                    // Regex path: full pattern matching (after literal pre-filter if
-                    // applicable)
-                    const char* lineData = line.c_str();
-                    const size_t lineLen = line.size();
-                    size_t searchOffset = 0;
-                    const auto regexScanStart = GrepClock::now();
-                    while (searchOffset <= lineLen) {
-                        ++localRegexSearchCalls;
-                        auto m = re.findNext(lineData, lineLen, searchOffset);
-                        if (!m)
-                            break;
-                        if (boundaryOk(line, m->position, m->length))
-                            ++count;
-                        searchOffset = m->position + std::max<size_t>(m->length, 1);
-                    }
-                    localRegexScanNs += static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(GrepClock::now() -
-                                                                             regexScanStart)
-                            .count());
-                    return count;
-                };
+                        // Two-phase matching: BMH literal pre-filter → regex validation
+                        if (bmhSearcher && !req.literalText) {
+                            if (bmhSearcher->find(line) == std::string::npos) {
+                                ++localBmhPrefilterSkips;
+                                return 0;
+                            }
+                        }
 
-                GrepFileResult fileResult;
-                fileResult.file = doc.filePath;
-                fileResult.fileName = std::filesystem::path(doc.filePath).filename().string();
-                fileResult.matchCount = 0;
-                size_t ln_counter = 0;
-                auto onLine = [&](const std::string& line) {
-                    if (stop.load(std::memory_order_relaxed))
-                        return;
-                    ++ln_counter;
-                    if (budget_ms > 0 && (ln_counter % 64 == 0)) {
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            GrepClock::now() - start_time);
-                        if (elapsed.count() >= budget_ms) {
-                            stop.store(true, std::memory_order_relaxed);
-                            return;
+                        if (req.literalText && bmhSearcher) {
+                            size_t from = 0;
+                            while (true) {
+                                auto pos = bmhSearcher->find(line, from);
+                                if (pos == std::string::npos)
+                                    break;
+                                if (boundaryOk(line, pos, rawPattern.size()))
+                                    ++count;
+                                from = pos + 1;
+                            }
+                            return count;
                         }
-                    }
-                    size_t n = countMatches(line);
-                    bool matched = (n > 0);
-                    if (req.invert)
-                        matched = !matched;
-                    if (!matched)
-                        return;
 
-                    if (max_total_results > 0) {
-                        const size_t limit = static_cast<size_t>(max_total_results);
-                        size_t prev = totalMatches.fetch_add(n, std::memory_order_relaxed);
-                        if (prev >= limit) {
-                            totalMatches.fetch_sub(n, std::memory_order_relaxed);
-                            stop.store(true, std::memory_order_relaxed);
-                            return;
-                        }
-                        const size_t remaining = limit - prev;
-                        if (n > remaining) {
-                            const size_t overflow = n - remaining;
-                            totalMatches.fetch_sub(overflow, std::memory_order_relaxed);
-                            n = remaining;
-                        }
-                        if (n == 0) {
-                            stop.store(true, std::memory_order_relaxed);
-                            return;
-                        }
-                        if ((prev + n) >= limit) {
-                            stop.store(true, std::memory_order_relaxed);
-                        }
-                    }
-
-                    fileResult.matchCount += n;
-                    if (req.count)
-                        return;
-                    GrepMatch gm;
-                    gm.matchType = req.literalText ? std::string("literal") : std::string("regex");
-                    gm.confidence = 1.0;
-                    if (req.lineNumbers)
-                        gm.lineNumber = ln_counter;
-                    gm.line = yams::common::sanitizeUtf8(line);
-                    if (!req.invert && !req.literalText) {
+                        // Regex path: full pattern matching (after literal pre-filter if
+                        // applicable)
+                        const char* lineData = line.c_str();
+                        const size_t lineLen = line.size();
+                        size_t searchOffset = 0;
                         const auto regexScanStart = GrepClock::now();
-                        ++localRegexSearchCalls;
-                        auto firstMatch = re.findFirst(line);
-                        if (firstMatch) {
-                            gm.columnStart = firstMatch->position + 1;
-                            gm.columnEnd = gm.columnStart + firstMatch->length;
+                        while (searchOffset <= lineLen) {
+                            ++localRegexSearchCalls;
+                            auto m = re.findNext(lineData, lineLen, searchOffset);
+                            if (!m)
+                                break;
+                            if (boundaryOk(line, m->position, m->length))
+                                ++count;
+                            searchOffset = m->position + std::max<size_t>(m->length, 1);
                         }
                         localRegexScanNs += static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::nanoseconds>(GrepClock::now() -
                                                                                  regexScanStart)
                                 .count());
-                    } else if (!req.invert && req.literalText) {
-                        auto pos = line.find(rawPattern);
-                        if (pos != std::string::npos) {
-                            gm.columnStart = pos + 1;
-                            gm.columnEnd = gm.columnStart + rawPattern.size();
-                        }
-                    }
-                    fileResult.matches.push_back(std::move(gm));
-                };
+                        return count;
+                    };
 
-                // Hot path: process extracted text line-by-line without touching CAS
-                if (mode == Mode::HotOnly && !forceCold) {
-                    if (ctx_.metadataRepo) {
-                        auto c =
-                            retryMetadataOp([&]() { return ctx_.metadataRepo->getContent(doc.id); },
-                                            4, std::chrono::milliseconds(25), &metadataTelemetry);
-                        if (c && c.value().has_value()) {
-                            localBytesScanned += c.value()->contentText.size();
-                            std::istringstream iss(c.value()->contentText);
-                            std::string line;
-                            while (std::getline(iss, line)) {
-                                if (!line.empty() && line.back() == '\r')
-                                    line.pop_back();
-                                onLine(line);
-                                if (req.maxCount > 0 &&
-                                    static_cast<int>(fileResult.matchCount) >= req.maxCount)
+                    GrepFileResult fileResult;
+                    fileResult.file = doc.filePath;
+                    fileResult.fileName = std::filesystem::path(doc.filePath).filename().string();
+                    fileResult.matchCount = 0;
+                    size_t ln_counter = 0;
+                    auto onLine = [&](const std::string& line) {
+                        if (stop.load(std::memory_order_relaxed))
+                            return;
+                        ++ln_counter;
+                        if (budget_ms > 0 && (ln_counter % 64 == 0)) {
+                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                GrepClock::now() - start_time);
+                            if (elapsed.count() >= budget_ms) {
+                                stop.store(true, std::memory_order_relaxed);
+                                return;
+                            }
+                        }
+                        size_t n = countMatches(line);
+                        bool matched = (n > 0);
+                        if (req.invert)
+                            matched = !matched;
+                        if (!matched)
+                            return;
+
+                        if (max_total_results > 0) {
+                            const size_t limit = static_cast<size_t>(max_total_results);
+                            size_t prev = totalMatches.fetch_add(n, std::memory_order_relaxed);
+                            if (prev >= limit) {
+                                totalMatches.fetch_sub(n, std::memory_order_relaxed);
+                                stop.store(true, std::memory_order_relaxed);
+                                return;
+                            }
+                            const size_t remaining = limit - prev;
+                            if (n > remaining) {
+                                const size_t overflow = n - remaining;
+                                totalMatches.fetch_sub(overflow, std::memory_order_relaxed);
+                                n = remaining;
+                            }
+                            if (n == 0) {
+                                stop.store(true, std::memory_order_relaxed);
+                                return;
+                            }
+                            if ((prev + n) >= limit) {
+                                stop.store(true, std::memory_order_relaxed);
+                            }
+                        }
+
+                        fileResult.matchCount += n;
+                        if (req.count)
+                            return;
+                        GrepMatch gm;
+                        gm.matchType =
+                            req.literalText ? std::string("literal") : std::string("regex");
+                        gm.confidence = 1.0;
+                        if (req.lineNumbers)
+                            gm.lineNumber = ln_counter;
+                        gm.line = yams::common::sanitizeUtf8(line);
+                        if (!req.invert && !req.literalText) {
+                            const auto regexScanStart = GrepClock::now();
+                            ++localRegexSearchCalls;
+                            auto firstMatch = re.findFirst(line);
+                            if (firstMatch) {
+                                gm.columnStart = firstMatch->position + 1;
+                                gm.columnEnd = gm.columnStart + firstMatch->length;
+                            }
+                            localRegexScanNs += static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    GrepClock::now() - regexScanStart)
+                                    .count());
+                        } else if (!req.invert && req.literalText) {
+                            auto pos = line.find(rawPattern);
+                            if (pos != std::string::npos) {
+                                gm.columnStart = pos + 1;
+                                gm.columnEnd = gm.columnStart + rawPattern.size();
+                            }
+                        }
+                        fileResult.matches.push_back(std::move(gm));
+                    };
+
+                    // Auto prefers metadata-backed hot content and falls back to CAS when needed.
+                    auto hotIt = hotContentBatch.find(doc.id);
+                    if ((mode == Mode::HotOnly || mode == Mode::Auto) && !forceCold &&
+                        hotIt != hotContentBatch.end()) {
+                        localBytesScanned += hotIt->second.contentText.size();
+                        std::istringstream iss(hotIt->second.contentText);
+                        std::string line;
+                        while (std::getline(iss, line)) {
+                            if (!line.empty() && line.back() == '\r')
+                                line.pop_back();
+                            onLine(line);
+                            if (req.maxCount > 0 &&
+                                static_cast<int>(fileResult.matchCount) >= req.maxCount)
+                                break;
+                            if (budget_ms > 0) {
+                                auto e2 = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    GrepClock::now() - start_time);
+                                if (e2.count() >= budget_ms) {
+                                    stop.store(true, std::memory_order_relaxed);
                                     break;
-                                if (budget_ms > 0) {
-                                    auto e2 = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        GrepClock::now() - start_time);
-                                    if (e2.count() >= budget_ms) {
-                                        stop.store(true, std::memory_order_relaxed);
-                                        break;
-                                    }
                                 }
                             }
-                        } else {
-                            continue;
                         }
                     } else {
-                        continue;
-                    }
-                } else {
-                    // Cold path: retrieve content into memory and scan directly
-                    // (E) retrieveBytes avoids temp file create/write/read/delete per doc
-                    // (F) Direct pointer-walking with SIMD newline scanner avoids
-                    //     streambuf/ostream abstraction overhead entirely
-                    if (budget_ms > 0) {
-                        auto e3 = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            GrepClock::now() - start_time);
-                        if (e3.count() >= budget_ms) {
-                            stop.store(true, std::memory_order_relaxed);
-                            break;
-                        }
-                    }
-                    const auto retrievalStart = GrepClock::now();
-                    auto bytesResult = ctx_.store->retrieveBytes(doc.sha256Hash);
-                    localContentRetrievalMs += static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::milliseconds>(GrepClock::now() -
-                                                                              retrievalStart)
-                            .count());
-                    if (!bytesResult)
-                        continue;
-                    const auto& bytes = bytesResult.value();
-                    const char* data = reinterpret_cast<const char*>(bytes.data());
-                    const size_t dataSize = bytes.size();
-                    localBytesScanned += dataSize;
-
-                    // Walk the buffer with SIMD newline scanning, calling onLine per line
-                    const char* p = data;
-                    const char* end = data + dataSize;
-                    std::string lineBuffer;
-                    while (p < end) {
-                        if (stop.load(std::memory_order_relaxed))
-                            break;
-                        size_t remaining = static_cast<size_t>(end - p);
-                        size_t nlOffset = SimdNewlineScanner::findNewline(p, remaining);
-
-                        const char* lineEnd = (nlOffset < remaining) ? (p + nlOffset) : end;
-                        size_t lineLen = static_cast<size_t>(lineEnd - p);
-
-                        // Strip trailing CR for CRLF line endings
-                        size_t trimLen = lineLen;
-                        if (trimLen > 0 && p[trimLen - 1] == '\r')
-                            --trimLen;
-
-                        // Check if any CRs remain (bare CRs in middle of line)
-                        if (trimLen > 0 && memchr(p, '\r', trimLen) != nullptr) {
-                            // Rare path: strip embedded CRs
-                            lineBuffer.clear();
-                            const char* q = p;
-                            const char* segEnd = p + trimLen;
-                            while (q < segEnd) {
-                                const char* r = static_cast<const char*>(
-                                    memchr(q, '\r', static_cast<size_t>(segEnd - q)));
-                                if (!r) {
-                                    lineBuffer.append(q, segEnd);
-                                    break;
-                                }
-                                lineBuffer.append(q, r);
-                                q = r + 1;
+                        // Cold path: retrieve content into memory and scan directly
+                        // (E) retrieveBytes avoids temp file create/write/read/delete per doc
+                        // (F) Direct pointer-walking with SIMD newline scanner avoids
+                        //     streambuf/ostream abstraction overhead entirely
+                        if (budget_ms > 0) {
+                            auto e3 = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                GrepClock::now() - start_time);
+                            if (e3.count() >= budget_ms) {
+                                stop.store(true, std::memory_order_relaxed);
+                                break;
                             }
-                            onLine(lineBuffer);
-                        } else {
-                            // Fast path: zero-copy string_view → string for onLine
-                            std::string line(p, trimLen);
-                            onLine(line);
                         }
+                        const auto retrievalStart = GrepClock::now();
+                        auto bytesResult = ctx_.store->retrieveBytes(doc.sha256Hash);
+                        localContentRetrievalMs += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(GrepClock::now() -
+                                                                                  retrievalStart)
+                                .count());
+                        if (!bytesResult)
+                            continue;
+                        const auto& bytes = bytesResult.value();
+                        const char* data = reinterpret_cast<const char*>(bytes.data());
+                        const size_t dataSize = bytes.size();
+                        localBytesScanned += dataSize;
 
-                        if (req.maxCount > 0 &&
-                            static_cast<int>(fileResult.matchCount) >= req.maxCount)
-                            break;
+                        // Walk the buffer with SIMD newline scanning, calling onLine per line
+                        const char* p = data;
+                        const char* end = data + dataSize;
+                        std::string lineBuffer;
+                        while (p < end) {
+                            if (stop.load(std::memory_order_relaxed))
+                                break;
+                            size_t remaining = static_cast<size_t>(end - p);
+                            size_t nlOffset = SimdNewlineScanner::findNewline(p, remaining);
 
-                        // Advance past LF (or to end if no newline found)
-                        p = (nlOffset < remaining) ? (p + nlOffset + 1) : end;
+                            const char* lineEnd = (nlOffset < remaining) ? (p + nlOffset) : end;
+                            size_t lineLen = static_cast<size_t>(lineEnd - p);
+
+                            // Strip trailing CR for CRLF line endings
+                            size_t trimLen = lineLen;
+                            if (trimLen > 0 && p[trimLen - 1] == '\r')
+                                --trimLen;
+
+                            // Check if any CRs remain (bare CRs in middle of line)
+                            if (trimLen > 0 && memchr(p, '\r', trimLen) != nullptr) {
+                                // Rare path: strip embedded CRs
+                                lineBuffer.clear();
+                                const char* q = p;
+                                const char* segEnd = p + trimLen;
+                                while (q < segEnd) {
+                                    const char* r = static_cast<const char*>(
+                                        memchr(q, '\r', static_cast<size_t>(segEnd - q)));
+                                    if (!r) {
+                                        lineBuffer.append(q, segEnd);
+                                        break;
+                                    }
+                                    lineBuffer.append(q, r);
+                                    q = r + 1;
+                                }
+                                onLine(lineBuffer);
+                            } else {
+                                // Fast path: zero-copy string_view → string for onLine
+                                std::string line(p, trimLen);
+                                onLine(line);
+                            }
+
+                            if (req.maxCount > 0 &&
+                                static_cast<int>(fileResult.matchCount) >= req.maxCount)
+                                break;
+
+                            // Advance past LF (or to end if no newline found)
+                            p = (nlOffset < remaining) ? (p + nlOffset + 1) : end;
+                        }
                     }
-                }
 
-                // Early exit shaping for files-only/paths-only
-                if (req.filesWithMatches || req.pathsOnly || req.filesWithoutMatch) {
-                    // Defer formatting to caller; we just track counts and file sets below
-                }
-
-                localLinesScanned += ln_counter;
-
-                std::lock_guard<std::mutex> lk(outMutex);
-                if (fileResult.matchCount > 0) {
-                    spdlog::debug("[GrepService] matched '{}' count={}", fileResult.file,
-                                  fileResult.matchCount);
-                    if (max_total_results <= 0) {
-                        totalMatches += static_cast<size_t>(fileResult.matchCount);
+                    // Early exit shaping for files-only/paths-only
+                    if (req.filesWithMatches || req.pathsOnly || req.filesWithoutMatch) {
+                        // Defer formatting to caller; we just track counts and file sets below
                     }
-                    regexMatches += static_cast<size_t>(fileResult.matchCount);
-                    filesWith.insert(fileResult.file);
-                    if (!req.filesWithMatches && !req.pathsOnly)
-                        outResults.push_back(std::move(fileResult));
 
-                    // PERFORMANCE: Stop early if we've hit the result limit
-                    if (max_total_results > 0 &&
-                        totalMatches >= static_cast<size_t>(max_total_results)) {
-                        spdlog::info("[GrepService] Hit result limit ({} matches), stopping early",
-                                     totalMatches.load());
-                        stop.store(true, std::memory_order_relaxed);
+                    localLinesScanned += ln_counter;
+
+                    std::lock_guard<std::mutex> lk(outMutex);
+                    if (fileResult.matchCount > 0) {
+                        spdlog::debug("[GrepService] matched '{}' count={}", fileResult.file,
+                                      fileResult.matchCount);
+                        if (max_total_results <= 0) {
+                            totalMatches += static_cast<size_t>(fileResult.matchCount);
+                        }
+                        regexMatches += static_cast<size_t>(fileResult.matchCount);
+                        filesWith.insert(fileResult.file);
+                        if (!req.filesWithMatches && !req.pathsOnly)
+                            outResults.push_back(std::move(fileResult));
+
+                        // PERFORMANCE: Stop early if we've hit the result limit
+                        if (max_total_results > 0 &&
+                            totalMatches >= static_cast<size_t>(max_total_results)) {
+                            spdlog::info(
+                                "[GrepService] Hit result limit ({} matches), stopping early",
+                                totalMatches.load());
+                            stop.store(true, std::memory_order_relaxed);
+                        }
+                    } else {
+                        filesWithout.insert(doc.filePath);
                     }
-                } else {
-                    filesWithout.insert(doc.filePath);
                 }
             }
 

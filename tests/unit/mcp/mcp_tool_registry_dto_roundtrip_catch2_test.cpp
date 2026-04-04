@@ -79,6 +79,45 @@ TEST_CASE("MCP DTO - GrepResponse preserves structured matches",
     CHECK(back.outputTruncated);
 }
 
+TEST_CASE("MCP DTO - GrepRequest preserves session and selector fields",
+          "[mcp][dto][grep][request][catch2]") {
+    yams::mcp::MCPGrepRequest req;
+    req.pattern = "TODO";
+    req.name = "src";
+    req.subpath = false;
+    req.paths = {"src/**/*.cpp"};
+    req.includePatterns = {"src/**", "include/**"};
+    req.ignoreCase = true;
+    req.lineNumbers = true;
+    req.useSession = true;
+    req.sessionName = "bench-session";
+    req.tags = {"code"};
+    req.matchAllTags = true;
+    req.cwd = "/tmp/worktree";
+
+    json j = req.toJson();
+    CHECK(j["name"] == "src");
+    CHECK(j["subpath"] == false);
+    REQUIRE(j.contains("include_patterns"));
+    CHECK(j["include_patterns"] == json::array({"src/**", "include/**"}));
+    CHECK(j["use_session"].get<bool>());
+    CHECK(j["session"] == "bench-session");
+
+    auto back = yams::mcp::MCPGrepRequest::fromJson(j);
+    CHECK(back.pattern == "TODO");
+    CHECK(back.name == "src");
+    CHECK(back.subpath == false);
+    CHECK(back.paths == std::vector<std::string>{"src/**/*.cpp"});
+    CHECK(back.includePatterns == std::vector<std::string>{"src/**", "include/**"});
+    CHECK(back.ignoreCase);
+    CHECK(back.lineNumbers);
+    CHECK(back.useSession);
+    CHECK(back.sessionName == "bench-session");
+    CHECK(back.tags == std::vector<std::string>{"code"});
+    CHECK(back.matchAllTags);
+    CHECK(back.cwd == "/tmp/worktree");
+}
+
 TEST_CASE("MCP DTO - RetrieveDocumentResponse includes content truncation metadata",
           "[mcp][dto][get][truncation][catch2]") {
     yams::mcp::MCPRetrieveDocumentResponse resp;
