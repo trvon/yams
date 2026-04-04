@@ -25,6 +25,7 @@ struct BenchmarkCliConfig {
 
     // Selection
     std::vector<std::string> filters;
+    std::vector<std::string> exactFilters;
 
     // Output
     std::filesystem::path outDir{"bench_results"};
@@ -48,6 +49,8 @@ inline void printBenchmarkUsage(std::string_view exeName) {
               << "  --verbose             Enable per-benchmark progress output (default)\n"
               << "  --no-memory           Disable memory tracking\n"
               << "  --filter PATTERN       Run only benchmarks whose name contains PATTERN\n"
+              << "                         (repeatable)\n"
+              << "  --exact-filter NAME    Run only benchmarks whose name exactly matches NAME\n"
               << "                         (repeatable)\n"
               << "  --out-dir DIR          Output directory (default: bench_results)\n"
               << "  --output FILE          Append JSONL results to FILE\n"
@@ -105,6 +108,8 @@ inline BenchmarkCliConfig parseBenchmarkArgs(int argc, char** argv) {
             cfg.iterations = toSizeT(needValue("--iterations"));
         } else if (arg == "--filter") {
             cfg.filters.emplace_back(needValue("--filter"));
+        } else if (arg == "--exact-filter") {
+            cfg.exactFilters.emplace_back(needValue("--exact-filter"));
         } else if (arg == "--out-dir") {
             cfg.outDir = std::filesystem::path(needValue("--out-dir"));
         } else if (arg == "--output") {
@@ -131,6 +136,23 @@ inline bool matchesAnyFilter(std::string_view name, const std::vector<std::strin
         }
     }
     return false;
+}
+
+inline bool matchesAnyFilter(std::string_view name, const std::vector<std::string>& filters,
+                             const std::vector<std::string>& exactFilters) {
+    if (!exactFilters.empty()) {
+        for (const auto& f : exactFilters) {
+            if (!f.empty() && name == f) {
+                return true;
+            }
+        }
+    }
+
+    if (!filters.empty()) {
+        return matchesAnyFilter(name, filters);
+    }
+
+    return exactFilters.empty();
 }
 
 inline std::string iso8601UtcNow() {
