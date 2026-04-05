@@ -197,6 +197,37 @@ TEST_CASE("describeOp - write ops have correct category", "[mcp][codemode][descr
     }
 }
 
+TEST_CASE("describeOp - add schema documents single-path semantics and supported fields",
+          "[mcp][codemode][describe]") {
+    auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());
+    auto result = server->testDescribeOp("add");
+
+    REQUIRE(result["op"] == "add");
+    REQUIRE(result.contains("description"));
+    CHECK(result["description"].get<std::string>().find("one file or one directory") !=
+          std::string::npos);
+
+    auto& schema = result["paramsSchema"];
+    REQUIRE(schema.contains("properties"));
+    auto& props = schema["properties"];
+
+    CHECK(props.contains("path"));
+    CHECK(props.contains("content"));
+    CHECK(props.contains("name"));
+    CHECK(props.contains("mime_type"));
+    CHECK(props.contains("disable_auto_mime"));
+    CHECK(props.contains("no_embeddings"));
+    CHECK(props.contains("collection"));
+    CHECK(props.contains("snapshot_id"));
+    CHECK(props.contains("snapshot_label"));
+    CHECK(props.contains("recursive"));
+    CHECK(props.contains("include"));
+    CHECK(props.contains("exclude"));
+    CHECK(props.contains("tags"));
+    CHECK(props.contains("metadata"));
+    CHECK_FALSE(props.contains("paths"));
+}
+
 TEST_CASE("describeOp - download job query ops have correct category",
           "[mcp][codemode][describe]") {
     auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());

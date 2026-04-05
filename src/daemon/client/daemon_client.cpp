@@ -1688,15 +1688,14 @@ DaemonClient::sendRequestStreaming(const Request& req,
 
     auto onHeader = [handler](const Response& r) { handler->onHeaderReceived(r); };
     auto onChunk = [handler](const Response& r, bool last) {
-        // Pretty-print progress events if present, then forward to handler
+        // Log progress events and still forward them so request-specific handlers can
+        // surface or collect them for CLI output.
         if (auto* ev = std::get_if<EmbeddingEvent>(&r)) {
             spdlog::info(
                 "[embed] model={} processed={}/{} success={} failure={} inserted={} phase={} {}",
                 ev->modelName, ev->processed, ev->total, ev->success, ev->failure, ev->inserted,
                 ev->phase, ev->message);
-            // Do not terminate stream on events
-            (void)last;
-            return true;
+            return handler->onChunkReceived(r, last);
         }
         if (auto* ml = std::get_if<ModelLoadEvent>(&r)) {
             if (ml->bytesTotal > 0) {
@@ -2055,13 +2054,21 @@ DaemonClient::streamingEmbedDocuments(const EmbedDocumentsRequest& req) {
         }
         bool onChunkReceived(const Response& r, bool isLast) override {
             if (auto* e = std::get_if<EmbeddingEvent>(&r)) {
-                // Emit a simple, user-visible progress line for repair UI and CLI flows
-                // Format: [embed] model processed/total success failure inserted phase message
                 try {
-                    std::cout << "[embed] model=" << e->modelName << " " << e->processed << "/"
-                              << e->total << " success=" << e->success << " failure=" << e->failure
-                              << " inserted=" << e->inserted << " phase=" << e->phase
-                              << (e->message.empty() ? "" : (" " + e->message)) << "\n";
+                    std::cout << "[embed] model=" << e->modelName;
+                    if (e->total > 0) {
+                        std::cout << " " << e->processed << "/" << e->total;
+                    }
+                    std::cout << " phase=" << e->phase;
+                    if (e->phase == "completed" || e->success > 0 || e->failure > 0 ||
+                        e->inserted > 0) {
+                        std::cout << " success=" << e->success << " failure=" << e->failure
+                                  << " inserted=" << e->inserted;
+                    }
+                    if (!e->message.empty()) {
+                        std::cout << " " << e->message;
+                    }
+                    std::cout << "\n";
                     std::cout.flush();
                 } catch (const std::exception& ex) {
                     spdlog::debug("streamingEmbedDocuments: progress output failed: {}", ex.what());

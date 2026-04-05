@@ -4116,6 +4116,17 @@ struct BenchFixture {
         return syntheticCorpusMode == SyntheticCorpusMode::CommunityGraph;
     }
 
+    bool benchmarkSemanticNeighborSeedingEnabled() const {
+        const char* raw = std::getenv("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS");
+        if (!(raw && *raw)) {
+            return false;
+        }
+        std::string value(raw);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+
     void seedSyntheticCommunityEdges() {
         if (!useSyntheticCommunityCorpus()) {
             return;
@@ -4189,6 +4200,235 @@ struct BenchFixture {
         }
 
         spdlog::info("Seeded synthetic community KG edges for {} documents", docNames.size());
+    }
+
+    void seedBenchmarkSemanticNeighbors() {
+        if (!benchmarkSemanticNeighborSeedingEnabled()) {
+            return;
+        }
+
+        auto* daemon = harness ? harness->daemon() : nullptr;
+        auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+        auto metadataRepo = serviceManager ? serviceManager->getMetadataRepo() : nullptr;
+        auto kgStore = metadataRepo ? metadataRepo->getKnowledgeGraphStore() : nullptr;
+        auto vectorDb = serviceManager ? serviceManager->getVectorDatabase() : nullptr;
+        if (!metadataRepo || !kgStore || !vectorDb) {
+            throw std::runtime_error(
+                "Semantic benchmark seeding requires metadata, KG, and vector stores");
+        }
+
+        auto parseSizeEnv = [](const char* primary, const char* fallback,
+                               std::size_t defaultValue) {
+            for (const char* key : {primary, fallback}) {
+                if (!key) {
+                    continue;
+                }
+                if (const char* raw = std::getenv(key); raw && *raw) {
+                    try {
+                        return static_cast<std::size_t>(std::max(1, std::stoi(raw)));
+                    } catch (...) {
+                    }
+                }
+            }
+            return defaultValue;
+        };
+        auto parseFloatEnv = [](const char* primary, const char* fallback, float defaultValue) {
+            for (const char* key : {primary, fallback}) {
+                if (!key) {
+                    continue;
+                }
+                if (const char* raw = std::getenv(key); raw && *raw) {
+                    try {
+                        return std::clamp(std::stof(raw), 0.0f, 1.0f);
+                    } catch (...) {
+                    }
+                }
+            }
+            return defaultValue;
+        };
+
+        const std::size_t semanticTopK =
+            parseSizeEnv("YAMS_BENCH_SEED_SEMANTIC_TOPK", "YAMS_GRAPH_SEMANTIC_TOPK", 6);
+        const float semanticThreshold = parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
+                                                      "YAMS_GRAPH_SEMANTIC_THRESHOLD", 0.30f);
+        const float semanticWeightFloor =
+            parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_WEIGHT_FLOOR", nullptr, 0.10f);
+
+        std::vector<std::string> documentPaths;
+        if (useBEIR && beirCorpus) {
+            documentPaths = beirCorpus->getDocumentPaths();
+        } else if (corpus) {
+            documentPaths.reserve(corpus->createdFiles.size());
+            for (const auto& filename : corpus->createdFiles) {
+                documentPaths.push_back((benchCorpusDir / filename).string());
+            }
+        }
+        if (documentPaths.empty()) {
+            throw std::runtime_error("Semantic benchmark seeding found no document paths");
+        }
+
+        struct DocSeedInfo {
+            std::string hash;
+            std::vector<float> embedding;
+            std::int64_t nodeId = 0;
+        };
+
+        std::vector<metadata::KGNode> docNodes;
+        std::vector<DocSeedInfo> docs;
+        docNodes.reserve(documentPaths.size());
+        docs.reserve(documentPaths.size());
+
+        for (const auto& docPath : documentPaths) {
+            auto docResult = metadataRepo->findDocumentByExactPath(docPath);
+            if (!docResult) {
+                throw std::runtime_error("Failed to resolve benchmark document " + docPath + ": " +
+                                         docResult.error().message);
+            }
+            if (!docResult.value().has_value()) {
+                throw std::runtime_error("Benchmark document missing from metadata: " + docPath);
+            }
+
+            const auto& doc = *docResult.value();
+            const auto vectors = vectorDb->getVectorsByDocument(doc.sha256Hash);
+            if (vectors.empty()) {
+                continue;
+            }
+
+            const auto documentLevel = std::find_if(
+                vectors.begin(), vectors.end(), [](const yams::vector::VectorRecord& record) {
+                    return record.level == yams::vector::EmbeddingLevel::DOCUMENT &&
+                           !record.embedding.empty();
+                });
+            const auto chosen =
+                (documentLevel != vectors.end() && !documentLevel->embedding.empty())
+                    ? documentLevel
+                    : std::find_if(vectors.begin(), vectors.end(),
+                                   [](const yams::vector::VectorRecord& record) {
+                                       return !record.embedding.empty();
+                                   });
+            if (chosen == vectors.end() || chosen->embedding.empty()) {
+                continue;
+            }
+
+            metadata::KGNode node;
+            node.nodeKey = "doc:" + doc.sha256Hash;
+            node.label = doc.fileName;
+            node.type = "document";
+            docNodes.push_back(std::move(node));
+            docs.push_back({doc.sha256Hash, chosen->embedding, 0});
+        }
+
+        if (docs.size() < 2) {
+            spdlog::warn("Skipping semantic benchmark seeding: only {} documents had embeddings",
+                         docs.size());
+            return;
+        }
+
+        auto nodeIdsResult = kgStore->upsertNodes(docNodes);
+        if (!nodeIdsResult) {
+            throw std::runtime_error("Failed to upsert benchmark semantic KG nodes: " +
+                                     nodeIdsResult.error().message);
+        }
+        const auto& nodeIds = nodeIdsResult.value();
+        if (nodeIds.size() != docs.size()) {
+            throw std::runtime_error("Benchmark semantic KG node upsert returned unexpected count");
+        }
+        for (std::size_t i = 0; i < docs.size(); ++i) {
+            docs[i].nodeId = nodeIds[i];
+        }
+
+        std::unordered_map<std::string, std::unordered_map<std::string, float>> neighborScores;
+        neighborScores.reserve(docs.size());
+
+        yams::vector::VectorSearchParams params;
+        params.k = semanticTopK + 4;
+        params.similarity_threshold = semanticThreshold;
+
+        for (const auto& doc : docs) {
+            const auto neighbors = vectorDb->searchSimilar(doc.embedding, params);
+            auto& scores = neighborScores[doc.hash];
+            for (const auto& rec : neighbors) {
+                if (rec.level != yams::vector::EmbeddingLevel::DOCUMENT) {
+                    continue;
+                }
+                if (rec.document_hash.empty() || rec.document_hash == doc.hash) {
+                    continue;
+                }
+                if (rec.relevance_score < semanticThreshold) {
+                    continue;
+                }
+                auto [it, inserted] = scores.emplace(rec.document_hash, rec.relevance_score);
+                if (!inserted) {
+                    it->second = std::max(it->second, rec.relevance_score);
+                }
+                if (scores.size() >= semanticTopK) {
+                    break;
+                }
+            }
+        }
+
+        std::unordered_map<std::string, std::int64_t> nodeIdByHash;
+        nodeIdByHash.reserve(docs.size());
+        for (const auto& doc : docs) {
+            nodeIdByHash.emplace(doc.hash, doc.nodeId);
+        }
+
+        std::vector<metadata::KGEdge> edges;
+        std::size_t reciprocalPairs = 0;
+        for (const auto& [srcHash, neighbors] : neighborScores) {
+            for (const auto& [dstHash, forwardScore] : neighbors) {
+                if (srcHash >= dstHash) {
+                    continue;
+                }
+                const auto reverseIt = neighborScores.find(dstHash);
+                if (reverseIt == neighborScores.end()) {
+                    continue;
+                }
+                const auto reverseScoreIt = reverseIt->second.find(srcHash);
+                if (reverseScoreIt == reverseIt->second.end()) {
+                    continue;
+                }
+                const auto srcNodeIt = nodeIdByHash.find(srcHash);
+                const auto dstNodeIt = nodeIdByHash.find(dstHash);
+                if (srcNodeIt == nodeIdByHash.end() || dstNodeIt == nodeIdByHash.end()) {
+                    continue;
+                }
+
+                const float weight =
+                    std::max(semanticWeightFloor, (forwardScore + reverseScoreIt->second) * 0.5f);
+                metadata::KGEdge forward;
+                forward.srcNodeId = srcNodeIt->second;
+                forward.dstNodeId = dstNodeIt->second;
+                forward.relation = "semantic_neighbor";
+                forward.weight = weight;
+                edges.push_back(forward);
+
+                metadata::KGEdge reverse;
+                reverse.srcNodeId = dstNodeIt->second;
+                reverse.dstNodeId = srcNodeIt->second;
+                reverse.relation = "semantic_neighbor";
+                reverse.weight = weight;
+                edges.push_back(reverse);
+                reciprocalPairs += 1;
+            }
+        }
+
+        if (edges.empty()) {
+            spdlog::warn("Semantic benchmark seeding produced no reciprocal neighbors (docs={}, "
+                         "topk={}, threshold={:.3f})",
+                         docs.size(), semanticTopK, semanticThreshold);
+            return;
+        }
+
+        auto addEdgesResult = kgStore->addEdgesUnique(edges);
+        if (!addEdgesResult) {
+            throw std::runtime_error("Failed to seed benchmark semantic KG edges: " +
+                                     addEdgesResult.error().message);
+        }
+
+        spdlog::info(
+            "Seeded {} reciprocal semantic neighbor pairs ({} directed edges) for benchmark corpus",
+            reciprocalPairs, edges.size());
     }
 
     void setup() {
@@ -6094,6 +6334,7 @@ struct BenchFixture {
         }
 
         seedSyntheticCommunityEdges();
+        seedBenchmarkSemanticNeighbors();
 
         // Post-ingest status/stats snapshot + sanity searches.
         // Goal: distinguish "no docs" vs "docs but query returns empty".

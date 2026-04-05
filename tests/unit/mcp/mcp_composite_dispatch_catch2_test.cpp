@@ -17,7 +17,9 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
+#include <vector>
 #include <yams/compat/unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -204,6 +206,32 @@ bool isCompositeError(const json& result, const std::string& expectedSubstring) 
         }
     }
     return false;
+}
+
+std::string classifyAddRoutingOutcome(const json& result) {
+    if (isCompositeError(result, "use 'download'")) {
+        return "download";
+    }
+    if (isCompositeError(result, "one 'path' per call")) {
+        return "multi-path";
+    }
+    if (isCompositeError(result, "expects 'path' to be a string")) {
+        return "path-array";
+    }
+    if (isCompositeError(result, "requires 'name'")) {
+        return "inline-name";
+    }
+    if (isCompositeError(result, "test harness")) {
+        return "handler";
+    }
+    if (isCompositeError(result, "No content or path provided") ||
+        isCompositeError(result, "Provide 'path'")) {
+        return "generic-path";
+    }
+    if (result.contains("error")) {
+        return result["error"].value("message", std::string{"other-error"});
+    }
+    return "ok";
 }
 
 } // namespace
@@ -675,6 +703,187 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "execute - stops on error by default"
             CHECK(data["results"].size() == 1);
             CHECK(data["failed"] == 1);
         }
+    }
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "execute - add with paths array returns actionable router error",
+                 "[mcp][composite][execute][router]") {
+    json params = {{"paths", json::array({"/Users/trevon/work/apps/satelitte/AGENTS.md",
+                                          "/Users/trevon/work/apps/satelitte/README.md"})},
+                   {"recursive", true},
+                   {"collection", "terrestrial-seed"},
+                   {"metadata", {{"task", "seed-repo-foundation"}}}};
+    json args = {{"operations", json::array({json{{"op", "add"}, {"params", std::move(params)}}})}};
+
+    auto result = callTool("execute", args);
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+    CHECK(isCompositeError(result, "one 'path' per call"));
+    CHECK(isCompositeError(result, "multiple add calls"));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "execute - add normalizes directory aliases before dispatch",
+                 "[mcp][composite][execute][router]") {
+    json params = {{"directory_path", "/tmp/project-docs"},
+                   {"include_patterns", json::array({"*.md", "docs/**"})},
+                   {"exclude_patterns", json::array({"node_modules/**"})},
+                   {"collection", "terrestrial-seed"}};
+    json args = {{"operations", json::array({json{{"op", "add"}, {"params", std::move(params)}}})}};
+
+    auto result = callTool("execute", args);
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+    CHECK(isCompositeError(result, "test harness"));
+    CHECK_FALSE(isCompositeError(result, "No content or path provided"));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture, "execute - add router stress cases stay actionable",
+                 "[mcp][composite][execute][stress]") {
+    const std::vector<json> seeds = {
+        json::object(),
+        json{{"path", "/tmp/one.txt"}},
+        json{{"paths", json::array({"/tmp/one.txt"})}},
+        json{{"paths", json::array({"/tmp/one.txt", "/tmp/two.txt"})}},
+        json{{"directory_path", "/tmp/project"}},
+        json{{"path", json::array({"/tmp/not-valid.txt"})}},
+        json{{"content", "hello world"}, {"name", "inline.txt"}},
+        json{{"content", "hello world"}},
+        json{{"url", "https://example.com/file.txt"}},
+    };
+
+    std::mt19937 rng(1337);
+    std::uniform_int_distribution<std::size_t> pickSeed(0, seeds.size() - 1);
+    std::bernoulli_distribution coin(0.5);
+
+    for (int i = 0; i < 96; ++i) {
+        json params = seeds[pickSeed(rng)];
+        if (coin(rng)) {
+            params["collection"] = "terrestrial-seed";
+        }
+        if (coin(rng)) {
+            params["metadata"] = json{{"task", "seed-repo-foundation"}, {"phase", "checkpoint"}};
+        }
+        if (coin(rng)) {
+            params["recursive"] = true;
+        }
+        if (coin(rng)) {
+            params["include_patterns"] = json::array({"*.md", "docs/**"});
+        }
+        if (coin(rng)) {
+            params["exclude_patterns"] = json::array({"node_modules/**"});
+        }
+        if (coin(rng)) {
+            params["snapshotId"] = "snap-1";
+        }
+        if (coin(rng)) {
+            params["snapshotLabel"] = "checkpoint";
+        }
+        if (coin(rng)) {
+            params["mimeType"] = "text/markdown";
+        }
+
+        json args = {{"operations", json::array({{{"op", "add"}, {"params", std::move(params)}}})}};
+
+        auto result = callTool("execute", args);
+
+        INFO("iteration=" << i << " args=" << args.dump());
+        CHECK_FALSE(isRoutingError(result));
+        CHECK(reachedHandler(result));
+        if (result.contains("error")) {
+            CHECK_FALSE(result["error"].value("message", std::string{}).empty());
+        }
+
+        const auto& caseParams = args["operations"][0]["params"];
+        if (caseParams.contains("url")) {
+            CHECK(isCompositeError(result, "use 'download'"));
+            continue;
+        }
+        if (caseParams.contains("path") && caseParams["path"].is_array()) {
+            CHECK(isCompositeError(result, "expects 'path' to be a string"));
+            continue;
+        }
+        if (caseParams.contains("paths") && caseParams["paths"].is_array() &&
+            caseParams["paths"].size() > 1) {
+            CHECK(isCompositeError(result, "one 'path' per call"));
+            continue;
+        }
+        if (caseParams.contains("content") && !caseParams.contains("name")) {
+            CHECK(isCompositeError(result, "requires 'name'"));
+            continue;
+        }
+        if (caseParams.contains("directory_path") ||
+            (caseParams.contains("paths") && caseParams["paths"].is_array() &&
+             caseParams["paths"].size() == 1)) {
+            CHECK_FALSE(isCompositeError(result, "No content or path provided"));
+        }
+    }
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "direct add and execute add stay aligned across stress cases",
+                 "[mcp][composite][execute][stress][parity]") {
+    const std::vector<json> seeds = {
+        json::object(),
+        json{{"path", "/tmp/one.txt"}},
+        json{{"paths", json::array({"/tmp/one.txt"})}},
+        json{{"paths", json::array({"/tmp/one.txt", "/tmp/two.txt"})}},
+        json{{"directory_path", "/tmp/project"}},
+        json{{"directoryPath", "/tmp/project-camel"}},
+        json{{"path", json::array({"/tmp/not-valid.txt"})}},
+        json{{"content", "hello world"}, {"name", "inline.txt"}},
+        json{{"content", "hello world"}},
+        json{{"url", "https://example.com/file.txt"}},
+    };
+
+    std::mt19937 rng(20260405);
+    std::uniform_int_distribution<std::size_t> pickSeed(0, seeds.size() - 1);
+    std::bernoulli_distribution coin(0.5);
+
+    for (int i = 0; i < 96; ++i) {
+        json params = seeds[pickSeed(rng)];
+        if (coin(rng)) {
+            params["collection"] = "terrestrial-seed";
+        }
+        if (coin(rng)) {
+            params["metadata"] = json{{"task", "seed-repo-foundation"}, {"phase", "checkpoint"}};
+        }
+        if (coin(rng)) {
+            params["recursive"] = true;
+        }
+        if (coin(rng)) {
+            params["include_patterns"] = json::array({"*.md", "docs/**"});
+        }
+        if (coin(rng)) {
+            params["exclude_patterns"] = json::array({"node_modules/**"});
+        }
+        if (coin(rng)) {
+            params["snapshotId"] = "snap-1";
+        }
+        if (coin(rng)) {
+            params["snapshotLabel"] = "checkpoint";
+        }
+        if (coin(rng)) {
+            params["mimeType"] = "text/markdown";
+        }
+
+        const json directArgs = params;
+        json executeArgs = {{"operations", json::array({json{{"op", "add"}, {"params", params}}})}};
+
+        auto directResult = callTool("add", directArgs);
+        auto executeResult = callTool("execute", executeArgs);
+
+        INFO("iteration=" << i << " params=" << params.dump());
+        CHECK_FALSE(isRoutingError(directResult));
+        CHECK_FALSE(isRoutingError(executeResult));
+        CHECK(reachedHandler(directResult));
+        CHECK(reachedHandler(executeResult));
+        CHECK(classifyAddRoutingOutcome(directResult) == classifyAddRoutingOutcome(executeResult));
     }
 }
 

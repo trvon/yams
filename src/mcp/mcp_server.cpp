@@ -2346,11 +2346,17 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             (void)req;
             co_return Error{ErrorCode::NotSupported, "add is not supported on WASI build"};
 #else
+    if (!req.inputError.empty()) {
+        co_return Error{ErrorCode::InvalidArgument, req.inputError};
+    }
+
     // Fast path: reject completely empty inputs before contacting the daemon
     if ((req.path.empty() || req.path == "") && (req.name.empty() || req.name == "") &&
         (req.content.empty() || req.content == "")) {
         co_return Error{ErrorCode::InvalidArgument,
-                        "No content or path provided. Set 'path' to a file or provide 'content'."};
+                        "Provide 'path' (a single file or directory) or inline 'content' with "
+                        "'name'. For code-mode execute/add, use one add operation per path "
+                        "instead of a 'paths' array."};
     }
 
     if (auto ensure = ensureDaemonClient(); !ensure) {
@@ -2532,11 +2538,13 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     if (aopts.path.empty()) {
         if (aopts.content.empty()) {
             co_return Error{ErrorCode::InvalidArgument,
-                            "Provide either 'path' or 'content' + 'name'"};
+                            "Provide 'path' (a single file or directory) or inline 'content' + "
+                            "'name'. For code-mode execute/add, use one add operation per path "
+                            "instead of a 'paths' array."};
         }
         if (aopts.name.empty()) {
             co_return Error{ErrorCode::InvalidArgument,
-                            "Provide 'name' when sending inline 'content'"};
+                            "Provide 'name' when sending inline 'content' to add."};
         }
     }
 
@@ -4335,7 +4343,9 @@ void MCPServer::initializeToolRegistry() {
         "add", [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },
         json{{"type", "object"},
              {"properties",
-              {{"path", {{"type", "string"}, {"description", "File or directory path"}}},
+              {{"path",
+                {{"type", "string"},
+                 {"description", "Single file or directory path for this add call"}}},
                {"content", {{"type", "string"}, {"description", "Inline document content"}}},
                {"name", {{"type", "string"}, {"description", "Document name (for stdin/content)"}}},
                {"mime_type", {{"type", "string"}, {"description", "MIME type override"}}},
@@ -4365,8 +4375,9 @@ void MCPServer::initializeToolRegistry() {
                  {"items", {{"type", "string"}}},
                  {"description", "Document tags"}}},
                {"metadata", {{"type", "object"}, {"description", "Metadata key/value pairs"}}}}}},
-        "Store documents (or directories) with deduplication; mirrors CLI add", "Add Documents",
-        addAnnotation);
+        "Store one file or directory per call with deduplication; for multiple files use "
+        "repeated add calls or a recursive directory path; mirrors CLI add",
+        "Add Documents", addAnnotation);
 
     toolRegistry_->registerTool<MCPRetrieveDocumentRequest, MCPRetrieveDocumentResponse>(
         "get",

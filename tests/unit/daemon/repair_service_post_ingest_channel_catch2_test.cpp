@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <functional>
@@ -7,6 +8,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <cstdlib>
 
@@ -18,6 +20,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/resource/model_provider.h>
 
 using namespace yams;
 using namespace yams::daemon;
@@ -81,6 +84,112 @@ bool waitForCondition(std::chrono::milliseconds timeout, const std::function<boo
     }
     return predicate();
 }
+
+class SelectiveFailingModelProvider : public IModelProvider {
+public:
+    SelectiveFailingModelProvider(size_t dim, std::string poisonNeedle)
+        : dim_(dim), poisonNeedle_(std::move(poisonNeedle)) {}
+
+    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        return generateEmbeddingFor(defaultModelName_, text);
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+        return generateBatchEmbeddingsFor(defaultModelName_, texts);
+    }
+
+    Result<std::vector<float>> generateEmbeddingFor(const std::string& modelName,
+                                                    const std::string& text) override {
+        ++singleCalls_;
+        if (!isModelLoaded(modelName)) {
+            return Error{ErrorCode::NotFound, "model not loaded"};
+        }
+        if (text.find(poisonNeedle_) != std::string::npos) {
+            return Error{ErrorCode::InternalError, "poison single"};
+        }
+        return std::vector<float>(dim_, 0.5f);
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddingsFor(const std::string& modelName,
+                               const std::vector<std::string>& texts) override {
+        ++batchCalls_;
+        if (!isModelLoaded(modelName)) {
+            return Error{ErrorCode::NotFound, "model not loaded"};
+        }
+        for (const auto& text : texts) {
+            if (text.find(poisonNeedle_) != std::string::npos) {
+                return Error{ErrorCode::InternalError, "poison batch"};
+            }
+        }
+        return std::vector<std::vector<float>>(texts.size(), std::vector<float>(dim_, 0.25f));
+    }
+
+    Result<void> loadModel(const std::string& modelName) override {
+        if (std::find(loadedModels_.begin(), loadedModels_.end(), modelName) ==
+            loadedModels_.end()) {
+            loadedModels_.push_back(modelName);
+        }
+        defaultModelName_ = modelName;
+        return Result<void>();
+    }
+
+    Result<void> unloadModel(const std::string& modelName) override {
+        auto it = std::find(loadedModels_.begin(), loadedModels_.end(), modelName);
+        if (it == loadedModels_.end()) {
+            return ErrorCode::NotFound;
+        }
+        loadedModels_.erase(it);
+        if (defaultModelName_ == modelName) {
+            defaultModelName_.clear();
+        }
+        return Result<void>();
+    }
+
+    bool isModelLoaded(const std::string& modelName) const override {
+        return std::find(loadedModels_.begin(), loadedModels_.end(), modelName) !=
+               loadedModels_.end();
+    }
+
+    std::vector<std::string> getLoadedModels() const override { return loadedModels_; }
+    size_t getLoadedModelCount() const override { return loadedModels_.size(); }
+
+    Result<ModelInfo> getModelInfo(const std::string& modelName) const override {
+        if (!isModelLoaded(modelName)) {
+            return Error{ErrorCode::NotFound, "model not loaded"};
+        }
+        ModelInfo info;
+        info.name = modelName;
+        info.embeddingDim = dim_;
+        return info;
+    }
+
+    size_t getEmbeddingDim(const std::string&) const override { return dim_; }
+
+    std::shared_ptr<vector::EmbeddingGenerator>
+    getEmbeddingGenerator(const std::string& = "") override {
+        return nullptr;
+    }
+
+    std::string getProviderName() const override { return "SelectiveFailingModelProvider"; }
+    std::string getProviderVersion() const override { return "vtest"; }
+    bool isAvailable() const override { return true; }
+    size_t getMemoryUsage() const override { return 0; }
+    void releaseUnusedResources() override {}
+    void shutdown() override {}
+
+    std::size_t batchCalls() const { return batchCalls_; }
+    std::size_t singleCalls() const { return singleCalls_; }
+
+private:
+    size_t dim_;
+    std::string poisonNeedle_;
+    std::string defaultModelName_;
+    std::vector<std::string> loadedModels_;
+    std::size_t batchCalls_{0};
+    std::size_t singleCalls_{0};
+};
 
 } // namespace
 
@@ -471,6 +580,135 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(finalDocRes.has_value());
     REQUIRE(finalDocRes.value().has_value());
     CHECK(finalDocRes.value()->repairStatus == metadata::RepairStatus::Completed);
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "EmbeddingService: single bad document should not abort the rest of the job",
+                 "[daemon][repair][regression][embedding-service]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::nullopt);
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    config_.enableAutoRepair = false;
+    config_.autoLoadPlugins = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    auto vectorDb = sm->getVectorDatabase();
+    REQUIRE(meta != nullptr);
+    REQUIRE(vectorDb != nullptr);
+
+    const std::string kModelName = "test-model";
+    auto provider = std::make_shared<SelectiveFailingModelProvider>(
+        vectorDb->getConfig().embedding_dim, "poison-pill");
+    REQUIRE(provider->loadModel(kModelName).has_value());
+    sm->__test_setModelProvider(provider);
+
+    auto embedChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
+                                                                                       128);
+    REQUIRE(embedChannel != nullptr);
+    InternalEventBus::EmbedJob drained;
+    while (embedChannel->try_pop(drained)) {
+    }
+
+    struct SeedDoc {
+        std::string hash;
+        std::string text;
+        metadata::RepairStatus expectedStatus;
+        bool expectEmbedding;
+    };
+
+    std::vector<SeedDoc> docs = {
+        {std::string(64, '1'), "good alpha text", metadata::RepairStatus::Completed, true},
+        {std::string(64, '2'), "poison-pill content", metadata::RepairStatus::Failed, false},
+        {std::string(64, '3'), "good beta text", metadata::RepairStatus::Completed, true},
+    };
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    std::vector<std::string> hashes;
+    hashes.reserve(docs.size());
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        metadata::DocumentInfo doc{};
+        doc.fileName = "doc-" + std::to_string(i) + ".txt";
+        doc.filePath = (config_.dataDir / doc.fileName).string();
+        doc.fileExtension = "txt";
+        doc.fileSize = static_cast<int64_t>(docs[i].text.size());
+        doc.sha256Hash = docs[i].hash;
+        doc.mimeType = "text/plain";
+        doc.modifiedTime = now;
+        doc.indexedTime = now;
+
+        auto idRes = meta->insertDocument(doc);
+        REQUIRE(idRes.has_value());
+
+        metadata::DocumentContent content{};
+        content.documentId = idRes.value();
+        content.contentText = docs[i].text;
+        content.contentLength = static_cast<int64_t>(docs[i].text.size());
+        content.extractionMethod = "test";
+        content.language = "en";
+        REQUIRE(meta->insertContent(content).has_value());
+        REQUIRE(meta->updateDocumentExtractionStatus(idRes.value(), true,
+                                                     metadata::ExtractionStatus::Success)
+                    .has_value());
+        REQUIRE(meta->updateDocumentRepairStatus(docs[i].hash, metadata::RepairStatus::Processing)
+                    .has_value());
+        hashes.push_back(docs[i].hash);
+    }
+
+    InternalEventBus::EmbedJob job;
+    job.hashes = hashes;
+    job.batchSize = static_cast<uint32_t>(hashes.size());
+    job.skipExisting = false;
+    job.modelName = kModelName;
+    REQUIRE(embedChannel->try_push(std::move(job)));
+
+    const bool settled = waitForCondition(std::chrono::seconds(10), [&]() {
+        for (const auto& seeded : docs) {
+            auto docRes = meta->getDocumentByHash(seeded.hash);
+            if (!docRes || !docRes.value().has_value()) {
+                return false;
+            }
+            if (docRes.value()->repairStatus != seeded.expectedStatus) {
+                return false;
+            }
+        }
+        return true;
+    });
+    REQUIRE(settled);
+
+    for (const auto& seeded : docs) {
+        auto docRes = meta->getDocumentByHash(seeded.hash);
+        REQUIRE(docRes.has_value());
+        REQUIRE(docRes.value().has_value());
+        CHECK(docRes.value()->repairStatus == seeded.expectedStatus);
+
+        auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(seeded.hash);
+        REQUIRE(hasEmbedRes.has_value());
+        CHECK(hasEmbedRes.value() == seeded.expectEmbedding);
+
+        const auto vectors = vectorDb->getVectorsByDocument(seeded.hash);
+        if (seeded.expectEmbedding) {
+            CHECK_FALSE(vectors.empty());
+        } else {
+            CHECK(vectors.empty());
+        }
+    }
+
+    CHECK(provider->batchCalls() >= 2);
+    CHECK(provider->singleCalls() >= 1);
 
     sm->shutdown();
 }

@@ -631,23 +631,30 @@ json MCPListDownloadJobsResponse::toJson() const {
 // MCPStoreDocumentRequest implementation
 MCPStoreDocumentRequest MCPStoreDocumentRequest::fromJson(const json& j) {
     MCPStoreDocumentRequest req;
-    req.path = j.value("path", std::string{});
-    req.content = j.value("content", std::string{});
-    req.name = j.value("name", std::string{});
-    req.mimeType = j.value("mime_type", std::string{});
-    req.collection = j.value("collection", std::string{});
-    req.snapshotId = j.value("snapshot_id", std::string{});
-    req.snapshotLabel = j.value("snapshot_label", std::string{});
-    req.recursive = j.value("recursive", false);
-    detail::readStringArray(j, "include", req.includePatterns);
-    detail::readStringArray(j, "exclude", req.excludePatterns);
-    req.disableAutoMime = j.value("disable_auto_mime", false);
-    req.noEmbeddings = j.value("no_embeddings", false);
+    auto normalized = detail::normalizeAddParams(j);
+    req.inputError = normalized.error.value_or(std::string{});
+    if (!req.inputError.empty()) {
+        return req;
+    }
 
-    detail::readStringArray(j, "tags", req.tags);
+    const auto& params = normalized.params;
+    req.path = params.value("path", std::string{});
+    req.content = params.value("content", std::string{});
+    req.name = params.value("name", std::string{});
+    req.mimeType = params.value("mime_type", std::string{});
+    req.collection = params.value("collection", std::string{});
+    req.snapshotId = params.value("snapshot_id", std::string{});
+    req.snapshotLabel = params.value("snapshot_label", std::string{});
+    req.recursive = params.value("recursive", false);
+    detail::readStringArray(params, "include", req.includePatterns);
+    detail::readStringArray(params, "exclude", req.excludePatterns);
+    req.disableAutoMime = params.value("disable_auto_mime", false);
+    req.noEmbeddings = params.value("no_embeddings", false);
 
-    if (j.contains("metadata")) {
-        req.metadata = j["metadata"];
+    detail::readStringArray(params, "tags", req.tags);
+
+    if (params.contains("metadata")) {
+        req.metadata = params["metadata"];
     }
 
     return req;

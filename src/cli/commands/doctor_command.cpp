@@ -885,12 +885,15 @@ private:
                                 ed.documentHashes = missing.value();
                                 ed.batchSize = static_cast<uint32_t>(rcfg.batchSize);
                                 ed.skipExisting = rcfg.skipExisting;
-                                SpinnerRunner rpcSpin;
-                                rpcSpin.start("Daemon: generating missing embeddings");
+                                std::cout
+                                    << "  "
+                                    << ui::status_pending("Daemon: generating missing embeddings")
+                                    << "\n"
+                                    << std::flush;
                                 auto er =
                                     yams::cli::run_result<yams::daemon::EmbedDocumentsResponse>(
-                                        client.call(ed), std::chrono::milliseconds{0});
-                                rpcSpin.stop();
+                                        client.streamingEmbedDocuments(ed),
+                                        std::chrono::milliseconds{0});
                                 if (er) {
                                     const auto& daemonResp = er.value();
                                     const bool suspiciousZeroResult =

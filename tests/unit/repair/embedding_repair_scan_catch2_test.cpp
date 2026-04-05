@@ -116,4 +116,70 @@ TEST_CASE("RepairUtilScan missing embeddings list identifies missing documents",
     std::filesystem::remove_all(tmp, ec);
 }
 
+TEST_CASE("RepairUtilScan prioritizes extractable documents ahead of skipped binaries",
+          "[repair][embedding][catch2]") {
+    if (std::getenv("YAMS_DISABLE_VECTORS") || std::getenv("YAMS_DISABLE_VECTOR_DB")) {
+        SKIP("Vectors disabled via environment");
+    }
+
+    auto tmp = std::filesystem::temp_directory_path() /
+               ("yams_repair_priority_catch2_" + std::to_string(std::rand()));
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec);
+    std::filesystem::create_directories(tmp);
+
+    auto repo = std::make_shared<InMemoryMetadata>();
+
+    metadata::DocumentInfo skipped{};
+    skipped.id = 1;
+    skipped.sha256Hash = "skipped-doc";
+    skipped.fileName = "image.png";
+    skipped.filePath = "/tmp/image.png";
+    skipped.fileSize = 128;
+    skipped.mimeType = "image/png";
+    skipped.extractionStatus = metadata::ExtractionStatus::Skipped;
+
+    metadata::DocumentInfo success{};
+    success.id = 2;
+    success.sha256Hash = "success-doc";
+    success.fileName = "notes.txt";
+    success.filePath = "/tmp/notes.txt";
+    success.fileSize = 256;
+    success.mimeType = "text/plain";
+    success.contentExtracted = true;
+    success.extractionStatus = metadata::ExtractionStatus::Success;
+
+    metadata::DocumentInfo failed{};
+    failed.id = 3;
+    failed.sha256Hash = "failed-doc";
+    failed.fileName = "empty.cpp";
+    failed.filePath = "/tmp/empty.cpp";
+    failed.fileSize = 0;
+    failed.mimeType = "text/x-c++";
+    failed.extractionStatus = metadata::ExtractionStatus::Failed;
+
+    repo->add(skipped);
+    repo->add(success);
+    repo->add(failed);
+
+    yams::vector::VectorDatabaseConfig cfg{};
+    cfg.database_path = (tmp / "vectors.db").string();
+    cfg.create_if_missing = true;
+    cfg.embedding_dim = 384;
+    auto vdb = std::make_unique<yams::vector::VectorDatabase>(cfg);
+    REQUIRE(vdb->initialize());
+    vdb.reset();
+
+    auto missing = getDocumentsMissingEmbeddings(repo, tmp);
+    REQUIRE(missing);
+
+    const auto& list = missing.value();
+    REQUIRE(list.size() == 3u);
+    CHECK(list[0] == std::string("success-doc"));
+    CHECK(list[1] == std::string("failed-doc"));
+    CHECK(list[2] == std::string("skipped-doc"));
+
+    std::filesystem::remove_all(tmp, ec);
+}
+
 } // namespace yams::repair::test

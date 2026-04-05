@@ -3345,21 +3345,27 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 for (size_t i = 0; i < rerankWindow; ++i) {
                     const auto& candidateId = candidateIds[i];
                     auto scoreIt = graphScores.find(candidateId);
-                    if (scoreIt == graphScores.end()) {
-                        continue;
+                    if (scoreIt != graphScores.end()) {
+                        graphMatchedCandidates++;
                     }
-                    graphMatchedCandidates++;
 
-                    const KGScore& kgScore = scoreIt->second;
-                    const auto getFeature = [&kgScore](const char* key) {
-                        auto featureIt = kgScore.features.find(key);
-                        return featureIt != kgScore.features.end() ? featureIt->second : 0.0f;
+                    const auto getFeature = [&scoreIt, &graphScores](const char* key) {
+                        if (scoreIt == graphScores.end()) {
+                            return 0.0f;
+                        }
+                        auto featureIt = scoreIt->second.features.find(key);
+                        return featureIt != scoreIt->second.features.end() ? featureIt->second
+                                                                           : 0.0f;
                     };
 
                     const float queryCoverage =
                         std::clamp(getFeature("feature_query_coverage_ratio"), 0.0f, 1.0f);
                     const float pathSupport =
                         std::clamp(getFeature("feature_path_support_score"), 0.0f, 1.0f);
+                    const float entitySignal =
+                        scoreIt != graphScores.end() ? scoreIt->second.entity : 0.0f;
+                    const float structuralSignal =
+                        scoreIt != graphScores.end() ? scoreIt->second.structural : 0.0f;
                     const float communitySignal = i < communitySupport.size()
                                                       ? std::clamp(communitySupport[i], 0.0f, 1.0f)
                                                       : 0.0f;
@@ -3367,7 +3373,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
                     // Composite graph relevance signal.
                     const float rawSignal =
-                        std::clamp((kgScore.entity * 0.40f + kgScore.structural * 0.20f +
+                        std::clamp((entitySignal * 0.40f + structuralSignal * 0.20f +
                                     queryCoverage * 0.20f + pathSupport * 0.10f) *
                                            baseSignalWeight +
                                        communitySignal * communityWeight,
