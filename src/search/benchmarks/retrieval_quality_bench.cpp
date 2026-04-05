@@ -656,6 +656,12 @@ struct QueryDiagnosticsSummary {
     std::vector<double> strongVectorOnlyRankEligibleDocsSamples;
     std::vector<double> graphAddedPostFusionSamples;
     std::vector<double> graphDisplacedPostFusionSamples;
+    std::vector<double> graphCommunitySupportedDocsSamples;
+    std::vector<double> graphCommunityEdgeCountSamples;
+    std::vector<double> graphCommunityLargestSizeSamples;
+    std::vector<double> graphCommunitySignalMassSamples;
+    std::vector<double> graphCommunityBoostedDocsSamples;
+    std::vector<double> graphCommunityWeightSamples;
     std::vector<double> multiVectorGeneratedPhraseSamples;
     std::vector<double> multiVectorRawHitSamples;
     std::vector<double> multiVectorAddedNewSamples;
@@ -1316,6 +1322,25 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         }
     }
 
+    if (auto v = parseDoubleStat(searchStats, "graph_community_supported_docs")) {
+        summary.graphCommunitySupportedDocsSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_edge_count")) {
+        summary.graphCommunityEdgeCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_largest_size")) {
+        summary.graphCommunityLargestSizeSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_signal_mass")) {
+        summary.graphCommunitySignalMassSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_boosted_docs")) {
+        summary.graphCommunityBoostedDocsSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_weight")) {
+        summary.graphCommunityWeightSamples.push_back(*v);
+    }
+
     if (auto stageSummary = searchStats.find("trace_stage_summary_json");
         stageSummary != searchStats.end()) {
         try {
@@ -1496,6 +1521,15 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"graph_added_post_fusion_count", summarizeSamples(summary.graphAddedPostFusionSamples)},
         {"graph_displaced_post_fusion_count",
          summarizeSamples(summary.graphDisplacedPostFusionSamples)},
+        {"graph_community_supported_docs",
+         summarizeSamples(summary.graphCommunitySupportedDocsSamples)},
+        {"graph_community_edge_count", summarizeSamples(summary.graphCommunityEdgeCountSamples)},
+        {"graph_community_largest_size",
+         summarizeSamples(summary.graphCommunityLargestSizeSamples)},
+        {"graph_community_signal_mass", summarizeSamples(summary.graphCommunitySignalMassSamples)},
+        {"graph_community_boosted_docs",
+         summarizeSamples(summary.graphCommunityBoostedDocsSamples)},
+        {"graph_community_weight", summarizeSamples(summary.graphCommunityWeightSamples)},
         {"multi_vector_generated_phrases",
          summarizeSamples(summary.multiVectorGeneratedPhraseSamples)},
         {"multi_vector_raw_hit_count", summarizeSamples(summary.multiVectorRawHitSamples)},

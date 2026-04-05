@@ -116,6 +116,7 @@ struct TunedParams {
     float graphRerankWeight = 0.15f;
     float graphRerankMaxBoost = 0.20f;
     float graphRerankMinSignal = 0.01f;
+    float graphCommunityWeight = 0.10f;
     size_t kgMaxResults = 100;
     int graphScoringBudgetMs = 10;
 
@@ -140,6 +141,7 @@ struct TunedParams {
         config.graphRerankWeight = graphRerankWeight;
         config.graphRerankMaxBoost = graphRerankMaxBoost;
         config.graphRerankMinSignal = graphRerankMinSignal;
+        config.graphCommunityWeight = graphCommunityWeight;
         config.kgMaxResults = kgMaxResults;
         config.graphScoringBudgetMs = graphScoringBudgetMs;
         config.vectorOnlyThreshold = vectorOnlyThreshold;
@@ -182,6 +184,7 @@ struct TunedParams {
             {"graph_rerank_weight", graphRerankWeight},
             {"graph_rerank_max_boost", graphRerankMaxBoost},
             {"graph_rerank_min_signal", graphRerankMinSignal},
+            {"graph_community_weight", graphCommunityWeight},
             {"kg_max_results", kgMaxResults},
             {"graph_scoring_budget_ms", graphScoringBudgetMs},
             {"vector_only_threshold", vectorOnlyThreshold},

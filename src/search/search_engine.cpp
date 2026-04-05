@@ -200,6 +200,162 @@ std::string buildRerankSnippet(const std::string& query, const std::string& cont
     return out;
 }
 
+std::optional<std::int64_t>
+resolveGraphCandidateDocumentId(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+                                std::string_view candidateId) {
+    if (!kgStore || candidateId.empty()) {
+        return std::nullopt;
+    }
+
+    auto byHash = kgStore->getDocumentIdByHash(candidateId);
+    if (byHash && byHash.value().has_value()) {
+        return byHash.value();
+    }
+
+    auto byPath = kgStore->getDocumentIdByPath(candidateId);
+    if (byPath && byPath.value().has_value()) {
+        return byPath.value();
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::int64_t>
+resolveGraphCandidateNodeId(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+                            std::string_view candidateId) {
+    if (!kgStore) {
+        return std::nullopt;
+    }
+
+    auto directNode = kgStore->getNodeByKey(std::string(candidateId));
+    if (directNode && directNode.value().has_value()) {
+        return directNode.value()->id;
+    }
+
+    auto docId = resolveGraphCandidateDocumentId(kgStore, candidateId);
+    if (!docId.has_value()) {
+        return std::nullopt;
+    }
+
+    auto docHash = kgStore->getDocumentHashById(*docId);
+    if (!docHash || !docHash.value().has_value() || docHash.value()->empty()) {
+        return std::nullopt;
+    }
+
+    auto node = kgStore->getNodeByKey("doc:" + *docHash.value());
+    if (!node || !node.value().has_value()) {
+        auto fallbackNode = kgStore->getNodeByKey("doc:" + std::string(candidateId));
+        if (fallbackNode && fallbackNode.value().has_value()) {
+            return fallbackNode.value()->id;
+        }
+        return std::nullopt;
+    }
+    return node.value()->id;
+}
+
+std::vector<float> computeReciprocalCommunitySupport(
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+    const std::vector<std::string>& candidateIds, std::size_t maxNeighbors,
+    std::size_t* supportedDocCountOut = nullptr, std::size_t* edgeCountOut = nullptr,
+    std::size_t* largestCommunityOut = nullptr) {
+    std::vector<float> support(candidateIds.size(), 0.0f);
+    if (!kgStore || candidateIds.size() < 2) {
+        return support;
+    }
+
+    std::unordered_map<std::int64_t, std::size_t> indexByNodeId;
+    indexByNodeId.reserve(candidateIds.size());
+    for (std::size_t i = 0; i < candidateIds.size(); ++i) {
+        auto nodeId = resolveGraphCandidateNodeId(kgStore, candidateIds[i]);
+        if (nodeId.has_value()) {
+            indexByNodeId.emplace(*nodeId, i);
+        }
+    }
+    if (indexByNodeId.size() < 2) {
+        return support;
+    }
+
+    std::vector<std::unordered_set<std::size_t>> outgoing(candidateIds.size());
+    std::vector<std::vector<std::size_t>> reciprocalAdj(candidateIds.size());
+
+    for (const auto& [nodeId, idx] : indexByNodeId) {
+        auto edgesResult =
+            kgStore->getEdgesFrom(nodeId, std::string_view("semantic_neighbor"), maxNeighbors, 0);
+        if (!edgesResult) {
+            continue;
+        }
+        for (const auto& edge : edgesResult.value()) {
+            auto it = indexByNodeId.find(edge.dstNodeId);
+            if (it == indexByNodeId.end() || it->second == idx) {
+                continue;
+            }
+            outgoing[idx].insert(it->second);
+        }
+    }
+
+    std::size_t reciprocalEdgeCount = 0;
+    for (std::size_t i = 0; i < outgoing.size(); ++i) {
+        for (const auto neighbor : outgoing[i]) {
+            if (neighbor <= i) {
+                continue;
+            }
+            if (outgoing[neighbor].contains(i)) {
+                reciprocalAdj[i].push_back(neighbor);
+                reciprocalAdj[neighbor].push_back(i);
+                ++reciprocalEdgeCount;
+            }
+        }
+    }
+
+    std::vector<bool> visited(candidateIds.size(), false);
+    std::size_t supportedDocCount = 0;
+    std::size_t largestCommunity = 0;
+    for (std::size_t i = 0; i < reciprocalAdj.size(); ++i) {
+        if (visited[i] || reciprocalAdj[i].empty()) {
+            continue;
+        }
+        std::vector<std::size_t> component;
+        std::vector<std::size_t> stack = {i};
+        visited[i] = true;
+        while (!stack.empty()) {
+            const auto cur = stack.back();
+            stack.pop_back();
+            component.push_back(cur);
+            for (const auto neighbor : reciprocalAdj[cur]) {
+                if (visited[neighbor]) {
+                    continue;
+                }
+                visited[neighbor] = true;
+                stack.push_back(neighbor);
+            }
+        }
+
+        if (component.size() < 2) {
+            continue;
+        }
+
+        supportedDocCount += component.size();
+        largestCommunity = std::max(largestCommunity, component.size());
+        const float normalized = std::clamp(static_cast<float>(component.size() - 1) /
+                                                static_cast<float>(candidateIds.size() - 1),
+                                            0.0f, 1.0f);
+        for (const auto member : component) {
+            support[member] = std::max(support[member], normalized);
+        }
+    }
+
+    if (supportedDocCountOut) {
+        *supportedDocCountOut = supportedDocCount;
+    }
+    if (edgeCountOut) {
+        *edgeCountOut = reciprocalEdgeCount;
+    }
+    if (largestCommunityOut) {
+        *largestCommunityOut = largestCommunity;
+    }
+    return support;
+}
+
 bool hasQueryTokenHit(const std::string& query, const std::string& content) {
     const auto queryTokens = tokenizeLower(query);
     const std::string loweredContent = toLowerCopy(content);
@@ -3137,14 +3293,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             candidateIds.reserve(rerankWindow);
             for (size_t i = 0; i < rerankWindow; ++i) {
                 const auto& res = response.results[i];
-                const std::string docId =
-                    documentIdForTrace(res.document.filePath, res.document.sha256Hash);
-                if (!docId.empty()) {
-                    candidateIds.push_back(docId);
-                } else if (!res.document.sha256Hash.empty()) {
+                if (!res.document.sha256Hash.empty()) {
                     candidateIds.push_back(res.document.sha256Hash);
-                } else {
+                } else if (!res.document.filePath.empty()) {
                     candidateIds.push_back(res.document.filePath);
+                } else {
+                    candidateIds.push_back(
+                        documentIdForTrace(res.document.filePath, res.document.sha256Hash));
                 }
             }
 
@@ -3170,6 +3325,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 const float minSignal = std::max(0.0f, workingConfig.graphRerankMinSignal);
                 const float maxBoost = std::max(0.0f, workingConfig.graphRerankMaxBoost);
                 const float rerankWeight = std::max(0.0f, workingConfig.graphRerankWeight);
+                const float communityWeight =
+                    std::clamp(workingConfig.graphCommunityWeight, 0.0f, 1.0f);
+                const float baseSignalWeight = std::max(0.0f, 1.0f - communityWeight);
+                std::size_t graphCommunitySupportedDocs = 0;
+                std::size_t graphCommunityEdges = 0;
+                std::size_t graphLargestCommunity = 0;
+                double graphCommunitySignalMass = 0.0;
+                std::size_t graphCommunityBoostedDocs = 0;
+                const auto communitySupport = computeReciprocalCommunitySupport(
+                    kgStore_, candidateIds,
+                    std::max<std::size_t>(8, workingConfig.graphMaxNeighbors),
+                    &graphCommunitySupportedDocs, &graphCommunityEdges, &graphLargestCommunity);
 
                 std::vector<float> rawSignals(rerankWindow, 0.0f);
                 float maxRawSignal = 0.0f;
@@ -3193,11 +3360,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         std::clamp(getFeature("feature_query_coverage_ratio"), 0.0f, 1.0f);
                     const float pathSupport =
                         std::clamp(getFeature("feature_path_support_score"), 0.0f, 1.0f);
+                    const float communitySignal = i < communitySupport.size()
+                                                      ? std::clamp(communitySupport[i], 0.0f, 1.0f)
+                                                      : 0.0f;
+                    graphCommunitySignalMass += communitySignal;
 
                     // Composite graph relevance signal.
                     const float rawSignal =
-                        std::clamp(kgScore.entity * 0.45f + kgScore.structural * 0.25f +
-                                       queryCoverage * 0.20f + pathSupport * 0.10f,
+                        std::clamp((kgScore.entity * 0.40f + kgScore.structural * 0.20f +
+                                    queryCoverage * 0.20f + pathSupport * 0.10f) *
+                                           baseSignalWeight +
+                                       communitySignal * communityWeight,
                                    0.0f, 1.0f);
                     rawSignals[i] = rawSignal;
                     maxRawSignal = std::max(maxRawSignal, rawSignal);
@@ -3236,6 +3409,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     response.results[i].kgScore = response.results[i].kgScore.value_or(0.0) + boost;
                     boosted = true;
                     graphBoostedDocs++;
+                    if (communityWeight > 0.0f && i < communitySupport.size() &&
+                        communitySupport[i] > 0.0f) {
+                        graphCommunityBoostedDocs++;
+                    }
                 }
 
                 if (!boosted && workingConfig.graphFallbackToTopSignal &&
@@ -3268,9 +3445,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     json graphExplainJson = json::array();
                     for (size_t i = 0; i < std::min(graphExplanations.size(), rerankWindow); ++i) {
                         const auto& expl = graphExplanations[i];
+                        const float communitySignal =
+                            i < communitySupport.size()
+                                ? std::clamp(communitySupport[i], 0.0f, 1.0f)
+                                : 0.0f;
                         graphExplainJson.push_back({
                             {"doc_id", expl.id},
                             {"components", expl.components},
+                            {"community_signal", communitySignal},
                             {"reasons", expl.reasons},
                         });
                     }
@@ -3278,6 +3460,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     response.debugStats["graph_doc_probe_json"] =
                         buildGraphDocProbeJson(kgStore_, response.results, rerankWindow).dump();
                 }
+                response.debugStats["graph_community_supported_docs"] =
+                    std::to_string(graphCommunitySupportedDocs);
+                response.debugStats["graph_community_edge_count"] =
+                    std::to_string(graphCommunityEdges);
+                response.debugStats["graph_community_largest_size"] =
+                    std::to_string(graphLargestCommunity);
+                response.debugStats["graph_community_signal_mass"] =
+                    fmt::format("{:.4f}", graphCommunitySignalMass);
+                response.debugStats["graph_community_boosted_docs"] =
+                    std::to_string(graphCommunityBoostedDocs);
+                response.debugStats["graph_community_weight"] =
+                    fmt::format("{:.4f}", communityWeight);
             } else {
                 failed.push_back("graph_rerank");
                 traceCollector.markStageFailure("graph_rerank");
@@ -4192,6 +4386,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(graphPositiveSignalCandidates);
     response.debugStats["graph_boosted_docs"] = std::to_string(graphBoostedDocs);
     response.debugStats["graph_max_signal"] = fmt::format("{:.4f}", graphMaxSignal);
+    response.debugStats.try_emplace("graph_community_supported_docs", "0");
+    response.debugStats.try_emplace("graph_community_edge_count", "0");
+    response.debugStats.try_emplace("graph_community_largest_size", "0");
+    response.debugStats.try_emplace("graph_community_signal_mass", "0.0000");
+    response.debugStats.try_emplace("graph_community_boosted_docs", "0");
+    response.debugStats.try_emplace(
+        "graph_community_weight",
+        fmt::format("{:.4f}", std::clamp(workingConfig.graphCommunityWeight, 0.0f, 1.0f)));
     response.debugStats["rerank_window_trace_json"] = rerankWindowTrace.dump();
     if (workingConfig.semanticRescueSlots > 0 && !response.results.empty()) {
         spdlog::debug(

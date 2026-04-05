@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/metadata/kg_topology_analysis.h>
@@ -11,6 +12,8 @@
 
 using namespace yams;
 using namespace yams::metadata;
+
+using Catch::Approx;
 
 namespace {
 std::filesystem::path tempDbPath(const char* prefix) {
@@ -168,8 +171,102 @@ TEST_CASE("KG topology analysis summarizes semantic neighborhoods", "[unit][meta
     REQUIRE(topology.has_value());
     CHECK(topology->documentNodeCount == 3);
     CHECK(topology->semanticEdgeCount == 1);
+    CHECK(topology->reciprocalSemanticEdgeCount == 1);
+    CHECK(topology->unreciprocatedSemanticEdgeCount == 0);
     CHECK(topology->documentsWithSemanticNeighbors == 2);
+    CHECK(topology->documentsWithReciprocalNeighbors == 2);
+    CHECK(topology->reciprocalCommunityCount == 1);
+    CHECK(topology->reciprocalSingletonDocumentCount == 1);
+    CHECK(topology->largestReciprocalCommunitySize == 2);
     CHECK(topology->isolatedDocumentCount == 1);
     CHECK(topology->connectedComponentCount == 2);
     CHECK(topology->largestComponentSize == 2);
+    CHECK(topology->semanticReciprocity == Approx(1.0));
+}
+
+TEST_CASE("KG topology analysis distinguishes one-way semantic neighborhoods",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    std::vector<KGNode> nodes = {
+        KGNode{.nodeKey = "doc:a", .label = std::string("a"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:b", .label = std::string("b"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:c", .label = std::string("c"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:d", .label = std::string("d"), .type = std::string("document")},
+    };
+    auto ids = fix.store_->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+    REQUIRE(ids.value().size() == 4);
+
+    REQUIRE(fix.store_
+                ->addEdgesUnique({KGEdge{.srcNodeId = ids.value()[0],
+                                         .dstNodeId = ids.value()[1],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.91f},
+                                  KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[2],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.90f},
+                                  KGEdge{.srcNodeId = ids.value()[2],
+                                         .dstNodeId = ids.value()[3],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.89f}})
+                .has_value());
+
+    auto topology = analyzeDocumentTopology(fix.store_.get());
+    REQUIRE(topology.has_value());
+    CHECK(topology->documentNodeCount == 4);
+    CHECK(topology->semanticEdgeCount == 3);
+    CHECK(topology->reciprocalSemanticEdgeCount == 0);
+    CHECK(topology->unreciprocatedSemanticEdgeCount == 3);
+    CHECK(topology->documentsWithSemanticNeighbors == 4);
+    CHECK(topology->documentsWithReciprocalNeighbors == 0);
+    CHECK(topology->reciprocalCommunityCount == 0);
+    CHECK(topology->reciprocalSingletonDocumentCount == 4);
+    CHECK(topology->largestReciprocalCommunitySize == 0);
+    CHECK(topology->connectedComponentCount == 1);
+    CHECK(topology->largestComponentSize == 4);
+    CHECK(topology->semanticReciprocity == Approx(0.0));
+}
+
+TEST_CASE("KG topology analysis summarizes reciprocal communities", "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    std::vector<KGNode> nodes = {
+        KGNode{.nodeKey = "doc:a", .label = std::string("a"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:b", .label = std::string("b"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:c", .label = std::string("c"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:d", .label = std::string("d"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:e", .label = std::string("e"), .type = std::string("document")},
+    };
+    auto ids = fix.store_->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    REQUIRE(fix.store_
+                ->addEdgesUnique({KGEdge{.srcNodeId = ids.value()[0],
+                                         .dstNodeId = ids.value()[1],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.9f},
+                                  KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[0],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.9f},
+                                  KGEdge{.srcNodeId = ids.value()[2],
+                                         .dstNodeId = ids.value()[3],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.88f},
+                                  KGEdge{.srcNodeId = ids.value()[3],
+                                         .dstNodeId = ids.value()[2],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.88f}})
+                .has_value());
+
+    auto topology = analyzeDocumentTopology(fix.store_.get());
+    REQUIRE(topology.has_value());
+    CHECK(topology->reciprocalCommunityCount == 2);
+    CHECK(topology->largestReciprocalCommunitySize == 2);
+    CHECK(topology->reciprocalSingletonDocumentCount == 1);
+    REQUIRE(topology->reciprocalCommunitySizes.size() == 2);
+    CHECK(topology->reciprocalCommunitySizes[0] == 2);
+    CHECK(topology->reciprocalCommunitySizes[1] == 2);
 }

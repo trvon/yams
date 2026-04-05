@@ -339,6 +339,7 @@ struct SearchEngineConfig {
     float graphRerankWeight = 0.15f;    // Multiplicative weight applied to KG signal
     float graphRerankMaxBoost = 0.20f;  // Per-document cap for graph-induced boost
     float graphRerankMinSignal = 0.01f; // Ignore weak KG signals below this threshold
+    float graphCommunityWeight = 0.10f; // Share of raw graph signal reserved for reciprocal support
     bool graphUseQueryConcepts = true;  // Enrich graph rerank query with extracted concepts
     bool graphFallbackToTopSignal =
         true; // If no candidate clears minSignal, still boost the top positive graph hit

@@ -776,6 +776,12 @@ private:
                     } else {
                         bool attemptedDaemon = false;
                         bool skipDaemon = noDaemonRepair_;
+                        if (skipDaemon) {
+                            std::cout
+                                << "  "
+                                << ui::status_info("Skipping daemon embedding RPC (--no-daemon)")
+                                << "\n";
+                        }
                         {
                             try {
                                 if (skipDaemon) {
@@ -853,13 +859,17 @@ private:
                                         << "\n";
                                 }
                             } catch (const std::exception& ex) {
-                                std::cout << "  "
-                                          << ui::status_warning(
-                                                 std::string("Daemon embeddings exception (") +
-                                                 ex.what() +
-                                                 ") — falling back to local mode. Use "
-                                                 "'--no-daemon' to skip RPC.")
-                                          << "\n";
+                                if (skipDaemon && std::string(ex.what()) == "skipped") {
+                                    // Intentional local-mode path; no warning needed.
+                                } else {
+                                    std::cout << "  "
+                                              << ui::status_warning(
+                                                     std::string("Daemon embeddings exception (") +
+                                                     ex.what() +
+                                                     ") — falling back to local mode. Use "
+                                                     "'--no-daemon' to skip RPC.")
+                                              << "\n";
+                                }
                             }
                         }
                         if (!attemptedDaemon) {

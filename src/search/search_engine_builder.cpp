@@ -575,6 +575,11 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine graphRerankMinSignal overridden to {:.3f} via env",
                          cfg.graphRerankMinSignal);
         }
+        if (auto graphCommunityWeight = getEnvFloat("YAMS_SEARCH_GRAPH_COMMUNITY_WEIGHT")) {
+            cfg.graphCommunityWeight = std::clamp(*graphCommunityWeight, 0.0f, 1.0f);
+            spdlog::info("SearchEngine graphCommunityWeight overridden to {:.3f} via env",
+                         cfg.graphCommunityWeight);
+        }
         if (auto graphUseQueryConcepts = getEnvBool("YAMS_SEARCH_GRAPH_USE_QUERY_CONCEPTS")) {
             cfg.graphUseQueryConcepts = *graphUseQueryConcepts;
             spdlog::info("SearchEngine graphUseQueryConcepts overridden to {} via env",

@@ -1485,6 +1485,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                             static_cast<double>(p.graphRerankMaxBoost);
                         newParams["graph_rerank_min_signal"] =
                             static_cast<double>(p.graphRerankMinSignal);
+                        newParams["graph_community_weight"] =
+                            static_cast<double>(p.graphCommunityWeight);
                         newParams["kg_max_results"] = static_cast<double>(p.kgMaxResults);
                         newParams["graph_scoring_budget_ms"] =
                             static_cast<double>(p.graphScoringBudgetMs);

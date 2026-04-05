@@ -122,6 +122,7 @@ void applyAdaptiveClamp(const storage::CorpusStats& stats, TunedParams& params) 
         params.graphRerankWeight = 0.0f;
         params.graphRerankMaxBoost = 0.0f;
         params.graphRerankMinSignal = 0.0f;
+        params.graphCommunityWeight = 0.0f;
     }
 
     normalizeComponentWeights(params);
@@ -170,6 +171,7 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
     params.graphRerankWeight = 0.18f + 0.14f * graphRichness;
     params.graphRerankMaxBoost = 0.22f + 0.16f * graphRichness;
     params.graphRerankMinSignal = std::max(0.005f, 0.02f - 0.012f * graphRichness);
+    params.graphCommunityWeight = 0.08f + 0.08f * graphRichness;
     params.kgMaxResults = static_cast<size_t>(std::lround(60.0 + 60.0 * graphRichness));
     params.graphScoringBudgetMs = static_cast<int>(std::lround(8.0 + 6.0 * graphRichness));
 
@@ -178,7 +180,8 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
     std::ostringstream suffix;
     suffix << ", graph=on(symbol_density=" << stats.symbolDensity
            << ", kg_weight=" << params.kgWeight
-           << ", graph_rerank_weight=" << params.graphRerankWeight << ")";
+           << ", graph_rerank_weight=" << params.graphRerankWeight
+           << ", graph_community_weight=" << params.graphCommunityWeight << ")";
     stateReason += suffix.str();
 }
 
@@ -242,6 +245,7 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.graphRerankWeight = config.graphRerankWeight;
     params_.graphRerankMaxBoost = config.graphRerankMaxBoost;
     params_.graphRerankMinSignal = config.graphRerankMinSignal;
+    params_.graphCommunityWeight = config.graphCommunityWeight;
     params_.kgMaxResults = config.kgMaxResults;
     params_.graphScoringBudgetMs = config.graphScoringBudgetMs;
     applyAdaptiveClamp(stats_, params_);

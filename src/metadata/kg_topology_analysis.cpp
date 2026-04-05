@@ -3,11 +3,26 @@
 #include <yams/metadata/knowledge_graph_store.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace yams::metadata {
+
+namespace {
+
+std::uint64_t makeUndirectedPairKey(std::size_t a, std::size_t b) {
+    const auto [lo, hi] = std::minmax(a, b);
+    return (static_cast<std::uint64_t>(lo) << 32U) | static_cast<std::uint64_t>(hi);
+}
+
+std::uint64_t makeDirectedPairKey(std::size_t src, std::size_t dst) {
+    return (static_cast<std::uint64_t>(src) << 32U) | static_cast<std::uint64_t>(dst);
+}
+
+} // namespace
 
 std::optional<KGTopologySummary> analyzeDocumentTopology(KnowledgeGraphStore* kgStore,
                                                          std::size_t maxNeighborsPerNode) {
@@ -34,7 +49,11 @@ std::optional<KGTopologySummary> analyzeDocumentTopology(KnowledgeGraphStore* kg
     }
 
     std::vector<std::vector<std::size_t>> adjacency(docs.size());
+    std::vector<std::vector<std::size_t>> reciprocalAdjacency(docs.size());
     std::vector<std::size_t> semanticDegree(docs.size(), 0);
+    std::unordered_set<std::uint64_t> directedPairs;
+    std::unordered_set<std::uint64_t> reciprocalPairs;
+    std::unordered_set<std::uint64_t> reciprocalDocs;
 
     for (std::size_t i = 0; i < docs.size(); ++i) {
         auto edgesResult =
@@ -51,6 +70,13 @@ std::optional<KGTopologySummary> analyzeDocumentTopology(KnowledgeGraphStore* kg
             if (it == nodeIndex.end()) {
                 continue;
             }
+            if (it->second == i) {
+                continue;
+            }
+
+            if (edge.srcNodeId == docs[i].id) {
+                directedPairs.insert(makeDirectedPairKey(i, it->second));
+            }
             uniqueNeighbors.insert(it->second);
         }
 
@@ -65,6 +91,25 @@ std::optional<KGTopologySummary> analyzeDocumentTopology(KnowledgeGraphStore* kg
             adjacency[i].push_back(neighborIndex);
         }
     }
+
+    for (const auto pair : directedPairs) {
+        const auto src = static_cast<std::size_t>(pair >> 32U);
+        const auto dst = static_cast<std::size_t>(pair & 0xffffffffU);
+        if (directedPairs.contains(makeDirectedPairKey(dst, src))) {
+            reciprocalPairs.insert(makeUndirectedPairKey(src, dst));
+            reciprocalDocs.insert(src);
+            reciprocalDocs.insert(dst);
+            reciprocalAdjacency[src].push_back(dst);
+            reciprocalAdjacency[dst].push_back(src);
+        }
+    }
+
+    summary.documentsWithReciprocalNeighbors = reciprocalDocs.size();
+    summary.reciprocalSemanticEdgeCount = reciprocalPairs.size();
+    summary.reciprocalSingletonDocumentCount =
+        summary.documentNodeCount > summary.documentsWithReciprocalNeighbors
+            ? summary.documentNodeCount - summary.documentsWithReciprocalNeighbors
+            : 0;
 
     if (summary.documentNodeCount > 0) {
         summary.avgSemanticDegree = static_cast<double>(summary.semanticEdgeCount) /
@@ -117,7 +162,53 @@ std::optional<KGTopologySummary> analyzeDocumentTopology(KnowledgeGraphStore* kg
         std::sort(summary.componentSizes.begin(), summary.componentSizes.end(), std::greater<>());
     }
 
+    std::vector<bool> reciprocalVisited(docs.size(), false);
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        if (reciprocalVisited[i] || reciprocalAdjacency[i].empty()) {
+            continue;
+        }
+
+        std::deque<std::size_t> queue;
+        queue.push_back(i);
+        reciprocalVisited[i] = true;
+        std::size_t communitySize = 0;
+
+        while (!queue.empty()) {
+            const auto cur = queue.front();
+            queue.pop_front();
+            ++communitySize;
+
+            for (const auto neighbor : reciprocalAdjacency[cur]) {
+                if (reciprocalVisited[neighbor]) {
+                    continue;
+                }
+                reciprocalVisited[neighbor] = true;
+                queue.push_back(neighbor);
+            }
+        }
+
+        if (communitySize >= 2) {
+            ++summary.reciprocalCommunityCount;
+            summary.reciprocalCommunitySizes.push_back(communitySize);
+            summary.largestReciprocalCommunitySize =
+                std::max(summary.largestReciprocalCommunitySize, communitySize);
+        }
+    }
+
+    if (!summary.reciprocalCommunitySizes.empty()) {
+        std::sort(summary.reciprocalCommunitySizes.begin(), summary.reciprocalCommunitySizes.end(),
+                  std::greater<>());
+    }
+
     summary.semanticEdgeCount /= 2;
+    summary.unreciprocatedSemanticEdgeCount =
+        summary.semanticEdgeCount > summary.reciprocalSemanticEdgeCount
+            ? summary.semanticEdgeCount - summary.reciprocalSemanticEdgeCount
+            : 0;
+    if (summary.semanticEdgeCount > 0) {
+        summary.semanticReciprocity = static_cast<double>(summary.reciprocalSemanticEdgeCount) /
+                                      static_cast<double>(summary.semanticEdgeCount);
+    }
     return summary;
 }
 

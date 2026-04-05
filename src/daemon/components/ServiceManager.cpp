@@ -2052,6 +2052,18 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
             if (piq) {
                 piq->setDrainCallback([this]() {
+                    if (auto graphComponent = getGraphComponent()) {
+                        auto maintenance = graphComponent->maintainSemanticTopology(false);
+                        if (!maintenance) {
+                            spdlog::warn(
+                                "[ServiceManager] Semantic topology maintenance failed: {}",
+                                maintenance.error().message);
+                        } else if (maintenance.value().semanticEdgesPruned > 0) {
+                            spdlog::info("[ServiceManager] Pruned {} one-way semantic_neighbor "
+                                         "edges after drain",
+                                         maintenance.value().semanticEdgesPruned);
+                        }
+                    }
                     spdlog::debug(
                         "[ServiceManager] PostIngestQueue drained, signaling SearchEngineManager");
                     searchEngineManager_.signalIndexingDrained();

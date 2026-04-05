@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -85,13 +86,27 @@ public:
         uint64_t unreachableNodes{0};
         uint64_t topologyDocumentNodes{0};
         uint64_t topologySemanticEdges{0};
+        uint64_t topologyReciprocalSemanticEdges{0};
+        uint64_t topologyUnreciprocatedSemanticEdges{0};
         uint64_t topologyDocumentsWithNeighbors{0};
+        uint64_t topologyDocumentsWithReciprocalNeighbors{0};
+        uint64_t topologyReciprocalCommunityCount{0};
+        uint64_t topologyLargestReciprocalCommunity{0};
         uint64_t topologyIsolatedDocuments{0};
         uint64_t topologyConnectedComponents{0};
         uint64_t topologyLargestComponent{0};
         std::vector<std::string> issues;
     };
     Result<GraphHealthReport> validateGraph();
+
+    struct SemanticTopologyMaintenanceStats {
+        uint64_t semanticEdgesPruned{0};
+        uint64_t reciprocalCommunities{0};
+        uint64_t largestReciprocalCommunity{0};
+        bool skipped{false};
+        std::vector<std::string> issues;
+    };
+    Result<SemanticTopologyMaintenanceStats> maintainSemanticTopology(bool dryRun = false);
 
     std::shared_ptr<app::services::IGraphQueryService> getQueryService() const;
 
@@ -111,6 +126,7 @@ private:
     std::shared_ptr<EntityGraphService> entityService_;
     ServiceManager* serviceManager_{nullptr};
     bool initialized_{false};
+    std::atomic<bool> semanticTopologyMaintenanceRunning_{false};
 };
 
 } // namespace yams::daemon

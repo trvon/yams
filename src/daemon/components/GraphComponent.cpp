@@ -16,10 +16,92 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace yams::daemon {
+
+namespace {
+
+using DirectedNodePair = std::pair<std::int64_t, std::int64_t>;
+
+struct DirectedNodePairHash {
+    std::size_t operator()(const DirectedNodePair& value) const noexcept {
+        std::size_t seed = std::hash<std::int64_t>{}(value.first);
+        seed ^= std::hash<std::int64_t>{}(value.second) + 0x9e3779b9 + (seed << 6U) + (seed >> 2U);
+        return seed;
+    }
+};
+
+Result<std::unordered_map<DirectedNodePair, std::int64_t, DirectedNodePairHash>>
+collectDirectedSemanticNeighborEdges(metadata::KnowledgeGraphStore* kgStore,
+                                     std::size_t batchSize) {
+    if (!kgStore) {
+        return Error{ErrorCode::InvalidArgument, "KnowledgeGraphStore is required"};
+    }
+
+    auto docsResult = kgStore->findNodesByType("document", 1'000'000, 0);
+    if (!docsResult) {
+        return docsResult.error();
+    }
+
+    std::unordered_set<std::int64_t> documentIds;
+    documentIds.reserve(docsResult.value().size());
+    for (const auto& doc : docsResult.value()) {
+        documentIds.insert(doc.id);
+    }
+
+    std::unordered_map<DirectedNodePair, std::int64_t, DirectedNodePairHash> edgeIdsByPair;
+    edgeIdsByPair.reserve(documentIds.size() * 4);
+
+    for (const auto& doc : docsResult.value()) {
+        std::size_t offset = 0;
+        while (true) {
+            auto edgesResult = kgStore->getEdgesFrom(doc.id, std::string_view("semantic_neighbor"),
+                                                     batchSize, offset);
+            if (!edgesResult) {
+                return edgesResult.error();
+            }
+
+            const auto& edges = edgesResult.value();
+            if (edges.empty()) {
+                break;
+            }
+
+            for (const auto& edge : edges) {
+                if (edge.srcNodeId == edge.dstNodeId) {
+                    edgeIdsByPair.emplace(DirectedNodePair{edge.srcNodeId, edge.dstNodeId},
+                                          edge.id);
+                    continue;
+                }
+                if (!documentIds.contains(edge.dstNodeId)) {
+                    continue;
+                }
+                edgeIdsByPair.emplace(DirectedNodePair{edge.srcNodeId, edge.dstNodeId}, edge.id);
+            }
+
+            offset += edges.size();
+            if (edges.size() < batchSize) {
+                break;
+            }
+        }
+    }
+
+    return edgeIdsByPair;
+}
+
+bool shouldPruneSemanticTopology(const metadata::KGTopologySummary& summary) {
+    if (summary.unreciprocatedSemanticEdgeCount == 0) {
+        return false;
+    }
+    if (summary.semanticEdgeCount >= 3 && summary.reciprocalSemanticEdgeCount == 0) {
+        return true;
+    }
+    return summary.semanticEdgeCount >= 4 && summary.semanticReciprocity < 0.5;
+}
+
+} // namespace
 
 GraphComponent::GraphComponent(std::shared_ptr<metadata::MetadataRepository> metadataRepo,
                                std::shared_ptr<metadata::KnowledgeGraphStore> kgStore,
@@ -745,6 +827,17 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun) {
             break;
     }
 
+    auto maintenanceResult = maintainSemanticTopology(dryRun);
+    if (!maintenanceResult) {
+        ++stats.errors;
+        stats.issues.push_back("semantic topology maintenance failed: " +
+                               maintenanceResult.error().message);
+    } else {
+        for (const auto& issue : maintenanceResult.value().issues) {
+            stats.issues.push_back(issue);
+        }
+    }
+
     if (dryRun) {
         stats.issues.push_back(
             "dry-run: changes were rolled back (counts reflect attempted writes)");
@@ -809,8 +902,18 @@ Result<GraphComponent::GraphHealthReport> GraphComponent::validateGraph() {
     if (auto topology = metadata::analyzeDocumentTopology(kgStore_.get()); topology.has_value()) {
         report.topologyDocumentNodes = static_cast<uint64_t>(topology->documentNodeCount);
         report.topologySemanticEdges = static_cast<uint64_t>(topology->semanticEdgeCount);
+        report.topologyReciprocalSemanticEdges =
+            static_cast<uint64_t>(topology->reciprocalSemanticEdgeCount);
+        report.topologyUnreciprocatedSemanticEdges =
+            static_cast<uint64_t>(topology->unreciprocatedSemanticEdgeCount);
         report.topologyDocumentsWithNeighbors =
             static_cast<uint64_t>(topology->documentsWithSemanticNeighbors);
+        report.topologyDocumentsWithReciprocalNeighbors =
+            static_cast<uint64_t>(topology->documentsWithReciprocalNeighbors);
+        report.topologyReciprocalCommunityCount =
+            static_cast<uint64_t>(topology->reciprocalCommunityCount);
+        report.topologyLargestReciprocalCommunity =
+            static_cast<uint64_t>(topology->largestReciprocalCommunitySize);
         report.topologyIsolatedDocuments = static_cast<uint64_t>(topology->isolatedDocumentCount);
         report.topologyConnectedComponents =
             static_cast<uint64_t>(topology->connectedComponentCount);
@@ -825,11 +928,114 @@ Result<GraphComponent::GraphHealthReport> GraphComponent::validateGraph() {
         if (topology->documentNodeCount >= 8 && topology->semanticCoverage < 0.25) {
             report.issues.push_back("semantic topology coverage below 25%");
         }
+        if (topology->semanticEdgeCount >= 3 && topology->reciprocalSemanticEdgeCount == 0) {
+            report.issues.push_back("semantic topology has no reciprocal document neighborhoods");
+        }
+        if (topology->semanticEdgeCount >= 6 && topology->semanticReciprocity < 0.5) {
+            report.issues.push_back("semantic topology reciprocity below 50%");
+        }
+        if (topology->documentsWithReciprocalNeighbors >= 6 &&
+            topology->largestReciprocalCommunitySize <= 2) {
+            report.issues.push_back("semantic community scaffold is fragmented into tiny clusters");
+        }
     } else {
         report.issues.push_back("topology analysis unavailable");
     }
 
     return report;
+}
+
+Result<GraphComponent::SemanticTopologyMaintenanceStats>
+GraphComponent::maintainSemanticTopology(bool dryRun) {
+    if (!initialized_ || !kgStore_) {
+        return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
+    }
+
+    bool expected = false;
+    if (!semanticTopologyMaintenanceRunning_.compare_exchange_strong(expected, true,
+                                                                     std::memory_order_acq_rel)) {
+        SemanticTopologyMaintenanceStats skipped;
+        skipped.skipped = true;
+        skipped.issues.push_back("semantic topology maintenance already in progress");
+        return skipped;
+    }
+
+    struct Guard {
+        std::atomic<bool>& flag;
+        ~Guard() { flag.store(false, std::memory_order_release); }
+    } guard{semanticTopologyMaintenanceRunning_};
+
+    auto topology = metadata::analyzeDocumentTopology(kgStore_.get(), 256);
+    if (!topology) {
+        return Error{ErrorCode::InternalError, "topology analysis unavailable"};
+    }
+
+    SemanticTopologyMaintenanceStats stats;
+    stats.reciprocalCommunities = static_cast<uint64_t>(topology->reciprocalCommunityCount);
+    stats.largestReciprocalCommunity =
+        static_cast<uint64_t>(topology->largestReciprocalCommunitySize);
+
+    if (!shouldPruneSemanticTopology(*topology)) {
+        stats.skipped = true;
+        stats.issues.push_back("semantic topology maintenance skipped: reciprocity healthy enough");
+        return stats;
+    }
+
+    auto edgesByPairResult = collectDirectedSemanticNeighborEdges(kgStore_.get(), 256);
+    if (!edgesByPairResult) {
+        return Error{ErrorCode::InternalError, "failed to collect semantic_neighbor edges: " +
+                                                   edgesByPairResult.error().message};
+    }
+
+    std::vector<std::int64_t> edgesToRemove;
+    edgesToRemove.reserve(topology->unreciprocatedSemanticEdgeCount);
+    for (const auto& [pair, edgeId] : edgesByPairResult.value()) {
+        if (pair.first == pair.second) {
+            edgesToRemove.push_back(edgeId);
+            continue;
+        }
+        if (!edgesByPairResult.value().contains(DirectedNodePair{pair.second, pair.first})) {
+            edgesToRemove.push_back(edgeId);
+        }
+    }
+
+    if (edgesToRemove.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back(
+            "semantic topology maintenance skipped: no removable one-way edges found");
+        return stats;
+    }
+
+    if (dryRun) {
+        stats.issues.push_back("dry-run: would prune " + std::to_string(edgesToRemove.size()) +
+                               " one-way semantic_neighbor edges");
+        return stats;
+    }
+
+    for (const auto edgeId : edgesToRemove) {
+        auto removeResult = kgStore_->removeEdgeById(edgeId);
+        if (!removeResult) {
+            return Error{ErrorCode::InternalError, "failed to prune semantic_neighbor edge " +
+                                                       std::to_string(edgeId) + ": " +
+                                                       removeResult.error().message};
+        }
+        ++stats.semanticEdgesPruned;
+    }
+
+    if (stats.semanticEdgesPruned > 0) {
+        stats.issues.push_back("pruned " + std::to_string(stats.semanticEdgesPruned) +
+                               " one-way semantic_neighbor edges");
+    }
+
+    auto updatedTopology = metadata::analyzeDocumentTopology(kgStore_.get(), 256);
+    if (updatedTopology) {
+        stats.reciprocalCommunities =
+            static_cast<uint64_t>(updatedTopology->reciprocalCommunityCount);
+        stats.largestReciprocalCommunity =
+            static_cast<uint64_t>(updatedTopology->largestReciprocalCommunitySize);
+    }
+
+    return stats;
 }
 
 std::shared_ptr<app::services::IGraphQueryService> GraphComponent::getQueryService() const {
