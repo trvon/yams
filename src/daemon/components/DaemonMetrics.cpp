@@ -1106,35 +1106,11 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.vectorDbDim = state_->readiness.vectorDbDim.load();
             } catch (...) {
             }
-            // Heal/mirror vector DB readiness from the live handle.
-            // Readiness semantics: false while empty/building; true only when the vector DB
-            // is initialized AND has at least one vector row (serving).
+            // Do not touch the live VectorDatabase handle on the status path.
+            // During startup the vector backend may be rebuilding HNSW under its internal mutex,
+            // and even cheap getters can block health checks. Use only cached counters and
+            // readiness atomics here so status remains responsive while startup progresses.
             std::size_t liveVectorRows = 0;
-            try {
-                auto vdb = services_->getVectorDatabase();
-                if (vdb && vdb->isInitialized()) {
-                    const auto dim = vdb->getConfig().embedding_dim;
-                    const auto rows = vdb->getVectorCount();
-                    liveVectorRows = rows;
-                    out.vectorDbReady = (rows > 0);
-                    out.vectorDbInitAttempted = true;
-
-                    // Best-effort: propagate back to state so subsequent snapshots are consistent.
-                    // We intentionally do not mark ready=true just because isInitialized().
-                    try {
-                        auto& readiness =
-                            const_cast<yams::daemon::DaemonReadiness&>(state_->readiness);
-                        readiness.vectorDbInitAttempted.store(true, std::memory_order_relaxed);
-                        readiness.vectorDbReady.store(out.vectorDbReady, std::memory_order_relaxed);
-                        if (dim > 0)
-                            readiness.vectorDbDim.store(static_cast<uint32_t>(dim),
-                                                        std::memory_order_relaxed);
-                        out.vectorDbDim = static_cast<uint32_t>(dim);
-                    } catch (...) {
-                    }
-                }
-            } catch (...) {
-            }
             // Size via filepath
             try {
                 auto dd = services_->getResolvedDataDir();
@@ -1180,8 +1156,17 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             try {
                 auto dd = services_->getResolvedDataDir();
                 if (!dd.empty()) {
+                    out.dataDir = dd.string();
                     out.contentStoreRoot = (dd / "storage").string();
                 }
+            } catch (...) {
+            }
+            try {
+                out.metadataDbPath = services_->getMetadataDatabasePath();
+            } catch (...) {
+            }
+            try {
+                out.vectorDbPath = services_->getVectorDatabasePath();
             } catch (...) {
             }
             try {
@@ -1460,36 +1445,71 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     }
 
                     if (needsRefresh) {
-                        // Compute new tuner state outside lock
+                        // Keep corpus-derived tuner state/reason for classification, but report
+                        // the live built search engine config for effective runtime parameters.
                         yams::search::SearchTuner tuner(stats);
                         auto newState = yams::search::tuningStateToString(tuner.currentState());
                         auto newReason = tuner.stateReason();
-                        const auto& p = tuner.getParams();
                         std::map<std::string, double> newParams;
-                        newParams["rrf_k"] = static_cast<double>(p.rrfK);
-                        newParams["text_weight"] = static_cast<double>(p.textWeight);
-                        newParams["vector_weight"] = static_cast<double>(p.vectorWeight);
-                        newParams["entity_vector_weight"] =
-                            static_cast<double>(p.entityVectorWeight);
-                        newParams["path_tree_weight"] = static_cast<double>(p.pathTreeWeight);
-                        newParams["kg_weight"] = static_cast<double>(p.kgWeight);
-                        newParams["tag_weight"] = static_cast<double>(p.tagWeight);
-                        newParams["metadata_weight"] = static_cast<double>(p.metadataWeight);
-                        newParams["similarity_threshold"] =
-                            static_cast<double>(p.similarityThreshold);
-                        newParams["vector_boost_factor"] = static_cast<double>(p.vectorBoostFactor);
-                        newParams["enable_graph_rerank"] = p.enableGraphRerank ? 1.0 : 0.0;
-                        newParams["graph_rerank_topn"] = static_cast<double>(p.graphRerankTopN);
-                        newParams["graph_rerank_weight"] = static_cast<double>(p.graphRerankWeight);
-                        newParams["graph_rerank_max_boost"] =
-                            static_cast<double>(p.graphRerankMaxBoost);
-                        newParams["graph_rerank_min_signal"] =
-                            static_cast<double>(p.graphRerankMinSignal);
-                        newParams["graph_community_weight"] =
-                            static_cast<double>(p.graphCommunityWeight);
-                        newParams["kg_max_results"] = static_cast<double>(p.kgMaxResults);
-                        newParams["graph_scoring_budget_ms"] =
-                            static_cast<double>(p.graphScoringBudgetMs);
+
+                        if (auto engine = services_->getSearchEngineSnapshot()) {
+                            const auto& cfg = engine->getConfig();
+                            newParams["rrf_k"] = static_cast<double>(cfg.rrfK);
+                            newParams["text_weight"] = static_cast<double>(cfg.textWeight);
+                            newParams["vector_weight"] = static_cast<double>(cfg.vectorWeight);
+                            newParams["entity_vector_weight"] =
+                                static_cast<double>(cfg.entityVectorWeight);
+                            newParams["path_tree_weight"] = static_cast<double>(cfg.pathTreeWeight);
+                            newParams["kg_weight"] = static_cast<double>(cfg.kgWeight);
+                            newParams["tag_weight"] = static_cast<double>(cfg.tagWeight);
+                            newParams["metadata_weight"] = static_cast<double>(cfg.metadataWeight);
+                            newParams["similarity_threshold"] =
+                                static_cast<double>(cfg.similarityThreshold);
+                            newParams["vector_boost_factor"] =
+                                static_cast<double>(cfg.vectorBoostFactor);
+                            newParams["enable_graph_rerank"] = cfg.enableGraphRerank ? 1.0 : 0.0;
+                            newParams["graph_rerank_topn"] =
+                                static_cast<double>(cfg.graphRerankTopN);
+                            newParams["graph_rerank_weight"] =
+                                static_cast<double>(cfg.graphRerankWeight);
+                            newParams["graph_rerank_max_boost"] =
+                                static_cast<double>(cfg.graphRerankMaxBoost);
+                            newParams["graph_rerank_min_signal"] =
+                                static_cast<double>(cfg.graphRerankMinSignal);
+                            newParams["graph_community_weight"] =
+                                static_cast<double>(cfg.graphCommunityWeight);
+                            newParams["kg_max_results"] = static_cast<double>(cfg.kgMaxResults);
+                            newParams["graph_scoring_budget_ms"] =
+                                static_cast<double>(cfg.graphScoringBudgetMs);
+                        } else {
+                            const auto& p = tuner.getParams();
+                            newParams["rrf_k"] = static_cast<double>(p.rrfK);
+                            newParams["text_weight"] = static_cast<double>(p.textWeight);
+                            newParams["vector_weight"] = static_cast<double>(p.vectorWeight);
+                            newParams["entity_vector_weight"] =
+                                static_cast<double>(p.entityVectorWeight);
+                            newParams["path_tree_weight"] = static_cast<double>(p.pathTreeWeight);
+                            newParams["kg_weight"] = static_cast<double>(p.kgWeight);
+                            newParams["tag_weight"] = static_cast<double>(p.tagWeight);
+                            newParams["metadata_weight"] = static_cast<double>(p.metadataWeight);
+                            newParams["similarity_threshold"] =
+                                static_cast<double>(p.similarityThreshold);
+                            newParams["vector_boost_factor"] =
+                                static_cast<double>(p.vectorBoostFactor);
+                            newParams["enable_graph_rerank"] = p.enableGraphRerank ? 1.0 : 0.0;
+                            newParams["graph_rerank_topn"] = static_cast<double>(p.graphRerankTopN);
+                            newParams["graph_rerank_weight"] =
+                                static_cast<double>(p.graphRerankWeight);
+                            newParams["graph_rerank_max_boost"] =
+                                static_cast<double>(p.graphRerankMaxBoost);
+                            newParams["graph_rerank_min_signal"] =
+                                static_cast<double>(p.graphRerankMinSignal);
+                            newParams["graph_community_weight"] =
+                                static_cast<double>(p.graphCommunityWeight);
+                            newParams["kg_max_results"] = static_cast<double>(p.kgMaxResults);
+                            newParams["graph_scoring_budget_ms"] =
+                                static_cast<double>(p.graphScoringBudgetMs);
+                        }
 
                         // Update cache under exclusive lock
                         std::unique_lock tunerLock(tunerCacheMutex_);
@@ -1500,12 +1520,49 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                         lastTunerStateAt_ = now;
                     }
 
-                    // Use cached values under shared lock
+                    // Use cached classification values under shared lock
                     {
                         std::shared_lock tunerLock(tunerCacheMutex_);
                         out.searchTuningState = cachedTuningState_;
                         out.searchTuningReason = cachedTuningReason_;
                         out.searchTuningParams = cachedTuningParams_;
+                    }
+
+                    // Always prefer the live built engine config for effective runtime params.
+                    if (auto engine = services_->getSearchEngineSnapshot()) {
+                        const auto& cfg = engine->getConfig();
+                        out.searchTuningParams["rrf_k"] = static_cast<double>(cfg.rrfK);
+                        out.searchTuningParams["text_weight"] = static_cast<double>(cfg.textWeight);
+                        out.searchTuningParams["vector_weight"] =
+                            static_cast<double>(cfg.vectorWeight);
+                        out.searchTuningParams["entity_vector_weight"] =
+                            static_cast<double>(cfg.entityVectorWeight);
+                        out.searchTuningParams["path_tree_weight"] =
+                            static_cast<double>(cfg.pathTreeWeight);
+                        out.searchTuningParams["kg_weight"] = static_cast<double>(cfg.kgWeight);
+                        out.searchTuningParams["tag_weight"] = static_cast<double>(cfg.tagWeight);
+                        out.searchTuningParams["metadata_weight"] =
+                            static_cast<double>(cfg.metadataWeight);
+                        out.searchTuningParams["similarity_threshold"] =
+                            static_cast<double>(cfg.similarityThreshold);
+                        out.searchTuningParams["vector_boost_factor"] =
+                            static_cast<double>(cfg.vectorBoostFactor);
+                        out.searchTuningParams["enable_graph_rerank"] =
+                            cfg.enableGraphRerank ? 1.0 : 0.0;
+                        out.searchTuningParams["graph_rerank_topn"] =
+                            static_cast<double>(cfg.graphRerankTopN);
+                        out.searchTuningParams["graph_rerank_weight"] =
+                            static_cast<double>(cfg.graphRerankWeight);
+                        out.searchTuningParams["graph_rerank_max_boost"] =
+                            static_cast<double>(cfg.graphRerankMaxBoost);
+                        out.searchTuningParams["graph_rerank_min_signal"] =
+                            static_cast<double>(cfg.graphRerankMinSignal);
+                        out.searchTuningParams["graph_community_weight"] =
+                            static_cast<double>(cfg.graphCommunityWeight);
+                        out.searchTuningParams["kg_max_results"] =
+                            static_cast<double>(cfg.kgMaxResults);
+                        out.searchTuningParams["graph_scoring_budget_ms"] =
+                            static_cast<double>(cfg.graphScoringBudgetMs);
                     }
                 }
             }

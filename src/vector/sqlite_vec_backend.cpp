@@ -3039,20 +3039,72 @@ private:
         query_dim_counts_.clear();
 
         const char* count_sql =
-            "SELECT (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 THEN LENGTH(embedding) / "
-            "4 "
-            "ELSE embedding_dim END) AS dim, COUNT(*) FROM vectors GROUP BY dim";
+            "SELECT embedding, embedding_dim, quantized_format, quantized_bits, quantized_seed, "
+            "quantized_packed_codes FROM vectors";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, count_sql, -1, &stmt, nullptr) != SQLITE_OK) {
             return;
         }
 
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
-            size_t count = static_cast<size_t>(sqlite3_column_int64(stmt, 1));
-            if (dim > 0 && count > 0) {
-                query_dim_counts_[dim] = count;
+        std::unique_ptr<TurboQuantMSE> count_tq;
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            TurboQuantConfig cfg;
+            cfg.dimension = config_.embedding_dim;
+            cfg.bits_per_channel = config_.turboquant_bits;
+            cfg.seed = config_.turboquant_seed;
+            count_tq = std::make_unique<TurboQuantMSE>(cfg);
+            auto scales = loadTurboQuantPerCoordScales(
+                db_, config_.embedding_dim, config_.turboquant_bits, config_.turboquant_seed);
+            if (!scales.empty()) {
+                count_tq->setPerCoordScales(std::move(scales));
             }
+        }
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const void* blob = sqlite3_column_blob(stmt, 0);
+            int blob_size = sqlite3_column_bytes(stmt, 0);
+            size_t num_floats =
+                (blob && blob_size > 0) ? static_cast<size_t>(blob_size) / sizeof(float) : 0;
+
+            size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 1));
+            if (dim == 0) {
+                dim = num_floats;
+            } else if (num_floats > 0 && dim != num_floats) {
+                dim = num_floats;
+            }
+
+            if (dim == 0) {
+                continue;
+            }
+
+            std::vector<float> embedding;
+            if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
+                embedding.resize(num_floats);
+                std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
+            } else {
+                if (!count_tq) {
+                    continue;
+                }
+                auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 2));
+                if (fmt != VectorRecord::QuantizedFormat::TURBOquant_1) {
+                    continue;
+                }
+                const void* qblob = sqlite3_column_blob(stmt, 5);
+                int qblob_size = sqlite3_column_bytes(stmt, 5);
+                if (!qblob || qblob_size <= 0) {
+                    continue;
+                }
+                std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
+                std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
+                embedding = vector_utils::packedDequantizeVector(packed, dim, count_tq.get());
+            }
+
+            if (embedding.empty() || isZeroNormEmbedding(embedding) ||
+                !isFiniteEmbedding(embedding)) {
+                continue;
+            }
+
+            query_dim_counts_[dim] += 1;
         }
 
         sqlite3_finalize(stmt);
@@ -3609,7 +3661,7 @@ ORDER BY rowid
         if (!force_rebuild) {
             // Pattern: vectors_{dim}_hnsw_meta (e.g., vectors_384_hnsw_meta, vectors_768_hnsw_meta)
             std::vector<size_t> existing_dims;
-            bool stalePersistedIndex = false;
+            bool needsPersistedCatchUp = false;
 
             // First check for legacy single-dimension tables (vectors_hnsw_meta)
             const char* check_legacy = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
@@ -3667,29 +3719,35 @@ ORDER BY rowid
                     } else {
                         auto loaded = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
                         const auto loadedSize = loaded->size();
+                        const auto activeSize = loaded->active_size();
+                        const auto deletedCount = loaded->deleted_count();
                         const auto countIt = query_dim_counts_.find(dim);
                         const auto currentCount =
                             countIt != query_dim_counts_.end() ? countIt->second : size_t{0};
-                        if (currentCount > 0 && loadedSize != currentCount) {
-                            stalePersistedIndex = true;
-                            spdlog::warn("[HNSW] Persisted index stale for dim={}: index_size={} "
-                                         "vector_rows={}. Rebuilding from vectors table.",
-                                         dim, loadedSize, currentCount);
-                            break;
-                        }
                         hnsw_indices_[dim] = std::move(loaded);
                         hnsw_dirty_[dim] = false;
-                        spdlog::info("[HNSW] Loaded index for dim={} with {} vectors", dim,
-                                     hnsw_indices_[dim]->size());
+                        spdlog::info("[HNSW] Loaded index for dim={} with {} total nodes ({} "
+                                     "active, {} deleted)",
+                                     dim, loadedSize, activeSize, deletedCount);
+                        if (currentCount > 0 && activeSize != currentCount) {
+                            needsPersistedCatchUp = true;
+                            spdlog::warn("[HNSW] Persisted index drift for dim={}: index_size={} "
+                                         "active_nodes={} deleted_nodes={} vector_rows={}. "
+                                         "Applying deferred catch-up from vectors table.",
+                                         dim, loadedSize, activeSize, deletedCount, currentCount);
+                        }
                     }
                 } catch (const std::exception& e) {
                     spdlog::warn("[HNSW] Exception loading index for dim={}: {}", dim, e.what());
                 }
             }
 
-            if (stalePersistedIndex) {
+            if (needsPersistedCatchUp) {
                 hnsw_indices_.clear();
                 hnsw_dirty_.clear();
+                hnsw_needs_rebuild_ = true;
+                catchUpDeferredHnswUnlocked();
+                return;
             }
         }
 

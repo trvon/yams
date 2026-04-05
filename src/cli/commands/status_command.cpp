@@ -113,6 +113,12 @@ public:
                             j["version"] = s.version;
                             j["uptimeSeconds"] = s.uptimeSeconds;
                             j["requestsProcessed"] = s.requestsProcessed;
+                            if (!s.dataDir.empty())
+                                j["dataDir"] = s.dataDir;
+                            if (!s.metadataDbPath.empty())
+                                j["metadataDbPath"] = s.metadataDbPath;
+                            if (!s.vectorDbPath.empty())
+                                j["vectorDbPath"] = s.vectorDbPath;
                             j["activeConnections"] = s.activeConnections;
                             j["maxConnections"] = s.maxConnections;
                             j["connectionSlotsFree"] = s.connectionSlotsFree;

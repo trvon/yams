@@ -103,26 +103,39 @@ void normalizeComponentWeights(TunedParams& params) {
     }
 }
 
-void applyAdaptiveClamp(const storage::CorpusStats& stats, TunedParams& params) {
-    params.rrfK = std::clamp(params.rrfK, kMinRrfK, kMaxRrfK);
-    params.graphRerankTopN =
-        std::clamp(params.graphRerankTopN, kMinGraphRerankTopN, kMaxGraphRerankTopN);
+void clampGraphControls(TunedParams& params) {
+    params.kgWeight = std::max(0.0f, params.kgWeight);
+    params.kgMaxResults = std::clamp(params.kgMaxResults, kMinKgMaxResults, kMaxKgMaxResults);
     params.graphScoringBudgetMs =
         std::clamp(params.graphScoringBudgetMs, kMinGraphBudgetMs, kMaxGraphBudgetMs);
-    params.kgMaxResults = std::clamp(params.kgMaxResults, kMinKgMaxResults, kMaxKgMaxResults);
+    params.enableGraphRerank = params.enableGraphRerank && params.graphRerankTopN > 0;
+    params.graphRerankTopN =
+        std::clamp(params.graphRerankTopN, kMinGraphRerankTopN, kMaxGraphRerankTopN);
+    params.graphRerankWeight = std::max(0.0f, params.graphRerankWeight);
+    params.graphRerankMaxBoost = std::max(0.0f, params.graphRerankMaxBoost);
+    params.graphRerankMinSignal = std::max(0.0f, params.graphRerankMinSignal);
+    params.graphCommunityWeight = std::clamp(params.graphCommunityWeight, 0.0f, 1.0f);
+}
+
+void applyAdaptiveClamp(const storage::CorpusStats& stats, TunedParams& params,
+                        bool preserveExplicitGraphConfig = false) {
+    params.rrfK = std::clamp(params.rrfK, kMinRrfK, kMaxRrfK);
+    clampGraphControls(params);
 
     if (stats.hasKnowledgeGraph()) {
         params.kgWeight = std::clamp(params.kgWeight, kMinKgWeightWhenAvailable, kMaxKgWeight);
     } else {
-        params.kgWeight = 0.0f;
-        params.kgMaxResults = 0;
-        params.graphScoringBudgetMs = 0;
-        params.enableGraphRerank = false;
-        params.graphRerankTopN = 0;
-        params.graphRerankWeight = 0.0f;
-        params.graphRerankMaxBoost = 0.0f;
-        params.graphRerankMinSignal = 0.0f;
-        params.graphCommunityWeight = 0.0f;
+        if (!preserveExplicitGraphConfig) {
+            params.kgWeight = 0.0f;
+            params.kgMaxResults = 0;
+            params.graphScoringBudgetMs = 0;
+            params.enableGraphRerank = false;
+            params.graphRerankTopN = 0;
+            params.graphRerankWeight = 0.0f;
+            params.graphRerankMaxBoost = 0.0f;
+            params.graphRerankMinSignal = 0.0f;
+            params.graphCommunityWeight = 0.0f;
+        }
     }
 
     normalizeComponentWeights(params);
@@ -248,7 +261,12 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.graphCommunityWeight = config.graphCommunityWeight;
     params_.kgMaxResults = config.kgMaxResults;
     params_.graphScoringBudgetMs = config.graphScoringBudgetMs;
-    applyAdaptiveClamp(stats_, params_);
+    const bool preserveExplicitGraphConfig =
+        !stats_.hasKnowledgeGraph() &&
+        (config.enableGraphRerank || config.kgWeight > 0.0f || config.graphRerankWeight > 0.0f ||
+         config.graphRerankMaxBoost > 0.0f || config.graphCommunityWeight > 0.0f ||
+         config.kgMaxResults > 0 || config.graphScoringBudgetMs > 0);
+    applyAdaptiveClamp(stats_, params_, preserveExplicitGraphConfig);
     baseParams_ = params_;
 }
 

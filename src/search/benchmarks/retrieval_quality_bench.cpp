@@ -503,6 +503,8 @@ struct TestQuery {
     bool useDocIds = false;
 };
 
+enum class SyntheticCorpusMode { Generic, CommunityGraph };
+
 struct CorpusGenerator {
     std::vector<std::string> topics = {"authentication", "database", "network", "parsing",
                                        "encryption",     "testing",  "logging", "storage"};
@@ -512,12 +514,36 @@ struct CorpusGenerator {
     fs::path corpusDir;
     std::vector<std::string> createdFiles;
     std::mt19937 rng{42};
+    SyntheticCorpusMode mode = SyntheticCorpusMode::Generic;
 
-    CorpusGenerator(const fs::path& dir) : corpusDir(dir) {
+    CorpusGenerator(const fs::path& dir,
+                    SyntheticCorpusMode corpusMode = SyntheticCorpusMode::Generic)
+        : corpusDir(dir), mode(corpusMode) {
         yams::common::ensureDirectories(corpusDir);
     }
 
     void generateDocuments(int count) {
+        if (mode == SyntheticCorpusMode::CommunityGraph) {
+            createdFiles.clear();
+
+            struct CommunityDocSpec {
+                const char* filename;
+                const char* content;
+            };
+
+            static constexpr CommunityDocSpec kCommunityDocs[] = {
+                {"community_target.txt", "Target note\n\nalpha rival target evidence\n"},
+                {"community_partner.txt", "Partner note\n\nalpha companion evidence\n"},
+                {"community_rival.txt", "Rival alpha note\n\nalpha rival alpha rival evidence\n"},
+            };
+
+            for (const auto& doc : kCommunityDocs) {
+                std::ofstream(corpusDir / doc.filename) << doc.content;
+                createdFiles.push_back(doc.filename);
+            }
+            return;
+        }
+
         std::uniform_int_distribution<int> topicDist(0, static_cast<int>(topics.size()) - 1);
         std::uniform_int_distribution<int> termDist(0, static_cast<int>(terms.size()) - 1);
         for (int i = 0; i < count; ++i) {
@@ -534,6 +560,20 @@ struct CorpusGenerator {
     }
 
     std::vector<TestQuery> generateQueries(int numQueries) {
+        if (mode == SyntheticCorpusMode::CommunityGraph) {
+            std::vector<TestQuery> queries;
+            const int repeatedQueries = std::max(1, numQueries);
+            for (int i = 0; i < repeatedQueries; ++i) {
+                TestQuery tq;
+                tq.query = "alpha rival";
+                tq.useDocIds = true;
+                tq.relevantDocIds.insert("community_target");
+                tq.relevanceGrades["community_target"] = 3;
+                queries.push_back(std::move(tq));
+            }
+            return queries;
+        }
+
         std::vector<TestQuery> queries;
         std::uniform_int_distribution<int> topicDist(0, static_cast<int>(topics.size()) - 1);
         for (int q = 0; q < numQueries; ++q) {
@@ -4067,8 +4107,89 @@ struct BenchFixture {
     std::vector<TestQuery> queries;
     int corpusSize = 50, numQueries = 10, topK = 10;
     bool useBEIR = false;
-    bool warmDataDir = false;    // True when reusing a pre-ingested data directory
+    SyntheticCorpusMode syntheticCorpusMode = SyntheticCorpusMode::Generic;
+    bool warmDataDir = false; // True when reusing a pre-ingested data directory
+    std::string datasetName = "synthetic";
     std::string beirDatasetName; // Name of BEIR dataset (scifact, cqadupstack, etc.)
+
+    bool useSyntheticCommunityCorpus() const {
+        return syntheticCorpusMode == SyntheticCorpusMode::CommunityGraph;
+    }
+
+    void seedSyntheticCommunityEdges() {
+        if (!useSyntheticCommunityCorpus()) {
+            return;
+        }
+
+        auto* daemon = harness ? harness->daemon() : nullptr;
+        auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+        auto metadataRepo = serviceManager ? serviceManager->getMetadataRepo() : nullptr;
+        auto kgStore = metadataRepo ? metadataRepo->getKnowledgeGraphStore() : nullptr;
+        if (!metadataRepo || !kgStore) {
+            throw std::runtime_error(
+                "Synthetic community corpus requires metadata and KG stores after ingest");
+        }
+
+        const std::array<std::string, 3> docNames = {
+            "community_target.txt", "community_partner.txt", "community_rival.txt"};
+        std::vector<metadata::KGNode> docNodes;
+        docNodes.reserve(docNames.size());
+
+        for (const auto& docName : docNames) {
+            const auto docPath = (benchCorpusDir / docName).string();
+            auto docResult = metadataRepo->findDocumentByExactPath(docPath);
+            if (!docResult) {
+                throw std::runtime_error("Failed to resolve synthetic community document " +
+                                         docPath + ": " + docResult.error().message);
+            }
+            if (!docResult.value().has_value()) {
+                throw std::runtime_error("Synthetic community document missing from metadata: " +
+                                         docPath);
+            }
+
+            const auto& doc = *docResult.value();
+            metadata::KGNode node;
+            node.nodeKey = "doc:" + doc.sha256Hash;
+            node.label = doc.fileName;
+            node.type = "document";
+            docNodes.push_back(std::move(node));
+        }
+
+        auto nodeIdsResult = kgStore->upsertNodes(docNodes);
+        if (!nodeIdsResult) {
+            throw std::runtime_error("Failed to upsert synthetic community KG nodes: " +
+                                     nodeIdsResult.error().message);
+        }
+
+        const auto& nodeIds = nodeIdsResult.value();
+        if (nodeIds.size() != docNodes.size()) {
+            throw std::runtime_error(
+                "Synthetic community KG node upsert returned unexpected count");
+        }
+
+        std::vector<metadata::KGEdge> edges;
+        metadata::KGEdge forward;
+        forward.srcNodeId = nodeIds[0];
+        forward.dstNodeId = nodeIds[1];
+        forward.relation = "semantic_neighbor";
+        forward.weight = 1.0f;
+        edges.push_back(forward);
+
+        metadata::KGEdge reverse;
+        reverse.srcNodeId = nodeIds[1];
+        reverse.dstNodeId = nodeIds[0];
+        reverse.relation = "semantic_neighbor";
+        reverse.weight = 1.0f;
+        edges.push_back(reverse);
+
+        auto addEdgesResult = kgStore->addEdgesUnique(edges);
+        if (!addEdgesResult) {
+            throw std::runtime_error("Failed to seed synthetic community KG edges: " +
+                                     addEdgesResult.error().message);
+        }
+
+        spdlog::info("Seeded synthetic community KG edges for {} documents", docNames.size());
+    }
 
     void setup() {
         const char* env_dataset = std::getenv("YAMS_BENCH_DATASET");
@@ -4092,16 +4213,17 @@ struct BenchFixture {
         const char* env_topk = std::getenv("YAMS_BENCH_TOPK");
 
         if (env_dataset) {
-            std::string datasetName = env_dataset;
+            std::string requestedDatasetName = env_dataset;
             // Supported BEIR datasets from
             // https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/
             static const std::set<std::string> SUPPORTED_BEIR_DATASETS = {
                 "scifact",        "nfcorpus",    "arguana",    "scidocs", "fiqa",
                 "quora",          "cqadupstack", "hotpotqa",   "fever",   "climate-fever",
                 "dbpedia-entity", "trec-covid",  "touche-2020"};
-            if (SUPPORTED_BEIR_DATASETS.count(datasetName) > 0) {
+            if (SUPPORTED_BEIR_DATASETS.count(requestedDatasetName) > 0) {
                 useBEIR = true;
-                beirDatasetName = datasetName;
+                beirDatasetName = requestedDatasetName;
+                datasetName = requestedDatasetName;
                 // Default to SearchTuner auto mode so benchmark reflects dynamic tuning behavior.
                 // Keep explicit override support for controlled experiments:
                 //   YAMS_BENCH_FORCE_TUNING_OVERRIDE=SCIENTIFIC
@@ -4113,18 +4235,21 @@ struct BenchFixture {
                     spdlog::info(
                         "Set YAMS_TUNING_OVERRIDE={} via YAMS_BENCH_FORCE_TUNING_OVERRIDE for "
                         "BEIR benchmark ({})",
-                        forcedOverride, datasetName);
+                        forcedOverride, requestedDatasetName);
                 } else if (existingOverride && std::strlen(existingOverride) > 0) {
                     spdlog::info("Using pre-set YAMS_TUNING_OVERRIDE={} for BEIR benchmark ({})",
-                                 existingOverride, datasetName);
+                                 existingOverride, requestedDatasetName);
                 } else {
                     spdlog::info("Using SearchTuner auto mode for BEIR benchmark ({})",
-                                 datasetName);
+                                 requestedDatasetName);
                 }
+            } else if (requestedDatasetName == "synthetic-community") {
+                datasetName = requestedDatasetName;
+                syntheticCorpusMode = SyntheticCorpusMode::CommunityGraph;
             } else {
                 spdlog::warn("Unknown dataset '{}', using synthetic. Supported: scifact, "
                              "cqadupstack, nfcorpus, etc.",
-                             datasetName);
+                             requestedDatasetName);
             }
         }
 
@@ -4134,6 +4259,34 @@ struct BenchFixture {
             numQueries = std::stoi(env_queries);
         if (env_topk)
             topK = std::stoi(env_topk);
+
+        if (useSyntheticCommunityCorpus()) {
+            corpusSize = 3;
+            if (!(env_queries && *env_queries)) {
+                numQueries = 1;
+            }
+            if (!(env_topk && *env_topk)) {
+                topK = 1;
+            }
+
+            // Force the graph rerank stage fully on for the synthetic community A/B.
+            // Tiny synthetic corpora are still classified as no_kg by the tuner, so enabling the
+            // stage alone is not enough to produce an actual rerank window.
+            const auto ensureSyntheticEnvDefault = [](const char* key, const char* value) {
+                const char* current = std::getenv(key);
+                if (!(current && *current)) {
+                    setenv(key, value, 0);
+                }
+            };
+            ensureSyntheticEnvDefault("YAMS_ENABLE_ENV_OVERRIDES", "1");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_KG_WEIGHT", "0.00");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_TOPN", "3");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "1.00");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST", "1.00");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_MIN_SIGNAL", "0.01");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_KG_MAX_RESULTS", "3");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_SCORING_BUDGET_MS", "8");
+        }
 
         auto optionalPositiveInt = [](const char* raw) -> std::optional<int> {
             if (!(raw && *raw)) {
@@ -4150,7 +4303,7 @@ struct BenchFixture {
         const std::optional<int> queryLimit = optionalPositiveInt(env_queries);
 
         spdlog::info("Setting up RAG benchmark: {} dataset, {} docs, {} queries, k={}",
-                     useBEIR ? beirDatasetName + " BEIR" : "synthetic", corpusSize, numQueries,
+                     useBEIR ? beirDatasetName + " BEIR" : datasetName, corpusSize, numQueries,
                      topK);
 
         // PBI-05b: Create summary log file for important embedding metrics
@@ -4161,7 +4314,7 @@ struct BenchFixture {
             auto time_t_now = std::chrono::system_clock::to_time_t(now);
             summaryLog << "=== YAMS Retrieval Quality Benchmark ===" << std::endl;
             summaryLog << "Started: " << std::ctime(&time_t_now);
-            summaryLog << "Dataset: " << (useBEIR ? beirDatasetName + " BEIR" : "synthetic")
+            summaryLog << "Dataset: " << (useBEIR ? beirDatasetName + " BEIR" : datasetName)
                        << std::endl;
             summaryLog << "Corpus size: " << corpusSize << std::endl;
             summaryLog << "Num queries: " << numQueries << std::endl;
@@ -4251,7 +4404,7 @@ struct BenchFixture {
         }
 
         BenchCacheMetadata expectedCacheMetadata;
-        expectedCacheMetadata.dataset = useBEIR ? beirDatasetName : "synthetic";
+        expectedCacheMetadata.dataset = useBEIR ? beirDatasetName : datasetName;
         expectedCacheMetadata.datasetPath = canonicalPathOrEmpty(datasetPathForMetadata);
         expectedCacheMetadata.corpusSize = corpusSize;
         expectedCacheMetadata.numQueries = numQueries;
@@ -4537,8 +4690,10 @@ struct BenchFixture {
             expectedCacheMetadata.corpusFingerprint = computePathFingerprint(benchCorpusDir);
         } else {
             benchCorpusDir = harness->rootDir() / "corpus";
-            corpus = std::make_unique<CorpusGenerator>(benchCorpusDir);
+            corpus = std::make_unique<CorpusGenerator>(benchCorpusDir, syntheticCorpusMode);
             corpus->generateDocuments(corpusSize);
+            corpusSize = static_cast<int>(corpus->createdFiles.size());
+            expectedCacheMetadata.expectedDocs = corpusSize;
             expectedCacheMetadata.corpusFingerprint = computePathFingerprint(benchCorpusDir);
         }
 
@@ -5938,6 +6093,8 @@ struct BenchFixture {
             throw std::runtime_error("No documents indexed - benchmark cannot proceed");
         }
 
+        seedSyntheticCommunityEdges();
+
         // Post-ingest status/stats snapshot + sanity searches.
         // Goal: distinguish "no docs" vs "docs but query returns empty".
         {
@@ -6199,6 +6356,29 @@ struct BenchFixture {
 static std::unique_ptr<BenchFixture> g_fixture;
 void SetupFixture() {
     if (!g_fixture) {
+        if (const char* debugBaseEnv = std::getenv("YAMS_BENCH_DEBUG_FILE");
+            debugBaseEnv && std::strlen(debugBaseEnv) > 0) {
+            if (std::getenv("YAMS_SEARCH_STAGE_TRACE") == nullptr) {
+                setenv("YAMS_SEARCH_STAGE_TRACE", "1", 0);
+            }
+
+            if (std::getenv("YAMS_SEARCH_STAGE_TRACE_TOP_N") == nullptr) {
+                const int traceTopNDefault =
+                    parseIntEnvOrDefault("YAMS_BENCH_TRACE_TOP_N", 50, 1, 10000);
+                setenv("YAMS_SEARCH_STAGE_TRACE_TOP_N", std::to_string(traceTopNDefault).c_str(),
+                       0);
+            }
+
+            if (std::getenv("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N") == nullptr) {
+                const int traceTopNDefault =
+                    parseIntEnvOrDefault("YAMS_BENCH_TRACE_TOP_N", 50, 1, 10000);
+                const int traceComponentDefault = parseIntEnvOrDefault(
+                    "YAMS_BENCH_TRACE_COMPONENT_TOP_N", std::min(traceTopNDefault, 50), 1, 10000);
+                setenv("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N",
+                       std::to_string(traceComponentDefault).c_str(), 0);
+            }
+        }
+
         g_fixture = std::make_unique<BenchFixture>();
         g_fixture->setup();
     }
@@ -6285,7 +6465,8 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
             result.tuningReason = status.value().searchTuningReason;
         }
 
-        g_debugRunContext->dataset = g_fixture->useBEIR ? g_fixture->beirDatasetName : "synthetic";
+        g_debugRunContext->dataset =
+            g_fixture->useBEIR ? g_fixture->beirDatasetName : g_fixture->datasetName;
         g_debugRunContext->corpusSize = g_fixture->corpusSize;
         g_debugRunContext->numQueries = static_cast<int>(g_fixture->queries.size());
         g_debugRunContext->topK = g_fixture->topK;

@@ -214,6 +214,8 @@ struct MetricsSnapshot {
 
     // Resolved data directory
     std::string dataDir;
+    std::string metadataDbPath;
+    std::string vectorDbPath;
 
     // Content store diagnostics
     std::string contentStoreRoot;  // absolute path to storage root

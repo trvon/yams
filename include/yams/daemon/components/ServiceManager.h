@@ -437,6 +437,14 @@ public:
     const DaemonConfig& getConfig() const { return config_; }
     const StateComponent& getState() const { return state_; }
     const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
+    std::string getMetadataDatabasePath() const {
+        auto db = database_;
+        return db ? db->path() : std::string{};
+    }
+    std::string getVectorDatabasePath() const {
+        auto vectorDb = loadVectorDatabase();
+        return vectorDb ? vectorDb->getConfig().database_path : std::string{};
+    }
     void persistTrustedPluginPath(const std::filesystem::path& path, bool remove) const;
 
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");

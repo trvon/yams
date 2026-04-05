@@ -1263,6 +1263,21 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("last_error");
             kv->set_value(r.lastError);
         }
+        if (!r.dataDir.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("data_dir");
+            kv->set_value(r.dataDir);
+        }
+        if (!r.metadataDbPath.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("metadata_db_path");
+            kv->set_value(r.metadataDbPath);
+        }
+        if (!r.vectorDbPath.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("vector_db_path");
+            kv->set_value(r.vectorDbPath);
+        }
         // Encode content store diagnostics in request_counts under reserved keys
         if (!r.contentStoreRoot.empty()) {
             auto* kv = o->add_request_counts();
@@ -1414,6 +1429,18 @@ template <> struct ProtoBinding<StatusResponse> {
         for (const auto& kv : i.request_counts()) {
             if (kv.key() == "last_error") {
                 r.lastError = kv.value();
+                continue;
+            }
+            if (kv.key() == "data_dir") {
+                r.dataDir = kv.value();
+                continue;
+            }
+            if (kv.key() == "metadata_db_path") {
+                r.metadataDbPath = kv.value();
+                continue;
+            }
+            if (kv.key() == "vector_db_path") {
+                r.vectorDbPath = kv.value();
                 continue;
             }
             if (kv.key() == "proxy_socket_path") {

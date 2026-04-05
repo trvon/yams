@@ -17,6 +17,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -702,8 +703,18 @@ private:
                 rcfg.dataPath = cli_->getDataPath();
                 rcfg.cancelRequested = &g_doctor_cancel_requested;
                 auto emb = cli_->getEmbeddingGenerator();
+                std::shared_ptr<yams::daemon::IModelProvider> localProvider;
+                auto getLocalProvider = [&]() -> std::shared_ptr<yams::daemon::IModelProvider> {
+                    if (!localProvider) {
+                        localProvider = cli_->getLocalModelProvider();
+                    }
+                    return localProvider;
+                };
                 if (!emb) {
-                    std::cout << "  Embedding generator unavailable -- ensure model provider is "
+                    localProvider = getLocalProvider();
+                }
+                if (!emb && !localProvider) {
+                    std::cout << "  Embedding generation unavailable -- ensure model provider is "
                                  "configured.\n";
                 } else {
                     // Guard: abort repair if DB schema dim mismatches configured target
@@ -747,8 +758,17 @@ private:
                         };
                         auto dbDim = readDbDim(dbPath);
                         auto resolved = resolveEmbeddingDim();
-                        size_t targetDim =
-                            resolved.first ? resolved.first : emb->getEmbeddingDimension();
+                        size_t targetDim = resolved.first;
+                        if (targetDim == 0 && !emb) {
+                            localProvider = getLocalProvider();
+                        }
+                        if (targetDim == 0 && localProvider) {
+                            targetDim =
+                                localProvider->getEmbeddingDim(cli_->getEmbeddingModelName());
+                        }
+                        if (targetDim == 0 && emb) {
+                            targetDim = emb->getEmbeddingDimension();
+                        }
                         if (dbDim && *dbDim != targetDim) {
                             std::cout << "  "
                                       << ui::status_error("Schema dimension mismatch (db=" +
@@ -788,9 +808,7 @@ private:
                                     throw std::runtime_error("skipped");
                                 }
                                 yams::daemon::ClientConfig cfg;
-                                if (cli_->hasExplicitDataDir()) {
-                                    cfg.dataDir = cli_->getDataPath();
-                                }
+                                cfg.dataDir = cli_->getDataPath();
                                 // Configurable RPC timeout (default 60s)
                                 int rpc_ms = 60000;
                                 if (const char* env = std::getenv("YAMS_DOCTOR_RPC_TIMEOUT_MS")) {
@@ -806,6 +824,60 @@ private:
                                 }
                                 auto leaseHandle = std::move(leaseRes.value());
                                 auto& client = **leaseHandle;
+                                auto daemonStatus =
+                                    yams::cli::run_result<yams::daemon::StatusResponse>(
+                                        client.status(true), std::chrono::milliseconds(rpc_ms));
+                                if (daemonStatus) {
+                                    const auto expectedDir =
+                                        std::filesystem::weakly_canonical(cli_->getDataPath())
+                                            .string();
+                                    const auto expectedMetadataDb =
+                                        std::filesystem::weakly_canonical(cli_->getDataPath() /
+                                                                          "yams.db")
+                                            .string();
+                                    const auto expectedVectorDb =
+                                        std::filesystem::weakly_canonical(cli_->getDataPath() /
+                                                                          "vectors.db")
+                                            .string();
+                                    const auto normalizePath =
+                                        [](const std::string& raw) -> std::string {
+                                        if (raw.empty()) {
+                                            return {};
+                                        }
+                                        return std::filesystem::weakly_canonical(raw).string();
+                                    };
+                                    if (!daemonStatus.value().dataDir.empty()) {
+                                        const auto daemonDir =
+                                            normalizePath(daemonStatus.value().dataDir);
+                                        if (daemonDir != expectedDir) {
+                                            throw std::runtime_error(
+                                                "Connected daemon is serving a different data "
+                                                "directory (" +
+                                                daemonDir + ") than the CLI corpus (" +
+                                                expectedDir + ")");
+                                        }
+                                    }
+                                    if (!daemonStatus.value().metadataDbPath.empty()) {
+                                        const auto daemonMetadataDb =
+                                            normalizePath(daemonStatus.value().metadataDbPath);
+                                        if (daemonMetadataDb != expectedMetadataDb) {
+                                            throw std::runtime_error(
+                                                "Connected daemon has metadata DB open at " +
+                                                daemonMetadataDb + " but CLI expects " +
+                                                expectedMetadataDb);
+                                        }
+                                    }
+                                    if (!daemonStatus.value().vectorDbPath.empty()) {
+                                        const auto daemonVectorDb =
+                                            normalizePath(daemonStatus.value().vectorDbPath);
+                                        if (daemonVectorDb != expectedVectorDb) {
+                                            throw std::runtime_error(
+                                                "Connected daemon has vector DB open at " +
+                                                daemonVectorDb + " but CLI expects " +
+                                                expectedVectorDb);
+                                        }
+                                    }
+                                }
                                 yams::daemon::EmbedDocumentsRequest ed;
                                 if (const char* preferred = std::getenv("YAMS_PREFERRED_MODEL")) {
                                     ed.modelName = preferred;
@@ -813,14 +885,11 @@ private:
                                 ed.documentHashes = missing.value();
                                 ed.batchSize = static_cast<uint32_t>(rcfg.batchSize);
                                 ed.skipExisting = rcfg.skipExisting;
-                                // Overall wait limit (2x per-request timeout, minimum 30s)
-                                int overall_ms = std::max(30000, 2 * rpc_ms);
-
                                 SpinnerRunner rpcSpin;
                                 rpcSpin.start("Daemon: generating missing embeddings");
                                 auto er =
                                     yams::cli::run_result<yams::daemon::EmbedDocumentsResponse>(
-                                        client.call(ed), std::chrono::milliseconds(overall_ms));
+                                        client.call(ed), std::chrono::milliseconds{0});
                                 rpcSpin.stop();
                                 if (er) {
                                     const auto& daemonResp = er.value();
@@ -919,9 +988,29 @@ private:
                                 lastPrint = now;
                             };
 
-                            auto stats = yams::repair::repairMissingEmbeddings(
-                                appCtx->store, appCtx->metadataRepo, emb, rcfg, missing.value(),
-                                onProgress, appCtx->contentExtractors);
+                            Result<yams::repair::EmbeddingRepairStats> stats =
+                                Error{ErrorCode::NotInitialized,
+                                      "No embedding generation path available"};
+                            localProvider = getLocalProvider();
+                            if (localProvider) {
+                                std::string modelName = cli_->getEmbeddingModelName();
+                                if (modelName.empty()) {
+                                    if (const char* preferred =
+                                            std::getenv("YAMS_PREFERRED_MODEL")) {
+                                        modelName = preferred;
+                                    }
+                                }
+                                if (!modelName.empty()) {
+                                    rcfg.preferredModel = modelName;
+                                }
+                                stats = yams::repair::repairMissingEmbeddings(
+                                    appCtx->store, appCtx->metadataRepo, localProvider, modelName,
+                                    rcfg, missing.value(), onProgress, appCtx->contentExtractors);
+                            } else if (emb) {
+                                stats = yams::repair::repairMissingEmbeddings(
+                                    appCtx->store, appCtx->metadataRepo, emb, rcfg, missing.value(),
+                                    onProgress, appCtx->contentExtractors);
+                            }
 
                             if (tty) {
                                 std::cout << "\n";

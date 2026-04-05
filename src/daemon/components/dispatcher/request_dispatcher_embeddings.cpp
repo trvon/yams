@@ -225,6 +225,12 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
         std::string modelName = req.modelName;
         if (modelName.empty()) {
             try {
+                modelName = serviceManager_->resolvePreferredModel();
+            } catch (...) {
+            }
+        }
+        if (modelName.empty()) {
+            try {
                 modelName = serviceManager_->getEmbeddingModelName();
             } catch (...) {
             }
@@ -270,6 +276,11 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
         co_return ErrorResponse{result->error().code, result->error().message};
     }
     const auto& stats = result->value();
+    if (!req.documentHashes.empty() && stats.documentsProcessed == 0) {
+        co_return ErrorResponse{ErrorCode::NotFound,
+                                "No requested documents were found in the daemon metadata "
+                                "repository"};
+    }
     EmbedDocumentsResponse resp;
     resp.requested = stats.documentsProcessed;
     resp.embedded = stats.embeddingsGenerated;

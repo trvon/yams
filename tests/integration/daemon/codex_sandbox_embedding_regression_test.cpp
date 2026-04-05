@@ -287,6 +287,29 @@ TEST_CASE("EmbedDocuments request model handling with daemon harness",
         CHECK(error.message.find("No embedding model configured") != std::string::npos);
     }
 
+    SECTION("Guard: empty request model resolves through daemon config") {
+        DaemonHarness harness(opts);
+        startHarnessWithRetry(harness);
+        injectMockProviderWithoutConfiguredModel(harness, kModelName);
+
+        EmbedDocumentsRequest embedReq;
+        embedReq.documentHashes.clear();
+        embedReq.modelName.clear();
+        embedReq.normalize = true;
+        embedReq.batchSize = 8;
+        embedReq.skipExisting = false;
+
+        auto response = dispatchEmbedDocumentsDirect(harness, embedReq);
+        if (std::holds_alternative<ErrorResponse>(response)) {
+            const auto& error = std::get<ErrorResponse>(response);
+            FAIL("EmbedDocuments returned error: " + error.message);
+        }
+
+        REQUIRE(std::holds_alternative<EmbedDocumentsResponse>(response));
+        const auto& embedResult = std::get<EmbedDocumentsResponse>(response);
+        CHECK(embedResult.failed == 0);
+    }
+
     SECTION("Guard: succeeds when request explicitly provides model name") {
         DaemonHarness harness(opts);
         startHarnessWithRetry(harness);
@@ -318,6 +341,14 @@ TEST_CASE("EmbedDocuments request model handling via in-process client transport
 
     const std::string kModelName = "all-MiniLM-L6-v2";
     const auto dataDir = makeUniqueTempDir("yams_codex_inprocess_embed_regression_");
+    const auto configPath = dataDir / "config.toml";
+
+    {
+        std::ofstream out(configPath);
+        REQUIRE(out.is_open());
+        out << "[embeddings]\n";
+        out << "preferred_model = \"" << kModelName << "\"\n";
+    }
 
     EmbeddedServiceHost::Options hostOpts;
     hostOpts.dataDir = dataDir;
@@ -326,6 +357,8 @@ TEST_CASE("EmbedDocuments request model handling via in-process client transport
     hostOpts.autoLoadPlugins = false;
     hostOpts.enableModelProvider = false;
     hostOpts.initTimeoutSeconds = 30;
+
+    yams::test::ScopedEnvVar configEnv("YAMS_CONFIG", configPath.string());
 
     auto hostResult = EmbeddedServiceHost::getOrCreate(hostOpts);
     REQUIRE(hostResult.has_value());
@@ -359,8 +392,20 @@ TEST_CASE("EmbedDocuments request model handling via in-process client transport
     missingModelReq.skipExisting = false;
 
     auto missingModelRes = yams::cli::run_sync(client.call(missingModelReq), 10s);
-    REQUIRE_FALSE(missingModelRes.has_value());
-    CHECK(missingModelRes.error().message.find("No embedding model configured") !=
+    REQUIRE(missingModelRes.has_value());
+    CHECK(missingModelRes.value().failed == 0);
+
+    EmbedDocumentsRequest missingHashReq;
+    missingHashReq.documentHashes = {std::string(64, 'a')};
+    missingHashReq.modelName = kModelName;
+    missingHashReq.normalize = true;
+    missingHashReq.batchSize = 8;
+    missingHashReq.skipExisting = false;
+
+    auto missingHashRes = yams::cli::run_sync(client.call(missingHashReq), 10s);
+    REQUIRE_FALSE(missingHashRes.has_value());
+    CHECK(missingHashRes.error().message.find(
+              "No requested documents were found in the daemon metadata repository") !=
           std::string::npos);
 
     EmbedDocumentsRequest requestModelReq;

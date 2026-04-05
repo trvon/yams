@@ -141,9 +141,11 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
             co_return std::nullopt;
         }
 
-        // EmbedDocumentsRequest: eager compute and store in pending_final_
+        // EmbedDocumentsRequest: defer work so RequestHandler can stream progress/keepalives.
+        // If used directly without RequestHandler, next_chunk() computes the final response on
+        // demand after the initial heartbeat.
         if (std::holds_alternative<EmbedDocumentsRequest>(req_copy)) {
-            spdlog::debug("StreamingRequestProcessor: eager compute EmbedDocuments (no copy)");
+            spdlog::debug("StreamingRequestProcessor: defer EmbedDocuments for streaming");
             mode_ = Mode::EmbedDocs;
 #ifdef YAMS_TESTING
             spdlog::debug("[SRP] defer EmbedDocuments -> streaming");
@@ -151,12 +153,10 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
                 spdlog::debug("[SRP] original ED docs.size={}", ed0->documentHashes.size());
             }
 #endif
-            // Process directly - no need for protobuf round-trip in unit tests
-            auto final = co_await delegate_->process(req_copy);
-            if (auto* r = std::get_if<EmbedDocumentsResponse>(&final)) {
-                pending_total_ = r->requested;
+            if (auto* ed0 = std::get_if<EmbedDocumentsRequest>(&req_copy)) {
+                pending_total_ = ed0->documentHashes.size();
             }
-            pending_final_ = std::move(final);
+            pending_request_.emplace(std::make_unique<Request>(std::move(request)));
             co_return std::nullopt;
         }
 
@@ -360,8 +360,8 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
         // NOTE: We use mode_ and std::holds_alternative() for dispatch instead of
         // getMessageType() to avoid ODR/cross-TU variant index issues in tests.
 
-        // BatchEmbed/EmbedDocs: emit precomputed final from pending_final_
-        if (mode_ == Mode::BatchEmbed || mode_ == Mode::EmbedDocs) {
+        // BatchEmbed: emit precomputed final from pending_final_
+        if (mode_ == Mode::BatchEmbed) {
             if (pending_final_.has_value()) {
                 auto final = std::move(pending_final_.value());
                 reset_state();
@@ -383,6 +383,25 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             }
             // pending_final_ should always be set for BatchEmbed/EmbedDocs, but handle gracefully
             ErrorResponse err{ErrorCode::InternalError, "Missing final response for embedding"};
+            reset_state();
+            co_return ResponseChunk{.data = Response{std::move(err)}, .is_last_chunk = true};
+        }
+
+        // EmbedDocs: compute final lazily after the heartbeat if RequestHandler did not take the
+        // dedicated streaming path.
+        if (mode_ == Mode::EmbedDocs) {
+            if (pending_final_.has_value()) {
+                auto final = std::move(pending_final_.value());
+                reset_state();
+                co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
+            }
+            if (pending_request_.has_value()) {
+                auto final = co_await delegate_->process(**pending_request_);
+                reset_state();
+                co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
+            }
+            ErrorResponse err{ErrorCode::InternalError,
+                              "Missing final response for embed documents"};
             reset_state();
             co_return ResponseChunk{.data = Response{std::move(err)}, .is_last_chunk = true};
         }

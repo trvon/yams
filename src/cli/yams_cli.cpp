@@ -6,6 +6,7 @@
 #include <sstream>
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/command_registry.h>
+#include <yams/cli/plugin_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
@@ -13,10 +14,13 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/resource/abi_model_provider_adapter.h>
+#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+#include <yams/plugins/model_provider_v1.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/dim_resolver.h>
@@ -248,6 +252,7 @@ YamsCLI::~YamsCLI() {
 
     contentStore_.reset();
     embeddingGenerator_.reset();
+    localModelProvider_.reset();
     if (vectorDatabase_) {
         try {
             vectorDatabase_->close();
@@ -698,6 +703,113 @@ std::shared_ptr<vector::EmbeddingGenerator> YamsCLI::getEmbeddingGenerator() {
     return embeddingGenerator_;
 }
 
+std::shared_ptr<daemon::IModelProvider> YamsCLI::getLocalModelProvider() {
+    if (localModelProvider_ && localModelProvider_->isAvailable()) {
+        return localModelProvider_;
+    }
+
+    std::string preferredModel = embeddingModelName_;
+    if (preferredModel.empty()) {
+        try {
+            auto cfgPath = getConfigPath();
+            if (fs::exists(cfgPath)) {
+                auto cfg = parseSimpleToml(cfgPath);
+                auto it = cfg.find("embeddings.preferred_model");
+                if (it != cfg.end() && !it->second.empty()) {
+                    preferredModel = it->second;
+                }
+            }
+        } catch (...) {
+        }
+    }
+    if (preferredModel.empty()) {
+        if (const char* env = std::getenv("YAMS_PREFERRED_MODEL")) {
+            preferredModel = env;
+        }
+    }
+
+    auto tryAdoptProvider =
+        [&](const fs::path& pluginPath) -> std::shared_ptr<daemon::IModelProvider> {
+        yams::daemon::AbiPluginLoader loader;
+        loader.setTrustFile(yams::config::get_daemon_plugin_trust_file());
+
+        auto loadResult = loader.load(pluginPath);
+        if (!loadResult) {
+            spdlog::debug("Failed to load local provider plugin '{}': {}", pluginPath.string(),
+                          loadResult.error().message);
+            return nullptr;
+        }
+
+        const std::string pluginName = loadResult.value().name;
+        auto ifaceRes = loader.getInterface(pluginName, YAMS_IFACE_MODEL_PROVIDER_V1,
+                                            YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
+        if (!ifaceRes) {
+            ifaceRes = loader.getInterface(pluginName, YAMS_IFACE_MODEL_PROVIDER_V1, 3u);
+        }
+        if (!ifaceRes) {
+            spdlog::debug("Plugin '{}' does not expose {}", pluginName,
+                          YAMS_IFACE_MODEL_PROVIDER_V1);
+            return nullptr;
+        }
+
+        auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceRes.value());
+        if (!table || table->abi_version < 3u) {
+            spdlog::debug("Plugin '{}' has unsupported model provider ABI", pluginName);
+            return nullptr;
+        }
+
+        std::shared_ptr<void> keepalive;
+        auto keepaliveRes = loader.acquireKeepAlive(pluginName);
+        if (keepaliveRes) {
+            keepalive = std::move(keepaliveRes.value());
+        }
+
+        auto provider =
+            std::make_shared<yams::daemon::AbiModelProviderAdapter>(table, std::move(keepalive));
+        if (!provider->isAvailable()) {
+            spdlog::debug("Local model provider '{}' is not available", pluginName);
+            return nullptr;
+        }
+
+        if (!preferredModel.empty()) {
+            auto loadModelResult = provider->loadModel(preferredModel);
+            if (!loadModelResult) {
+                spdlog::warn("Local provider failed to load model '{}': {}", preferredModel,
+                             loadModelResult.error().message);
+            }
+        }
+
+        localModelProvider_ = provider;
+        spdlog::info("Using local model provider plugin '{}'", pluginName);
+        return provider;
+    };
+
+    if (auto resolved = yams::cli::plugin::resolvePlugin("onnx")) {
+        if (auto provider = tryAdoptProvider(*resolved)) {
+            return provider;
+        }
+    }
+
+    for (const auto& dir : yams::cli::plugin::getPluginSearchDirs()) {
+        std::error_code ec;
+        if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
+            continue;
+        }
+
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            if (!entry.is_regular_file(ec) ||
+                !yams::cli::plugin::hasPluginExtension(entry.path())) {
+                continue;
+            }
+            if (auto provider = tryAdoptProvider(entry.path())) {
+                return provider;
+            }
+        }
+    }
+
+    return nullptr;
+}
+
 std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
     std::lock_guard<std::mutex> lock(appContextMutex_);
 
@@ -1089,6 +1201,7 @@ Result<void> YamsCLI::initializeStorage() {
                     }
 
                     if (!selectedModel.empty()) {
+                        embeddingModelName_ = selectedModel;
                         embConfig.model_path = (modelsPath / selectedModel / "model.onnx").string();
                         embConfig.model_name = selectedModel;
                         embConfig.batch_size = 32;

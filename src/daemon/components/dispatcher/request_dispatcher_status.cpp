@@ -84,6 +84,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.embeddingModel = snap->embeddingModel;
             res.embeddingModelPath = snap->embeddingModelPath;
             res.embeddingDim = snap->embeddingDim;
+            res.dataDir = snap->dataDir;
+            res.metadataDbPath = snap->metadataDbPath;
+            res.vectorDbPath = snap->vectorDbPath;
             // Vector diagnostics (from background snapshot - no blocking)
             // Helpers to reduce binary bloat from repeated std::string construction
             auto setVal = [&](std::string_view key, size_t val) {
@@ -356,6 +359,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
 
             if (includeExtendedStatus) {
                 // Content store diagnostics
+                res.dataDir = snap->dataDir;
                 res.contentStoreRoot = snap->contentStoreRoot;
                 res.contentStoreError = snap->contentStoreError;
                 // Search tuning state (from SearchTuner FSM - epic yams-7ez4)

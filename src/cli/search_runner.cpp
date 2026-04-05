@@ -27,6 +27,7 @@ daemon_search(yams::daemon::DaemonClient& client, DaemonSearchOptions opts, bool
     req.showLineNumbers = opts.showLineNumbers;
     req.symbolRank = opts.symbolRank;
     req.timeout = opts.timeout;
+    req.verbose = true;
 
     req.pathPatterns = opts.pathPatterns;
     req.tags = opts.tags;

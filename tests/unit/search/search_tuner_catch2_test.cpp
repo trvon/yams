@@ -444,6 +444,44 @@ TEST_CASE("SearchTuner: handles missing KG", "[unit][search_tuner][edge]") {
     CHECK(reason.find("no_kg") != std::string::npos);
 }
 
+TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit graph overrides without KG",
+          "[unit][search_tuner][edge]") {
+    CorpusStats stats;
+    stats.docCount = 500;
+    stats.proseRatio = 0.90f;
+    stats.pathDepthAvg = 6.0f;
+    stats.tagCoverage = 0.02f;
+    stats.symbolDensity = 0.0f;
+
+    SearchTuner tuner(stats);
+
+    SearchEngineConfig config = tuner.getConfig();
+    config.enableGraphRerank = true;
+    config.kgWeight = 0.04f;
+    config.graphRerankTopN = 30;
+    config.graphRerankWeight = 0.18f;
+    config.graphRerankMaxBoost = 0.22f;
+    config.graphRerankMinSignal = 0.01f;
+    config.graphCommunityWeight = 0.10f;
+    config.kgMaxResults = 60;
+    config.graphScoringBudgetMs = 8;
+
+    tuner.seedRuntimeConfig(config);
+    const auto seeded = tuner.getConfig();
+
+    CHECK_FALSE(stats.hasKnowledgeGraph());
+    CHECK(seeded.enableGraphRerank);
+    CHECK(seeded.kgWeight > 0.0f);
+    CHECK(seeded.kgWeight == Approx(0.04f / 1.04f));
+    CHECK(seeded.graphRerankTopN == 30);
+    CHECK(seeded.graphRerankWeight == Approx(0.18f));
+    CHECK(seeded.graphRerankMaxBoost == Approx(0.22f));
+    CHECK(seeded.graphRerankMinSignal == Approx(0.01f));
+    CHECK(seeded.graphCommunityWeight == Approx(0.10f));
+    CHECK(seeded.kgMaxResults == 60);
+    CHECK(seeded.graphScoringBudgetMs == 8);
+}
+
 TEST_CASE("SearchTuner: priority order - MINIMAL takes precedence", "[unit][search_tuner][edge]") {
     // Even with code-dominant ratio, minimal size wins
     CorpusStats stats;
