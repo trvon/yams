@@ -90,6 +90,127 @@ TEST_CASE("GraphComponent: Initialize without dependencies", "[daemon][graph][li
     REQUIRE_FALSE(component.isReady());
 }
 
+TEST_CASE("GraphComponent: validateGraph reports fragmented semantic topology",
+          "[daemon][graph][validate]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    std::vector<KGNode> nodes = {
+        KGNode{
+            .nodeKey = "blob:hash-a", .label = std::string("hash-a"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-a",
+               .label = std::string("/tmp/a.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-b", .label = std::string("hash-b"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-b",
+               .label = std::string("/tmp/b.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-c", .label = std::string("hash-c"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-c",
+               .label = std::string("/tmp/c.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-d", .label = std::string("hash-d"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-d",
+               .label = std::string("/tmp/d.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-e", .label = std::string("hash-e"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-e",
+               .label = std::string("/tmp/e.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-f", .label = std::string("hash-f"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-f",
+               .label = std::string("/tmp/f.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-g", .label = std::string("hash-g"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-g",
+               .label = std::string("/tmp/g.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-h", .label = std::string("hash-h"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-h",
+               .label = std::string("/tmp/h.txt"),
+               .type = std::string("document")},
+    };
+    auto ids = fixture.kgStore->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    for (std::size_t i = 0; i < ids.value().size(); i += 2) {
+        KGEdge hasBlob{.srcNodeId = ids.value()[i + 1],
+                       .dstNodeId = ids.value()[i],
+                       .relation = "has_blob",
+                       .weight = 1.0f};
+        REQUIRE(fixture.kgStore->addEdge(hasBlob).has_value());
+    }
+
+    auto report = component.validateGraph();
+    REQUIRE(report.has_value());
+    CHECK(report.value().topologyDocumentNodes == 8);
+    CHECK(report.value().topologyDocumentsWithNeighbors == 0);
+    CHECK(report.value().topologyConnectedComponents == 8);
+    CHECK(report.value().topologyLargestComponent == 1);
+    CHECK_FALSE(report.value().issues.empty());
+    CHECK(std::find(report.value().issues.begin(), report.value().issues.end(),
+                    "semantic topology has zero connected document neighborhoods") !=
+          report.value().issues.end());
+}
+
+TEST_CASE("GraphComponent: validateGraph recognizes semantic neighborhood coverage",
+          "[daemon][graph][validate]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    std::vector<KGNode> nodes = {
+        KGNode{.nodeKey = "blob:x", .label = std::string("x"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:x",
+               .label = std::string("/tmp/x.txt"),
+               .type = std::string("document")},
+        KGNode{.nodeKey = "blob:y", .label = std::string("y"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:y",
+               .label = std::string("/tmp/y.txt"),
+               .type = std::string("document")},
+    };
+    auto ids = fixture.kgStore->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    REQUIRE(fixture.kgStore
+                ->addEdgesUnique({KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[0],
+                                         .relation = "has_blob",
+                                         .weight = 1.0f},
+                                  KGEdge{.srcNodeId = ids.value()[3],
+                                         .dstNodeId = ids.value()[2],
+                                         .relation = "has_blob",
+                                         .weight = 1.0f},
+                                  KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[3],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.95f},
+                                  KGEdge{.srcNodeId = ids.value()[3],
+                                         .dstNodeId = ids.value()[1],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.95f}})
+                .has_value());
+
+    auto report = component.validateGraph();
+    REQUIRE(report.has_value());
+    CHECK(report.value().topologyDocumentNodes == 2);
+    CHECK(report.value().topologySemanticEdges == 1);
+    CHECK(report.value().topologyDocumentsWithNeighbors == 2);
+    CHECK(report.value().topologyConnectedComponents == 1);
+    CHECK(report.value().topologyLargestComponent == 2);
+    CHECK(std::find(report.value().issues.begin(), report.value().issues.end(),
+                    "semantic topology has zero connected document neighborhoods") ==
+          report.value().issues.end());
+}
+
 TEST_CASE("GraphComponent: Get query service after init", "[daemon][graph][lifecycle]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);

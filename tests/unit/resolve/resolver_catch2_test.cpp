@@ -376,6 +376,10 @@ public:
                                                             const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<void> reconcileDocumentEmbeddingStatusByHashes(const std::vector<std::string>&,
+                                                          const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
     Result<bool> hasDocumentEmbeddingByHash(const std::string&) override {
         return false; // Default to no embedding for mock
     }

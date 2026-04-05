@@ -68,9 +68,7 @@ public:
 
         cmd->add_flag("--non-interactive", nonInteractive_,
                       "Run without prompts, using defaults and flags");
-        cmd->add_flag("--auto", autoInit_,
-                      "Auto-initialize with all defaults for containerized/headless environments "
-                      "(enables vector DB, plugins, default model; skips S3)");
+        cmd->add_flag("--auto", autoInit_, "Run setup with defaults for headless environments");
         cmd->add_flag("--force", force_, "Overwrite existing config/keys if already initialized");
         cmd->add_flag("--no-keygen", noKeygen_, "Skip authentication key generation");
         cmd->add_flag("--print", printConfig_,
@@ -97,7 +95,7 @@ public:
                 nonInteractive_ = true;
                 enablePlugins_ = true;
                 // noKeygen_ remains false (generate keys by default)
-                spdlog::info("Auto-initialization mode: using defaults for headless environment");
+                spdlog::info("Auto init: using default setup");
             }
 
             // 1) Resolve directories using platform-specific helpers
@@ -111,7 +109,7 @@ public:
             if (!nonInteractive_) {
                 dataPath = promptForDataDir(dataPath);
                 if (!noKeygen_) {
-                    noKeygen_ = !prompt_yes_no("Generate authentication keys? [Y/n]: ",
+                    noKeygen_ = !prompt_yes_no("Generate auth keys? [Y/n]: ",
                                                YesNoOptions{.defaultYes = true});
                 }
                 tuningProfile_ = promptForTuningProfile();
@@ -207,9 +205,8 @@ public:
                 spdlog::info("Using default embedding model: {}", selectedModel);
                 colbertSelected = isColbertModelName(selectedModel);
             } else if (!nonInteractive_) {
-                enableVectorDB =
-                    prompt_yes_no("\nEnable vector database for semantic search? [Y/n]: ",
-                                  YesNoOptions{.defaultYes = true});
+                enableVectorDB = prompt_yes_no("\nEnable semantic search? [Y/n]: ",
+                                               YesNoOptions{.defaultYes = true});
                 if (enableVectorDB) {
                     selectedModel = promptForModel(dataPath);
                     colbertSelected = isColbertModelName(selectedModel);
@@ -223,21 +220,17 @@ public:
             std::string s3FallbackLocalDataDir;
             bool s3UsePathStyle = false;
             if (!nonInteractive_) {
-                useS3 =
-                    prompt_yes_no("\nConfigure S3 as the storage backend? (default: local) [y/N]: ",
-                                  YesNoOptions{.defaultYes = false});
+                useS3 = prompt_yes_no("\nUse S3 storage instead of local? [y/N]: ",
+                                      YesNoOptions{.defaultYes = false});
                 if (useS3) {
-                    s3Url = prompt_input(
-                        "Enter S3 URL (bucket + optional prefix, e.g., s3://my-bucket/my-prefix): ",
-                        InputOptions{.allowEmpty = false, .retryOnInvalid = true});
-                    s3Region = prompt_input("Enter S3 region [us-east-1]: ",
+                    s3Url = prompt_input("S3 URL [s3://bucket[/prefix]]: ",
+                                         InputOptions{.allowEmpty = false, .retryOnInvalid = true});
+                    s3Region = prompt_input("Region [us-east-1]: ",
                                             InputOptions{.defaultValue = "us-east-1",
                                                          .allowEmpty = true,
                                                          .retryOnInvalid = true});
                     s3Endpoint =
-                        prompt_input("Enter S3 endpoint host (optional, for R2/MinIO). Example: "
-                                     "<accountid>.r2.cloudflarestorage.com\n"
-                                     "(Do not include scheme or /bucket path): ",
+                        prompt_input("Endpoint host (optional, for R2/MinIO): ",
                                      InputOptions{.allowEmpty = true, .retryOnInvalid = true});
                     auto normalizedEndpoint = normalizeS3EndpointInput(s3Endpoint);
                     if (!s3Endpoint.empty() && normalizedEndpoint != s3Endpoint) {
@@ -250,29 +243,25 @@ public:
                         s3Region = "auto";
                         spdlog::info("Detected Cloudflare R2 endpoint; using region 'auto'.");
                     }
-                    s3AccessKey = prompt_input(
-                        "Enter S3 Access Key ID (optional, uses env var if blank). For Cloudflare "
-                        "R2, use R2 S3 credentials (not API bearer token): ",
-                        InputOptions{.allowEmpty = true, .retryOnInvalid = true});
-                    s3SecretKey = prompt_input(
-                        "Enter S3 Secret Access Key (optional, uses env var if blank): ",
-                        InputOptions{.allowEmpty = true, .retryOnInvalid = true});
-                    s3UsePathStyle =
-                        prompt_yes_no("Use path-style addressing? (R2 usually: No, MinIO often: "
-                                      "Yes) [y/N]: ",
-                                      YesNoOptions{.defaultYes = false});
+                    s3AccessKey =
+                        prompt_input("Access key ID (optional): ",
+                                     InputOptions{.allowEmpty = true, .retryOnInvalid = true});
+                    s3SecretKey =
+                        prompt_input("Secret access key (optional): ",
+                                     InputOptions{.allowEmpty = true, .retryOnInvalid = true});
+                    s3UsePathStyle = prompt_yes_no("Use path-style addressing? [y/N]: ",
+                                                   YesNoOptions{.defaultYes = false});
 
                     const bool enableFallback =
-                        prompt_yes_no("If S3 fails during startup, fall back to local storage? "
-                                      "[y/N]: ",
+                        prompt_yes_no("Fall back to local storage if S3 fails at startup? [y/N]: ",
                                       YesNoOptions{.defaultYes = false});
                     if (enableFallback) {
                         s3FallbackPolicy = "fallback_local_if_configured";
-                        s3FallbackLocalDataDir = prompt_input(
-                            "Fallback local data directory [" + dataPath.string() + "]: ",
-                            InputOptions{.defaultValue = dataPath.string(),
-                                         .allowEmpty = true,
-                                         .retryOnInvalid = true});
+                        s3FallbackLocalDataDir =
+                            prompt_input("Fallback data directory [" + dataPath.string() + "]: ",
+                                         InputOptions{.defaultValue = dataPath.string(),
+                                                      .allowEmpty = true,
+                                                      .retryOnInvalid = true});
                     }
                 }
             }
@@ -280,9 +269,8 @@ public:
             // 6b) Plugins setup (local user directory + trust)
             bool setupPlugins = enablePlugins_;
             if (!nonInteractive_) {
-                setupPlugins =
-                    prompt_yes_no("Enable plugins and create a local plugins dir? [Y/n]: ",
-                                  YesNoOptions{.defaultYes = true});
+                setupPlugins = prompt_yes_no("Create and trust a local plugins dir? [Y/n]: ",
+                                             YesNoOptions{.defaultYes = true});
             }
 
             // 7) Generate an initial API key
@@ -382,9 +370,7 @@ public:
             maybeSetupAgentSkill();
 
             maybeBootstrapProjectSession();
-            spdlog::info("YAMS initialization complete.");
-            spdlog::info("Config file: {}", configPath.string());
-            spdlog::info("Data dir:    {}", dataPath.string());
+            printInitSummary(configPath, dataPath);
             return Result<void>();
         } catch (const std::exception& ex) {
             return Error{ErrorCode::Unknown, std::string("Init error: ") + ex.what()};
@@ -411,6 +397,17 @@ private:
         }
         const auto last = value.find_last_not_of(" \t\r\n");
         return value.substr(first, last - first + 1);
+    }
+
+    static void printLaterCommand(const std::string& command) {
+        std::cout << "\nLater: " << command << "\n";
+    }
+
+    static void printInitSummary(const fs::path& configPath, const fs::path& dataPath) {
+        std::cout << "\n" << ui::status_ok("YAMS is ready") << "\n";
+        std::cout << ui::key_value("Config", configPath.string()) << "\n";
+        std::cout << ui::key_value("Data", dataPath.string()) << "\n";
+        std::cout << ui::key_value("Next", "yams list | yams doctor") << "\n";
     }
 
     static std::string normalizeS3EndpointInput(std::string endpoint) {
@@ -1147,7 +1144,7 @@ private:
             return Error{ErrorCode::InvalidArgument, "Unknown model: " + model.name};
         }
 
-        std::cout << "\n" << cli::ui::section_header("Downloading Model") << "\n";
+        std::cout << "\n" << cli::ui::section_header("Embedding Model") << "\n";
         std::cout << cli::ui::key_value("Model", model.name) << "\n";
         std::cout << cli::ui::key_value("Size", "~" + std::to_string(model.size_mb) + " MB")
                   << "\n\n";
@@ -1185,7 +1182,7 @@ private:
             (void)downloadFile(url, outputDir / localName, filename);
         }
 
-        std::cout << ui::status_ok("Model downloaded successfully") << "\n";
+        std::cout << ui::status_ok("Embedding model ready") << "\n";
         return Result<void>{};
     }
 
@@ -1212,7 +1209,7 @@ private:
             }
         }
 
-        size_t chosenIdx = prompt_choice("\nAvailable embedding models (recommended first):", items,
+        size_t chosenIdx = prompt_choice("\nChoose an embedding model:", items,
                                          ChoiceOptions{.defaultIndex = defaultIndex,
                                                        .allowEmpty = true,
                                                        .retryOnInvalid = true});
@@ -1224,22 +1221,20 @@ private:
         fs::path modelPath = modelDir / "model.onnx";
 
         if (fs::exists(modelPath)) {
-            std::cout << "\nModel already downloaded at: " << modelPath.string() << "\n";
+            std::cout << "\nModel already present: " << modelPath.string() << "\n";
         } else {
             // Ask if user wants to download now
-            bool downloadNow = prompt_yes_no("\nDownload the model now? [Y/n]: ",
+            bool downloadNow = prompt_yes_no("\nDownload this model now? [Y/n]: ",
                                              YesNoOptions{.defaultYes = true});
 
             if (downloadNow) {
                 auto result = downloadModelFiles(selectedModel, modelDir);
                 if (!result) {
                     spdlog::warn("Model download failed: {}", result.error().message);
-                    std::cout << "\nYou can download the model later with:\n"
-                              << "  yams model download " << selectedModel.name << "\n";
+                    printLaterCommand("yams model download " + selectedModel.name);
                 }
             } else {
-                std::cout << "\nTo download this model later:\n"
-                          << "  yams model download " << selectedModel.name << "\n";
+                printLaterCommand("yams model download " + selectedModel.name);
             }
         }
         return selectedModel.name;
@@ -1343,7 +1338,7 @@ private:
             return Result<void>{};
         };
 
-        std::cout << "\n" << cli::ui::section_header("Downloading GLiNER Model") << "\n";
+        std::cout << "\n" << cli::ui::section_header("GLiNER Model") << "\n";
         std::cout << cli::ui::key_value("Model", model.name) << "\n";
         std::cout << cli::ui::key_value("Size", "~" + std::to_string(model.size_mb) + " MB")
                   << "\n\n";
@@ -1380,7 +1375,7 @@ private:
             }
         }
 
-        std::cout << ui::status_ok("GLiNER model downloaded successfully") << "\n";
+        std::cout << ui::status_ok("GLiNER model ready") << "\n";
         return Result<void>{};
     }
 
@@ -1394,7 +1389,7 @@ private:
         ChoiceItem skipItem;
         skipItem.value = "";
         skipItem.label = "Skip GLiNER model download";
-        skipItem.description = "You can download a model later with: yams model download --gliner";
+        skipItem.description = "Later: yams model download --gliner";
         items.push_back(std::move(skipItem));
 
         for (const auto& m : glinerModels) {
@@ -1406,13 +1401,12 @@ private:
         }
 
         size_t chosenIdx = prompt_choice(
-            "\nGLiNER model for named entity extraction (NER):", items,
+            "\nChoose a GLiNER model:", items,
             ChoiceOptions{.defaultIndex = 1, .allowEmpty = true, .retryOnInvalid = true});
 
         if (chosenIdx == 0) {
             // Skip selected
-            std::cout << "\nSkipping GLiNER model download.\n";
-            std::cout << "You can download a model later with: yams model download --gliner\n";
+            printLaterCommand("yams model download --gliner");
             return "";
         }
 
@@ -1423,22 +1417,20 @@ private:
         fs::path modelPath = modelDir / "model.onnx";
 
         if (fs::exists(modelPath)) {
-            std::cout << "\nGLiNER model already downloaded at: " << modelDir.string() << "\n";
+            std::cout << "\nGLiNER model already present: " << modelDir.string() << "\n";
         } else {
             // Ask if user wants to download now
-            bool downloadNow = prompt_yes_no("\nDownload the GLiNER model now? [Y/n]: ",
+            bool downloadNow = prompt_yes_no("\nDownload this GLiNER model now? [Y/n]: ",
                                              YesNoOptions{.defaultYes = true});
 
             if (downloadNow) {
                 auto result = downloadGlinerModelFiles(selectedModel, modelDir);
                 if (!result) {
                     spdlog::warn("GLiNER model download failed: {}", result.error().message);
-                    std::cout << "\nYou can download the model later with:\n"
-                              << "  yams model download --gliner " << selectedModel.name << "\n";
+                    printLaterCommand("yams model download --gliner " + selectedModel.name);
                 }
             } else {
-                std::cout << "\nTo download this model later:\n"
-                          << "  yams model download --gliner " << selectedModel.name << "\n";
+                printLaterCommand("yams model download --gliner " + selectedModel.name);
             }
         }
         return selectedModel.name;
@@ -1469,7 +1461,7 @@ private:
         } else if (!nonInteractive_) {
             // Interactive mode: prompt user
             bool setupGliner =
-                prompt_yes_no("\nDownload GLiNER model for named entity extraction? [Y/n]: ",
+                prompt_yes_no("\nDownload a GLiNER model for named entity extraction? [Y/n]: ",
                               YesNoOptions{.defaultYes = true});
             if (setupGliner) {
                 selectedGlinerModel = promptForGlinerModel(dataPath);
@@ -1639,7 +1631,7 @@ private:
             return Result<void>{};
         };
 
-        std::cout << "\n" << cli::ui::section_header("Downloading Reranker Model") << "\n";
+        std::cout << "\n" << cli::ui::section_header("Reranker Model") << "\n";
         std::cout << cli::ui::key_value("Model", model.name) << "\n";
         std::cout << cli::ui::key_value("Size", "~" + std::to_string(model.size_mb) + " MB")
                   << "\n";
@@ -1667,11 +1659,7 @@ private:
             }
         }
 
-        std::cout << ui::status_ok("Reranker model downloaded successfully") << "\n";
-        std::cout << "\n"
-                  << ui::status_info("Reranker improves hybrid search by re-scoring "
-                                     "candidates with cross-attention")
-                  << "\n";
+        std::cout << ui::status_ok("Reranker model ready") << "\n";
         return Result<void>{};
     }
 
@@ -1693,7 +1681,7 @@ private:
 
         size_t defaultIndex = 0; // bge-reranker-base is first (recommended)
 
-        size_t chosenIdx = prompt_choice("\nAvailable reranker models:", items,
+        size_t chosenIdx = prompt_choice("\nChoose a reranker model:", items,
                                          ChoiceOptions{.defaultIndex = defaultIndex,
                                                        .allowEmpty = true,
                                                        .retryOnInvalid = true});
@@ -1705,22 +1693,20 @@ private:
         fs::path modelPath = modelDir / "model.onnx";
 
         if (fs::exists(modelPath)) {
-            std::cout << "\nReranker model already downloaded at: " << modelPath.string() << "\n";
+            std::cout << "\nReranker model already present: " << modelPath.string() << "\n";
         } else {
             // Ask if user wants to download now
-            bool downloadNow = prompt_yes_no("\nDownload the reranker model now? [Y/n]: ",
+            bool downloadNow = prompt_yes_no("\nDownload this reranker model now? [Y/n]: ",
                                              YesNoOptions{.defaultYes = true});
 
             if (downloadNow) {
                 auto result = downloadRerankerModelFiles(selectedModel, modelDir);
                 if (!result) {
                     spdlog::warn("Reranker model download failed: {}", result.error().message);
-                    std::cout << "\nYou can download the model later with:\n"
-                              << "  yams model download " << selectedModel.name << "\n";
+                    printLaterCommand("yams model download " + selectedModel.name);
                 }
             } else {
-                std::cout << "\nTo download this model later:\n"
-                          << "  yams model download " << selectedModel.name << "\n";
+                printLaterCommand("yams model download " + selectedModel.name);
             }
         }
         return selectedModel.name;
@@ -1752,7 +1738,7 @@ private:
         } else if (!nonInteractive_) {
             // Interactive mode: prompt user
             bool setupReranker =
-                prompt_yes_no("\nDownload reranker model for improved hybrid search? [Y/n]: ",
+                prompt_yes_no("\nDownload a reranker model for hybrid search? [Y/n]: ",
                               YesNoOptions{.defaultYes = true});
             if (setupReranker) {
                 selectedRerankerModel = promptForRerankerModel(dataPath);
@@ -1908,7 +1894,7 @@ private:
         } else if (!nonInteractive_) {
             // Interactive mode: prompt user
             bool setupGrammars =
-                prompt_yes_no("\nDownload tree-sitter grammars for symbol extraction? [Y/n]: ",
+                prompt_yes_no("\nDownload tree-sitter grammars for code symbols? [Y/n]: ",
                               YesNoOptions{.defaultYes = true});
             if (setupGrammars) {
                 downloadGrammars(dataPath, false);
@@ -1938,7 +1924,7 @@ private:
                     selectedLanguages.emplace_back(g.language);
                 }
             }
-            std::cout << "\nDownloading recommended grammars: ";
+            std::cout << "\nRecommended grammars: ";
             for (size_t i = 0; i < selectedLanguages.size(); ++i) {
                 std::cout << selectedLanguages[i];
                 if (i + 1 < selectedLanguages.size())
@@ -1947,12 +1933,12 @@ private:
             std::cout << "\n";
         } else {
             // Interactive mode: show menu
-            std::cout << "\n" << cli::ui::section_header("Tree-sitter Grammars") << "\n";
+            std::cout << "\n" << cli::ui::section_header("Grammars") << "\n";
             std::vector<ChoiceItem> grammarChoices = {
-                {"recommended", "Recommended (C, C++, Python, JS, TS, Rust, Go, Swift)", ""},
-                {"all", "All supported grammars", ""},
-                {"custom", "Select specific languages", ""},
-                {"skip", "Skip grammar download", ""},
+                {"recommended", "Recommended set", "C, C++, Python, JS, TS, Rust, Go, Swift"},
+                {"all", "All supported", ""},
+                {"custom", "Choose languages", ""},
+                {"skip", "Skip for now", ""},
             };
             const size_t choiceIdx = prompt_choice("", grammarChoices,
                                                    ChoiceOptions{.defaultIndex = 0,
@@ -1971,8 +1957,8 @@ private:
                     selectedLanguages.emplace_back(g.language);
                 }
             } else if (choiceIdx == 2) {
-                std::cout << "\nEnter language names separated by commas (e.g., c,cpp,python):\n";
-                std::cout << "Available: ";
+                std::cout << "\nEnter comma-separated languages (for example: c,cpp,python).\n";
+                std::cout << "Available languages: ";
                 for (size_t i = 0; i < supportedGrammars.size(); ++i) {
                     std::cout << supportedGrammars[i].language;
                     if (i + 1 < supportedGrammars.size())
@@ -1991,9 +1977,7 @@ private:
                     }
                 }
             } else {
-                std::cout << "Skipping grammar download.\n";
-                std::cout
-                    << "You can download grammars later with: yams grammar download <language>\n";
+                printLaterCommand("yams grammar download <language>");
                 return;
             }
         }
@@ -2007,7 +1991,8 @@ private:
         bool canBuild = checkBuildToolsAvailable();
         if (!canBuild) {
             std::cout << "\n"
-                      << cli::ui::status_warning("Build tools not found (git + compiler required).")
+                      << cli::ui::status_warning(
+                             "Build tools not found (git and a compiler are required).")
                       << "\n";
             std::cout << "Please install:\n";
 #ifdef _WIN32
@@ -2018,8 +2003,7 @@ private:
 #else
             std::cout << "  " << cli::ui::bullet("git, gcc/g++ or clang") << "\n";
 #endif
-            std::cout
-                << "\nYou can download grammars later with: yams grammar download <language>\n";
+            printLaterCommand("yams grammar download <language>");
             return;
         }
 
@@ -2063,12 +2047,10 @@ private:
 
         std::cout << "\n";
         if (failed == 0) {
-            std::cout << cli::ui::status_ok("Grammar setup complete: " + std::to_string(succeeded) +
-                                            " succeeded")
-                      << "\n";
+            std::cout << cli::ui::status_ok("Grammars ready: " + std::to_string(succeeded)) << "\n";
         } else {
             std::cout << cli::ui::status_warning(
-                             "Grammar setup complete: " +
+                             "Grammars finished: " +
                              cli::ui::colorize(std::to_string(succeeded) + " succeeded",
                                                cli::ui::Ansi::GREEN) +
                              ", " +
@@ -2425,15 +2407,15 @@ private:
         } else if (!nonInteractive_) {
             // Interactive mode: prompt user
             bool installSkill =
-                prompt_yes_no("\nInstall YAMS skill for AI agents (Claude Code, OpenCode)? [Y/n]: ",
+                prompt_yes_no("\nInstall the YAMS skill for Claude Code or OpenCode? [Y/n]: ",
                               YesNoOptions{.defaultYes = true});
             if (installSkill) {
                 // Ask which agents to install for
-                std::cout << "\n" << cli::ui::section_header("AI Agent Skill Installation") << "\n";
+                std::cout << "\n" << cli::ui::section_header("Agent Skill") << "\n";
                 std::vector<ChoiceItem> installChoices = {
-                    {"claude", "Claude Code only", ""},
-                    {"opencode", "OpenCode only", ""},
-                    {"both", "Both (recommended)", ""},
+                    {"claude", "Claude Code", ""},
+                    {"opencode", "OpenCode", ""},
+                    {"both", "Both", "Recommended"},
                 };
                 const size_t choiceIdx = prompt_choice("", installChoices,
                                                        ChoiceOptions{.defaultIndex = 2,

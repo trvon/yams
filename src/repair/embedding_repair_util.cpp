@@ -356,6 +356,8 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
             std::size_t maxBatch = yams::daemon::TuneAdvisor::getEmbedDocCap();
             if (maxBatch == 0)
                 maxBatch = 64;
+            if (config.batchSize > 0)
+                maxBatch = std::min(maxBatch, config.batchSize);
             if (maxBatch < 1)
                 maxBatch = 1;
 

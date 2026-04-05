@@ -551,7 +551,80 @@ constexpr const char* queryIntentToString(QueryIntent intent) {
     return "mixed";
 }
 
-double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent) {
+SearchEngineConfig::NavigationZoomLevel zoomLevelForIntent(QueryIntent intent) {
+    switch (intent) {
+        case QueryIntent::Code:
+        case QueryIntent::Path:
+            return SearchEngineConfig::NavigationZoomLevel::Street;
+        case QueryIntent::Prose:
+        case QueryIntent::Mixed:
+            return SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+    }
+    return SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+}
+
+void applyNavigationZoomPolicy(SearchEngineConfig& config,
+                               SearchEngineConfig::NavigationZoomLevel zoomLevel) {
+    auto scale = [](float& weight, float factor) {
+        weight = std::clamp(weight * factor, 0.0f, 1.0f);
+    };
+
+    switch (zoomLevel) {
+        case SearchEngineConfig::NavigationZoomLevel::Auto:
+            return;
+        case SearchEngineConfig::NavigationZoomLevel::Map:
+            scale(config.kgWeight, 1.25f);
+            scale(config.graphTextWeight, 1.15f);
+            scale(config.graphVectorWeight, 1.15f);
+            scale(config.pathTreeWeight, 1.10f);
+            scale(config.vectorWeight, 0.90f);
+            scale(config.entityVectorWeight, 0.85f);
+            config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{10});
+            config.graphExpansionMaxSeeds = std::max(config.graphExpansionMaxSeeds, size_t{8});
+            config.graphRerankTopN = std::max(config.graphRerankTopN, size_t{32});
+            config.graphScoringBudgetMs = std::max(config.graphScoringBudgetMs, 12);
+            config.rerankTopK = std::min(config.rerankTopK, size_t{3});
+            config.rerankSnippetMaxChars = std::min(config.rerankSnippetMaxChars, size_t{192});
+            config.semanticRescueSlots = std::min(config.semanticRescueSlots, size_t{1});
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
+            scale(config.kgWeight, 1.10f);
+            scale(config.graphTextWeight, 1.05f);
+            scale(config.pathTreeWeight, 1.05f);
+            config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{8});
+            config.graphRerankTopN = std::max(config.graphRerankTopN, size_t{24});
+            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{256});
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Street:
+            scale(config.textWeight, 1.10f);
+            scale(config.pathTreeWeight, 1.15f);
+            scale(config.entityVectorWeight, 1.10f);
+            scale(config.vectorWeight, 0.85f);
+            scale(config.graphVectorWeight, 0.85f);
+            scale(config.graphTextWeight, 0.95f);
+            scale(config.kgWeight, 0.90f);
+            config.similarityThreshold = std::clamp(config.similarityThreshold + 0.03f, 0.0f, 1.0f);
+            config.vectorOnlyThreshold = std::clamp(config.vectorOnlyThreshold + 0.02f, 0.0f, 1.0f);
+            config.vectorOnlyPenalty = std::clamp(config.vectorOnlyPenalty * 0.90f, 0.0f, 1.0f);
+            config.semanticRescueSlots = 0;
+            config.lexicalFloorTopN = std::max(config.lexicalFloorTopN, size_t{10});
+            config.lexicalFloorBoost = std::max(config.lexicalFloorBoost, 0.16f);
+            config.enableLexicalTieBreak = true;
+            config.lexicalTieBreakEpsilon = std::max(config.lexicalTieBreakEpsilon, 0.010f);
+            config.rerankTopK = std::max(config.rerankTopK, size_t{8});
+            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{384});
+            if (config.graphExpansionMaxTerms > 0) {
+                config.graphExpansionMaxTerms = std::min(config.graphExpansionMaxTerms, size_t{6});
+            }
+            if (config.graphRerankTopN > 0) {
+                config.graphRerankTopN = std::min(config.graphRerankTopN, size_t{18});
+            }
+            break;
+    }
+}
+
+double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent,
+                              SearchEngineConfig::NavigationZoomLevel zoomLevel) {
     const double text = result.keywordScore.value_or(0.0);
     const double vector = result.vectorScore.value_or(0.0);
     const double graphText = result.graphTextScore.value_or(0.0);
@@ -596,6 +669,23 @@ double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent) {
             break;
         case QueryIntent::Mixed:
             signal += text * 0.05 + vector * 0.05 + kg * 0.03 + path * 0.02;
+            break;
+    }
+
+    switch (zoomLevel) {
+        case SearchEngineConfig::NavigationZoomLevel::Auto:
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Map:
+            signal += kg * 0.08 + graphText * 0.06 + graphVector * 0.05;
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
+            signal += kg * 0.04 + graphText * 0.03 + path * 0.02;
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Street:
+            signal += text * 0.10 + path * 0.08 + symbol * 0.08;
+            if (!hasText && hasVector) {
+                signal -= 0.10;
+            }
             break;
     }
 
@@ -1433,6 +1523,36 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig = tuner_->getConfig();
     }
 
+    const QueryIntent intent = detectQueryIntent(query);
+    const auto configuredZoomLevel = workingConfig.zoomLevel;
+    const auto effectiveZoomLevel =
+        configuredZoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto
+            ? zoomLevelForIntent(intent)
+            : configuredZoomLevel;
+    const bool zoomLevelInferredFromIntent =
+        configuredZoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto;
+    workingConfig.zoomLevel = effectiveZoomLevel;
+    applyNavigationZoomPolicy(workingConfig, effectiveZoomLevel);
+    applyIntentWeights(workingConfig, intent);
+    if (params.semanticOnly) {
+        workingConfig.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
+        workingConfig.similarityThreshold = std::min(workingConfig.similarityThreshold, 0.30f);
+        workingConfig.textWeight = std::min(workingConfig.textWeight, 0.20f);
+        workingConfig.graphTextWeight = 0.0f;
+        workingConfig.kgWeight = 0.0f;
+        workingConfig.graphVectorWeight = 0.0f;
+        workingConfig.vectorWeight = std::max(workingConfig.vectorWeight, 0.45f);
+        workingConfig.entityVectorWeight = std::max(workingConfig.entityVectorWeight, 0.15f);
+        workingConfig.enableGraphRerank = false;
+        workingConfig.vectorOnlyThreshold =
+            std::min(workingConfig.vectorOnlyThreshold, workingConfig.similarityThreshold);
+        workingConfig.vectorOnlyPenalty = 1.0f;
+        workingConfig.vectorOnlyNearMissPenalty = 1.0f;
+    }
+    spdlog::debug("Query intent: {}, zoom={} ({})", queryIntentToString(intent),
+                  SearchEngineConfig::navigationZoomLevelToString(effectiveZoomLevel),
+                  zoomLevelInferredFromIntent ? "intent_auto" : "configured");
+
     SearchTraceCollector traceCollector(workingConfig);
 
     // Embedding generation may be launched eagerly or lazily depending on tiering strategy.
@@ -1445,8 +1565,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     bool embeddingAwaited = false;
     bool embeddingFailed = false;
     std::string embeddingStatus = needsEmbedding ? "not_started" : "not_needed";
+    const size_t vectorDbEmbeddingDim = vectorDb_ ? vectorDb_->getConfig().embedding_dim : 0;
+    size_t queryEmbeddingDim = 0;
     bool semanticTierSkipped = false;
     std::string semanticTierSkipReason;
+    std::string vectorTierSkipReason;
     auto launchEmbeddingIfNeeded = [&]() {
         if (!embeddingStarted && needsEmbedding && embeddingGen_) {
             traceCollector.markStageAttempted("embedding");
@@ -1474,7 +1597,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<GraphExpansionTerm> docSeedGraphTerms;
     bool graphExpansionMaterialized = false;
     size_t graphQueryNeighborSeedDocCount = 0;
-    if (conceptExtractor_) {
+    if (conceptExtractor_ && !params.semanticOnly) {
         conceptStart = std::chrono::steady_clock::now();
         conceptFuture = postWork(
             [this, &query]() {
@@ -1553,6 +1676,34 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                        workingConfig.enableGraphRerank && kgScorer_ != nullptr);
     traceCollector.markStageConfigured("reranker",
                                        workingConfig.enableReranking && reranker_ != nullptr);
+
+    auto hasVectorTierDimMismatch = [&]() {
+        if (!queryEmbedding.has_value() || !vectorDb_) {
+            return false;
+        }
+        queryEmbeddingDim = queryEmbedding.value().size();
+        if (queryEmbeddingDim == 0 || vectorDbEmbeddingDim == 0 ||
+            queryEmbeddingDim == vectorDbEmbeddingDim) {
+            return false;
+        }
+        if (vectorTierSkipReason.empty()) {
+            vectorTierSkipReason =
+                "embedding_dim_mismatch(db=" + std::to_string(vectorDbEmbeddingDim) +
+                ",query=" + std::to_string(queryEmbeddingDim) + ")";
+        }
+        return true;
+    };
+
+    auto markVectorTierDimMismatch = [&]() {
+        if (vectorTierSkipReason.empty()) {
+            return;
+        }
+        traceCollector.markStageSkipped("vector", vectorTierSkipReason);
+        traceCollector.markStageSkipped("entity_vector", vectorTierSkipReason);
+        if (workingConfig.enableCompressedANN) {
+            traceCollector.markStageSkipped("compressed_ann", vectorTierSkipReason);
+        }
+    };
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
         if (conceptsMaterialized || !conceptFuture.valid()) {
@@ -1689,10 +1840,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     spdlog::debug("Search limit: userLimit={}, fusionCandidateLimit={}, textMax={}, vectorMax={}",
                   userLimit, fusionCandidateLimit, workingConfig.textMaxResults,
                   workingConfig.vectorMaxResults);
-
-    const QueryIntent intent = detectQueryIntent(query);
-    applyIntentWeights(workingConfig, intent);
-    spdlog::debug("Query intent: {}", queryIntentToString(intent));
 
     std::vector<ComponentResult> allComponentResults;
     size_t estimatedResults = 0;
@@ -1963,7 +2110,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             const bool shouldNarrow = workingConfig.tieredNarrowVectorSearch &&
                                       tier1CandidateCount >= workingConfig.tieredMinCandidates;
 
-            if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_) {
+            if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_ &&
+                !hasVectorTierDimMismatch()) {
                 vectorFuture = schedule(
                     "vector", workingConfig.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros,
@@ -1988,9 +2136,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         return queryEntityVectors(queryEmbedding.value(), workingConfig,
                                                   effectiveEntityVectorMaxResults);
                     });
+            } else if (!shouldSkipSemantic && hasVectorTierDimMismatch()) {
+                markVectorTierDimMismatch();
             }
 
-            if (workingConfig.enableCompressedANN && queryEmbedding.has_value() && vectorDb_) {
+            if (workingConfig.enableCompressedANN && queryEmbedding.has_value() && vectorDb_ &&
+                !hasVectorTierDimMismatch()) {
                 compressedAnnFuture = schedule(
                     "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
@@ -2064,7 +2215,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             // Await embedding (ran in parallel with text/kg/path above) then schedule vector
             awaitEmbedding();
-            if (queryEmbedding.has_value() && vectorDb_) {
+            if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
                 vectorFuture =
                     schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
                              stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
@@ -2092,6 +2243,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                       workingConfig.compressedAnnTopK);
                         });
                 }
+            } else if (hasVectorTierDimMismatch()) {
+                markVectorTierDimMismatch();
             }
 
             collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
@@ -2159,7 +2312,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         // Await embedding (ran in parallel with sequential components above)
         awaitEmbedding();
-        if (queryEmbedding.has_value() && vectorDb_) {
+        if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
             runSequential(
                 [&]() {
                     return queryVectorIndex(queryEmbedding.value(), workingConfig,
@@ -2185,6 +2338,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros);
             }
+        } else if (hasVectorTierDimMismatch()) {
+            markVectorTierDimMismatch();
         }
 
         if (!params.tags.empty()) {
@@ -2206,6 +2361,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         compressedAnnSkipReason = "no_query_embedding";
     } else if (!vectorDb_) {
         compressedAnnSkipReason = "no_vector_db";
+    } else if (!vectorTierSkipReason.empty()) {
+        compressedAnnSkipReason = vectorTierSkipReason;
     } else if (semanticTierSkipped && !compressedAnnAttempted) {
         compressedAnnSkipReason = "adaptive_vector_skip";
     } else {
@@ -2694,6 +2851,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     } else if (!vectorDb_) {
         turboQuantSkipReason = "no_vector_db";
+    } else if (!vectorTierSkipReason.empty()) {
+        turboQuantSkipReason = vectorTierSkipReason;
     } else {
         const size_t window =
             std::min(workingConfig.turboQuantRerankWindow, response.results.size());
@@ -3165,8 +3324,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::stable_sort(response.results.begin(),
                              response.results.begin() + static_cast<ptrdiff_t>(rerankWindow),
                              [&](const SearchResult& a, const SearchResult& b) {
-                                 return scoreBasedRerankSignal(a, intent) >
-                                        scoreBasedRerankSignal(b, intent);
+                                 return scoreBasedRerankSignal(a, intent, effectiveZoomLevel) >
+                                        scoreBasedRerankSignal(b, intent, effectiveZoomLevel);
                              });
             contributing.push_back("score_rerank");
         }
@@ -3527,6 +3686,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(turboQuantPackedCandidatesScored);
     response.debugStats["turboquant_skip_reason"] = turboQuantSkipReason;
     response.debugStats["embedding_status"] = embeddingStatus;
+    response.debugStats["vector_db_dim"] = std::to_string(vectorDbEmbeddingDim);
+    response.debugStats["query_embedding_dim"] = std::to_string(queryEmbeddingDim);
+    response.debugStats["vector_tier_skip_reason"] = vectorTierSkipReason;
 
     if (!concepts.empty() && workingConfig.conceptBoostWeight > 0.0f &&
         workingConfig.conceptMaxBoost > 0.0f && !response.results.empty()) {
@@ -4237,6 +4399,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         response.debugStats["trace_enabled"] = "1";
         response.debugStats["trace_query_intent"] = queryIntentToString(intent);
+        response.debugStats["trace_zoom_level"] =
+            SearchEngineConfig::navigationZoomLevelToString(effectiveZoomLevel);
+        response.debugStats["trace_zoom_source"] =
+            zoomLevelInferredFromIntent ? "intent_auto" : "configured";
         response.debugStats["trace_user_limit"] = std::to_string(userLimit);
         response.debugStats["trace_fusion_candidate_limit"] = std::to_string(fusionCandidateLimit);
         response.debugStats["trace_top_window"] = std::to_string(traceTopCount);
@@ -4301,6 +4467,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                     .count());
         telemetry.finalResultCount = response.results.size();
         telemetry.topWindow = std::max<size_t>(userLimit, size_t{25});
+        telemetry.zoomLevel = effectiveZoomLevel;
 
         try {
             auto stageSummary = traceCollector.buildStageSummaryJson();

@@ -56,6 +56,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/plugin_trust.h>
+#include <yams/search/internal_benchmark.h>
 
 #include <algorithm>
 #include <cctype>
@@ -676,6 +677,7 @@ struct QueryDiagnosticsSummary {
     std::unordered_map<std::string, std::vector<double>> fusionSourceFinalDocSamples;
     std::unordered_map<std::string, std::vector<double>> tunerSignalSamples;
     std::unordered_map<std::string, std::uint64_t> tunerDecisionCounts;
+    std::unordered_map<std::string, std::uint64_t> zoomLevelCounts;
 };
 
 static const std::vector<std::string>& trackedTimingKeys() {
@@ -1127,6 +1129,10 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     if (parseBoolStat(searchStats, "trace_graph_rerank_applied").value_or(false)) {
         summary.graphRerankAppliedQueryCount++;
     }
+    if (auto it = searchStats.find("trace_zoom_level");
+        it != searchStats.end() && !it->second.empty()) {
+        summary.zoomLevelCounts[it->second]++;
+    }
     bool compressedAnnEnabled =
         parseBoolStat(searchStats, "compressed_ann_enabled").value_or(false);
     bool compressedAnnApplied =
@@ -1564,6 +1570,7 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
     }
     out["tuner_signals"] = tunerSignals;
     out["tuner_decisions"] = summary.tunerDecisionCounts;
+    out["zoom_level_counts"] = summary.zoomLevelCounts;
 
     return out;
 }
@@ -2178,6 +2185,33 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
              {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
              {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+         }},
+        {"mixed_precision_zoom_map",
+         "MIXED_PRECISION with map-level navigation bias",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ZOOM_LEVEL", "MAP"},
+         }},
+        {"mixed_precision_zoom_neighborhood",
+         "MIXED_PRECISION with neighborhood navigation bias",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ZOOM_LEVEL", "NEIGHBORHOOD"},
+         }},
+        {"mixed_precision_zoom_street",
+         "MIXED_PRECISION with street-level precision bias",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ZOOM_LEVEL", "STREET"},
          }},
         {"diag_turboquant_off_mixed_precision",
          "MIXED_PRECISION baseline with TurboQuant rerank forced off",
@@ -3458,6 +3492,19 @@ static double computeLatencyPenalty(double avgHybridQueryMs) {
     return std::clamp(std::max(0.0, avgHybridQueryMs) / 25000.0, 0.0, 0.25);
 }
 
+static double computePrecisionFailurePenalty(const QueryDiagnosticsSummary& summary) {
+    const double queryCount = static_cast<double>(std::max<std::uint64_t>(summary.queryCount, 1));
+    const double noRelevantHitRate =
+        static_cast<double>(summary.queryWithoutRelevantHitCount) / queryCount;
+    const double fusionCutoffRate = static_cast<double>(summary.missFusionCutoffCount) / queryCount;
+    const double rerankDropRate =
+        static_cast<double>(summary.missRerankWindowDropCount) / queryCount;
+    const double topKDropRate = static_cast<double>(summary.missTopKDropCount) / queryCount;
+
+    return std::min(0.20, noRelevantHitRate * 0.18 + fusionCutoffRate * 0.04 +
+                              rerankDropRate * 0.05 + topKDropRate * 0.03);
+}
+
 static std::string summarizeTimingTradeoffs(const json& hybridDiag) {
     if (!hybridDiag.is_object()) {
         return "timings=unavailable";
@@ -3547,16 +3594,20 @@ static std::string summarizeStageTradeoffs(const json& hybridDiag) {
 
 static double computeOptimizationObjective(const RetrievalMetrics& hybrid,
                                            const RetrievalMetrics& keyword,
+                                           const QueryDiagnosticsSummary& hybridDiagnostics,
                                            double avgHybridQueryMs) {
-    // Accuracy-first, but keep latency meaningful so recall probes do not win by default when
-    // they materially slow search without improving quality.
-    const double quality =
-        0.40 * hybrid.mrr + 0.30 * hybrid.ndcgAtK + 0.20 * hybrid.recallAtK + 0.10 * hybrid.map;
+    // Precision-first objective for machine-first navigation: keep top-K correctness high while
+    // still rewarding rank quality and recall. Miss-stage penalties keep the loop focused on the
+    // actual places where relevant documents are lost.
+    const double quality = 0.32 * hybrid.mrr + 0.24 * hybrid.ndcgAtK + 0.24 * hybrid.precisionAtK +
+                           0.12 * hybrid.recallAtK + 0.08 * hybrid.map;
     const double hybridGain = std::max(0.0, hybrid.mrr - keyword.mrr);
     const double regressionPenalty = computeHybridRegressionPenalty(hybrid, keyword);
     const double duplicatePenalty = computeDuplicatePenalty(hybrid);
     const double latencyPenalty = computeLatencyPenalty(avgHybridQueryMs);
-    return quality + 0.10 * hybridGain - regressionPenalty - duplicatePenalty - latencyPenalty;
+    const double precisionFailurePenalty = computePrecisionFailurePenalty(hybridDiagnostics);
+    return quality + 0.10 * hybridGain - regressionPenalty - duplicatePenalty - latencyPenalty -
+           precisionFailurePenalty;
 }
 
 static void appendOptimizationResultJson(const fs::path& outputFile,
@@ -3587,9 +3638,12 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     const double objectiveRegressionPenalty =
         computeHybridRegressionPenalty(result.hybridMetrics, result.keywordMetrics);
     const double objectiveDuplicatePenalty = computeDuplicatePenalty(result.hybridMetrics);
+    const double objectivePrecisionFailurePenalty =
+        computePrecisionFailurePenalty(result.hybridDiagnostics);
     j["objective_penalties"] = {
         {"hybrid_regression", objectiveRegressionPenalty},
         {"duplicate_rate", objectiveDuplicatePenalty},
+        {"precision_failures", objectivePrecisionFailurePenalty},
     };
 
     j["hybrid"] = {
@@ -4131,11 +4185,22 @@ struct BenchFixture {
         }
 
         const bool graphRerankRequested = envFlagEnabled(graphRerankCanonical);
-        bool requireKgReady = graphRerankRequested;
+        std::optional<bool> explicitRequireKgReady;
         if (const char* envRequireKgReady = std::getenv("YAMS_BENCH_REQUIRE_KG_READY");
             envRequireKgReady && *envRequireKgReady) {
-            requireKgReady = envFlagEnabled(envRequireKgReady);
+            explicitRequireKgReady = envFlagEnabled(envRequireKgReady);
         }
+        const auto kgReadinessPolicy = yams::search::resolveBenchmarkKgReadinessPolicy(
+            graphRerankRequested, explicitRequireKgReady, useBEIR);
+        const bool requireKgReady =
+            kgReadinessPolicy != yams::search::BenchmarkKgReadinessPolicy::Skip;
+        spdlog::info("[Bench] KG readiness policy: {} (graph_rerank_requested={}, beir={}, "
+                     "explicit_override={})",
+                     yams::search::benchmarkKgReadinessPolicyToString(kgReadinessPolicy),
+                     graphRerankRequested ? "true" : "false", useBEIR ? "true" : "false",
+                     explicitRequireKgReady.has_value()
+                         ? (*explicitRequireKgReady ? "true" : "false")
+                         : "none");
 
         fs::path datasetPathForMetadata = env_path ? fs::path(env_path) : fs::path();
         Result<BEIRDataset> preparedBeirDataset =
@@ -5575,7 +5640,34 @@ struct BenchFixture {
             spdlog::error("This is likely due to search engine build not completing.");
         }
 
-        if (requireKgReady) {
+        auto effectiveKgReadinessPolicy = kgReadinessPolicy;
+        if (kgReadinessPolicy != yams::search::BenchmarkKgReadinessPolicy::Skip) {
+            auto statusForKgPolicy = benchRunSync(client->status(true), 5s);
+            if (statusForKgPolicy) {
+                bool tunedGraphRerank = graphRerankRequested;
+                if (auto it =
+                        statusForKgPolicy.value().searchTuningParams.find("enable_graph_rerank");
+                    it != statusForKgPolicy.value().searchTuningParams.end()) {
+                    tunedGraphRerank = it->second > 0.5f;
+                }
+
+                effectiveKgReadinessPolicy = yams::search::refineBenchmarkKgReadinessPolicy(
+                    kgReadinessPolicy, explicitRequireKgReady, tunedGraphRerank);
+                if (effectiveKgReadinessPolicy != kgReadinessPolicy) {
+                    spdlog::info("[Bench] Refined KG readiness policy to {} after search tuning "
+                                 "(state='{}', enable_graph_rerank={})",
+                                 yams::search::benchmarkKgReadinessPolicyToString(
+                                     effectiveKgReadinessPolicy),
+                                 statusForKgPolicy.value().searchTuningState,
+                                 tunedGraphRerank ? "true" : "false");
+                }
+            } else {
+                spdlog::warn("[Bench] Unable to inspect tuned graph rerank before KG wait: {}",
+                             statusForKgPolicy.error().message);
+            }
+        }
+
+        if (effectiveKgReadinessPolicy != yams::search::BenchmarkKgReadinessPolicy::Skip) {
             int kgReadyTimeoutSec = 180;
             if (const char* env = std::getenv("YAMS_BENCH_KG_READY_TIMEOUT")) {
                 kgReadyTimeoutSec = std::max(0, std::stoi(env));
@@ -5687,7 +5779,8 @@ struct BenchFixture {
                 const bool warmReuseIdleReady =
                     reusedWarmCacheWithoutIngest && queuesDrained && lastPostInflight == 0;
 
-                if (queuesDrained && kgSignalReady) {
+                if (yams::search::benchmarkKgReadinessSatisfied(effectiveKgReadinessPolicy,
+                                                                queuesDrained, kgSignalReady)) {
                     stableReadyChecks++;
                     if (stableReadyChecks >= 4) {
                         kgReady = true;
@@ -5711,7 +5804,9 @@ struct BenchFixture {
             if (!kgReady) {
                 throw std::runtime_error(
                     "KG not ready before benchmark queries (has_kg=" +
-                    std::string(lastHasKg ? "true" : "false") +
+                    std::string(lastHasKg ? "true" : "false") + ", policy=" +
+                    std::string(yams::search::benchmarkKgReadinessPolicyToString(
+                        effectiveKgReadinessPolicy)) +
                     ", kg_consumed=" + std::to_string(lastKgConsumed) +
                     ", post_ingest_queue_depth=" + std::to_string(lastQueueDepth) +
                     ", post_ingest_queued=" + std::to_string(lastPostQueued) +
@@ -5725,7 +5820,13 @@ struct BenchFixture {
                     "). Increase YAMS_BENCH_KG_READY_TIMEOUT or reduce ingestion load.");
             }
 
-            if (!lastHasKg) {
+            if (effectiveKgReadinessPolicy ==
+                    yams::search::BenchmarkKgReadinessPolicy::AcceptDrainedWithoutSignal &&
+                !lastHasKg && lastKgConsumed == 0) {
+                spdlog::warn(
+                    "KG readiness satisfied with drained queues under relaxed synthetic policy; "
+                    "no explicit KG signal was observed. Graph signals may be weak.");
+            } else if (!lastHasKg) {
                 if (acceptedWarmReuseIdle) {
                     spdlog::warn(
                         "KG readiness accepted for reused warm cache with drained queues and no "
@@ -5750,6 +5851,10 @@ struct BenchFixture {
             } else {
                 spdlog::info("KG readiness satisfied (queues drained + corpus_stats.has_kg=true)");
             }
+        } else if (requireKgReady) {
+            spdlog::info(
+                "Skipping KG readiness wait because the effective tuned search policy disables "
+                "graph rerank.");
         }
 
         // Verify document count using status metrics (avoids degraded search false negatives)
@@ -6181,8 +6286,9 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
 
         const double avgHybridQueryMs =
             result.hybridEvalMs / std::max(1, result.hybridMetrics.numQueries);
-        result.objectiveScore = computeOptimizationObjective(
-            result.hybridMetrics, result.keywordMetrics, avgHybridQueryMs);
+        result.objectiveScore =
+            computeOptimizationObjective(result.hybridMetrics, result.keywordMetrics,
+                                         result.hybridDiagnostics, avgHybridQueryMs);
         result.success = true;
     } catch (const std::exception& e) {
         result.success = false;

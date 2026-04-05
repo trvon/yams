@@ -4063,6 +4063,170 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
                  "batchUpdateDocumentEmbeddingStatusByHashes: max retries exceeded"};
 }
 
+Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
+    const std::vector<std::string>& embeddedHashes, const std::string& modelId) {
+    constexpr int kMaxRetries = 5;
+    constexpr int kBaseDelayMs = 50;
+
+    std::vector<std::string> uniqueHashes = embeddedHashes;
+    std::sort(uniqueHashes.begin(), uniqueHashes.end());
+    uniqueHashes.erase(std::unique(uniqueHashes.begin(), uniqueHashes.end()), uniqueHashes.end());
+
+    thread_local std::mt19937 rng(std::random_device{}());
+    std::size_t reconciledEmbeddedDocs = 0;
+
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+#if YAMS_LIBSQL_BACKEND
+            auto beginResult = db.execute("BEGIN");
+#else
+            auto beginResult = db.execute("BEGIN IMMEDIATE");
+#endif
+            if (!beginResult)
+                return beginResult.error();
+
+            auto rollback = [&db](const Result<void>& err) -> Result<void> {
+                db.execute("ROLLBACK");
+                return err;
+            };
+
+            if (auto createTemp =
+                    db.execute("CREATE TEMP TABLE IF NOT EXISTS temp_embedding_reconcile_hashes ("
+                               "sha256_hash TEXT PRIMARY KEY)");
+                !createTemp) {
+                return rollback(createTemp.error());
+            }
+            if (auto clearTemp = db.execute("DELETE FROM temp_embedding_reconcile_hashes");
+                !clearTemp) {
+                return rollback(clearTemp.error());
+            }
+
+            if (!modelId.empty()) {
+                auto ensureModelStmt = db.prepare(R"(
+                    INSERT OR IGNORE INTO vector_models (model_id, model_name, embedding_dim)
+                    VALUES (?, ?, 0)
+                )");
+                if (!ensureModelStmt) {
+                    return rollback(ensureModelStmt.error());
+                }
+                auto& mstmt = ensureModelStmt.value();
+                if (auto r = mstmt.bind(1, modelId); !r) {
+                    return rollback(r.error());
+                }
+                if (auto r = mstmt.bind(2, modelId); !r) {
+                    return rollback(r.error());
+                }
+                if (auto exec = mstmt.execute(); !exec) {
+                    return rollback(exec.error());
+                }
+            }
+
+            if (!uniqueHashes.empty()) {
+                auto insertHashStmt = db.prepare(
+                    "INSERT OR IGNORE INTO temp_embedding_reconcile_hashes (sha256_hash) "
+                    "VALUES (?)");
+                if (!insertHashStmt) {
+                    return rollback(insertHashStmt.error());
+                }
+                auto& hstmt = insertHashStmt.value();
+                for (const auto& hash : uniqueHashes) {
+                    hstmt.reset();
+                    if (auto r = hstmt.bind(1, hash); !r) {
+                        return rollback(r.error());
+                    }
+                    if (auto exec = hstmt.execute(); !exec) {
+                        return rollback(exec.error());
+                    }
+                }
+            }
+
+            auto countStmt = db.prepare(R"(
+                SELECT COUNT(*)
+                FROM documents d
+                JOIN temp_embedding_reconcile_hashes th ON th.sha256_hash = d.sha256_hash
+            )");
+            if (!countStmt) {
+                return rollback(countStmt.error());
+            }
+            if (auto step = countStmt.value().step(); !step) {
+                return rollback(step.error());
+            } else if (step.value()) {
+                reconciledEmbeddedDocs = static_cast<std::size_t>(countStmt.value().getInt64(0));
+            }
+
+            auto reconcileStmt = db.prepare(R"(
+                INSERT INTO document_embeddings_status (
+                    document_id, has_embedding, model_id, chunk_count, updated_at
+                )
+                SELECT d.id,
+                       CASE WHEN th.sha256_hash IS NOT NULL THEN 1 ELSE 0 END,
+                       CASE WHEN th.sha256_hash IS NOT NULL THEN ? ELSE NULL END,
+                       CASE WHEN th.sha256_hash IS NOT NULL THEN 1 ELSE 0 END,
+                       unixepoch()
+                FROM documents d
+                LEFT JOIN temp_embedding_reconcile_hashes th ON th.sha256_hash = d.sha256_hash
+                ON CONFLICT(document_id) DO UPDATE SET
+                    has_embedding = excluded.has_embedding,
+                    model_id = CASE
+                        WHEN excluded.has_embedding = 0 THEN NULL
+                        WHEN excluded.model_id IS NOT NULL THEN excluded.model_id
+                        ELSE document_embeddings_status.model_id
+                    END,
+                    chunk_count = CASE
+                        WHEN excluded.has_embedding = 0 THEN 0
+                        WHEN document_embeddings_status.chunk_count > 0
+                            THEN document_embeddings_status.chunk_count
+                        ELSE excluded.chunk_count
+                    END,
+                    updated_at = excluded.updated_at
+            )");
+            if (!reconcileStmt) {
+                return rollback(reconcileStmt.error());
+            }
+            auto& rstmt = reconcileStmt.value();
+            if (auto r = rstmt.bind(1, modelId.empty() ? nullptr : modelId.c_str()); !r) {
+                return rollback(r.error());
+            }
+            if (auto exec = rstmt.execute(); !exec) {
+                return rollback(exec.error());
+            }
+
+            if (auto clearTemp = db.execute("DELETE FROM temp_embedding_reconcile_hashes");
+                !clearTemp) {
+                return rollback(clearTemp.error());
+            }
+
+            auto commitResult = db.execute("COMMIT");
+            if (!commitResult) {
+                db.execute("ROLLBACK");
+                return commitResult.error();
+            }
+            return Result<void>();
+        });
+
+        if (result) {
+            cachedEmbeddedCount_.store(static_cast<uint64_t>(reconciledEmbeddedDocs),
+                                       std::memory_order_relaxed);
+            signalCorpusStatsStale();
+            return result;
+        }
+
+        if (result.error().message.find("database is locked") == std::string::npos) {
+            return result;
+        }
+
+        int baseDelayMs = kBaseDelayMs * (1 << attempt);
+        int jitter = static_cast<int>(baseDelayMs * 0.25);
+        std::uniform_int_distribution<int> dist(-jitter, jitter);
+        int delayMs = baseDelayMs + dist(rng);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+    }
+
+    daemon::TuneAdvisor::reportDbLockError();
+    return Error{ErrorCode::DatabaseError,
+                 "reconcileDocumentEmbeddingStatusByHashes: max retries exceeded"};
+}
+
 Result<bool> MetadataRepository::hasDocumentEmbeddingByHash(const std::string& hash) {
     return executeReadQuery<bool>([&](Database& db) -> Result<bool> {
         auto stmtResult = db.prepare(R"(

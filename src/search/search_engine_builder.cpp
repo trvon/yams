@@ -133,15 +133,17 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         cfg.enableParallelExecution = options.config.enableParallelExecution;
         cfg.includeDebugInfo = options.config.includeDebugInfo;
 
-        spdlog::info("SearchEngine using override state={} (k={}, text={:.2f}, vector={:.2f}, "
-                     "fusion={}, vector_gate={:.2f}/{:.2f}, lexical_floor={}@{:.3f}, "
-                     "path_dedup={}, lexical_tiebreak={}, semantic_rescue={}@{:.4f})",
-                     tuningStateToString(overrideState), params.rrfK, cfg.textWeight,
-                     cfg.vectorWeight,
-                     SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
-                     cfg.vectorOnlyThreshold, cfg.vectorOnlyPenalty, cfg.lexicalFloorTopN,
-                     cfg.lexicalFloorBoost, cfg.enablePathDedupInFusion, cfg.enableLexicalTieBreak,
-                     cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore);
+        spdlog::info(
+            "SearchEngine using override state={} (zoom={}, k={}, text={:.2f}, vector={:.2f}, "
+            "fusion={}, vector_gate={:.2f}/{:.2f}, lexical_floor={}@{:.3f}, "
+            "path_dedup={}, lexical_tiebreak={}, semantic_rescue={}@{:.4f})",
+            tuningStateToString(overrideState),
+            SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel), params.rrfK,
+            cfg.textWeight, cfg.vectorWeight,
+            SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy), cfg.vectorOnlyThreshold,
+            cfg.vectorOnlyPenalty, cfg.lexicalFloorTopN, cfg.lexicalFloorBoost,
+            cfg.enablePathDedupInFusion, cfg.enableLexicalTieBreak, cfg.semanticRescueSlots,
+            cfg.semanticRescueMinVectorScore);
     } else if (options.autoTune && metadataRepo_) {
         // Get corpus statistics from metadata repository
         auto statsResult = metadataRepo_->getCorpusStats();
@@ -154,12 +156,14 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.maxResults = options.config.maxResults;
             cfg.enableParallelExecution = options.config.enableParallelExecution;
             cfg.includeDebugInfo = options.config.includeDebugInfo;
-            spdlog::info("SearchEngine auto-tuned to state={} (k={}, text={:.2f}, vector={:.2f}, "
-                         "fusion={}, semantic_rescue={}@{:.4f})",
-                         tuningStateToString(runtimeTuner->currentState()), runtimeTuner->getRrfK(),
-                         cfg.textWeight, cfg.vectorWeight,
-                         SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
-                         cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore);
+            spdlog::info(
+                "SearchEngine auto-tuned to state={} (zoom={}, k={}, text={:.2f}, vector={:.2f}, "
+                "fusion={}, semantic_rescue={}@{:.4f})",
+                tuningStateToString(runtimeTuner->currentState()),
+                SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
+                runtimeTuner->getRrfK(), cfg.textWeight, cfg.vectorWeight,
+                SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore);
         } else {
             spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
                          statsResult.error().message);
@@ -182,6 +186,11 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.vectorWeight = *vectorWeight;
             spdlog::info("SearchEngine vectorWeight overridden to {:.2f} via env",
                          cfg.vectorWeight);
+        }
+        if (auto similarityThreshold = getEnvFloat("YAMS_SEARCH_SIMILARITY_THRESHOLD")) {
+            cfg.similarityThreshold = std::clamp(*similarityThreshold, 0.0f, 1.0f);
+            spdlog::info("SearchEngine similarityThreshold overridden to {:.3f} via env",
+                         cfg.similarityThreshold);
         }
         if (auto kgWeight = getEnvFloat("YAMS_SEARCH_KG_WEIGHT")) {
             cfg.kgWeight = *kgWeight;
@@ -253,6 +262,22 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.waitForConceptExtraction = *waitForConcepts;
             spdlog::info("SearchEngine waitForConceptExtraction overridden to {} via env",
                          cfg.waitForConceptExtraction);
+        }
+
+        if (auto zoomLevel = getEnvString("YAMS_SEARCH_ZOOM_LEVEL")) {
+            if (*zoomLevel == "AUTO") {
+                cfg.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Auto;
+            } else if (*zoomLevel == "MAP") {
+                cfg.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
+            } else if (*zoomLevel == "NEIGHBORHOOD") {
+                cfg.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+            } else if (*zoomLevel == "STREET") {
+                cfg.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Street;
+            } else {
+                spdlog::warn("Unknown YAMS_SEARCH_ZOOM_LEVEL value '{}', ignoring", *zoomLevel);
+            }
+            spdlog::info("SearchEngine zoomLevel overridden to {} via env",
+                         SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel));
         }
     }
 

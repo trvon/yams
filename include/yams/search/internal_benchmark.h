@@ -275,6 +275,87 @@ struct BenchmarkConfig {
 };
 
 /**
+ * @brief KG readiness policy for end-to-end retrieval benchmarks.
+ *
+ * Graph-aware candidates often benefit from waiting for KG work to settle, but synthetic or
+ * low-structure corpora should not hard-fail merely because they do not emit a strong KG signal.
+ */
+enum class BenchmarkKgReadinessPolicy {
+    Skip,
+    AcceptDrainedWithoutSignal,
+    RequireSignal,
+};
+
+[[nodiscard]] constexpr const char*
+benchmarkKgReadinessPolicyToString(BenchmarkKgReadinessPolicy policy) noexcept {
+    switch (policy) {
+        case BenchmarkKgReadinessPolicy::Skip:
+            return "SKIP";
+        case BenchmarkKgReadinessPolicy::AcceptDrainedWithoutSignal:
+            return "ACCEPT_DRAINED_WITHOUT_SIGNAL";
+        case BenchmarkKgReadinessPolicy::RequireSignal:
+            return "REQUIRE_SIGNAL";
+    }
+    return "SKIP";
+}
+
+/**
+ * @brief Resolve benchmark KG readiness policy from corpus type and override intent.
+ *
+ * Explicit overrides always win. Otherwise, BEIR runs keep strict KG readiness when graph rerank
+ * is requested, while synthetic runs fall back to a drained-queues policy so low-structure corpora
+ * do not fail spuriously.
+ */
+[[nodiscard]] constexpr BenchmarkKgReadinessPolicy resolveBenchmarkKgReadinessPolicy(
+    bool graphRerankRequested, std::optional<bool> explicitRequireKgReady, bool useBEIR) noexcept {
+    if (explicitRequireKgReady.has_value()) {
+        return *explicitRequireKgReady ? BenchmarkKgReadinessPolicy::RequireSignal
+                                       : BenchmarkKgReadinessPolicy::Skip;
+    }
+    if (!graphRerankRequested) {
+        return BenchmarkKgReadinessPolicy::Skip;
+    }
+    return useBEIR ? BenchmarkKgReadinessPolicy::RequireSignal
+                   : BenchmarkKgReadinessPolicy::AcceptDrainedWithoutSignal;
+}
+
+/**
+ * @brief Determine whether benchmark readiness criteria are satisfied.
+ */
+[[nodiscard]] constexpr bool benchmarkKgReadinessSatisfied(BenchmarkKgReadinessPolicy policy,
+                                                           bool queuesDrained,
+                                                           bool kgSignalReady) noexcept {
+    switch (policy) {
+        case BenchmarkKgReadinessPolicy::Skip:
+            return true;
+        case BenchmarkKgReadinessPolicy::AcceptDrainedWithoutSignal:
+            return queuesDrained;
+        case BenchmarkKgReadinessPolicy::RequireSignal:
+            return queuesDrained && kgSignalReady;
+    }
+    return true;
+}
+
+/**
+ * @brief Refine KG readiness policy using the effective graph-rerank state.
+ *
+ * If the runtime-tuned search engine disables graph reranking and the caller did not explicitly
+ * force KG waiting, benchmark sweeps should skip KG wait entirely.
+ */
+[[nodiscard]] constexpr BenchmarkKgReadinessPolicy
+refineBenchmarkKgReadinessPolicy(BenchmarkKgReadinessPolicy initialPolicy,
+                                 std::optional<bool> explicitRequireKgReady,
+                                 bool effectiveGraphRerankEnabled) noexcept {
+    if (explicitRequireKgReady.has_value()) {
+        return initialPolicy;
+    }
+    if (!effectiveGraphRerankEnabled) {
+        return BenchmarkKgReadinessPolicy::Skip;
+    }
+    return initialPolicy;
+}
+
+/**
  * @brief Internal benchmark runner for search quality measurement.
  *
  * Runs synthetic queries against the search engine and measures retrieval

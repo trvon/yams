@@ -39,6 +39,28 @@ double shareOf(double part, double total) {
     return std::clamp(part / total, 0.0, 1.0);
 }
 
+double zoomLevelDepth(SearchEngineConfig::NavigationZoomLevel level) {
+    switch (level) {
+        case SearchEngineConfig::NavigationZoomLevel::Auto:
+            return 0.0;
+        case SearchEngineConfig::NavigationZoomLevel::Map:
+            return 1.0;
+        case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
+            return 2.0;
+        case SearchEngineConfig::NavigationZoomLevel::Street:
+            return 3.0;
+    }
+    return 0.0;
+}
+
+nlohmann::json zoomLevelCountJson(const std::map<std::string, std::uint64_t>& counts) {
+    nlohmann::json out = nlohmann::json::object();
+    for (const auto& [level, count] : counts) {
+        out[level] = count;
+    }
+    return out;
+}
+
 const SearchTuner::RuntimeStageSignal* findStage(const SearchTuner::RuntimeTelemetry& telemetry,
                                                  std::string_view name) {
     auto it = telemetry.stages.find(std::string(name));
@@ -186,6 +208,7 @@ SearchTuner::SearchTuner(const storage::CorpusStats& stats, std::optional<Tuning
 void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     baseConfig_ = config;
+    params_.zoomLevel = config.zoomLevel;
     params_.textWeight = config.textWeight;
     params_.vectorWeight = config.vectorWeight;
     params_.entityVectorWeight = config.entityVectorWeight;
@@ -284,6 +307,11 @@ void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
         ewmaUpdate(adaptive_.ewmaGraphRerankSkipRate, graphSkipRate, adaptive_.observations);
     adaptive_.ewmaGraphRerankContributionRate = ewmaUpdate(
         adaptive_.ewmaGraphRerankContributionRate, graphContributionRate, adaptive_.observations);
+    adaptive_.ewmaZoomDepth = ewmaUpdate(
+        adaptive_.ewmaZoomDepth, zoomLevelDepth(telemetry.zoomLevel), adaptive_.observations);
+    adaptive_.lastZoomLevel = telemetry.zoomLevel;
+    adaptive_
+        .zoomLevelCounts[SearchEngineConfig::navigationZoomLevelToString(telemetry.zoomLevel)]++;
 
     if (!stats_.hasKnowledgeGraph()) {
         adaptive_.lastDecision = "steady_no_kg";
@@ -408,6 +436,10 @@ nlohmann::json SearchTuner::adaptiveStateToJsonLocked() const {
         {"ewma_graph_rerank_latency_ms", adaptive_.ewmaGraphRerankLatencyMs},
         {"ewma_graph_rerank_skip_rate", adaptive_.ewmaGraphRerankSkipRate},
         {"ewma_graph_rerank_contribution_rate", adaptive_.ewmaGraphRerankContributionRate},
+        {"ewma_zoom_depth", adaptive_.ewmaZoomDepth},
+        {"last_zoom_level",
+         SearchEngineConfig::navigationZoomLevelToString(adaptive_.lastZoomLevel)},
+        {"zoom_level_counts", zoomLevelCountJson(adaptive_.zoomLevelCounts)},
         {"current_params", params_.toJson()},
         {"base_params", baseParams_.toJson()},
     };

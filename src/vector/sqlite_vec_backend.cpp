@@ -3602,10 +3602,14 @@ ORDER BY rowid
         // stmt is used both in table discovery and in build-from-vectors
         sqlite3_stmt* stmt = nullptr;
 
+        // Refresh current row counts before deciding whether persisted HNSW state is usable.
+        refreshQueryDimCountsUnlocked();
+
         // Discover existing dimension-specific HNSW tables (skip if force_rebuild)
         if (!force_rebuild) {
             // Pattern: vectors_{dim}_hnsw_meta (e.g., vectors_384_hnsw_meta, vectors_768_hnsw_meta)
             std::vector<size_t> existing_dims;
+            bool stalePersistedIndex = false;
 
             // First check for legacy single-dimension tables (vectors_hnsw_meta)
             const char* check_legacy = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
@@ -3661,7 +3665,19 @@ ORDER BY rowid
                         spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
                         sqlite3_free(err);
                     } else {
-                        hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
+                        auto loaded = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
+                        const auto loadedSize = loaded->size();
+                        const auto countIt = query_dim_counts_.find(dim);
+                        const auto currentCount =
+                            countIt != query_dim_counts_.end() ? countIt->second : size_t{0};
+                        if (currentCount > 0 && loadedSize != currentCount) {
+                            stalePersistedIndex = true;
+                            spdlog::warn("[HNSW] Persisted index stale for dim={}: index_size={} "
+                                         "vector_rows={}. Rebuilding from vectors table.",
+                                         dim, loadedSize, currentCount);
+                            break;
+                        }
+                        hnsw_indices_[dim] = std::move(loaded);
                         hnsw_dirty_[dim] = false;
                         spdlog::info("[HNSW] Loaded index for dim={} with {} vectors", dim,
                                      hnsw_indices_[dim]->size());
@@ -3669,6 +3685,11 @@ ORDER BY rowid
                 } catch (const std::exception& e) {
                     spdlog::warn("[HNSW] Exception loading index for dim={}: {}", dim, e.what());
                 }
+            }
+
+            if (stalePersistedIndex) {
+                hnsw_indices_.clear();
+                hnsw_dirty_.clear();
             }
         }
 

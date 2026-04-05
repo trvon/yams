@@ -47,6 +47,7 @@ TEST_CASE("TuningState: string conversion", "[unit][search_tuner]") {
 TEST_CASE("TunedParams: SMALL_CODE parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SMALL_CODE);
 
+    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Street);
     CHECK(params.rrfK == 20);
     CHECK(params.textWeight == Approx(0.45f));
     CHECK(params.vectorWeight == Approx(0.15f));
@@ -99,6 +100,7 @@ TEST_CASE("TunedParams: LARGE_PROSE parameters", "[unit][search_tuner][params]")
 TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SCIENTIFIC);
 
+    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Map);
     CHECK(params.rrfK == 12);
     CHECK(params.textWeight == Approx(0.70f));
     CHECK(params.vectorWeight == Approx(0.25f));
@@ -125,6 +127,7 @@ TEST_CASE("TunedParams: MIXED parameters", "[unit][search_tuner][params]") {
 TEST_CASE("TunedParams: MIXED_PRECISION parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::MIXED_PRECISION);
 
+    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
     CHECK(params.rrfK == 45);
     CHECK(params.textWeight == Approx(0.40f));
     CHECK(params.vectorWeight == Approx(0.25f));
@@ -162,6 +165,7 @@ TEST_CASE("TunedParams: JSON serialization", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SMALL_CODE);
     auto json = params.toJson();
 
+    CHECK(json["zoom_level"] == "STREET");
     CHECK(json["rrf_k"] == 20);
     CHECK(json["text_weight"].get<float>() == Approx(0.45f));
     CHECK(json["vector_weight"].get<float>() == Approx(0.15f));
@@ -178,6 +182,7 @@ TEST_CASE("TunedParams: applyTo SearchEngineConfig", "[unit][search_tuner][param
     SearchEngineConfig config;
     params.applyTo(config);
 
+    CHECK(config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
     CHECK(config.textWeight == Approx(0.40f));
     CHECK(config.vectorWeight == Approx(0.45f));
     CHECK(config.entityVectorWeight == Approx(0.00f));
@@ -375,6 +380,7 @@ TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][sea
     auto config = tuner.getConfig();
 
     // Should be SMALL_PROSE
+    CHECK(config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
     CHECK(config.textWeight == Approx(0.50f));
     CHECK(config.vectorWeight == Approx(0.40f));
     CHECK(config.pathTreeWeight == Approx(0.00f));
@@ -399,6 +405,7 @@ TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
     CHECK(json["state"] == "MIXED_PRECISION");
     CHECK_FALSE(json["reason"].get<std::string>().empty());
     CHECK(json["rrf_k"] == 45);
+    CHECK(json["params"]["zoom_level"] == "NEIGHBORHOOD");
     // When KG is present, graph-aware adjustments shift weights toward KG.
     CHECK(json["params"]["text_weight"].get<float>() == Approx(0.323f));
     CHECK(json["params"]["kg_weight"].get<float>() == Approx(0.19f));

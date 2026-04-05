@@ -2255,6 +2255,56 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 if (dbVectorCount > 0) {
                     spdlog::info("[VectorInit] Found {} vectors in database", dbVectorCount);
                 }
+
+                if (auto metadataRepo = loadMetadataRepo()) {
+                    auto embeddedHashes = vectorDatabase->getEmbeddedDocumentHashes();
+                    const auto metadataEmbeddedCount =
+                        static_cast<int64_t>(metadataRepo->getCachedEmbeddedCount());
+                    const auto actualEmbeddedCount = static_cast<int64_t>(embeddedHashes.size());
+                    if (metadataEmbeddedCount != actualEmbeddedCount) {
+                        spdlog::warn("[Embeddings] Metadata/vector status mismatch: "
+                                     "documents_embedded={} vector_docs={}. Reconciling "
+                                     "document_embeddings_status from vector rows.",
+                                     metadataEmbeddedCount, actualEmbeddedCount);
+                        std::vector<std::string> reconciledHashes;
+                        reconciledHashes.reserve(embeddedHashes.size());
+                        for (const auto& hash : embeddedHashes) {
+                            reconciledHashes.push_back(hash);
+                        }
+                        auto reconcileResult =
+                            metadataRepo->reconcileDocumentEmbeddingStatusByHashes(
+                                reconciledHashes);
+                        if (!reconcileResult) {
+                            spdlog::warn("[Embeddings] Failed to reconcile embedded-doc status "
+                                         "from vector rows: {}",
+                                         reconcileResult.error().message);
+                        } else {
+                            spdlog::info("[Embeddings] Reconciled embedded-doc status: {} -> {}",
+                                         metadataEmbeddedCount, actualEmbeddedCount);
+                        }
+                    }
+                }
+
+                if (auto modelProvider = loadModelProvider();
+                    modelProvider && modelProvider->isAvailable()) {
+                    std::string activeModelName = embeddingModelName_;
+                    if (activeModelName.empty()) {
+                        auto loadedModels = modelProvider->getLoadedModels();
+                        if (!loadedModels.empty()) {
+                            activeModelName = loadedModels.front();
+                        }
+                    }
+                    const auto dbEmbeddingDim = vectorDatabase->getConfig().embedding_dim;
+                    const auto modelEmbeddingDim = modelProvider->getEmbeddingDim(activeModelName);
+                    if (dbEmbeddingDim > 0 && modelEmbeddingDim > 0 &&
+                        dbEmbeddingDim != modelEmbeddingDim) {
+                        spdlog::warn("[Embeddings] Vector DB/model dimension mismatch: db={} "
+                                     "model={} ('{}'). Vector search will be skipped until you "
+                                     "select a matching model or rebuild embeddings.",
+                                     dbEmbeddingDim, modelEmbeddingDim,
+                                     activeModelName.empty() ? "<default>" : activeModelName);
+                    }
+                }
             }
         } else {
             spdlog::info("[ServiceManager] Vector DB init deferred (dim unresolved)");
@@ -2338,6 +2388,26 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                              ? modelProvider->getEmbeddingGenerator()
                              : modelProvider->getEmbeddingGenerator(embeddingModelName_);
                 spdlog::info("[SearchBuild] Got embedding generator: {}", embGen != nullptr);
+
+                if (auto vectorDatabase = loadVectorDatabase()) {
+                    std::string activeModelName = embeddingModelName_;
+                    if (activeModelName.empty()) {
+                        auto loadedModels = modelProvider->getLoadedModels();
+                        if (!loadedModels.empty()) {
+                            activeModelName = loadedModels.front();
+                        }
+                    }
+                    const auto dbEmbeddingDim = vectorDatabase->getConfig().embedding_dim;
+                    const auto modelEmbeddingDim = modelProvider->getEmbeddingDim(activeModelName);
+                    if (dbEmbeddingDim > 0 && modelEmbeddingDim > 0 &&
+                        dbEmbeddingDim != modelEmbeddingDim) {
+                        spdlog::warn("[SearchBuild] Vector DB/model dimension mismatch: db={} "
+                                     "model={} ('{}'). Search vector tiers will be skipped until "
+                                     "you select a matching model or rebuild embeddings.",
+                                     dbEmbeddingDim, modelEmbeddingDim,
+                                     activeModelName.empty() ? "<default>" : activeModelName);
+                    }
+                }
             } catch (const std::exception& e) {
                 spdlog::warn("[SearchBuild] Failed to get embedding generator: {}", e.what());
             }

@@ -431,6 +431,9 @@ public:
     batchUpdateDocumentEmbeddingStatusByHashes(const std::vector<std::string>& hashes,
                                                bool hasEmbedding,
                                                const std::string& modelId = "") = 0;
+    virtual Result<void>
+    reconcileDocumentEmbeddingStatusByHashes(const std::vector<std::string>& embeddedHashes,
+                                             const std::string& modelId = "") = 0;
     virtual Result<bool> hasDocumentEmbeddingByHash(const std::string& hash) = 0;
 
     // Extraction status operations (avoid read-modify-write)
@@ -743,6 +746,9 @@ public:
     batchUpdateDocumentEmbeddingStatusByHashes(const std::vector<std::string>& hashes,
                                                bool hasEmbedding,
                                                const std::string& modelId = "") override;
+    Result<void>
+    reconcileDocumentEmbeddingStatusByHashes(const std::vector<std::string>& embeddedHashes,
+                                             const std::string& modelId = "") override;
     Result<bool> hasDocumentEmbeddingByHash(const std::string& hash) override;
 
     // Extraction status operations (avoid read-modify-write)

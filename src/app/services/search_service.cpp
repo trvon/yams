@@ -1607,6 +1607,7 @@ private:
         params.limit = static_cast<int>(std::min<std::size_t>(
             req.limit, static_cast<std::size_t>(std::numeric_limits<int>::max())));
         params.offset = 0;
+        params.semanticOnly = (req.type == "semantic");
         // Propagate tag filters to the search engine (used for candidate gathering/ranking)
         params.tags = req.tags;
         params.matchAllTags = req.matchAllTags;
@@ -1799,7 +1800,7 @@ private:
         }
 
         SearchResponse resp;
-        resp.type = "hybrid";
+        resp.type = req.type.empty() ? "hybrid" : req.type;
         resp.usedHybrid = true;
         resp.executionTimeMs = engineResponse.executionTimeMs;
         resp.isDegraded = engineResponse.isDegraded;

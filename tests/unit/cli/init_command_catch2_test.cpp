@@ -168,6 +168,8 @@ TEST_CASE("InitCommand - help shows non-interactive setup options", "[cli][init]
 
     CHECK(rc == 0);
     CHECK(output.find("Initialize YAMS storage and configuration") != std::string::npos);
+    CHECK(output.find("--auto") != std::string::npos);
+    CHECK(output.find("headless environments") != std::string::npos);
     CHECK(output.find("--non-interactive") != std::string::npos);
     CHECK(output.find("--no-keygen") != std::string::npos);
     CHECK(output.find("--print") != std::string::npos);

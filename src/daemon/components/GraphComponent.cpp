@@ -5,6 +5,7 @@
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
+#include <yams/metadata/kg_topology_analysis.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
@@ -444,6 +445,27 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun) {
     RepairStats stats;
     constexpr int kBatchSize = 500;
 
+    if (!dryRun) {
+        auto orphanEdgesRes = kgStore_->deleteOrphanedEdges();
+        if (!orphanEdgesRes) {
+            ++stats.errors;
+            stats.issues.push_back("deleteOrphanedEdges failed: " + orphanEdgesRes.error().message);
+        } else if (orphanEdgesRes.value() > 0) {
+            stats.issues.push_back("removed orphaned edges: " +
+                                   std::to_string(orphanEdgesRes.value()));
+        }
+
+        auto orphanEntitiesRes = kgStore_->deleteOrphanedDocEntities();
+        if (!orphanEntitiesRes) {
+            ++stats.errors;
+            stats.issues.push_back("deleteOrphanedDocEntities failed: " +
+                                   orphanEntitiesRes.error().message);
+        } else if (orphanEntitiesRes.value() > 0) {
+            stats.issues.push_back("removed orphaned doc_entities: " +
+                                   std::to_string(orphanEntitiesRes.value()));
+        }
+    }
+
     std::size_t offset = 0;
     while (true) {
         metadata::DocumentQueryOptions opts;
@@ -771,6 +793,42 @@ Result<GraphComponent::GraphHealthReport> GraphComponent::validateGraph() {
                                     relCounts.error().message);
         }
     }
+
+    auto orphanDocs = kgStore_->findIsolatedNodes("document", "has_blob", 1024);
+    if (orphanDocs) {
+        report.orphanedNodes = static_cast<uint64_t>(orphanDocs.value().size());
+        if (!orphanDocs.value().empty()) {
+            report.issues.push_back("document nodes missing has_blob edges: " +
+                                    std::to_string(orphanDocs.value().size()));
+        }
+    } else {
+        report.issues.push_back("isolated document probe unavailable: " +
+                                orphanDocs.error().message);
+    }
+
+    if (auto topology = metadata::analyzeDocumentTopology(kgStore_.get()); topology.has_value()) {
+        report.topologyDocumentNodes = static_cast<uint64_t>(topology->documentNodeCount);
+        report.topologySemanticEdges = static_cast<uint64_t>(topology->semanticEdgeCount);
+        report.topologyDocumentsWithNeighbors =
+            static_cast<uint64_t>(topology->documentsWithSemanticNeighbors);
+        report.topologyIsolatedDocuments = static_cast<uint64_t>(topology->isolatedDocumentCount);
+        report.topologyConnectedComponents =
+            static_cast<uint64_t>(topology->connectedComponentCount);
+        report.topologyLargestComponent = static_cast<uint64_t>(topology->largestComponentSize);
+
+        if (topology->documentNodeCount > 0 && topology->documentsWithSemanticNeighbors == 0) {
+            report.issues.push_back("semantic topology has zero connected document neighborhoods");
+        }
+        if (topology->documentNodeCount >= 8 && topology->largestComponentSize <= 1) {
+            report.issues.push_back("semantic topology is fully fragmented into singletons");
+        }
+        if (topology->documentNodeCount >= 8 && topology->semanticCoverage < 0.25) {
+            report.issues.push_back("semantic topology coverage below 25%");
+        }
+    } else {
+        report.issues.push_back("topology analysis unavailable");
+    }
+
     return report;
 }
 

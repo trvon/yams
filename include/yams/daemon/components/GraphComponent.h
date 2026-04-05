@@ -83,6 +83,12 @@ public:
         uint64_t totalEdges{0};
         uint64_t orphanedNodes{0};
         uint64_t unreachableNodes{0};
+        uint64_t topologyDocumentNodes{0};
+        uint64_t topologySemanticEdges{0};
+        uint64_t topologyDocumentsWithNeighbors{0};
+        uint64_t topologyIsolatedDocuments{0};
+        uint64_t topologyConnectedComponents{0};
+        uint64_t topologyLargestComponent{0};
         std::vector<std::string> issues;
     };
     Result<GraphHealthReport> validateGraph();

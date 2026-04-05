@@ -6,6 +6,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/metadata/kg_topology_analysis.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
 using namespace yams;
@@ -139,4 +140,36 @@ TEST_CASE("KG Store: ensurePathNode links logical path to snapshot path", "[unit
     REQUIRE(edges.has_value());
     REQUIRE_FALSE(edges.value().empty());
     CHECK(edges.value()[0].dstNodeId == snapshotId.value());
+}
+
+TEST_CASE("KG topology analysis summarizes semantic neighborhoods", "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    std::vector<KGNode> nodes = {
+        KGNode{.nodeKey = "doc:a", .label = std::string("a"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:b", .label = std::string("b"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:c", .label = std::string("c"), .type = std::string("document")},
+    };
+    auto ids = fix.store_->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+    REQUIRE(ids.value().size() == 3);
+
+    KGEdge ab{.srcNodeId = ids.value()[0],
+              .dstNodeId = ids.value()[1],
+              .relation = "semantic_neighbor",
+              .weight = 0.92f};
+    KGEdge ba{.srcNodeId = ids.value()[1],
+              .dstNodeId = ids.value()[0],
+              .relation = "semantic_neighbor",
+              .weight = 0.92f};
+    REQUIRE(fix.store_->addEdgesUnique({ab, ba}).has_value());
+
+    auto topology = analyzeDocumentTopology(fix.store_.get());
+    REQUIRE(topology.has_value());
+    CHECK(topology->documentNodeCount == 3);
+    CHECK(topology->semanticEdgeCount == 1);
+    CHECK(topology->documentsWithSemanticNeighbors == 2);
+    CHECK(topology->isolatedDocumentCount == 1);
+    CHECK(topology->connectedComponentCount == 2);
+    CHECK(topology->largestComponentSize == 2);
 }

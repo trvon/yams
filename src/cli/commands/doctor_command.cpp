@@ -697,7 +697,7 @@ private:
             if (fixEmbeddings_) {
                 std::cout << status_pending("Repairing missing embeddings") << "\n";
                 yams::repair::EmbeddingRepairConfig rcfg;
-                rcfg.batchSize = 32;
+                rcfg.batchSize = 8;
                 rcfg.skipExisting = true;
                 rcfg.dataPath = cli_->getDataPath();
                 rcfg.cancelRequested = &g_doctor_cancel_requested;
@@ -801,7 +801,9 @@ private:
                                 auto leaseHandle = std::move(leaseRes.value());
                                 auto& client = **leaseHandle;
                                 yams::daemon::EmbedDocumentsRequest ed;
-                                ed.modelName = ""; // let server/provider decide
+                                if (const char* preferred = std::getenv("YAMS_PREFERRED_MODEL")) {
+                                    ed.modelName = preferred;
+                                }
                                 ed.documentHashes = missing.value();
                                 ed.batchSize = static_cast<uint32_t>(rcfg.batchSize);
                                 ed.skipExisting = rcfg.skipExisting;
@@ -812,20 +814,35 @@ private:
                                 rpcSpin.start("Daemon: generating missing embeddings");
                                 auto er =
                                     yams::cli::run_result<yams::daemon::EmbedDocumentsResponse>(
-                                        client.streamingEmbedDocuments(ed),
-                                        std::chrono::milliseconds(overall_ms));
+                                        client.call(ed), std::chrono::milliseconds(overall_ms));
                                 rpcSpin.stop();
                                 if (er) {
-                                    std::cout
-                                        << "  "
-                                        << ui::status_ok(
-                                               "Daemon embeddings: requested=" +
-                                               std::to_string(er.value().requested) +
-                                               ", embedded=" + std::to_string(er.value().embedded) +
-                                               ", skipped=" + std::to_string(er.value().skipped) +
-                                               ", failed=" + std::to_string(er.value().failed))
-                                        << "\n";
-                                    attemptedDaemon = true;
+                                    const auto& daemonResp = er.value();
+                                    const bool suspiciousZeroResult =
+                                        !missing.value().empty() && daemonResp.requested == 0 &&
+                                        daemonResp.embedded == 0 && daemonResp.skipped == 0 &&
+                                        daemonResp.failed == 0;
+                                    if (suspiciousZeroResult) {
+                                        std::cout << "  "
+                                                  << ui::status_warning(
+                                                         "Daemon embeddings returned a zero-op "
+                                                         "result despite missing documents; "
+                                                         "falling back to local mode.")
+                                                  << "\n";
+                                    } else {
+                                        std::cout
+                                            << "  "
+                                            << ui::status_ok(
+                                                   "Daemon embeddings: requested=" +
+                                                   std::to_string(daemonResp.requested) +
+                                                   ", embedded=" +
+                                                   std::to_string(daemonResp.embedded) +
+                                                   ", skipped=" +
+                                                   std::to_string(daemonResp.skipped) +
+                                                   ", failed=" + std::to_string(daemonResp.failed))
+                                            << "\n";
+                                        attemptedDaemon = true;
+                                    }
                                 } else {
                                     std::cout
                                         << "  "
