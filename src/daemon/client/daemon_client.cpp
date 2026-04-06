@@ -1829,18 +1829,58 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
         std::optional<AddDocumentResponse> value;
     };
 
-    auto handler = std::make_shared<AddDocHandler>();
-    auto result = co_await sendRequestStreaming(req, handler);
-    if (!result) {
-        co_return result.error();
+    static constexpr int kMaxRetries = 3;
+    static constexpr std::array<int, kMaxRetries> kRetryDelaysMs = {25, 50, 100};
+
+    auto isTransientAddError = [](const Error& err) {
+        if (err.code == ErrorCode::InvalidState &&
+            err.message.find("Daemon not ready yet") != std::string::npos) {
+            return true;
+        }
+
+        const std::string& msg = err.message;
+        if (auto kindOpt = yams::daemon::parseIpcFailureKind(msg)) {
+            return yams::daemon::isTransient(*kindOpt);
+        }
+
+        return (err.code == ErrorCode::NetworkError) &&
+               (msg.find("Connection closed") != std::string::npos ||
+                msg.find("Connection reset") != std::string::npos ||
+                msg.find("ECONNRESET") != std::string::npos ||
+                msg.find("EPIPE") != std::string::npos ||
+                msg.find("Broken pipe") != std::string::npos ||
+                msg.find("read header failed") != std::string::npos ||
+                msg.find("read payload failed") != std::string::npos ||
+                msg.find("Read failed") != std::string::npos);
+    };
+
+    Error lastErr{ErrorCode::InvalidData, "Missing AddDocumentResponse in stream"};
+
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        auto handler = std::make_shared<AddDocHandler>();
+        auto result = co_await sendRequestStreaming(req, handler);
+        if (result) {
+            if (handler->error.has_value()) {
+                lastErr = *handler->error;
+            } else if (handler->value.has_value()) {
+                co_return *handler->value;
+            } else {
+                lastErr = Error{ErrorCode::InvalidData, "Missing AddDocumentResponse in stream"};
+            }
+        } else {
+            lastErr = result.error();
+        }
+
+        if (!isTransientAddError(lastErr) || attempt == (kMaxRetries - 1)) {
+            co_return lastErr;
+        }
+
+        boost::asio::steady_timer t(co_await boost::asio::this_coro::executor);
+        t.expires_after(std::chrono::milliseconds(kRetryDelaysMs[attempt]));
+        co_await t.async_wait(boost::asio::use_awaitable);
     }
-    if (handler->error.has_value()) {
-        co_return *handler->error;
-    }
-    if (handler->value.has_value()) {
-        co_return *handler->value;
-    }
-    co_return Error{ErrorCode::InvalidData, "Missing AddDocumentResponse in stream"};
+
+    co_return lastErr;
 }
 
 boost::asio::awaitable<Result<EmbeddingResponse>>

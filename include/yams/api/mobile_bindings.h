@@ -160,6 +160,7 @@ typedef struct yams_mobile_metadata_result_t yams_mobile_metadata_result_t;
 
 typedef struct yams_mobile_vector_status_request {
     yams_mobile_request_header header;
+    /* Deprecated no-op retained for ABI compatibility. */
     uint8_t warmup;
 } yams_mobile_vector_status_request;
 

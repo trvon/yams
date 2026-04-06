@@ -743,6 +743,51 @@ public:
                     // Non-fatal: path tree update is opportunistic
                 }
 
+                // Keep the lightweight corpus graph in sync for single-document stores so
+                // embedded/mobile graph queries can resolve the stored document immediately.
+                if (ctx_.kgStore) {
+                    try {
+                        auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
+                        if (!blobNodeResult) {
+                            spdlog::debug("Failed to ensure KG blob node for {}: {}",
+                                          info.sha256Hash.substr(0, 8),
+                                          blobNodeResult.error().message);
+                        } else {
+                            metadata::KGNode docNode;
+                            docNode.nodeKey = "doc:" + info.sha256Hash;
+                            docNode.label = info.filePath;
+                            docNode.type = "document";
+                            auto docNodeIds =
+                                ctx_.kgStore->upsertNodes({std::move(docNode)});
+                            if (!docNodeIds) {
+                                spdlog::debug("Failed to upsert KG doc node for {}: {}",
+                                              info.sha256Hash.substr(0, 8),
+                                              docNodeIds.error().message);
+                            }
+
+                            metadata::PathNodeDescriptor pathDesc;
+                            pathDesc.snapshotId = snapshotId;
+                            pathDesc.path = info.filePath;
+                            pathDesc.isDirectory = false;
+
+                            auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
+                            if (!pathNodeResult) {
+                                spdlog::debug("Failed to ensure KG path node for {}: {}",
+                                              info.filePath, pathNodeResult.error().message);
+                            } else {
+                                auto linkResult = ctx_.kgStore->linkPathVersion(
+                                    pathNodeResult.value(), blobNodeResult.value(), 0);
+                                if (!linkResult) {
+                                    spdlog::debug("Failed to link KG path version for {}: {}",
+                                                  info.filePath, linkResult.error().message);
+                                }
+                            }
+                        }
+                    } catch (const std::exception& ex) {
+                        spdlog::warn("Exception syncing KG for {}: {}", info.filePath, ex.what());
+                    }
+                }
+
                 // Index document terms for fuzzy search (best-effort)
                 try {
                     indexDocumentTermsForFuzzySearch(ctx_.metadataRepo, info);

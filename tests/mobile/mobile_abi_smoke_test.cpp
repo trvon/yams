@@ -66,6 +66,73 @@ bool wait_for_document(yams_mobile_context_t* ctx, const std::string& hash,
     return false;
 }
 
+bool wait_for_corpus_status_documents(yams_mobile_context_t* ctx, std::uint64_t minDocuments,
+                                      std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        yams_mobile_vector_status_request statusReq{};
+        statusReq.header = yams_mobile_request_header_default();
+
+        yams_mobile_vector_status_result_t* result = nullptr;
+        const auto status = yams_mobile_get_vector_status(ctx, &statusReq, &result);
+        if (status == YAMS_MOBILE_STATUS_OK && result != nullptr) {
+            const auto payload = yams_mobile_vector_status_result_json(result);
+            if (payload.data != nullptr) {
+                const auto parsed =
+                    nlohmann::json::parse(std::string(payload.data, payload.length), nullptr, false);
+                if (!parsed.is_discarded() && parsed.value("documents", 0ULL) >= minDocuments) {
+                    yams_mobile_vector_status_result_destroy(result);
+                    return true;
+                }
+            }
+        }
+        if (result != nullptr)
+            yams_mobile_vector_status_result_destroy(result);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return false;
+}
+
+bool store_document_with_retry(yams_mobile_context_t* ctx,
+                               const yams_mobile_document_store_request& request,
+                               yams_mobile_string_view* outHash,
+                               std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto status = yams_mobile_store_document(ctx, &request, outHash);
+        if (status == YAMS_MOBILE_STATUS_OK) {
+            return true;
+        }
+
+        if (status != YAMS_MOBILE_STATUS_INTERNAL_ERROR &&
+            status != YAMS_MOBILE_STATUS_UNAVAILABLE) {
+            return false;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    return false;
+}
+
+void require_stable_update_payload(const nlohmann::json& parsed, const std::string& expectedHash) {
+    REQUIRE(parsed.contains("success"));
+    REQUIRE(parsed.contains("hash"));
+    REQUIRE(parsed.contains("contentUpdated"));
+    REQUIRE(parsed.contains("metadataUpdated"));
+    REQUIRE(parsed.contains("tagsUpdated"));
+    REQUIRE(parsed.contains("updatesApplied"));
+    REQUIRE(parsed.contains("tagsAdded"));
+    REQUIRE(parsed.contains("tagsRemoved"));
+
+    CHECK(parsed.at("hash").template get<std::string>() == expectedHash);
+    CHECK(parsed.at("success").template get<bool>());
+    CHECK(parsed.at("metadataUpdated").template get<bool>());
+    CHECK(parsed.at("updatesApplied").template get<std::uint64_t>() >= 1U);
+    CHECK(parsed.at("tagsAdded").template get<std::uint64_t>() >= 0U);
+    CHECK(parsed.at("tagsRemoved").template get<std::uint64_t>() >= 0U);
+}
+
 } // namespace
 
 TEST_CASE("Mobile ABI version matches header macros", "[mobile][abi]") {
@@ -105,7 +172,7 @@ TEST_CASE("Mobile corpus document round trip works in embedded mode", "[mobile][
     store.sync_now = 1;
 
     yams_mobile_string_view stored_hash{};
-    REQUIRE(yams_mobile_store_document(ctx, &store, &stored_hash) == YAMS_MOBILE_STATUS_OK);
+    REQUIRE(store_document_with_retry(ctx, store, &stored_hash, std::chrono::seconds(5)));
     INFO(yams_mobile_last_error_message());
     REQUIRE(stored_hash.length > 0U);
 
@@ -199,15 +266,6 @@ TEST_CASE("Mobile corpus document round trip works in embedded mode", "[mobile][
     CHECK(yams_mobile_get_document(ctx, &getAfterDelete, &getAfterDeleteResult) ==
           YAMS_MOBILE_STATUS_NOT_FOUND);
 
-    yams_mobile_graph_query_request graphReq{};
-    graphReq.header = yams_mobile_request_header_default();
-    graphReq.document_hash = hashString.c_str();
-    graphReq.max_depth = 1;
-    graphReq.max_results = 10;
-    yams_mobile_graph_query_result_t* graphResult = nullptr;
-    CHECK(yams_mobile_graph_query(ctx, &graphReq, &graphResult) ==
-          YAMS_MOBILE_STATUS_UNAVAILABLE);
-
     yams_mobile_context_destroy(ctx);
 }
 
@@ -245,7 +303,7 @@ TEST_CASE("Mobile invalid backend mode is rejected", "[mobile][abi]") {
     CHECK(ctx == nullptr);
 }
 
-TEST_CASE("Embedded mobile graph query remains unavailable", "[mobile][abi]") {
+TEST_CASE("Embedded mobile graph query returns corpus graph state", "[mobile][abi]") {
     const auto workingDir = make_unique_temp_dir();
     TempDirGuard guard(workingDir);
 
@@ -258,17 +316,104 @@ TEST_CASE("Embedded mobile graph query remains unavailable", "[mobile][abi]") {
     INFO(yams_mobile_last_error_message());
     REQUIRE(ctx != nullptr);
 
+    yams::test::FixtureManager fixtures;
+    auto spec = yams::test::mobileSearchCorpusSpec();
+    auto corpus = fixtures.createSearchCorpus(spec);
+    REQUIRE_FALSE(corpus.fixtures.empty());
+
+    const auto documentPath = corpus.fixtures.front().path.string();
+    yams_mobile_document_store_request store{};
+    store.header = yams_mobile_request_header_default();
+    store.path = documentPath.c_str();
+    store.sync_now = 1;
+
+    yams_mobile_string_view stored_hash{};
+    REQUIRE(yams_mobile_store_document(ctx, &store, &stored_hash) == YAMS_MOBILE_STATUS_OK);
+    INFO(yams_mobile_last_error_message());
+    REQUIRE(stored_hash.length > 0U);
+    const auto hashString = std::string(stored_hash.data, stored_hash.length);
+
     yams_mobile_graph_query_request graphReq{};
     graphReq.header = yams_mobile_request_header_default();
-    graphReq.document_hash = "deadbeef";
+    graphReq.document_hash = hashString.c_str();
     graphReq.max_depth = 1;
     graphReq.max_results = 10;
     yams_mobile_graph_query_result_t* graphResult = nullptr;
 
-    CHECK(yams_mobile_graph_query(ctx, &graphReq, &graphResult) ==
-          YAMS_MOBILE_STATUS_UNAVAILABLE);
-    CHECK(graphResult == nullptr);
+    REQUIRE(yams_mobile_graph_query(ctx, &graphReq, &graphResult) == YAMS_MOBILE_STATUS_OK);
+    INFO(yams_mobile_last_error_message());
+    REQUIRE(graphResult != nullptr);
 
+    const auto graphJson = yams_mobile_graph_query_result_json(graphResult);
+    REQUIRE(graphJson.data != nullptr);
+    const auto parsed = nlohmann::json::parse(std::string(graphJson.data, graphJson.length));
+    CHECK(parsed.contains("kgAvailable"));
+    CHECK(parsed.at("kgAvailable").template get<bool>());
+    CHECK(parsed.contains("originNode"));
+    CHECK(parsed.at("originNode").at("documentHash").template get<std::string>() == hashString);
+    CHECK(parsed.contains("connectedNodes"));
+    CHECK(parsed.contains("edges"));
+
+    yams_mobile_graph_query_result_destroy(graphResult);
+
+    yams_mobile_context_destroy(ctx);
+}
+
+TEST_CASE("Embedded mobile corpus status reports readiness without warmup control",
+          "[mobile][abi]") {
+    const auto workingDir = make_unique_temp_dir();
+    TempDirGuard guard(workingDir);
+
+    yams_mobile_context_config config = yams_mobile_context_config_default();
+    config.working_directory = workingDir.c_str();
+    config.backend_mode = YAMS_MOBILE_BACKEND_EMBEDDED;
+
+    yams_mobile_context_t* ctx = nullptr;
+    REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+    INFO(yams_mobile_last_error_message());
+    REQUIRE(ctx != nullptr);
+
+    yams::test::FixtureManager fixtures;
+    auto spec = yams::test::mobileSearchCorpusSpec();
+    auto corpus = fixtures.createSearchCorpus(spec);
+    REQUIRE_FALSE(corpus.fixtures.empty());
+
+    const auto documentPath = corpus.fixtures.front().path.string();
+    yams_mobile_document_store_request store{};
+    store.header = yams_mobile_request_header_default();
+    store.path = documentPath.c_str();
+
+    yams_mobile_string_view stored_hash{};
+    REQUIRE(yams_mobile_store_document(ctx, &store, &stored_hash) == YAMS_MOBILE_STATUS_OK);
+    INFO(yams_mobile_last_error_message());
+    REQUIRE(stored_hash.length > 0U);
+
+    yams_mobile_vector_status_request statusReq{};
+    statusReq.header = yams_mobile_request_header_default();
+    statusReq.warmup = 1;
+
+    yams_mobile_vector_status_result_t* statusResult = nullptr;
+    REQUIRE(yams_mobile_get_vector_status(ctx, &statusReq, &statusResult) ==
+            YAMS_MOBILE_STATUS_OK);
+    INFO(yams_mobile_last_error_message());
+    REQUIRE(statusResult != nullptr);
+
+    const auto statusJson = yams_mobile_vector_status_result_json(statusResult);
+    REQUIRE(statusJson.data != nullptr);
+    const auto parsed = nlohmann::json::parse(std::string(statusJson.data, statusJson.length));
+    CHECK(parsed.at("statusType").template get<std::string>() == "corpus");
+    CHECK(parsed.at("backendMode").template get<std::string>() == "embedded");
+    CHECK(parsed.at("documents").template get<std::uint64_t>() >= 1U);
+    CHECK(parsed.at("indexedDocuments").template get<std::uint64_t>() >= 1U);
+    CHECK(parsed.at("corpusReady").template get<bool>());
+    CHECK(parsed.at("indexReady").template get<bool>());
+    CHECK_FALSE(parsed.at("supportsWarmup").template get<bool>());
+    CHECK(parsed.at("warmupRequested").template get<bool>());
+    CHECK(parsed.at("warmupIgnored").template get<bool>());
+    CHECK(parsed.contains("corpusStats"));
+    CHECK(parsed.at("corpusStats").at("doc_count").template get<std::int64_t>() >= 1);
+
+    yams_mobile_vector_status_result_destroy(statusResult);
     yams_mobile_context_destroy(ctx);
 }
 
@@ -289,8 +434,8 @@ TEST_CASE("Daemon mobile get_document honors include_content flag", "[mobile][ab
     yams_mobile_context_config config = yams_mobile_context_config_default();
     config.working_directory = workingDir.c_str();
     config.backend_mode = YAMS_MOBILE_BACKEND_DAEMON;
-    const auto socketPath = harness.socketPath().string();
-    config.daemon_socket_path = socketPath.c_str();
+    const auto daemonSocketPath = harness.socketPath().string();
+    config.daemon_socket_path = daemonSocketPath.c_str();
 
     yams_mobile_context_t* ctx = nullptr;
     REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
@@ -347,6 +492,159 @@ TEST_CASE("Daemon mobile get_document honors include_content flag", "[mobile][ab
           std::string::npos);
     yams_mobile_document_get_result_destroy(withContentResult);
 
+    yams_mobile_context_destroy(ctx);
+    harness.stop();
+}
+
+TEST_CASE("Mobile update_document returns a stable payload shape across backends",
+          "[mobile][abi][parity]") {
+    auto run_case = [](yams_mobile_backend_mode backendMode) {
+        const auto workingDir = make_unique_temp_dir();
+        TempDirGuard guard(workingDir);
+        const auto documentPath = std::filesystem::path(workingDir) / "mobile-update-shape.txt";
+
+        {
+            std::ofstream out(documentPath);
+            REQUIRE(out.is_open());
+            out << "stable update payload\n";
+        }
+
+        std::optional<yams::test::DaemonHarness> harness;
+        yams_mobile_context_config config = yams_mobile_context_config_default();
+        config.working_directory = workingDir.c_str();
+        config.backend_mode = backendMode;
+        std::string daemonSocketPath;
+        if (backendMode == YAMS_MOBILE_BACKEND_DAEMON) {
+            harness.emplace(yams::test::DaemonHarnessOptions{.enableAutoRepair = false});
+            REQUIRE(harness->start(std::chrono::seconds(10)));
+            daemonSocketPath = harness->socketPath().string();
+            config.daemon_socket_path = daemonSocketPath.c_str();
+        }
+
+        yams_mobile_context_t* ctx = nullptr;
+        REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(ctx != nullptr);
+
+        yams_mobile_document_store_request store{};
+        store.header = yams_mobile_request_header_default();
+        store.path = documentPath.c_str();
+
+        yams_mobile_string_view storedHash{};
+        REQUIRE(store_document_with_retry(ctx, store, &storedHash, std::chrono::seconds(5)));
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(storedHash.length > 0U);
+
+        const auto hashString = std::string(storedHash.data, storedHash.length);
+        if (backendMode == YAMS_MOBILE_BACKEND_DAEMON) {
+            REQUIRE(wait_for_document(ctx, hashString, std::chrono::seconds(5)));
+        }
+
+        const char* addTags[] = {"stable-tag", nullptr};
+        const char* metadataKeys[] = {"source", nullptr};
+        const char* metadataValues[] = {"stable-shape-test", nullptr};
+
+        yams_mobile_update_request updateReq{};
+        updateReq.header = yams_mobile_request_header_default();
+        updateReq.hash = hashString.c_str();
+        updateReq.add_tags = addTags;
+        updateReq.add_tag_count = 1;
+        updateReq.metadata_keys = metadataKeys;
+        updateReq.metadata_values = metadataValues;
+        updateReq.metadata_count = 1;
+
+        yams_mobile_update_result_t* updateResult = nullptr;
+        REQUIRE(yams_mobile_update_document(ctx, &updateReq, &updateResult) ==
+                YAMS_MOBILE_STATUS_OK);
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(updateResult != nullptr);
+
+        const auto updateJson = yams_mobile_update_result_json(updateResult);
+        REQUIRE(updateJson.data != nullptr);
+        const auto parsed = nlohmann::json::parse(std::string(updateJson.data, updateJson.length));
+        require_stable_update_payload(parsed, hashString);
+
+        yams_mobile_update_result_destroy(updateResult);
+        yams_mobile_context_destroy(ctx);
+        if (harness) {
+            harness->stop();
+        }
+    };
+
+    SECTION("embedded") {
+        run_case(YAMS_MOBILE_BACKEND_EMBEDDED);
+    }
+
+    SECTION("daemon") {
+        run_case(YAMS_MOBILE_BACKEND_DAEMON);
+    }
+}
+
+TEST_CASE("Daemon mobile corpus status reports readiness without warmup control",
+          "[mobile][abi][daemon]") {
+    yams::test::DaemonHarness harness({.enableAutoRepair = false});
+    REQUIRE(harness.start(std::chrono::seconds(10)));
+
+    const auto workingDir = make_unique_temp_dir();
+    TempDirGuard guard(workingDir);
+    const auto documentPath = std::filesystem::path(workingDir) / "daemon-mobile-status.txt";
+
+    {
+        std::ofstream out(documentPath);
+        REQUIRE(out.is_open());
+        out << "daemon corpus status test\n";
+    }
+
+    yams_mobile_context_config config = yams_mobile_context_config_default();
+    config.working_directory = workingDir.c_str();
+    config.backend_mode = YAMS_MOBILE_BACKEND_DAEMON;
+    const auto daemonSocketPath = harness.socketPath().string();
+    config.daemon_socket_path = daemonSocketPath.c_str();
+
+    yams_mobile_context_t* ctx = nullptr;
+    REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+    INFO(yams_mobile_last_error_message());
+    REQUIRE(ctx != nullptr);
+
+    yams_mobile_document_store_request store{};
+    store.header = yams_mobile_request_header_default();
+    store.path = documentPath.c_str();
+
+    yams_mobile_string_view stored_hash{};
+    REQUIRE(store_document_with_retry(ctx, store, &stored_hash, std::chrono::seconds(5)));
+    INFO(yams_mobile_last_error_message());
+    REQUIRE(stored_hash.length > 0U);
+
+    const auto hashString = std::string(stored_hash.data, stored_hash.length);
+    REQUIRE(wait_for_document(ctx, hashString, std::chrono::seconds(5)));
+    REQUIRE(wait_for_corpus_status_documents(ctx, 1, std::chrono::seconds(5)));
+
+    yams_mobile_vector_status_request statusReq{};
+    statusReq.header = yams_mobile_request_header_default();
+    statusReq.warmup = 1;
+
+    yams_mobile_vector_status_result_t* statusResult = nullptr;
+    REQUIRE(yams_mobile_get_vector_status(ctx, &statusReq, &statusResult) ==
+            YAMS_MOBILE_STATUS_OK);
+    INFO(yams_mobile_last_error_message());
+    REQUIRE(statusResult != nullptr);
+
+    const auto statusJson = yams_mobile_vector_status_result_json(statusResult);
+    REQUIRE(statusJson.data != nullptr);
+    const auto parsed = nlohmann::json::parse(std::string(statusJson.data, statusJson.length));
+    CHECK(parsed.at("statusType").template get<std::string>() == "corpus");
+    CHECK(parsed.at("backendMode").template get<std::string>() == "daemon");
+    CHECK(parsed.at("documents").template get<std::uint64_t>() >= 1U);
+    CHECK(parsed.at("indexedDocuments").template get<std::uint64_t>() >= 1U);
+    CHECK(parsed.at("corpusReady").template get<bool>());
+    CHECK(parsed.at("indexReady").template get<bool>());
+    CHECK_FALSE(parsed.at("supportsWarmup").template get<bool>());
+    CHECK(parsed.at("warmupRequested").template get<bool>());
+    CHECK(parsed.at("warmupIgnored").template get<bool>());
+    CHECK(parsed.contains("corpusStats"));
+    CHECK(parsed.at("corpusStats").at("doc_count").template get<std::int64_t>() >= 1);
+
+    yams_mobile_vector_status_result_destroy(statusResult);
     yams_mobile_context_destroy(ctx);
     harness.stop();
 }

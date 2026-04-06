@@ -749,6 +749,27 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         CHECK(got->maxBytes == req.maxBytes);
     }
 
+    SECTION("UpdateDocumentResponse preserves detailed update fields") {
+        UpdateDocumentResponse resp;
+        resp.hash = "sha256:update123";
+        resp.contentUpdated = false;
+        resp.metadataUpdated = true;
+        resp.tagsUpdated = true;
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 16));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<UpdateDocumentResponse>(&std::get<Response>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        CHECK(got->hash == resp.hash);
+        CHECK(got->contentUpdated == resp.contentUpdated);
+        CHECK(got->metadataUpdated == resp.metadataUpdated);
+        CHECK(got->tagsUpdated == resp.tagsUpdated);
+    }
+
     SECTION("ListRequest sanitizes invalid UTF-8 filter and session fields") {
         ListRequest req;
         req.format = invalidUtf8("table");

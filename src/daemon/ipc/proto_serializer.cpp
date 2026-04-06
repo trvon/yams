@@ -1952,15 +1952,23 @@ template <> struct ProtoBinding<PluginTrustListResponse> {
 template <> struct ProtoBinding<UpdateDocumentResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kUpdateDocumentResponse;
     static void set(Envelope& env, const UpdateDocumentResponse& r) {
-        env.mutable_update_document_response()->set_updated(r.contentUpdated || r.metadataUpdated ||
-                                                            r.tagsUpdated);
+        auto* o = env.mutable_update_document_response();
+        o->set_hash(yams::common::sanitizeUtf8(r.hash));
+        o->set_updated(r.contentUpdated || r.metadataUpdated || r.tagsUpdated);
+        o->set_content_updated(r.contentUpdated);
+        o->set_metadata_updated(r.metadataUpdated);
+        o->set_tags_updated(r.tagsUpdated);
     }
     static UpdateDocumentResponse get(const Envelope& env) {
         UpdateDocumentResponse r{};
-        bool updated = env.update_document_response().updated();
-        r.contentUpdated = updated;
-        r.metadataUpdated = false;
-        r.tagsUpdated = false;
+        const auto& i = env.update_document_response();
+        r.hash = i.hash();
+        r.contentUpdated = i.content_updated();
+        r.metadataUpdated = i.metadata_updated();
+        r.tagsUpdated = i.tags_updated();
+        if (!r.contentUpdated && !r.metadataUpdated && !r.tagsUpdated) {
+            r.contentUpdated = i.updated();
+        }
         return r;
     }
 };

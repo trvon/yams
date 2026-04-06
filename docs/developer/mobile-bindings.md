@@ -72,15 +72,16 @@ This means mobile bindings should be evaluated as a corpus SDK, not as an infere
 | Document lifecycle    | `yams_mobile_store_document`, `yams_mobile_download`, `yams_mobile_update_document`, `yams_mobile_delete_by_name`, `yams_mobile_remove_document` | CRUD exists, but backend parity and naming cleanup are still in progress. |
 | Document retrieval    | `yams_mobile_list_documents`, `yams_mobile_get_document` | Core surface for app-side prompt assembly and memory recall. |
 | Metadata inspection   | `yams_mobile_get_metadata`, `yams_mobile_metadata_result_json` | JSON payload mirrors DocumentService metadata map. |
-| Graph retrieval       | `yams_mobile_graph_query`, `yams_mobile_graph_query_result_json` | Daemon-backed today; embedded parity is not complete. |
-| Corpus status         | `yams_mobile_get_vector_status`, `yams_mobile_vector_status_result_json` | Currently closer to corpus/index status than model control; naming may need cleanup. |
+| Graph retrieval       | `yams_mobile_graph_query`, `yams_mobile_graph_query_result_json` | Supported in both daemon and embedded mode for corpus-backed documents; follow-up parity review is still needed for edge cases and cleanup behavior. |
+| Corpus status         | `yams_mobile_get_vector_status`, `yams_mobile_vector_status_result_json` | JSON now reports corpus/index readiness, embedding coverage, and corpus feature signals. The request-side `warmup` flag is deprecated and ignored for ABI compatibility. |
 
 ## Current Gaps
 
 - Embedded and daemon backends do not yet expose identical behavior for all corpus APIs.
 - `get_document.include_content` parity is fixed and covered by daemon/mobile tests, but other corpus APIs still need backend-by-backend review.
-- Embedded graph query is unavailable today.
-- `warmup` on vector status is not a real model-control surface and should likely be reframed or removed.
+- `update_document` now returns a stable JSON shape in both embedded and daemon mode, but daemon tag-update semantics still need a follow-up parity pass.
+- Embedded graph query now works for corpus-backed mobile stores, but backend parity still needs review for edge cases and deletion/cleanup behavior.
+- `yams_mobile_get_vector_status` still carries legacy naming and a deprecated `warmup` request field, but the payload is now corpus-shaped and `warmup` is explicitly ignored.
 - The documentation previously implied demo apps and ABI automation that are not present in this checkout.
 
 ## Compatibility Strategy
@@ -100,8 +101,12 @@ This means mobile bindings should be evaluated as a corpus SDK, not as an infere
   curated mobile dataset (sync deltas, path sensitivity, semantic warm-up, case toggles). Use this in
   unit/integration tests to align with the demo apps and smoke suites.
 - `tests/mobile/mobile_abi_smoke_test.cpp` now runs on Catch2, validates the round-trip
-  ingest/list/search flow against the new corpus, and covers daemon `get_document.include_content`
-  parity.
+  ingest/list/search flow against the new corpus, covers daemon `get_document.include_content`
+  parity, verifies embedded graph query on a corpus-backed store, checks the corpus-status
+  payload in both embedded and daemon modes, and verifies a stable `update_document` payload
+  shape across embedded and daemon backends. The current suite also retries the first daemon
+  store call in smoke coverage to absorb daemon-startup transport flakiness seen only in
+  full-suite execution.
 
 ## Platform Wrappers
 

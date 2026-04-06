@@ -545,7 +545,13 @@ message GrepResponse {
   repeated string paths_only = 12;
 }
 
-message UpdateDocumentResponse { bool updated = 1; }
+message UpdateDocumentResponse {
+  string hash = 1;
+  bool updated = 2;
+  bool content_updated = 3;
+  bool metadata_updated = 4;
+  bool tags_updated = 5;
+}
 message EmbedDocumentsResponse {
   uint64 requested = 1;
   uint64 embedded = 2;

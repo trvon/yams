@@ -2,14 +2,17 @@
 
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/factory.hpp>
+#include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/metadata/query_helpers.h>
+#include <yams/storage/corpus_stats.h>
 
 #include <nlohmann/json.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -49,6 +52,9 @@ using yams::app::services::DeleteByNameResponse;
 using yams::app::services::DocumentEntry;
 using yams::app::services::DownloadServiceRequest;
 using yams::app::services::DownloadServiceResponse;
+using yams::app::services::GraphNodeMetadata;
+using yams::app::services::GraphQueryRequest;
+using yams::app::services::GraphQueryResponse;
 using yams::app::services::GrepRequest;
 using yams::app::services::GrepResponse;
 using yams::app::services::ListDocumentsRequest;
@@ -182,6 +188,7 @@ yams_mobile_status validate_request_header(const yams_mobile_request_header* hea
 enum class TelemetrySinkType { None, Console, Stderr, File };
 
 struct MobileState;
+Result<void> daemon_connect(MobileState& state);
 
 template <typename T> std::shared_ptr<T> to_shared(std::unique_ptr<T>&& ptr) {
     return std::shared_ptr<T>(ptr.release());
@@ -222,6 +229,88 @@ nlohmann::json stats_map_to_json(const std::unordered_map<std::string, std::stri
         obj[key] = value;
     }
     return obj;
+}
+
+bool is_truthy_string(std::string_view value) {
+    return value == "1" || value == "true" || value == "yes";
+}
+
+nlohmann::json make_empty_corpus_stats_json() {
+    nlohmann::json stats;
+    stats["doc_count"] = 0;
+    stats["embedding_count"] = 0;
+    stats["embedding_coverage"] = 0.0;
+    stats["symbol_count"] = 0;
+    stats["tag_count"] = 0;
+    stats["docs_with_tags"] = 0;
+    stats["tag_coverage"] = 0.0;
+    stats["path_depth_avg"] = 0.0;
+    stats["path_depth_max"] = 0.0;
+    stats["top_extensions"] = nlohmann::json::object();
+    stats["classification"] = {{"has_embeddings", false},
+                               {"has_kg", false},
+                               {"has_tags", false},
+                               {"has_paths", false},
+                               {"is_minimal", true},
+                               {"is_small", true},
+                               {"is_large", false},
+                               {"is_code_dominant", false},
+                               {"is_prose_dominant", false},
+                               {"is_mixed", false},
+                               {"is_scientific", false}};
+    return stats;
+}
+
+nlohmann::json parse_corpus_stats_or_default(const std::string* serialized) {
+    if (!serialized || serialized->empty()) {
+        return make_empty_corpus_stats_json();
+    }
+
+    try {
+        auto parsed = nlohmann::json::parse(*serialized);
+        if (parsed.is_object()) {
+            return parsed;
+        }
+    } catch (...) {
+    }
+
+    return make_empty_corpus_stats_json();
+}
+
+nlohmann::json build_corpus_status_json(uint64_t documents, uint64_t indexedDocuments,
+                                        uint64_t storageBytes, uint64_t dedupBytes,
+                                        uint64_t vectorIndexBytes, double compressionRatio,
+                                        const nlohmann::json& corpusStats, bool corpusReady,
+                                        bool indexReady, bool warmupRequested,
+                                        std::string_view backendMode) {
+    const auto classification =
+        corpusStats.contains("classification") && corpusStats["classification"].is_object()
+            ? corpusStats["classification"]
+            : nlohmann::json::object();
+
+    nlohmann::json j;
+    j["statusType"] = "corpus";
+    j["backendMode"] = backendMode;
+    j["documents"] = documents;
+    j["indexedDocuments"] = indexedDocuments;
+    j["storageBytes"] = storageBytes;
+    j["dedupBytes"] = dedupBytes;
+    j["vectorIndexBytes"] = vectorIndexBytes;
+    j["compressionRatio"] = compressionRatio;
+    j["corpusReady"] = corpusReady;
+    j["indexReady"] = indexReady;
+    j["embeddingDocuments"] = corpusStats.value("embedding_count", 0);
+    j["embeddingCoverage"] = corpusStats.value("embedding_coverage", 0.0);
+    j["symbolCount"] = corpusStats.value("symbol_count", 0);
+    j["supportsWarmup"] = false;
+    j["warmupRequested"] = warmupRequested;
+    j["warmupIgnored"] = warmupRequested;
+    j["hasEmbeddings"] = classification.value("has_embeddings", false);
+    j["hasKnowledgeGraph"] = classification.value("has_kg", false);
+    j["hasTags"] = classification.value("has_tags", false);
+    j["hasPaths"] = classification.value("has_paths", false);
+    j["corpusStats"] = corpusStats;
+    return j;
 }
 
 void emit_telemetry(MobileState& state, const nlohmann::json& payload);
@@ -293,6 +382,64 @@ nlohmann::json retrieved_document_to_json(const RetrievedDocument& doc, bool inc
     return j;
 }
 
+nlohmann::json graph_node_metadata_to_json(const GraphNodeMetadata& node, int distance) {
+    nlohmann::json result;
+    result["nodeId"] = node.node.nodeId;
+    result["nodeKey"] = node.node.nodeKey;
+    result["label"] = node.node.label.value_or("");
+    result["type"] = node.node.type.value_or("");
+    result["documentHash"] = node.documentHash.value_or("");
+    result["documentPath"] = node.documentPath.value_or("");
+    result["snapshotId"] = node.snapshotId.value_or("");
+    result["distance"] = distance;
+    if (!node.metadata.empty()) {
+        result["properties"] = node.metadata;
+    }
+    return result;
+}
+
+nlohmann::json graph_query_response_to_json(const GraphQueryResponse& response) {
+    nlohmann::json root;
+    root["totalNodesFound"] = response.totalNodesFound;
+    root["totalEdgesTraversed"] = response.totalEdgesTraversed;
+    root["truncated"] = response.truncated;
+    root["maxDepthReached"] = response.maxDepthReached;
+    root["queryTimeMs"] = response.queryTimeMs;
+    root["kgAvailable"] = response.kgAvailable;
+    if (response.warning.has_value()) {
+        root["warning"] = response.warning.value();
+    }
+
+    root["originNode"] = graph_node_metadata_to_json(response.originNode, 0);
+
+    nlohmann::json nodes = nlohmann::json::array();
+    nlohmann::json edges = nlohmann::json::array();
+    std::unordered_set<std::int64_t> seenEdgeIds;
+
+    for (const auto& node : response.allConnectedNodes) {
+        nodes.push_back(graph_node_metadata_to_json(node.nodeMetadata, node.distance));
+        for (const auto& edge : node.connectingEdges) {
+            if (!seenEdgeIds.insert(edge.edgeId).second) {
+                continue;
+            }
+            nlohmann::json e;
+            e["edgeId"] = edge.edgeId;
+            e["srcNodeId"] = edge.srcNodeId;
+            e["dstNodeId"] = edge.dstNodeId;
+            e["relation"] = edge.relation;
+            e["weight"] = edge.weight;
+            if (edge.properties.has_value()) {
+                e["properties"] = edge.properties.value();
+            }
+            edges.push_back(std::move(e));
+        }
+    }
+
+    root["connectedNodes"] = std::move(nodes);
+    root["edges"] = std::move(edges);
+    return root;
+}
+
 nlohmann::json list_response_to_json(const ListDocumentsResponse& resp) {
     nlohmann::json root;
     root["count"] = static_cast<std::uint64_t>(resp.count);
@@ -353,6 +500,28 @@ nlohmann::json list_response_to_json(const ListDocumentsResponse& resp) {
     if (!resp.sortOrder.empty())
         root["sortOrder"] = resp.sortOrder;
 
+    return root;
+}
+
+nlohmann::json build_update_result_json(const std::string& hash, bool contentUpdated,
+                                        bool metadataUpdated, bool tagsUpdated,
+                                        std::size_t metadataUpdatesApplied,
+                                        std::size_t tagsAdded, std::size_t tagsRemoved,
+                                        std::optional<std::int64_t> documentId = std::nullopt,
+                                        std::string backupHash = {}) {
+    nlohmann::json root;
+    root["success"] = contentUpdated || metadataUpdated || tagsUpdated;
+    root["hash"] = hash;
+    root["contentUpdated"] = contentUpdated;
+    root["metadataUpdated"] = metadataUpdated;
+    root["tagsUpdated"] = tagsUpdated;
+    root["updatesApplied"] = static_cast<std::uint64_t>(metadataUpdatesApplied);
+    root["tagsAdded"] = static_cast<std::uint64_t>(tagsAdded);
+    root["tagsRemoved"] = static_cast<std::uint64_t>(tagsRemoved);
+    if (documentId)
+        root["documentId"] = *documentId;
+    if (!backupHash.empty())
+        root["backupHash"] = backupHash;
     return root;
 }
 
@@ -462,6 +631,7 @@ Result<yams::daemon::ResponseOfT<Req>> daemon_call(MobileState& state, Req req) 
     }
 
     using Resp = yams::daemon::ResponseOfT<Req>;
+    Req retryReq = req;
     auto promise = std::make_shared<std::promise<Result<Resp>>>();
     auto future = promise->get_future();
     auto client = state.daemon_client;
@@ -482,7 +652,47 @@ Result<yams::daemon::ResponseOfT<Req>> daemon_call(MobileState& state, Req req) 
         },
         boost::asio::detached);
 
-    return future.get();
+    auto result = future.get();
+    if (result) {
+        return result;
+    }
+
+    const auto& err = result.error();
+    const bool shouldRetry =
+        err.message.empty() ||
+        err.code == ErrorCode::InvalidState ||
+        err.code == ErrorCode::NetworkError ||
+        err.code == ErrorCode::Timeout ||
+        err.code == ErrorCode::InternalError;
+    if (!shouldRetry) {
+        return result;
+    }
+
+    auto reconnect = daemon_connect(state);
+    if (!reconnect) {
+        return result;
+    }
+
+    auto retryPromise = std::make_shared<std::promise<Result<Resp>>>();
+    auto retryFuture = retryPromise->get_future();
+    boost::asio::co_spawn(
+        state.worker_pool->get_executor(),
+        [client, req = std::move(retryReq),
+         retryPromise]() mutable -> boost::asio::awaitable<void> {
+            try {
+                auto retryResult = co_await client->call<Req>(req);
+                retryPromise->set_value(std::move(retryResult));
+            } catch (...) {
+                try {
+                    retryPromise->set_exception(std::current_exception());
+                } catch (...) {
+                }
+            }
+            co_return;
+        },
+        boost::asio::detached);
+
+    return retryFuture.get();
 }
 
 Result<void> daemon_connect(MobileState& state) {
@@ -691,6 +901,14 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
                 std::make_unique<ConnectionPool>(dbPath.string(), ConnectionPoolConfig{});
             ctx->state.metadata_repo =
                 std::make_shared<MetadataRepository>(*ctx->state.connection_pool);
+            auto kgStoreRes =
+                yams::metadata::makeSqliteKnowledgeGraphStore(*ctx->state.connection_pool);
+            if (!kgStoreRes) {
+                set_last_error(kgStoreRes.error().message);
+                return map_error_code(kgStoreRes.error().code);
+            }
+            auto kgStore = to_shared(std::move(kgStoreRes.value()));
+            ctx->state.metadata_repo->setKnowledgeGraphStore(kgStore);
 
             MigrationManager migrator(*ctx->state.database);
             auto initRes = migrator.initialize();
@@ -717,6 +935,9 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
             // App context wiring
             ctx->state.app_context.store = ctx->state.content_store;
             ctx->state.app_context.metadataRepo = ctx->state.metadata_repo;
+            ctx->state.app_context.kgStore = std::move(kgStore);
+            ctx->state.app_context.graphQueryService =
+                yams::app::services::makeGraphQueryService(ctx->state.app_context);
             ctx->state.app_context.workerExecutor = ctx->state.worker_pool->get_executor();
 
             // Services
@@ -1385,13 +1606,10 @@ yams_mobile_update_document(yams_mobile_context_t* ctx, const yams_mobile_update
 
         auto& resp = result.value();
         auto wrapper = std::make_unique<yams_mobile_update_result_t>();
-        nlohmann::json j;
-        j["success"] = resp.contentUpdated || resp.metadataUpdated || resp.tagsUpdated;
-        j["hash"] = resp.hash;
-        j["contentUpdated"] = resp.contentUpdated;
-        j["metadataUpdated"] = resp.metadataUpdated;
-        j["tagsUpdated"] = resp.tagsUpdated;
-        wrapper->json = j.dump();
+        wrapper->json = build_update_result_json(resp.hash, resp.contentUpdated,
+                                                 resp.metadataUpdated, resp.tagsUpdated,
+                                                 resp.metadataUpdated ? 1U : 0U, 0U, 0U)
+                            .dump();
         if (out_result)
             *out_result = wrapper.release();
 
@@ -1443,18 +1661,14 @@ yams_mobile_update_document(yams_mobile_context_t* ctx, const yams_mobile_update
     }
 
     auto wrapper = std::make_unique<yams_mobile_update_result_t>();
-    nlohmann::json j;
-    j["success"] = result.value().success;
-    j["hash"] = result.value().hash;
-    j["updatesApplied"] = static_cast<std::uint64_t>(result.value().updatesApplied);
-    j["contentUpdated"] = result.value().contentUpdated;
-    j["tagsAdded"] = static_cast<std::uint64_t>(result.value().tagsAdded);
-    j["tagsRemoved"] = static_cast<std::uint64_t>(result.value().tagsRemoved);
-    if (result.value().documentId)
-        j["documentId"] = *result.value().documentId;
-    if (!result.value().backupHash.empty())
-        j["backupHash"] = result.value().backupHash;
-    wrapper->json = j.dump();
+    wrapper->json =
+        build_update_result_json(result.value().hash, result.value().contentUpdated,
+                                 result.value().updatesApplied > 0,
+                                 (result.value().tagsAdded > 0) || (result.value().tagsRemoved > 0),
+                                 result.value().updatesApplied, result.value().tagsAdded,
+                                 result.value().tagsRemoved, result.value().documentId,
+                                 result.value().backupHash)
+            .dump();
 
     if (out_result)
         *out_result = wrapper.release();
@@ -1627,109 +1841,146 @@ yams_mobile_graph_query(yams_mobile_context_t* ctx, const yams_mobile_graph_quer
         status != YAMS_MOBILE_STATUS_OK)
         return status;
 
-    if (!ctx->state.daemon_client) {
-        set_last_error("graph query currently requires daemon backend mode");
-        return YAMS_MOBILE_STATUS_UNAVAILABLE;
-    }
-
-    yams::daemon::GraphQueryRequest req;
-    if (request->document_hash)
-        req.documentHash = request->document_hash;
-    if (request->document_name)
-        req.documentName = request->document_name;
-    if (request->snapshot_id)
-        req.snapshotId = request->snapshot_id;
-    req.nodeId = request->node_id;
-    req.maxDepth = request->max_depth > 0 ? request->max_depth : 1;
-    req.maxResults = request->max_results > 0 ? request->max_results : 200;
-    req.offset = request->offset;
-    req.limit = request->limit > 0 ? request->limit : 100;
-    req.reverseTraversal = request->reverse_traversal != 0;
-    req.includeEdgeProperties = request->include_edge_properties != 0;
-    req.includeNodeProperties = request->include_node_properties != 0;
-
-    if (request->relation_filters && request->relation_filter_count > 0) {
-        req.relationFilters.reserve(request->relation_filter_count);
-        for (size_t i = 0; i < request->relation_filter_count; ++i) {
-            if (request->relation_filters[i])
-                req.relationFilters.emplace_back(request->relation_filters[i]);
-        }
-    }
-
-    auto result = daemon_call(ctx->state, std::move(req));
-    if (!result) {
-        set_last_error(result.error().message);
-        return map_error_code(result.error().code);
-    }
-
     nlohmann::json root;
-    root["totalNodesFound"] = result.value().totalNodesFound;
-    root["totalEdgesTraversed"] = result.value().totalEdgesTraversed;
-    root["truncated"] = result.value().truncated;
-    root["maxDepthReached"] = result.value().maxDepthReached;
-    root["queryTimeMs"] = result.value().queryTimeMs;
-    root["kgAvailable"] = result.value().kgAvailable;
-    if (!result.value().warning.empty())
-        root["warning"] = result.value().warning;
+    if (ctx->state.daemon_client) {
+        yams::daemon::GraphQueryRequest req;
+        if (request->document_hash)
+            req.documentHash = request->document_hash;
+        if (request->document_name)
+            req.documentName = request->document_name;
+        if (request->snapshot_id)
+            req.snapshotId = request->snapshot_id;
+        req.nodeId = request->node_id;
+        req.maxDepth = request->max_depth > 0 ? request->max_depth : 1;
+        req.maxResults = request->max_results > 0 ? request->max_results : 200;
+        req.offset = request->offset;
+        req.limit = request->limit > 0 ? request->limit : 100;
+        req.reverseTraversal = request->reverse_traversal != 0;
+        req.includeEdgeProperties = request->include_edge_properties != 0;
+        req.includeNodeProperties = request->include_node_properties != 0;
 
-    nlohmann::json origin;
-    origin["nodeId"] = result.value().originNode.nodeId;
-    origin["nodeKey"] = result.value().originNode.nodeKey;
-    origin["label"] = result.value().originNode.label;
-    origin["type"] = result.value().originNode.type;
-    origin["documentHash"] = result.value().originNode.documentHash;
-    origin["documentPath"] = result.value().originNode.documentPath;
-    origin["snapshotId"] = result.value().originNode.snapshotId;
-    origin["distance"] = result.value().originNode.distance;
-    if (!result.value().originNode.properties.empty())
-        origin["properties"] = result.value().originNode.properties;
-    root["originNode"] = std::move(origin);
-
-    nlohmann::json nodes = nlohmann::json::array();
-    for (const auto& node : result.value().connectedNodes) {
-        nlohmann::json n;
-        n["nodeId"] = node.nodeId;
-        n["nodeKey"] = node.nodeKey;
-        n["label"] = node.label;
-        n["type"] = node.type;
-        n["documentHash"] = node.documentHash;
-        n["documentPath"] = node.documentPath;
-        n["snapshotId"] = node.snapshotId;
-        n["distance"] = node.distance;
-        if (!node.properties.empty())
-            n["properties"] = node.properties;
-        nodes.push_back(std::move(n));
-    }
-    root["connectedNodes"] = std::move(nodes);
-
-    nlohmann::json edges = nlohmann::json::array();
-    for (const auto& edge : result.value().edges) {
-        nlohmann::json e;
-        e["edgeId"] = edge.edgeId;
-        e["srcNodeId"] = edge.srcNodeId;
-        e["dstNodeId"] = edge.dstNodeId;
-        e["relation"] = edge.relation;
-        e["weight"] = edge.weight;
-        if (!edge.properties.empty())
-            e["properties"] = edge.properties;
-        edges.push_back(std::move(e));
-    }
-    root["edges"] = std::move(edges);
-
-    if (!result.value().nodeTypeCounts.empty()) {
-        nlohmann::json counts = nlohmann::json::array();
-        for (const auto& [type, count] : result.value().nodeTypeCounts) {
-            counts.push_back({{"type", type}, {"count", count}});
+        if (request->relation_filters && request->relation_filter_count > 0) {
+            req.relationFilters.reserve(request->relation_filter_count);
+            for (size_t i = 0; i < request->relation_filter_count; ++i) {
+                if (request->relation_filters[i])
+                    req.relationFilters.emplace_back(request->relation_filters[i]);
+            }
         }
-        root["nodeTypeCounts"] = std::move(counts);
-    }
 
-    if (!result.value().relationTypeCounts.empty()) {
-        nlohmann::json counts = nlohmann::json::array();
-        for (const auto& [relation, count] : result.value().relationTypeCounts) {
-            counts.push_back({{"relation", relation}, {"count", count}});
+        auto result = daemon_call(ctx->state, std::move(req));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
         }
-        root["relationTypeCounts"] = std::move(counts);
+
+        root["totalNodesFound"] = result.value().totalNodesFound;
+        root["totalEdgesTraversed"] = result.value().totalEdgesTraversed;
+        root["truncated"] = result.value().truncated;
+        root["maxDepthReached"] = result.value().maxDepthReached;
+        root["queryTimeMs"] = result.value().queryTimeMs;
+        root["kgAvailable"] = result.value().kgAvailable;
+        if (!result.value().warning.empty())
+            root["warning"] = result.value().warning;
+
+        nlohmann::json origin;
+        origin["nodeId"] = result.value().originNode.nodeId;
+        origin["nodeKey"] = result.value().originNode.nodeKey;
+        origin["label"] = result.value().originNode.label;
+        origin["type"] = result.value().originNode.type;
+        origin["documentHash"] = result.value().originNode.documentHash;
+        origin["documentPath"] = result.value().originNode.documentPath;
+        origin["snapshotId"] = result.value().originNode.snapshotId;
+        origin["distance"] = result.value().originNode.distance;
+        if (!result.value().originNode.properties.empty())
+            origin["properties"] = result.value().originNode.properties;
+        root["originNode"] = std::move(origin);
+
+        nlohmann::json nodes = nlohmann::json::array();
+        for (const auto& node : result.value().connectedNodes) {
+            nlohmann::json n;
+            n["nodeId"] = node.nodeId;
+            n["nodeKey"] = node.nodeKey;
+            n["label"] = node.label;
+            n["type"] = node.type;
+            n["documentHash"] = node.documentHash;
+            n["documentPath"] = node.documentPath;
+            n["snapshotId"] = node.snapshotId;
+            n["distance"] = node.distance;
+            if (!node.properties.empty())
+                n["properties"] = node.properties;
+            nodes.push_back(std::move(n));
+        }
+        root["connectedNodes"] = std::move(nodes);
+
+        nlohmann::json edges = nlohmann::json::array();
+        for (const auto& edge : result.value().edges) {
+            nlohmann::json e;
+            e["edgeId"] = edge.edgeId;
+            e["srcNodeId"] = edge.srcNodeId;
+            e["dstNodeId"] = edge.dstNodeId;
+            e["relation"] = edge.relation;
+            e["weight"] = edge.weight;
+            if (!edge.properties.empty())
+                e["properties"] = edge.properties;
+            edges.push_back(std::move(e));
+        }
+        root["edges"] = std::move(edges);
+
+        if (!result.value().nodeTypeCounts.empty()) {
+            nlohmann::json counts = nlohmann::json::array();
+            for (const auto& [type, count] : result.value().nodeTypeCounts) {
+                counts.push_back({{"type", type}, {"count", count}});
+            }
+            root["nodeTypeCounts"] = std::move(counts);
+        }
+
+        if (!result.value().relationTypeCounts.empty()) {
+            nlohmann::json counts = nlohmann::json::array();
+            for (const auto& [relation, count] : result.value().relationTypeCounts) {
+                counts.push_back({{"relation", relation}, {"count", count}});
+            }
+            root["relationTypeCounts"] = std::move(counts);
+        }
+    } else {
+        auto graphService = ctx->state.app_context.graphQueryService;
+        if (!graphService) {
+            set_last_error("graph query service not initialized");
+            return YAMS_MOBILE_STATUS_UNAVAILABLE;
+        }
+
+        GraphQueryRequest req;
+        if (request->document_hash && *request->document_hash)
+            req.documentHash = std::string(request->document_hash);
+        if (request->document_name && *request->document_name)
+            req.documentName = std::string(request->document_name);
+        if (request->snapshot_id && *request->snapshot_id)
+            req.snapshotId = std::string(request->snapshot_id);
+        if (request->node_id > 0)
+            req.nodeId = static_cast<std::int64_t>(request->node_id);
+        req.maxDepth = request->max_depth > 0 ? request->max_depth : 1;
+        req.maxResults = request->max_results > 0 ? request->max_results : 200;
+        req.offset = request->offset;
+        req.limit = request->limit > 0 ? request->limit : 100;
+        req.reverseTraversal = request->reverse_traversal != 0;
+        req.includeEdgeProperties = request->include_edge_properties != 0;
+        req.includeNodeProperties = request->include_node_properties != 0;
+        req.hydrateFully = true;
+
+        if (request->relation_filters && request->relation_filter_count > 0) {
+            req.relationNames.reserve(request->relation_filter_count);
+            for (size_t i = 0; i < request->relation_filter_count; ++i) {
+                if (request->relation_filters[i] && *request->relation_filters[i]) {
+                    req.relationNames.emplace_back(request->relation_filters[i]);
+                }
+            }
+        }
+
+        auto result = graphService->query(req);
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+        root = graph_query_response_to_json(result.value());
     }
 
     auto wrapper = std::make_unique<yams_mobile_graph_query_result_t>();
@@ -1940,6 +2191,7 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
         }
 
         yams::daemon::GetStatsRequest dreq;
+        dreq.detailed = true;
         auto result = daemon_call(ctx->state, std::move(dreq));
         if (!result) {
             set_last_error(result.error().message);
@@ -1947,12 +2199,31 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
         }
 
         auto& resp = result.value();
-        nlohmann::json j;
-        j["documents"] = resp.totalDocuments;
-        j["storageBytes"] = resp.totalSize;
-        j["dedupBytes"] = static_cast<std::uint64_t>(
+        const bool warmupRequested = request && request->warmup != 0;
+        const auto corpusStatsIt = resp.additionalStats.find("corpus_stats");
+        const auto corpusStats =
+            parse_corpus_stats_or_default(corpusStatsIt != resp.additionalStats.end()
+                                              ? &corpusStatsIt->second
+                                              : nullptr);
+        const auto effectiveDocuments = static_cast<uint64_t>(
+            std::max<uint64_t>(static_cast<uint64_t>(resp.totalDocuments),
+                               static_cast<uint64_t>(std::max<std::int64_t>(
+                                   corpusStats.value("doc_count", 0), 0))));
+        const auto effectiveIndexedDocuments = static_cast<uint64_t>(
+            std::max<uint64_t>(static_cast<uint64_t>(resp.indexedDocuments), effectiveDocuments));
+        const bool notReady =
+            is_truthy_string(resp.additionalStats.contains("not_ready")
+                                 ? std::string_view(resp.additionalStats.at("not_ready"))
+                                 : std::string_view{});
+        const bool indexReady = !notReady && (effectiveDocuments == 0 ||
+                                              effectiveIndexedDocuments >= effectiveDocuments);
+        const auto dedupBytes = static_cast<std::uint64_t>(
             resp.compressionRatio > 0.0 ? resp.totalSize * resp.compressionRatio : 0);
-        j["warmupRequested"] = (request && request->warmup != 0);
+        nlohmann::json j = build_corpus_status_json(
+            effectiveDocuments, effectiveIndexedDocuments, static_cast<uint64_t>(resp.totalSize),
+            dedupBytes,
+            static_cast<uint64_t>(resp.vectorIndexSize), resp.compressionRatio, corpusStats,
+            !notReady, indexReady, warmupRequested, "daemon");
 
         if (out_result) {
             auto res = std::make_unique<yams_mobile_vector_status_result_t>();
@@ -1977,16 +2248,20 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
     }
 
     std::uint64_t docCount = 0;
-    auto countRes = repo->getDocumentCount();
-    if (countRes)
+    nlohmann::json corpusStats = make_empty_corpus_stats_json();
+    if (auto corpusStatsRes = repo->getCorpusStats(); corpusStatsRes) {
+        corpusStats = corpusStatsRes.value().toJson();
+        docCount = static_cast<std::uint64_t>(corpusStatsRes.value().docCount);
+    } else if (auto countRes = repo->getDocumentCount(); countRes) {
         docCount = static_cast<std::uint64_t>(countRes.value());
+        corpusStats["doc_count"] = docCount;
+    }
 
     auto stats = store->getStats();
-    nlohmann::json j;
-    j["documents"] = docCount;
-    j["storageBytes"] = stats.totalBytes;
-    j["dedupBytes"] = stats.deduplicatedBytes;
-    j["warmupRequested"] = (request && request->warmup != 0);
+    const bool warmupRequested = request && request->warmup != 0;
+    nlohmann::json j =
+        build_corpus_status_json(docCount, docCount, stats.totalBytes, stats.deduplicatedBytes, 0,
+                                 0.0, corpusStats, true, true, warmupRequested, "embedded");
 
     if (out_result) {
         auto res = std::make_unique<yams_mobile_vector_status_result_t>();
