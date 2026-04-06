@@ -34,8 +34,11 @@ using nlohmann::json;
 #include <sys/time.h>
 #include <sys/wait.h>
 #ifdef __APPLE__
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
 #include <libproc.h>
 #include <sys/sysctl.h>
+#endif
 #endif
 #endif
 
@@ -667,7 +670,7 @@ std::uint64_t LifecycleComponent::getProcessStartTimeNs(pid_t pid) const {
     uli.HighPart = createTime.dwHighDateTime;
     // FILETIME is 100ns intervals since 1601
     return static_cast<std::uint64_t>(uli.QuadPart) * 100ull;
-#elif __APPLE__
+#elif defined(__APPLE__) && TARGET_OS_OSX
     struct kinfo_proc kp;
     std::memset(&kp, 0, sizeof(kp));
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
@@ -678,6 +681,9 @@ std::uint64_t LifecycleComponent::getProcessStartTimeNs(pid_t pid) const {
     auto tv = kp.kp_proc.p_starttime;
     return static_cast<std::uint64_t>(tv.tv_sec) * 1000000000ull +
            static_cast<std::uint64_t>(tv.tv_usec) * 1000ull;
+#elif defined(__APPLE__)
+    (void)pid;
+    return 0;
 #else
     std::ifstream statFile("/proc/" + std::to_string(pid) + "/stat");
     if (!statFile.is_open()) {
@@ -726,13 +732,16 @@ std::string LifecycleComponent::getProcessExecutablePath(pid_t pid) const {
     }
     CloseHandle(hProcess);
     return std::string(buffer, size);
-#elif __APPLE__
+#elif defined(__APPLE__) && TARGET_OS_OSX
     char pathbuf[PROC_PIDPATHINFO_MAXSIZE] = {0};
     int ret = proc_pidpath(pid, pathbuf, sizeof(pathbuf));
     if (ret <= 0) {
         return {};
     }
     return std::string(pathbuf);
+#elif defined(__APPLE__)
+    (void)pid;
+    return {};
 #else
     std::error_code ec;
     auto exePath = std::filesystem::read_symlink(

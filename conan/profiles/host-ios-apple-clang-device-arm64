@@ -1,0 +1,18 @@
+[settings]
+os=iOS
+os.version=17.0
+os.sdk=iphoneos
+arch=armv8
+compiler=apple-clang
+compiler.version=17
+compiler.libcxx=libc++
+compiler.cppstd=20
+build_type=Release
+
+[conf]
+tools.cmake.cmaketoolchain:generator=Ninja
+
+# Notes:
+# - Intended for physical iPhone/iPad arm64 builds.
+# - Pair with a macOS build profile on Apple Silicon when cross-building from CI.
+# - SDK selection is represented in settings via os.sdk=iphoneos.

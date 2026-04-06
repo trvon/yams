@@ -1,6 +1,6 @@
 from conan import ConanFile
+from conan.tools.build import check_min_cppstd, cross_building
 from conan.tools.layout import basic_layout
-from conan.tools.build import check_min_cppstd
 
 
 # type: ignore[assignment,attr-defined,import-error]
@@ -55,11 +55,13 @@ class YamsConan(ConanFile):
         )
         self.requires("zlib/1.3.1")
         self.requires("zstd/1.5.5")
-        self.requires("libarchive/3.7.6")
+        if self.settings.os not in ["iOS", "Android"]:  # type: ignore
+            self.requires("libarchive/3.7.6")
         self.requires("openssl/3.2.0")
         self.requires("libcurl/8.10.1")
         self.requires("protobuf/3.21.12")
-        self.requires("taglib/2.0")
+        if self.settings.os not in ["iOS", "Android"]:  # type: ignore
+            self.requires("taglib/2.0")
         self.requires("tl-expected/1.1.0")
         self.requires("boost/1.85.0")
 
@@ -101,6 +103,9 @@ class YamsConan(ConanFile):
         self.tool_requires("pkgconf/2.1.0")
         self.tool_requires("meson/[>=1.2.2 <2]")
         self.tool_requires("ninja/[>=1.10.2 <2]")
+        if cross_building(self):
+            # Cross-builds still need a build-machine protoc for Meson codegen.
+            self.tool_requires("protobuf/3.21.12")
 
         if self.options.build_benchmarks:  # type: ignore
             self.requires("benchmark/1.8.3")
@@ -122,12 +127,57 @@ class YamsConan(ConanFile):
         self.options["libcurl"].with_zlib = True
         self.options["libcurl"].shared = False
         self.options["openssl"].shared = False
-        self.options["libarchive"].shared = False
-        self.options[
-            "libarchive"
-        ].with_acl = False  # Avoid libacl link issues on Linux CI
-        self.options["taglib"].shared = False
+        try:
+            self.options["libarchive"].shared = False
+            self.options[
+                "libarchive"
+            ].with_acl = False  # Avoid libacl link issues on Linux CI
+        except Exception:
+            pass
+        try:
+            self.options["taglib"].shared = False
+        except Exception:
+            pass
         self.options["spdlog"].header_only = False
+
+        if self.settings.os in ["iOS", "Android"]:  # type: ignore
+            # Mobile cross-builds do not benefit from a compiled fmt library and
+            # currently hit simulator-specific toolchain failures in fmt's
+            # source build path. Header-only fmt keeps the dependency surface
+            # smaller and avoids that compiler path entirely.
+            self.options["fmt"].header_only = True  # type: ignore
+            # Mobile builds also do not need a separately compiled spdlog
+            # library. Keeping it header-only avoids Apple SDK-specific
+            # failures in spdlog's bundled/external fmt compile path.
+            self.options["spdlog"].header_only = True  # type: ignore
+            # The mobile corpus ABI only relies on Boost.Asio plus the linked
+            # system/thread modules. Disable unrelated Boost libraries so
+            # mobile cross-builds do not drag in platform-specific components
+            # like boost.context assembly or locale/iconv stacks.
+            for boost_opt in (
+                "without_cobalt",
+                "without_context",
+                "without_contract",
+                "without_coroutine",
+                "without_fiber",
+                "without_graph",
+                "without_iostreams",
+                "without_json",
+                "without_locale",
+                "without_log",
+                "without_math",
+                "without_nowide",
+                "without_program_options",
+                "without_random",
+                "without_regex",
+                "without_serialization",
+                "without_stacktrace",
+                "without_test",
+                "without_type_erasure",
+                "without_url",
+                "without_wave",
+            ):
+                setattr(self.options["boost"], boost_opt, True)  # type: ignore
 
         if self.options.enable_onnx:  # type: ignore
             self.options["onnxruntime"].fPIC = True

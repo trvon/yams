@@ -1,0 +1,18 @@
+[settings]
+os=iOS
+os.version=17.0
+os.sdk=iphonesimulator
+arch=armv8
+compiler=apple-clang
+compiler.version=17
+compiler.libcxx=libc++
+compiler.cppstd=20
+build_type=Release
+
+[conf]
+tools.cmake.cmaketoolchain:generator=Ninja
+
+# Notes:
+# - Intended for Apple Silicon iOS Simulator builds.
+# - Use together with the device profile to assemble an xcframework.
+# - A separate x86_64 simulator profile can be added later if Intel simulator support is required.

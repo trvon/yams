@@ -4,9 +4,16 @@ nlohmann_json_dep = dependency('nlohmann_json')
 
 # Protobuf generation for client
 pb_includedir = protobuf_dep.get_variable(pkgconfig: 'includedir', default_value: '')
-proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
-protoc_candidate = proto_prefix != '' ? join_paths(proto_prefix, 'bin', 'protoc') : 'protoc'
-protoc_prog = find_program(protoc_candidate, required: protobuf_dep.found())
+protoc_override = get_option('protoc-path')
+if protoc_override != ''
+  protoc_prog = find_program(protoc_override, native: meson.is_cross_build(), required: true)
+elif meson.is_cross_build()
+  protoc_prog = find_program('protoc', native: true, required: true)
+else
+  proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
+  protoc_candidate = proto_prefix != '' ? join_paths(proto_prefix, 'bin', 'protoc') : 'protoc'
+  protoc_prog = find_program(protoc_candidate, required: protobuf_dep.found())
+endif
 
 proto_source_root = join_paths(meson.project_source_root(), 'include')
 proto_input = join_paths(proto_source_root, 'yams', 'daemon', 'ipc', 'proto', 'ipc_envelope.proto')

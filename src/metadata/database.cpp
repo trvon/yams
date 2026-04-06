@@ -217,7 +217,7 @@ Result<void> Statement::bind(int index, std::span<const std::byte> blob) {
 // C++20 chrono support
 Result<void> Statement::bind(int index, std::chrono::sys_seconds tp) {
     // Store as unix epoch seconds (int64)
-    return bind(index, tp.time_since_epoch().count());
+    return bind(index, static_cast<int64_t>(tp.time_since_epoch().count()));
 }
 
 Result<void> Statement::execute() {

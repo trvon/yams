@@ -6,7 +6,8 @@ mobile_dep = dependency('yams_mobile', required: get_option('enable-mobile-bindi
 
 if mobile_dep.found() and catch2_dep.found() and catch2_main_dep.found()
   mobile_test_deps = [catch2_dep, catch2_main_dep, mobile_dep, dependency('nlohmann_json'),
-                      dependency('yams_daemon')]
+                      dependency('yams_daemon'), dependency('spdlog'), dependency('boost'),
+                      dependency('tl-expected')]
 
   mobile_test = executable('catch2_mobile_abi', mobile_test_srcs,
     include_directories: incs,

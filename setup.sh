@@ -14,8 +14,10 @@
 # Environment variables (for CI/advanced use):
 #   YAMS_CONAN_HOST_PROFILE  - Path to Conan host profile (bypasses auto-detection)
 #   YAMS_CONAN_ARCH          - Target architecture (x86_64, armv8, etc.)
+#   YAMS_BUILD_DIR           - Override the Meson/Conan build directory
 #   YAMS_EXTRA_MESON_FLAGS   - Additional Meson setup flags
 #   YAMS_ENABLE_MOBILE_BINDINGS - Build mobile C ABI shared library (true/false)
+#   YAMS_DISABLE_RE2         - Disable RE2 dependency and use std::regex fallback (true/false)
 #   YAMS_COMPILER            - Force compiler (clang or gcc)
 #   YAMS_CPPSTD              - C++ standard (17, 20, 23)
 #   YAMS_ENABLE_MODULES      - Enable C++20 modules (true/false, auto-detected if not set)
@@ -378,6 +380,10 @@ else
   BUILD_TYPE_MESON_LOWER="${BUILD_TYPE_INPUT_LOWER}"
 fi
 
+if [[ -n "${YAMS_BUILD_DIR:-}" ]]; then
+  BUILD_DIR="${YAMS_BUILD_DIR}"
+fi
+
 # Some Conan generators ignore --output-folder and always emit to build-<build_type>.
 # Remember locations to probe for toolchains and Meson cache files.
 CONAN_GENERATED_DIR="${BUILD_DIR}/build-${BUILD_TYPE_INPUT_LOWER}"
@@ -421,7 +427,9 @@ echo "--- Exporting custom Conan recipes... ---"
 # qpdf export removed - PDF plugin will be updated in separate PBI
 
 # Export custom onnxruntime recipe if it exists
-if [[ -f "conan/onnxruntime/conanfile.py" ]]; then
+if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
+  echo "Skipping onnxruntime recipe export (YAMS_DISABLE_ONNX=true)"
+elif [[ -f "conan/onnxruntime/conanfile.py" ]]; then
   # Avoid sporadic Conan cache race/collision errors by retrying export once.
   echo "Exporting onnxruntime/1.23.0 from conan/onnxruntime/"
   if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.0; then
@@ -636,6 +644,11 @@ if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
   CONAN_ARGS+=(-o "yams/*:enable_symbol_extraction=False")
 fi
 
+if [[ "${YAMS_DISABLE_RE2:-}" == "true" ]]; then
+  echo "RE2 disabled (YAMS_DISABLE_RE2=true)"
+  CONAN_ARGS+=(-o "yams/*:enable_re2=False")
+fi
+
 # Force building missing packages to ensure ABI compatibility
 # This is especially important for C++23 with Clang + libstdc++
 CONAN_ARGS+=(--build=missing)
@@ -695,6 +708,16 @@ else
   exit 1
 fi
 
+CONAN_TOOLCHAIN_DIR="$(cd "$(dirname "${MESON_TOOLCHAIN_FILE}")" && pwd)"
+CONAN_BUILD_ENV="${CONAN_TOOLCHAIN_DIR}/conanbuild.sh"
+if [[ -f "${CONAN_BUILD_ENV}" ]]; then
+  # Activate Conan's build-machine tools before Meson configure so cross-build
+  # generators resolve native utilities like protoc from the Conan graph.
+  # shellcheck disable=SC1090
+  source "${CONAN_BUILD_ENV}"
+fi
+YAMS_PROTOC_PATH="${YAMS_PROTOC_PATH:-$(command -v protoc || true)}"
+
 MESON_ARGS=(
   "${BUILD_DIR}"
   "--prefix" "${INSTALL_PREFIX}"
@@ -710,6 +733,9 @@ if [[ -f "${INTRO_OPTS_JSON}" ]]; then
 fi
 
 MESON_OPTIONS=("-Dbuild-cli=true" "-Dcpp_std=${MESON_CPPSTD}" "-Denable-modules=${ENABLE_MODULES}")
+if [[ -n "${YAMS_PROTOC_PATH}" ]]; then
+  MESON_OPTIONS+=("-Dprotoc-path=${YAMS_PROTOC_PATH}")
+fi
 
 # Add libc++ hardening mode if specified
 if [[ "${LIBCXX_HARDENING}" != "none" ]]; then

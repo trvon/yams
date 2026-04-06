@@ -1,0 +1,17 @@
+[settings]
+os=Android
+os.api_level=24
+arch=x86_64
+compiler=clang
+compiler.version=18
+compiler.libcxx=c++_shared
+compiler.cppstd=20
+build_type=Release
+
+[conf]
+tools.cmake.cmaketoolchain:generator=Ninja
+
+# Notes:
+# - Intended for Android emulator and x86_64 test-device builds.
+# - Requires a valid Android NDK in the environment when cross-building.
+# - The CI/wrapper layer should map this output into jni/x86_64/.

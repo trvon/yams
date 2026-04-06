@@ -1,0 +1,17 @@
+[settings]
+os=Android
+os.api_level=24
+arch=armv8
+compiler=clang
+compiler.version=18
+compiler.libcxx=c++_shared
+compiler.cppstd=20
+build_type=Release
+
+[conf]
+tools.cmake.cmaketoolchain:generator=Ninja
+
+# Notes:
+# - Intended for Android arm64-v8a shared library builds.
+# - Requires a valid Android NDK in the environment when cross-building.
+# - The CI/wrapper layer should map this output into jni/arm64-v8a/.

@@ -54,10 +54,18 @@ endif
 # pb_includedir = protobuf_dep.get_variable(pkgconfig: 'includedir', default_value: '')
 # pb_system_inc = pb_includedir != '' ? include_directories(pb_includedir, is_system: true) : []
 pb_system_inc = []
-# Prefer protoc from the protobuf dependency (Conan) to avoid header/runtime mismatch.
-proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
-protoc_candidate = proto_prefix != '' ? join_paths(proto_prefix, 'bin', 'protoc') : 'protoc'
-protoc_prog = find_program(protoc_candidate, required: protobuf_dep.found())
+protoc_override = get_option('protoc-path')
+# Cross-builds need a build-machine protoc, not the target protobuf package binary.
+if protoc_override != ''
+  protoc_prog = find_program(protoc_override, native: meson.is_cross_build(), required: true)
+elif meson.is_cross_build()
+  protoc_prog = find_program('protoc', native: true, required: true)
+else
+  # Prefer protoc from the protobuf dependency (Conan) to avoid header/runtime mismatch.
+  proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
+  protoc_candidate = proto_prefix != '' ? join_paths(proto_prefix, 'bin', 'protoc') : 'protoc'
+  protoc_prog = find_program(protoc_candidate, required: protobuf_dep.found())
+endif
 proto_source_root = join_paths(meson.project_source_root(), 'include')
 proto_out_dir = join_paths(meson.current_build_dir(), 'libyams_daemon.a.p')
 proto_generator = generator(protoc_prog,

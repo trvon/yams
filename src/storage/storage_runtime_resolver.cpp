@@ -6,6 +6,7 @@
 #include <curl/curl.h>
 
 #if defined(__APPLE__)
+#include <TargetConditionals.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 #endif
@@ -378,7 +379,7 @@ std::string getOrDefault(const std::map<std::string, std::string>& cfg, const st
 } // namespace
 
 Result<std::string> loadCloudflareApiTokenFromKeychain(std::string_view accountIdView) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_OSX
     const std::string accountId = trim(std::string(accountIdView));
     if (accountId.empty()) {
         return Error{ErrorCode::InvalidArgument,
@@ -422,7 +423,7 @@ Result<std::string> loadCloudflareApiTokenFromKeychain(std::string_view accountI
 
 Result<void> storeCloudflareApiTokenInKeychain(std::string_view accountIdView,
                                                std::string_view apiTokenView) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_OSX
     const std::string accountId = trim(std::string(accountIdView));
     const std::string apiToken = trim(std::string(apiTokenView));
     if (accountId.empty()) {
