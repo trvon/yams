@@ -3,6 +3,7 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -2186,14 +2187,17 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_document(
                 dreq.byName = true;
             }
             dreq.metadataOnly = request->metadata_only != 0;
+            dreq.includeContent = request->include_content != 0 && !dreq.metadataOnly;
             dreq.raw = request->raw != 0;
             dreq.extract = request->include_extracted_text != 0 && !dreq.raw;
             dreq.latest = request->latest != 0;
             dreq.oldest = request->oldest != 0;
             if (request->max_bytes > 0)
                 dreq.maxBytes = request->max_bytes;
-            if (dreq.metadataOnly)
+            if (dreq.metadataOnly) {
+                dreq.includeContent = false;
                 dreq.raw = false;
+            }
         }
 
         auto result = daemon_call(ctx->state, std::move(dreq));

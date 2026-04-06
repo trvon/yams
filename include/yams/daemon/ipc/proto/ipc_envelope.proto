@@ -78,6 +78,7 @@ message GetRequest {
   bool show_graph = 23;
   int32 graph_depth = 24;
   bool verbose = 25;
+  bool include_content = 26;
   bool accept_compressed = 40;
 }
 

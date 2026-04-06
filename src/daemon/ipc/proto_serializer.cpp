@@ -305,6 +305,7 @@ template <> struct ProtoBinding<GetRequest> {
         o->set_oldest(r.oldest);
         o->set_output_path(yams::common::sanitizeUtf8(r.outputPath));
         o->set_metadata_only(r.metadataOnly);
+        o->set_include_content(r.includeContent);
         o->set_max_bytes(r.maxBytes);
         o->set_chunk_size(r.chunkSize);
         o->set_raw(r.raw);
@@ -334,6 +335,7 @@ template <> struct ProtoBinding<GetRequest> {
         r.oldest = i.oldest();
         r.outputPath = i.output_path();
         r.metadataOnly = i.metadata_only();
+        r.includeContent = i.include_content();
         r.maxBytes = i.max_bytes();
         r.chunkSize = i.chunk_size();
         r.raw = i.raw();

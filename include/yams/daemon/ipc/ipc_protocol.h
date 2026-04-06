@@ -332,6 +332,7 @@ struct GetRequest {
     // Output options
     std::string outputPath;      // output file path (empty = stdout)
     bool metadataOnly = false;   // return only metadata, no content
+    bool includeContent = true;  // include document content when not metadataOnly
     uint64_t maxBytes = 0;       // max bytes to transfer (0 = unlimited)
     uint32_t chunkSize = 524288; // streaming chunk size in bytes (increased default)
 
@@ -364,7 +365,7 @@ struct GetRequest {
         ser << latest << oldest;
 
         // Output options
-        ser << outputPath << metadataOnly << static_cast<uint64_t>(maxBytes)
+        ser << outputPath << metadataOnly << includeContent << static_cast<uint64_t>(maxBytes)
             << static_cast<uint32_t>(chunkSize);
 
         // Content options
@@ -476,6 +477,11 @@ struct GetRequest {
         if (!metadataOnlyResult)
             return metadataOnlyResult.error();
         req.metadataOnly = metadataOnlyResult.value();
+
+        auto includeContentResult = deser.template read<bool>();
+        if (!includeContentResult)
+            return includeContentResult.error();
+        req.includeContent = includeContentResult.value();
 
         auto maxBytesResult = deser.template read<uint64_t>();
         if (!maxBytesResult)

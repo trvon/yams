@@ -823,7 +823,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             serviceReq.metadataOnly = req.metadataOnly;
             serviceReq.maxBytes = req.maxBytes;
             serviceReq.chunkSize = req.chunkSize;
-            serviceReq.includeContent = !req.metadataOnly;
+            serviceReq.includeContent = !req.metadataOnly && req.includeContent;
             serviceReq.raw = req.raw;
             serviceReq.extract = req.extract;
             serviceReq.acceptCompressed = req.acceptCompressed;

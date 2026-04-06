@@ -116,8 +116,27 @@ Focus: **Stability, polish, and production readiness**
 - [ ] Space reclamation and integrity verification CLI
 
 ### Platform Expansion
-- [ ] Flutter bindings for iOS/Android
+- [ ] Corpus bindings and Flutter memory UX
 - [ ] Cross-repository search federation
+
+### Mobile Memory Work Matrix
+
+| Category | Area | Status | What needs to be done | Notes |
+|---------|------|--------|------------------------|-------|
+| Backend | Corpus binding contract | In progress | Lock the mobile ABI boundary to corpus access only: ingest, list/search/get, metadata, delete/update, and graph where supported. | Docs now reflect that model hosting and generation stay out of `libyams_mobile`. |
+| Backend | Backend parity | In progress | Make embedded and daemon behavior match for `get_document`, search/list payloads, and deletion/update semantics. | `get_document.include_content` parity is fixed and covered; other corpus APIs still need review. |
+| Backend | Graph retrieval | Open | Decide whether embedded graph query is required for local-only apps; implement it or explicitly mark daemon-only in the ABI contract. | This is the biggest missing corpus feature for fully local use. |
+| Backend | Corpus status cleanup | Open | Rename or reframe vector/model-ish status APIs so they describe corpus/index readiness instead of implying model lifecycle control. | `warmup` should not pretend to be app-side LLM control. |
+| Backend | Retrieval write-back | Open | Ensure the corpus layer cleanly supports app-owned write-back artifacts such as conversation summaries, tags, provenance, and optional embedding metadata. | This is the core integration point for local Gemma sessions. |
+| Build Cleanup | Meson wiring | In progress | Make `enable-mobile-bindings` and `enable-mobile-tests` easy to configure in a reproducible build directory. | A reproducible `build/mobile-check` flow works now, but it still depends on local system packages and submodules. |
+| Build Cleanup | ABI hygiene | Open | Add or restore symbol-surface checks and document the actual source of truth for ABI compatibility. | The docs previously referenced files/scripts that are not present here. |
+| Build Cleanup | Wrapper scaffolding | Open | Add thin platform wrapper stubs or example packaging targets for Swift/Android/Flutter. | Keep them thin and corpus-focused. |
+| Build Cleanup | Test coverage | In progress | Expand smoke tests to cover daemon mode success paths and backend parity cases, not just embedded CRUD and daemon connection failure. | Mobile ABI smoke tests now run on Catch2 and cover daemon `get_document.include_content`. |
+| Flutter UX | Retrieval UX | Open | Build the memory picker, context injection controls, and provenance display on top of corpus bindings. | This is the app-facing value layer. |
+| Flutter UX | Local LLM hosting | Open | Host Gemma in Flutter/app-native code, including model download, load/unload, prompt formatting, and response streaming. | Not part of YAMS bindings. |
+| Flutter UX | Write-back UX | Open | Persist conversation artifacts back into YAMS with clear tags/metadata and user-visible controls. | Should map cleanly onto corpus CRUD APIs. |
+| Flutter UX | Failure handling | Open | Surface backend state clearly: corpus unavailable, graph unavailable, stale index, missing local model, or failed write-back. | Avoid hiding corpus/backend limitations behind chat UI failures. |
+| Flutter UX | Gemma support | Open | Add `google/gemma-4-E4B-it` or other chosen Gemma runtime support in the app host once retrieval and write-back flows are stable. | Sequence this after corpus contract cleanup, not before. |
 
 ### Advanced Features
 - [ ] Custom embedding model support

@@ -728,6 +728,27 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         checkSanitizedField("GetRequest.outputPath", got->outputPath, req.outputPath);
     }
 
+    SECTION("GetRequest preserves content selection flags") {
+        GetRequest req;
+        req.hash = "sha256:abc123";
+        req.metadataOnly = false;
+        req.includeContent = false;
+        req.maxBytes = 4096;
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 16));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+
+        auto* got = std::get_if<GetRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        CHECK(got->hash == req.hash);
+        CHECK(got->metadataOnly == req.metadataOnly);
+        CHECK(got->includeContent == req.includeContent);
+        CHECK(got->maxBytes == req.maxBytes);
+    }
+
     SECTION("ListRequest sanitizes invalid UTF-8 filter and session fields") {
         ListRequest req;
         req.format = invalidUtf8("table");
