@@ -40,6 +40,7 @@ using yams::metadata::SearchResult;
 struct SearchParams {
     int limit = 100;
     int offset = 0;
+    bool semanticOnly = false;
 
     // Tag-based search parameters
     std::vector<std::string> tags; // Tags to search for
@@ -104,6 +105,35 @@ struct SearchEngineConfig {
         MIXED, // Balanced corpus (default)
         CUSTOM // User-specified weights
     } corpusProfile = CorpusProfile::MIXED;
+
+    /**
+     * @brief Navigation zoom level for machine-first retrieval.
+     *
+     * Auto lets the engine infer an effective zoom from query intent. Explicit zoom levels bias the
+     * engine toward high-level topology (Map), balanced dependency exploration (Neighborhood), or
+     * detail-preserving retrieval (Street).
+     */
+    enum class NavigationZoomLevel {
+        Auto,
+        Map,
+        Neighborhood,
+        Street,
+    } zoomLevel = NavigationZoomLevel::Auto;
+
+    [[nodiscard]] static constexpr const char*
+    navigationZoomLevelToString(NavigationZoomLevel level) noexcept {
+        switch (level) {
+            case NavigationZoomLevel::Auto:
+                return "AUTO";
+            case NavigationZoomLevel::Map:
+                return "MAP";
+            case NavigationZoomLevel::Neighborhood:
+                return "NEIGHBORHOOD";
+            case NavigationZoomLevel::Street:
+                return "STREET";
+        }
+        return "AUTO";
+    }
 
     // Component weights (0.0 = disabled, 1.0 = full weight)
     float textWeight = 0.70f;          // Full-text search weight
@@ -309,6 +339,7 @@ struct SearchEngineConfig {
     float graphRerankWeight = 0.15f;    // Multiplicative weight applied to KG signal
     float graphRerankMaxBoost = 0.20f;  // Per-document cap for graph-induced boost
     float graphRerankMinSignal = 0.01f; // Ignore weak KG signals below this threshold
+    float graphCommunityWeight = 0.10f; // Share of raw graph signal reserved for reciprocal support
     bool graphUseQueryConcepts = true;  // Enrich graph rerank query with extracted concepts
     bool graphFallbackToTopSignal =
         true; // If no candidate clears minSignal, still boost the top positive graph hit

@@ -200,6 +200,162 @@ std::string buildRerankSnippet(const std::string& query, const std::string& cont
     return out;
 }
 
+std::optional<std::int64_t>
+resolveGraphCandidateDocumentId(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+                                std::string_view candidateId) {
+    if (!kgStore || candidateId.empty()) {
+        return std::nullopt;
+    }
+
+    auto byHash = kgStore->getDocumentIdByHash(candidateId);
+    if (byHash && byHash.value().has_value()) {
+        return byHash.value();
+    }
+
+    auto byPath = kgStore->getDocumentIdByPath(candidateId);
+    if (byPath && byPath.value().has_value()) {
+        return byPath.value();
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::int64_t>
+resolveGraphCandidateNodeId(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+                            std::string_view candidateId) {
+    if (!kgStore) {
+        return std::nullopt;
+    }
+
+    auto directNode = kgStore->getNodeByKey(std::string(candidateId));
+    if (directNode && directNode.value().has_value()) {
+        return directNode.value()->id;
+    }
+
+    auto docId = resolveGraphCandidateDocumentId(kgStore, candidateId);
+    if (!docId.has_value()) {
+        return std::nullopt;
+    }
+
+    auto docHash = kgStore->getDocumentHashById(*docId);
+    if (!docHash || !docHash.value().has_value() || docHash.value()->empty()) {
+        return std::nullopt;
+    }
+
+    auto node = kgStore->getNodeByKey("doc:" + *docHash.value());
+    if (!node || !node.value().has_value()) {
+        auto fallbackNode = kgStore->getNodeByKey("doc:" + std::string(candidateId));
+        if (fallbackNode && fallbackNode.value().has_value()) {
+            return fallbackNode.value()->id;
+        }
+        return std::nullopt;
+    }
+    return node.value()->id;
+}
+
+std::vector<float> computeReciprocalCommunitySupport(
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+    const std::vector<std::string>& candidateIds, std::size_t maxNeighbors,
+    std::size_t* supportedDocCountOut = nullptr, std::size_t* edgeCountOut = nullptr,
+    std::size_t* largestCommunityOut = nullptr) {
+    std::vector<float> support(candidateIds.size(), 0.0f);
+    if (!kgStore || candidateIds.size() < 2) {
+        return support;
+    }
+
+    std::unordered_map<std::int64_t, std::size_t> indexByNodeId;
+    indexByNodeId.reserve(candidateIds.size());
+    for (std::size_t i = 0; i < candidateIds.size(); ++i) {
+        auto nodeId = resolveGraphCandidateNodeId(kgStore, candidateIds[i]);
+        if (nodeId.has_value()) {
+            indexByNodeId.emplace(*nodeId, i);
+        }
+    }
+    if (indexByNodeId.size() < 2) {
+        return support;
+    }
+
+    std::vector<std::unordered_set<std::size_t>> outgoing(candidateIds.size());
+    std::vector<std::vector<std::size_t>> reciprocalAdj(candidateIds.size());
+
+    for (const auto& [nodeId, idx] : indexByNodeId) {
+        auto edgesResult =
+            kgStore->getEdgesFrom(nodeId, std::string_view("semantic_neighbor"), maxNeighbors, 0);
+        if (!edgesResult) {
+            continue;
+        }
+        for (const auto& edge : edgesResult.value()) {
+            auto it = indexByNodeId.find(edge.dstNodeId);
+            if (it == indexByNodeId.end() || it->second == idx) {
+                continue;
+            }
+            outgoing[idx].insert(it->second);
+        }
+    }
+
+    std::size_t reciprocalEdgeCount = 0;
+    for (std::size_t i = 0; i < outgoing.size(); ++i) {
+        for (const auto neighbor : outgoing[i]) {
+            if (neighbor <= i) {
+                continue;
+            }
+            if (outgoing[neighbor].contains(i)) {
+                reciprocalAdj[i].push_back(neighbor);
+                reciprocalAdj[neighbor].push_back(i);
+                ++reciprocalEdgeCount;
+            }
+        }
+    }
+
+    std::vector<bool> visited(candidateIds.size(), false);
+    std::size_t supportedDocCount = 0;
+    std::size_t largestCommunity = 0;
+    for (std::size_t i = 0; i < reciprocalAdj.size(); ++i) {
+        if (visited[i] || reciprocalAdj[i].empty()) {
+            continue;
+        }
+        std::vector<std::size_t> component;
+        std::vector<std::size_t> stack = {i};
+        visited[i] = true;
+        while (!stack.empty()) {
+            const auto cur = stack.back();
+            stack.pop_back();
+            component.push_back(cur);
+            for (const auto neighbor : reciprocalAdj[cur]) {
+                if (visited[neighbor]) {
+                    continue;
+                }
+                visited[neighbor] = true;
+                stack.push_back(neighbor);
+            }
+        }
+
+        if (component.size() < 2) {
+            continue;
+        }
+
+        supportedDocCount += component.size();
+        largestCommunity = std::max(largestCommunity, component.size());
+        const float normalized = std::clamp(static_cast<float>(component.size() - 1) /
+                                                static_cast<float>(candidateIds.size() - 1),
+                                            0.0f, 1.0f);
+        for (const auto member : component) {
+            support[member] = std::max(support[member], normalized);
+        }
+    }
+
+    if (supportedDocCountOut) {
+        *supportedDocCountOut = supportedDocCount;
+    }
+    if (edgeCountOut) {
+        *edgeCountOut = reciprocalEdgeCount;
+    }
+    if (largestCommunityOut) {
+        *largestCommunityOut = largestCommunity;
+    }
+    return support;
+}
+
 bool hasQueryTokenHit(const std::string& query, const std::string& content) {
     const auto queryTokens = tokenizeLower(query);
     const std::string loweredContent = toLowerCopy(content);
@@ -551,7 +707,80 @@ constexpr const char* queryIntentToString(QueryIntent intent) {
     return "mixed";
 }
 
-double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent) {
+SearchEngineConfig::NavigationZoomLevel zoomLevelForIntent(QueryIntent intent) {
+    switch (intent) {
+        case QueryIntent::Code:
+        case QueryIntent::Path:
+            return SearchEngineConfig::NavigationZoomLevel::Street;
+        case QueryIntent::Prose:
+        case QueryIntent::Mixed:
+            return SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+    }
+    return SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+}
+
+void applyNavigationZoomPolicy(SearchEngineConfig& config,
+                               SearchEngineConfig::NavigationZoomLevel zoomLevel) {
+    auto scale = [](float& weight, float factor) {
+        weight = std::clamp(weight * factor, 0.0f, 1.0f);
+    };
+
+    switch (zoomLevel) {
+        case SearchEngineConfig::NavigationZoomLevel::Auto:
+            return;
+        case SearchEngineConfig::NavigationZoomLevel::Map:
+            scale(config.kgWeight, 1.25f);
+            scale(config.graphTextWeight, 1.15f);
+            scale(config.graphVectorWeight, 1.15f);
+            scale(config.pathTreeWeight, 1.10f);
+            scale(config.vectorWeight, 0.90f);
+            scale(config.entityVectorWeight, 0.85f);
+            config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{10});
+            config.graphExpansionMaxSeeds = std::max(config.graphExpansionMaxSeeds, size_t{8});
+            config.graphRerankTopN = std::max(config.graphRerankTopN, size_t{32});
+            config.graphScoringBudgetMs = std::max(config.graphScoringBudgetMs, 12);
+            config.rerankTopK = std::min(config.rerankTopK, size_t{3});
+            config.rerankSnippetMaxChars = std::min(config.rerankSnippetMaxChars, size_t{192});
+            config.semanticRescueSlots = std::min(config.semanticRescueSlots, size_t{1});
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
+            scale(config.kgWeight, 1.10f);
+            scale(config.graphTextWeight, 1.05f);
+            scale(config.pathTreeWeight, 1.05f);
+            config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{8});
+            config.graphRerankTopN = std::max(config.graphRerankTopN, size_t{24});
+            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{256});
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Street:
+            scale(config.textWeight, 1.10f);
+            scale(config.pathTreeWeight, 1.15f);
+            scale(config.entityVectorWeight, 1.10f);
+            scale(config.vectorWeight, 0.85f);
+            scale(config.graphVectorWeight, 0.85f);
+            scale(config.graphTextWeight, 0.95f);
+            scale(config.kgWeight, 0.90f);
+            config.similarityThreshold = std::clamp(config.similarityThreshold + 0.03f, 0.0f, 1.0f);
+            config.vectorOnlyThreshold = std::clamp(config.vectorOnlyThreshold + 0.02f, 0.0f, 1.0f);
+            config.vectorOnlyPenalty = std::clamp(config.vectorOnlyPenalty * 0.90f, 0.0f, 1.0f);
+            config.semanticRescueSlots = 0;
+            config.lexicalFloorTopN = std::max(config.lexicalFloorTopN, size_t{10});
+            config.lexicalFloorBoost = std::max(config.lexicalFloorBoost, 0.16f);
+            config.enableLexicalTieBreak = true;
+            config.lexicalTieBreakEpsilon = std::max(config.lexicalTieBreakEpsilon, 0.010f);
+            config.rerankTopK = std::max(config.rerankTopK, size_t{8});
+            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{384});
+            if (config.graphExpansionMaxTerms > 0) {
+                config.graphExpansionMaxTerms = std::min(config.graphExpansionMaxTerms, size_t{6});
+            }
+            if (config.graphRerankTopN > 0) {
+                config.graphRerankTopN = std::min(config.graphRerankTopN, size_t{18});
+            }
+            break;
+    }
+}
+
+double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent,
+                              SearchEngineConfig::NavigationZoomLevel zoomLevel) {
     const double text = result.keywordScore.value_or(0.0);
     const double vector = result.vectorScore.value_or(0.0);
     const double graphText = result.graphTextScore.value_or(0.0);
@@ -596,6 +825,23 @@ double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent) {
             break;
         case QueryIntent::Mixed:
             signal += text * 0.05 + vector * 0.05 + kg * 0.03 + path * 0.02;
+            break;
+    }
+
+    switch (zoomLevel) {
+        case SearchEngineConfig::NavigationZoomLevel::Auto:
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Map:
+            signal += kg * 0.08 + graphText * 0.06 + graphVector * 0.05;
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
+            signal += kg * 0.04 + graphText * 0.03 + path * 0.02;
+            break;
+        case SearchEngineConfig::NavigationZoomLevel::Street:
+            signal += text * 0.10 + path * 0.08 + symbol * 0.08;
+            if (!hasText && hasVector) {
+                signal -= 0.10;
+            }
             break;
     }
 
@@ -1433,6 +1679,36 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig = tuner_->getConfig();
     }
 
+    const QueryIntent intent = detectQueryIntent(query);
+    const auto configuredZoomLevel = workingConfig.zoomLevel;
+    const auto effectiveZoomLevel =
+        configuredZoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto
+            ? zoomLevelForIntent(intent)
+            : configuredZoomLevel;
+    const bool zoomLevelInferredFromIntent =
+        configuredZoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto;
+    workingConfig.zoomLevel = effectiveZoomLevel;
+    applyNavigationZoomPolicy(workingConfig, effectiveZoomLevel);
+    applyIntentWeights(workingConfig, intent);
+    if (params.semanticOnly) {
+        workingConfig.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
+        workingConfig.similarityThreshold = std::min(workingConfig.similarityThreshold, 0.30f);
+        workingConfig.textWeight = std::min(workingConfig.textWeight, 0.20f);
+        workingConfig.graphTextWeight = 0.0f;
+        workingConfig.kgWeight = 0.0f;
+        workingConfig.graphVectorWeight = 0.0f;
+        workingConfig.vectorWeight = std::max(workingConfig.vectorWeight, 0.45f);
+        workingConfig.entityVectorWeight = std::max(workingConfig.entityVectorWeight, 0.15f);
+        workingConfig.enableGraphRerank = false;
+        workingConfig.vectorOnlyThreshold =
+            std::min(workingConfig.vectorOnlyThreshold, workingConfig.similarityThreshold);
+        workingConfig.vectorOnlyPenalty = 1.0f;
+        workingConfig.vectorOnlyNearMissPenalty = 1.0f;
+    }
+    spdlog::debug("Query intent: {}, zoom={} ({})", queryIntentToString(intent),
+                  SearchEngineConfig::navigationZoomLevelToString(effectiveZoomLevel),
+                  zoomLevelInferredFromIntent ? "intent_auto" : "configured");
+
     SearchTraceCollector traceCollector(workingConfig);
 
     // Embedding generation may be launched eagerly or lazily depending on tiering strategy.
@@ -1445,8 +1721,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     bool embeddingAwaited = false;
     bool embeddingFailed = false;
     std::string embeddingStatus = needsEmbedding ? "not_started" : "not_needed";
+    const size_t vectorDbEmbeddingDim = vectorDb_ ? vectorDb_->getConfig().embedding_dim : 0;
+    size_t queryEmbeddingDim = 0;
     bool semanticTierSkipped = false;
     std::string semanticTierSkipReason;
+    std::string vectorTierSkipReason;
     auto launchEmbeddingIfNeeded = [&]() {
         if (!embeddingStarted && needsEmbedding && embeddingGen_) {
             traceCollector.markStageAttempted("embedding");
@@ -1474,7 +1753,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<GraphExpansionTerm> docSeedGraphTerms;
     bool graphExpansionMaterialized = false;
     size_t graphQueryNeighborSeedDocCount = 0;
-    if (conceptExtractor_) {
+    if (conceptExtractor_ && !params.semanticOnly) {
         conceptStart = std::chrono::steady_clock::now();
         conceptFuture = postWork(
             [this, &query]() {
@@ -1553,6 +1832,34 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                        workingConfig.enableGraphRerank && kgScorer_ != nullptr);
     traceCollector.markStageConfigured("reranker",
                                        workingConfig.enableReranking && reranker_ != nullptr);
+
+    auto hasVectorTierDimMismatch = [&]() {
+        if (!queryEmbedding.has_value() || !vectorDb_) {
+            return false;
+        }
+        queryEmbeddingDim = queryEmbedding.value().size();
+        if (queryEmbeddingDim == 0 || vectorDbEmbeddingDim == 0 ||
+            queryEmbeddingDim == vectorDbEmbeddingDim) {
+            return false;
+        }
+        if (vectorTierSkipReason.empty()) {
+            vectorTierSkipReason =
+                "embedding_dim_mismatch(db=" + std::to_string(vectorDbEmbeddingDim) +
+                ",query=" + std::to_string(queryEmbeddingDim) + ")";
+        }
+        return true;
+    };
+
+    auto markVectorTierDimMismatch = [&]() {
+        if (vectorTierSkipReason.empty()) {
+            return;
+        }
+        traceCollector.markStageSkipped("vector", vectorTierSkipReason);
+        traceCollector.markStageSkipped("entity_vector", vectorTierSkipReason);
+        if (workingConfig.enableCompressedANN) {
+            traceCollector.markStageSkipped("compressed_ann", vectorTierSkipReason);
+        }
+    };
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
         if (conceptsMaterialized || !conceptFuture.valid()) {
@@ -1689,10 +1996,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     spdlog::debug("Search limit: userLimit={}, fusionCandidateLimit={}, textMax={}, vectorMax={}",
                   userLimit, fusionCandidateLimit, workingConfig.textMaxResults,
                   workingConfig.vectorMaxResults);
-
-    const QueryIntent intent = detectQueryIntent(query);
-    applyIntentWeights(workingConfig, intent);
-    spdlog::debug("Query intent: {}", queryIntentToString(intent));
 
     std::vector<ComponentResult> allComponentResults;
     size_t estimatedResults = 0;
@@ -1963,7 +2266,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             const bool shouldNarrow = workingConfig.tieredNarrowVectorSearch &&
                                       tier1CandidateCount >= workingConfig.tieredMinCandidates;
 
-            if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_) {
+            if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_ &&
+                !hasVectorTierDimMismatch()) {
                 vectorFuture = schedule(
                     "vector", workingConfig.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros,
@@ -1988,9 +2292,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         return queryEntityVectors(queryEmbedding.value(), workingConfig,
                                                   effectiveEntityVectorMaxResults);
                     });
+            } else if (!shouldSkipSemantic && hasVectorTierDimMismatch()) {
+                markVectorTierDimMismatch();
             }
 
-            if (workingConfig.enableCompressedANN && queryEmbedding.has_value() && vectorDb_) {
+            if (workingConfig.enableCompressedANN && queryEmbedding.has_value() && vectorDb_ &&
+                !hasVectorTierDimMismatch()) {
                 compressedAnnFuture = schedule(
                     "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
@@ -2064,7 +2371,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             // Await embedding (ran in parallel with text/kg/path above) then schedule vector
             awaitEmbedding();
-            if (queryEmbedding.has_value() && vectorDb_) {
+            if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
                 vectorFuture =
                     schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
                              stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
@@ -2092,6 +2399,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                       workingConfig.compressedAnnTopK);
                         });
                 }
+            } else if (hasVectorTierDimMismatch()) {
+                markVectorTierDimMismatch();
             }
 
             collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
@@ -2159,7 +2468,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         // Await embedding (ran in parallel with sequential components above)
         awaitEmbedding();
-        if (queryEmbedding.has_value() && vectorDb_) {
+        if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
             runSequential(
                 [&]() {
                     return queryVectorIndex(queryEmbedding.value(), workingConfig,
@@ -2185,6 +2494,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros);
             }
+        } else if (hasVectorTierDimMismatch()) {
+            markVectorTierDimMismatch();
         }
 
         if (!params.tags.empty()) {
@@ -2206,6 +2517,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         compressedAnnSkipReason = "no_query_embedding";
     } else if (!vectorDb_) {
         compressedAnnSkipReason = "no_vector_db";
+    } else if (!vectorTierSkipReason.empty()) {
+        compressedAnnSkipReason = vectorTierSkipReason;
     } else if (semanticTierSkipped && !compressedAnnAttempted) {
         compressedAnnSkipReason = "adaptive_vector_skip";
     } else {
@@ -2694,6 +3007,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     } else if (!vectorDb_) {
         turboQuantSkipReason = "no_vector_db";
+    } else if (!vectorTierSkipReason.empty()) {
+        turboQuantSkipReason = vectorTierSkipReason;
     } else {
         const size_t window =
             std::min(workingConfig.turboQuantRerankWindow, response.results.size());
@@ -2978,14 +3293,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             candidateIds.reserve(rerankWindow);
             for (size_t i = 0; i < rerankWindow; ++i) {
                 const auto& res = response.results[i];
-                const std::string docId =
-                    documentIdForTrace(res.document.filePath, res.document.sha256Hash);
-                if (!docId.empty()) {
-                    candidateIds.push_back(docId);
-                } else if (!res.document.sha256Hash.empty()) {
+                if (!res.document.sha256Hash.empty()) {
                     candidateIds.push_back(res.document.sha256Hash);
-                } else {
+                } else if (!res.document.filePath.empty()) {
                     candidateIds.push_back(res.document.filePath);
+                } else {
+                    candidateIds.push_back(
+                        documentIdForTrace(res.document.filePath, res.document.sha256Hash));
                 }
             }
 
@@ -3011,6 +3325,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 const float minSignal = std::max(0.0f, workingConfig.graphRerankMinSignal);
                 const float maxBoost = std::max(0.0f, workingConfig.graphRerankMaxBoost);
                 const float rerankWeight = std::max(0.0f, workingConfig.graphRerankWeight);
+                const float communityWeight =
+                    std::clamp(workingConfig.graphCommunityWeight, 0.0f, 1.0f);
+                const float baseSignalWeight = std::max(0.0f, 1.0f - communityWeight);
+                std::size_t graphCommunitySupportedDocs = 0;
+                std::size_t graphCommunityEdges = 0;
+                std::size_t graphLargestCommunity = 0;
+                double graphCommunitySignalMass = 0.0;
+                std::size_t graphCommunityBoostedDocs = 0;
+                const auto communitySupport = computeReciprocalCommunitySupport(
+                    kgStore_, candidateIds,
+                    std::max<std::size_t>(8, workingConfig.graphMaxNeighbors),
+                    &graphCommunitySupportedDocs, &graphCommunityEdges, &graphLargestCommunity);
 
                 std::vector<float> rawSignals(rerankWindow, 0.0f);
                 float maxRawSignal = 0.0f;
@@ -3019,26 +3345,38 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 for (size_t i = 0; i < rerankWindow; ++i) {
                     const auto& candidateId = candidateIds[i];
                     auto scoreIt = graphScores.find(candidateId);
-                    if (scoreIt == graphScores.end()) {
-                        continue;
+                    if (scoreIt != graphScores.end()) {
+                        graphMatchedCandidates++;
                     }
-                    graphMatchedCandidates++;
 
-                    const KGScore& kgScore = scoreIt->second;
-                    const auto getFeature = [&kgScore](const char* key) {
-                        auto featureIt = kgScore.features.find(key);
-                        return featureIt != kgScore.features.end() ? featureIt->second : 0.0f;
+                    const auto getFeature = [&scoreIt, &graphScores](const char* key) {
+                        if (scoreIt == graphScores.end()) {
+                            return 0.0f;
+                        }
+                        auto featureIt = scoreIt->second.features.find(key);
+                        return featureIt != scoreIt->second.features.end() ? featureIt->second
+                                                                           : 0.0f;
                     };
 
                     const float queryCoverage =
                         std::clamp(getFeature("feature_query_coverage_ratio"), 0.0f, 1.0f);
                     const float pathSupport =
                         std::clamp(getFeature("feature_path_support_score"), 0.0f, 1.0f);
+                    const float entitySignal =
+                        scoreIt != graphScores.end() ? scoreIt->second.entity : 0.0f;
+                    const float structuralSignal =
+                        scoreIt != graphScores.end() ? scoreIt->second.structural : 0.0f;
+                    const float communitySignal = i < communitySupport.size()
+                                                      ? std::clamp(communitySupport[i], 0.0f, 1.0f)
+                                                      : 0.0f;
+                    graphCommunitySignalMass += communitySignal;
 
                     // Composite graph relevance signal.
                     const float rawSignal =
-                        std::clamp(kgScore.entity * 0.45f + kgScore.structural * 0.25f +
-                                       queryCoverage * 0.20f + pathSupport * 0.10f,
+                        std::clamp((entitySignal * 0.40f + structuralSignal * 0.20f +
+                                    queryCoverage * 0.20f + pathSupport * 0.10f) *
+                                           baseSignalWeight +
+                                       communitySignal * communityWeight,
                                    0.0f, 1.0f);
                     rawSignals[i] = rawSignal;
                     maxRawSignal = std::max(maxRawSignal, rawSignal);
@@ -3077,6 +3415,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     response.results[i].kgScore = response.results[i].kgScore.value_or(0.0) + boost;
                     boosted = true;
                     graphBoostedDocs++;
+                    if (communityWeight > 0.0f && i < communitySupport.size() &&
+                        communitySupport[i] > 0.0f) {
+                        graphCommunityBoostedDocs++;
+                    }
                 }
 
                 if (!boosted && workingConfig.graphFallbackToTopSignal &&
@@ -3109,9 +3451,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     json graphExplainJson = json::array();
                     for (size_t i = 0; i < std::min(graphExplanations.size(), rerankWindow); ++i) {
                         const auto& expl = graphExplanations[i];
+                        const float communitySignal =
+                            i < communitySupport.size()
+                                ? std::clamp(communitySupport[i], 0.0f, 1.0f)
+                                : 0.0f;
                         graphExplainJson.push_back({
                             {"doc_id", expl.id},
                             {"components", expl.components},
+                            {"community_signal", communitySignal},
                             {"reasons", expl.reasons},
                         });
                     }
@@ -3119,6 +3466,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     response.debugStats["graph_doc_probe_json"] =
                         buildGraphDocProbeJson(kgStore_, response.results, rerankWindow).dump();
                 }
+                response.debugStats["graph_community_supported_docs"] =
+                    std::to_string(graphCommunitySupportedDocs);
+                response.debugStats["graph_community_edge_count"] =
+                    std::to_string(graphCommunityEdges);
+                response.debugStats["graph_community_largest_size"] =
+                    std::to_string(graphLargestCommunity);
+                response.debugStats["graph_community_signal_mass"] =
+                    fmt::format("{:.4f}", graphCommunitySignalMass);
+                response.debugStats["graph_community_boosted_docs"] =
+                    std::to_string(graphCommunityBoostedDocs);
+                response.debugStats["graph_community_weight"] =
+                    fmt::format("{:.4f}", communityWeight);
             } else {
                 failed.push_back("graph_rerank");
                 traceCollector.markStageFailure("graph_rerank");
@@ -3165,8 +3524,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::stable_sort(response.results.begin(),
                              response.results.begin() + static_cast<ptrdiff_t>(rerankWindow),
                              [&](const SearchResult& a, const SearchResult& b) {
-                                 return scoreBasedRerankSignal(a, intent) >
-                                        scoreBasedRerankSignal(b, intent);
+                                 return scoreBasedRerankSignal(a, intent, effectiveZoomLevel) >
+                                        scoreBasedRerankSignal(b, intent, effectiveZoomLevel);
                              });
             contributing.push_back("score_rerank");
         }
@@ -3527,6 +3886,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(turboQuantPackedCandidatesScored);
     response.debugStats["turboquant_skip_reason"] = turboQuantSkipReason;
     response.debugStats["embedding_status"] = embeddingStatus;
+    response.debugStats["vector_db_dim"] = std::to_string(vectorDbEmbeddingDim);
+    response.debugStats["query_embedding_dim"] = std::to_string(queryEmbeddingDim);
+    response.debugStats["vector_tier_skip_reason"] = vectorTierSkipReason;
 
     if (!concepts.empty() && workingConfig.conceptBoostWeight > 0.0f &&
         workingConfig.conceptMaxBoost > 0.0f && !response.results.empty()) {
@@ -4030,6 +4392,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(graphPositiveSignalCandidates);
     response.debugStats["graph_boosted_docs"] = std::to_string(graphBoostedDocs);
     response.debugStats["graph_max_signal"] = fmt::format("{:.4f}", graphMaxSignal);
+    response.debugStats.try_emplace("graph_community_supported_docs", "0");
+    response.debugStats.try_emplace("graph_community_edge_count", "0");
+    response.debugStats.try_emplace("graph_community_largest_size", "0");
+    response.debugStats.try_emplace("graph_community_signal_mass", "0.0000");
+    response.debugStats.try_emplace("graph_community_boosted_docs", "0");
+    response.debugStats.try_emplace(
+        "graph_community_weight",
+        fmt::format("{:.4f}", std::clamp(workingConfig.graphCommunityWeight, 0.0f, 1.0f)));
     response.debugStats["rerank_window_trace_json"] = rerankWindowTrace.dump();
     if (workingConfig.semanticRescueSlots > 0 && !response.results.empty()) {
         spdlog::debug(
@@ -4237,6 +4607,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         response.debugStats["trace_enabled"] = "1";
         response.debugStats["trace_query_intent"] = queryIntentToString(intent);
+        response.debugStats["trace_zoom_level"] =
+            SearchEngineConfig::navigationZoomLevelToString(effectiveZoomLevel);
+        response.debugStats["trace_zoom_source"] =
+            zoomLevelInferredFromIntent ? "intent_auto" : "configured";
         response.debugStats["trace_user_limit"] = std::to_string(userLimit);
         response.debugStats["trace_fusion_candidate_limit"] = std::to_string(fusionCandidateLimit);
         response.debugStats["trace_top_window"] = std::to_string(traceTopCount);
@@ -4301,6 +4675,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                     .count());
         telemetry.finalResultCount = response.results.size();
         telemetry.topWindow = std::max<size_t>(userLimit, size_t{25});
+        telemetry.zoomLevel = effectiveZoomLevel;
 
         try {
             auto stageSummary = traceCollector.buildStageSummaryJson();

@@ -278,16 +278,40 @@ json MCPServer::describeOp(const std::string& target) const {
             "query", true};
 
         ops["add"] = {
-            "Store documents with deduplication",
+            "Store one file or one directory per operation, or inline content with a name. "
+            "Use 'path' for files or directories, set 'recursive' when ingesting a directory, "
+            "and use multiple add operations instead of a 'paths' array.",
             json{{"type", "object"},
                  {"properties",
-                  {{"path", {{"type", "string"}, {"description", "File or directory path"}}},
-                   {"content", {{"type", "string"}, {"description", "Inline content"}}},
-                   {"name", {{"type", "string"}, {"description", "Document name"}}},
+                  {{"path",
+                    {{"type", "string"},
+                     {"description", "Single file or directory path for this add operation"}}},
+                   {"content", {{"type", "string"}, {"description", "Inline document content"}}},
+                   {"name",
+                    {{"type", "string"},
+                     {"description", "Document name when sending inline content"}}},
+                   {"mime_type", {{"type", "string"}, {"description", "MIME type override"}}},
+                   {"disable_auto_mime",
+                    {{"type", "boolean"}, {"description", "Disable automatic MIME detection"}}},
+                   {"no_embeddings",
+                    {{"type", "boolean"},
+                     {"description", "Disable automatic embedding generation"},
+                     {"default", false}}},
+                   {"collection", {{"type", "string"}, {"description", "Collection name"}}},
+                   {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
+                   {"snapshot_label", {{"type", "string"}, {"description", "Snapshot label"}}},
                    {"recursive",
                     {{"type", "boolean"},
-                     {"description", "Recursively add from directories"},
+                     {"description", "Recursively add files from a directory path"},
                      {"default", false}}},
+                   {"include",
+                    {{"type", "array"},
+                     {"items", {{"type", "string"}}},
+                     {"description", "Include patterns for recursive directory adds"}}},
+                   {"exclude",
+                    {{"type", "array"},
+                     {"items", {{"type", "string"}}},
+                     {"description", "Exclude patterns for recursive directory adds"}}},
                    {"tags",
                     {{"type", "array"},
                      {"items", {{"type", "string"}}},
@@ -883,6 +907,22 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
             }
 
             auto params = operation.value("params", json::object());
+            if (op == "add") {
+                auto normalized = detail::normalizeAddParams(params);
+                params = std::move(normalized.params);
+                if (normalized.error) {
+                    auto errResult = json{{"stepIndex", i},
+                                          {"op", op},
+                                          {"success", false},
+                                          {"error", *normalized.error}};
+                    results.push_back(std::move(errResult));
+                    ++failed;
+                    if (!continueOnError) {
+                        break;
+                    }
+                    continue;
+                }
+            }
 
             // Dispatch via the internal registry
             auto toolResult = co_await internalRegistry_->callTool(toolIt->second, params);

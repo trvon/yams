@@ -67,6 +67,114 @@ void readStringArray(const json& j, std::string_view key, Container& out) {
     }
 }
 
+[[nodiscard]] inline bool hasNonEmptyString(const json& j, std::string_view key) {
+    if (const auto it = j.find(key); it != j.end() && it->is_string()) {
+        return !it->template get_ref<const std::string&>().empty();
+    }
+    return false;
+}
+
+[[nodiscard]] inline std::vector<std::string> collectStringValues(const json& value) {
+    std::vector<std::string> values;
+    if (value.is_string()) {
+        const auto& str = value.template get_ref<const std::string&>();
+        if (!str.empty()) {
+            values.push_back(str);
+        }
+        return values;
+    }
+    if (!value.is_array()) {
+        return values;
+    }
+
+    values.reserve(value.size());
+    for (const auto& item : value) {
+        if (!item.is_string()) {
+            continue;
+        }
+        const auto& str = item.template get_ref<const std::string&>();
+        if (!str.empty()) {
+            values.push_back(str);
+        }
+    }
+    return values;
+}
+
+inline void copyAliasIfMissing(json& j, std::string_view canonicalKey, std::string_view aliasKey) {
+    if (!j.is_object() || j.contains(canonicalKey)) {
+        return;
+    }
+    if (const auto it = j.find(aliasKey); it != j.end()) {
+        j[canonicalKey] = *it;
+    }
+}
+
+struct NormalizedAddParams {
+    json params = json::object();
+    std::optional<std::string> error;
+};
+
+[[nodiscard]] inline NormalizedAddParams normalizeAddParams(const json& raw) {
+    if (!raw.is_object()) {
+        return {json::object(), "add expects params to be an object."};
+    }
+
+    NormalizedAddParams out;
+    out.params = raw;
+    auto& params = out.params;
+
+    if (params.contains("url")) {
+        out.error = "add stores local files or inline content. To fetch a URL, use 'download' "
+                    "with {url}.";
+        return out;
+    }
+
+    copyAliasIfMissing(params, "mime_type", "mimeType");
+    copyAliasIfMissing(params, "snapshot_id", "snapshotId");
+    copyAliasIfMissing(params, "snapshot_label", "snapshotLabel");
+    copyAliasIfMissing(params, "disable_auto_mime", "disableAutoMime");
+    copyAliasIfMissing(params, "no_embeddings", "noEmbeddings");
+    copyAliasIfMissing(params, "include", "include_patterns");
+    copyAliasIfMissing(params, "exclude", "exclude_patterns");
+
+    if (!hasNonEmptyString(params, "path")) {
+        if (hasNonEmptyString(params, "directory_path")) {
+            params["path"] = params["directory_path"];
+            if (!params.contains("recursive")) {
+                params["recursive"] = true;
+            }
+        } else if (hasNonEmptyString(params, "directoryPath")) {
+            params["path"] = params["directoryPath"];
+            if (!params.contains("recursive")) {
+                params["recursive"] = true;
+            }
+        }
+    }
+
+    if (!hasNonEmptyString(params, "path") && params.contains("paths")) {
+        auto paths = collectStringValues(params["paths"]);
+        if (paths.size() == 1) {
+            params["path"] = paths.front();
+        } else {
+            out.error = "add accepts one 'path' per call, not 'paths'. Split this into multiple "
+                        "add calls, or pass a directory 'path' with 'recursive': true.";
+            return out;
+        }
+    }
+
+    if (params.contains("path") && params["path"].is_array()) {
+        out.error = "add expects 'path' to be a string. Use one add call per path, not an "
+                    "array.";
+        return out;
+    }
+
+    if (hasNonEmptyString(params, "content") && !hasNonEmptyString(params, "name")) {
+        out.error = "add requires 'name' when providing inline 'content'.";
+    }
+
+    return out;
+}
+
 } // namespace detail
 
 // MCP 1.x requires textual responses wrapped in a content array. Retain this format until the
@@ -478,6 +586,7 @@ struct MCPStoreDocumentRequest {
     bool noEmbeddings = false;
     std::vector<std::string> tags;
     json metadata;
+    std::string inputError;
 
     static MCPStoreDocumentRequest fromJson(const json& j);
     json toJson() const;

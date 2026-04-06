@@ -112,8 +112,11 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
 
     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
     // Default daemon policy: lexical-first with adaptive semantic fallback.
+    // Keep weak-query vector fanout disabled here so hybrid search stays precision-biased
+    // instead of broadening semantic candidates whenever lexical evidence is sparse.
     // SearchEngine::Impl computes auto-threshold as max(maxResults*2, 50) when this is 0.
     opts.config.enableAdaptiveVectorFallback = true;
+    opts.config.enableWeakQueryFanoutBoost = false;
     opts.config.adaptiveVectorSkipMinTier1Hits = 0;
     if (!vectorEnabled) {
         opts.config.vectorWeight = 0.0f;

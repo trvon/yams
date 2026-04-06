@@ -18,6 +18,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/storage/corpus_stats.h>
 
 using namespace yams;
 using namespace yams::metadata;
@@ -262,6 +263,48 @@ TEST_CASE("MetadataRepository: dual-pool embedding-hash read route isolation",
 
     std::error_code ec;
     std::filesystem::remove(dbPath, ec);
+}
+
+TEST_CASE("MetadataRepository: reconcile embedding status from vector-backed hashes",
+          "[unit][metadata][repository][embeddings]") {
+    MetadataRepositoryFixture fix;
+
+    auto docA = makeDocumentWithPath("/tmp/reconcile_a.txt", "reconcile-hash-a");
+    auto docB = makeDocumentWithPath("/tmp/reconcile_b.txt", "reconcile-hash-b");
+
+    auto docAId = fix.repository_->insertDocument(docA);
+    auto docBId = fix.repository_->insertDocument(docB);
+    REQUIRE(docAId.has_value());
+    REQUIRE(docBId.has_value());
+
+    REQUIRE(fix.repository_
+                ->updateDocumentEmbeddingStatusByHash("reconcile-hash-a", true, "legacy-embed")
+                .has_value());
+    REQUIRE(fix.repository_
+                ->updateDocumentEmbeddingStatusByHash("reconcile-hash-b", true, "legacy-embed")
+                .has_value());
+
+    auto beforeA = fix.repository_->hasDocumentEmbeddingByHash("reconcile-hash-a");
+    auto beforeB = fix.repository_->hasDocumentEmbeddingByHash("reconcile-hash-b");
+    REQUIRE(beforeA.has_value());
+    REQUIRE(beforeB.has_value());
+    CHECK(beforeA.value());
+    CHECK(beforeB.value());
+
+    REQUIRE(fix.repository_
+                ->reconcileDocumentEmbeddingStatusByHashes({"reconcile-hash-a", "missing-hash"})
+                .has_value());
+
+    auto afterA = fix.repository_->hasDocumentEmbeddingByHash("reconcile-hash-a");
+    auto afterB = fix.repository_->hasDocumentEmbeddingByHash("reconcile-hash-b");
+    REQUIRE(afterA.has_value());
+    REQUIRE(afterB.has_value());
+    CHECK(afterA.value());
+    CHECK_FALSE(afterB.value());
+
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().embeddingCount == 1);
 }
 
 TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",

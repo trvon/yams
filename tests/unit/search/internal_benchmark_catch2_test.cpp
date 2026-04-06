@@ -455,6 +455,59 @@ TEST_CASE("BenchmarkConfig: default values", "[unit][internal_benchmark][config]
     CHECK(config.improvementThreshold == Approx(0.05f));
 }
 
+TEST_CASE("BenchmarkKgReadinessPolicy: synthetic graph rerank relaxes missing KG signal",
+          "[unit][internal_benchmark][kg]") {
+    const auto policy = resolveBenchmarkKgReadinessPolicy(
+        true, std::nullopt,
+        false); // synthetic corpus, graph rerank requested, no explicit override
+
+    CHECK(policy == BenchmarkKgReadinessPolicy::AcceptDrainedWithoutSignal);
+    CHECK(std::string(benchmarkKgReadinessPolicyToString(policy)) ==
+          "ACCEPT_DRAINED_WITHOUT_SIGNAL");
+
+    // Regression case: drained queues with no KG signal should no longer hard-fail.
+    CHECK(benchmarkKgReadinessSatisfied(policy, true, false));
+    CHECK_FALSE(
+        benchmarkKgReadinessSatisfied(BenchmarkKgReadinessPolicy::RequireSignal, true, false));
+}
+
+TEST_CASE("BenchmarkKgReadinessPolicy: BEIR graph rerank still requires KG signal",
+          "[unit][internal_benchmark][kg]") {
+    const auto policy = resolveBenchmarkKgReadinessPolicy(
+        true, std::nullopt,
+        true); // BEIR corpus, graph rerank requested, no explicit override
+
+    CHECK(policy == BenchmarkKgReadinessPolicy::RequireSignal);
+    CHECK_FALSE(benchmarkKgReadinessSatisfied(policy, true, false));
+    CHECK(benchmarkKgReadinessSatisfied(policy, true, true));
+}
+
+TEST_CASE("BenchmarkKgReadinessPolicy: explicit override disables KG wait",
+          "[unit][internal_benchmark][kg]") {
+    const auto policy = resolveBenchmarkKgReadinessPolicy(true, false, true);
+
+    CHECK(policy == BenchmarkKgReadinessPolicy::Skip);
+    CHECK(benchmarkKgReadinessSatisfied(policy, false, false));
+}
+
+TEST_CASE("BenchmarkKgReadinessPolicy: tuned graph rerank off skips wait when not explicit",
+          "[unit][internal_benchmark][kg]") {
+    const auto initialPolicy = resolveBenchmarkKgReadinessPolicy(true, std::nullopt, false);
+    const auto refinedPolicy = refineBenchmarkKgReadinessPolicy(initialPolicy, std::nullopt, false);
+
+    CHECK(initialPolicy == BenchmarkKgReadinessPolicy::AcceptDrainedWithoutSignal);
+    CHECK(refinedPolicy == BenchmarkKgReadinessPolicy::Skip);
+}
+
+TEST_CASE("BenchmarkKgReadinessPolicy: explicit require preserves strict wait despite tuning",
+          "[unit][internal_benchmark][kg]") {
+    const auto initialPolicy = resolveBenchmarkKgReadinessPolicy(true, true, false);
+    const auto refinedPolicy = refineBenchmarkKgReadinessPolicy(initialPolicy, true, false);
+
+    CHECK(initialPolicy == BenchmarkKgReadinessPolicy::RequireSignal);
+    CHECK(refinedPolicy == BenchmarkKgReadinessPolicy::RequireSignal);
+}
+
 // =============================================================================
 // QueryExecution tests
 // =============================================================================

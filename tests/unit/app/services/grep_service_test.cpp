@@ -84,6 +84,91 @@ private:
     std::size_t queryFailures_{0};
 };
 
+class RetrieveBytesFailStore final : public IContentStore {
+public:
+    explicit RetrieveBytesFailStore(std::shared_ptr<IContentStore> inner)
+        : inner_(std::move(inner)) {}
+
+    Result<StoreResult> store(const std::filesystem::path& path, const ContentMetadata& metadata,
+                              api::ProgressCallback progress) override {
+        return inner_->store(path, metadata, progress);
+    }
+
+    Result<RetrieveResult> retrieve(const std::string& hash,
+                                    const std::filesystem::path& outputPath,
+                                    api::ProgressCallback progress) override {
+        return inner_->retrieve(hash, outputPath, progress);
+    }
+
+    Result<StoreResult> storeStream(std::istream& stream, const ContentMetadata& metadata,
+                                    api::ProgressCallback progress) override {
+        return inner_->storeStream(stream, metadata, progress);
+    }
+
+    Result<RetrieveResult> retrieveStream(const std::string& hash, std::ostream& output,
+                                          api::ProgressCallback progress) override {
+        return inner_->retrieveStream(hash, output, progress);
+    }
+
+    Result<StoreResult> storeBytes(std::span<const std::byte> data,
+                                   const ContentMetadata& metadata) override {
+        return inner_->storeBytes(data, metadata);
+    }
+
+    Result<std::vector<std::byte>> retrieveBytes(const std::string&) override {
+        return Error{ErrorCode::NotFound, "retrieveBytes disabled for test"};
+    }
+
+    Result<RawContent> retrieveRaw(const std::string& hash) override {
+        return inner_->retrieveRaw(hash);
+    }
+
+    std::future<Result<RawContent>> retrieveRawAsync(const std::string& hash) override {
+        return inner_->retrieveRawAsync(hash);
+    }
+
+    Result<bool> exists(const std::string& hash) const override { return inner_->exists(hash); }
+
+    Result<bool> remove(const std::string& hash) override { return inner_->remove(hash); }
+
+    Result<ContentMetadata> getMetadata(const std::string& hash) const override {
+        return inner_->getMetadata(hash);
+    }
+
+    Result<void> updateMetadata(const std::string& hash, const ContentMetadata& metadata) override {
+        return inner_->updateMetadata(hash, metadata);
+    }
+
+    std::vector<Result<StoreResult>>
+    storeBatch(const std::vector<std::filesystem::path>& paths,
+               const std::vector<ContentMetadata>& metadata) override {
+        return inner_->storeBatch(paths, metadata);
+    }
+
+    std::vector<Result<bool>> removeBatch(const std::vector<std::string>& hashes) override {
+        return inner_->removeBatch(hashes);
+    }
+
+    ContentStoreStats getStats() const override { return inner_->getStats(); }
+
+    HealthStatus checkHealth() const override { return inner_->checkHealth(); }
+
+    Result<void> verify(api::ProgressCallback progress) override {
+        return inner_->verify(progress);
+    }
+
+    Result<void> compact(api::ProgressCallback progress) override {
+        return inner_->compact(progress);
+    }
+
+    Result<void> garbageCollect(api::ProgressCallback progress) override {
+        return inner_->garbageCollect(progress);
+    }
+
+private:
+    std::shared_ptr<IContentStore> inner_;
+};
+
 struct GrepFixture {
     GrepFixture() {
         tmpDir_ =
@@ -149,6 +234,22 @@ struct GrepFixture {
         StoreDocumentRequest req;
         req.path = path.string();
         REQUIRE(docService->store(req));
+    }
+
+    void addHotContent(std::string_view name, std::string_view content,
+                       std::string_view mimeType = "text/plain") {
+        (void)mimeType;
+        auto path = (tmpDir_ / name).string();
+        auto docRes = repo_->findDocumentByExactPath(path);
+        REQUIRE(docRes.has_value());
+        REQUIRE(docRes.value().has_value());
+        DocumentContent docContent;
+        docContent.documentId = docRes.value()->id;
+        docContent.contentText = std::string(content);
+        docContent.contentLength = static_cast<int64_t>(docContent.contentText.size());
+        docContent.extractionMethod = "test";
+        docContent.language = "en";
+        REQUIRE(repo_->insertContent(docContent));
     }
 
     auto grep(const GrepRequest& req) const { return grepService_->grep(req); }
@@ -465,6 +566,38 @@ TEST_CASE("GrepService - Error Handling", "[grep][service][reliability]") {
         CHECK(res.error().code == ErrorCode::NotInitialized);
         CHECK_FALSE(res.error().message.empty());
     }
+}
+
+TEST_CASE("GrepService - Session auto mode uses hot metadata content", "[grep][service][session]") {
+    SKIP_GREP_ON_WINDOWS();
+
+    GrepFixture fixture;
+    fixture.addDocument("session_hot.txt", "alpha from metadata\n");
+    fixture.addHotContent("session_hot.txt", "alpha from metadata\n");
+
+    fixture.store_ = std::make_shared<RetrieveBytesFailStore>(fixture.store_);
+    fixture.ctx_.store = fixture.store_;
+    fixture.grepService_ = makeGrepService(fixture.ctx_);
+
+    auto coldRes = fixture.grep({
+        .pattern = "alpha",
+        .literalText = true,
+        .useSession = false,
+    });
+
+    REQUIRE(coldRes);
+    CHECK(coldRes.value().totalMatches == 0);
+
+    auto sessionRes = fixture.grep({
+        .pattern = "alpha",
+        .literalText = true,
+        .useSession = true,
+    });
+
+    REQUIRE(sessionRes);
+    CHECK(sessionRes.value().totalMatches == 1);
+    REQUIRE(sessionRes.value().filesWith.size() == 1);
+    CHECK(sessionRes.value().filesWith.front().find("session_hot.txt") != std::string::npos);
 }
 
 TEST_CASE("GrepService - Edge Cases", "[grep][service][edge]") {

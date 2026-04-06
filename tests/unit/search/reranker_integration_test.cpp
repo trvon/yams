@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Unit tests for reranker integration into search pipeline
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -8,8 +9,10 @@
 #include <yams/core/types.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/search/internal_benchmark.h>
 #include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine.h>
 
@@ -24,6 +27,8 @@
 
 namespace yams::search {
 namespace {
+
+using Catch::Approx;
 
 // =============================================================================
 // Mock Reranker for Testing
@@ -393,6 +398,14 @@ public:
             throw std::runtime_error("Failed to initialize connection pool");
         }
         repo_ = std::make_shared<yams::metadata::MetadataRepository>(*pool_);
+        yams::metadata::KnowledgeGraphStoreConfig kgConfig;
+        auto kgResult = yams::metadata::makeSqliteKnowledgeGraphStore(*pool_, kgConfig);
+        if (!kgResult) {
+            throw std::runtime_error("Failed to initialize KG store");
+        }
+        kgStore_ =
+            std::shared_ptr<yams::metadata::KnowledgeGraphStore>(std::move(kgResult).value());
+        repo_->setKnowledgeGraphStore(kgStore_);
     }
 
     ~SearchEngineRerankerFixture() {
@@ -426,14 +439,78 @@ public:
         if (!indexRes) {
             throw std::runtime_error("Failed to index test document content");
         }
+
+        yams::metadata::KGNode docNode;
+        docNode.nodeKey = "doc:" + hash;
+        docNode.label = filePath;
+        docNode.type = "document";
+        auto nodeId = kgStore_->upsertNode(docNode);
+        if (!nodeId) {
+            throw std::runtime_error("Failed to upsert test KG document node");
+        }
+    }
+
+    void addDocEntityByHash(const std::string& hash, const std::string& entityText) {
+        auto docId = kgStore_->getDocumentIdByHash(hash);
+        if (!docId || !docId.value().has_value()) {
+            throw std::runtime_error("Failed to resolve test document by hash");
+        }
+
+        yams::metadata::KGNode entityNode;
+        entityNode.nodeKey = "entity:" + entityText;
+        entityNode.label = entityText;
+        entityNode.type = "topic";
+        auto entityId = kgStore_->upsertNode(entityNode);
+        if (!entityId) {
+            throw std::runtime_error("Failed to upsert test entity node");
+        }
+
+        yams::metadata::DocEntity docEntity;
+        docEntity.documentId = *docId.value();
+        docEntity.entityText = entityText;
+        docEntity.nodeId = entityId.value();
+        docEntity.confidence = 1.0f;
+        auto entityRes = kgStore_->addDocEntities({docEntity});
+        if (!entityRes) {
+            throw std::runtime_error("Failed to insert test doc entity");
+        }
+    }
+
+    void addReciprocalSemanticNeighborsByHash(const std::string& leftHash,
+                                              const std::string& rightHash, float weight = 0.95f) {
+        auto leftNode = kgStore_->getNodeByKey("doc:" + leftHash);
+        auto rightNode = kgStore_->getNodeByKey("doc:" + rightHash);
+        if (!leftNode || !leftNode.value().has_value() || !rightNode ||
+            !rightNode.value().has_value()) {
+            throw std::runtime_error("Failed to resolve test KG doc nodes for semantic neighbors");
+        }
+
+        yams::metadata::KGEdge lr;
+        lr.srcNodeId = leftNode.value()->id;
+        lr.dstNodeId = rightNode.value()->id;
+        lr.relation = "semantic_neighbor";
+        lr.weight = weight;
+
+        yams::metadata::KGEdge rl;
+        rl.srcNodeId = rightNode.value()->id;
+        rl.dstNodeId = leftNode.value()->id;
+        rl.relation = "semantic_neighbor";
+        rl.weight = weight;
+
+        auto edgeRes = kgStore_->addEdgesUnique({lr, rl});
+        if (!edgeRes) {
+            throw std::runtime_error("Failed to insert reciprocal semantic neighbors");
+        }
     }
 
     std::shared_ptr<yams::metadata::MetadataRepository> repo() const { return repo_; }
+    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore() const { return kgStore_; }
 
 private:
     std::filesystem::path dbPath_;
     std::unique_ptr<yams::metadata::ConnectionPool> pool_;
     std::shared_ptr<yams::metadata::MetadataRepository> repo_;
+    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;
 };
 
 } // namespace
@@ -576,6 +653,207 @@ TEST_CASE("SearchEngine: reranker preview preserves tail evidence for long metad
     CHECK(std::all_of(
         reranker->getLastDocuments().begin(), reranker->getLastDocuments().end(),
         [&](const std::string& doc) { return doc.size() <= config.rerankSnippetMaxChars + 3; }));
+}
+
+TEST_CASE("SearchEngine: graph rerank emits reciprocal community telemetry",
+          "[search][graph][community]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string pathA = "/tmp/community_alpha.md";
+    const std::string pathB = "/tmp/community_beta.md";
+    const std::string hashA = "HASH_COMMUNITY_ALPHA";
+    const std::string hashB = "HASH_COMMUNITY_BETA";
+
+    fixture.addIndexedDocument(pathA, hashA, "Alpha topic", "alpha matching content");
+    fixture.addIndexedDocument(pathB, hashB, "Beta topic", "alpha matching companion content");
+    fixture.addDocEntityByHash(hashA, "alpha");
+    fixture.addDocEntityByHash(hashB, "alpha");
+    fixture.addReciprocalSemanticNeighborsByHash(hashA, hashB);
+
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 0.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableGraphRerank = true;
+    config.graphRerankTopN = 5;
+    config.graphRerankWeight = 1.0f;
+    config.graphRerankMaxBoost = 1.0f;
+    config.graphRerankMinSignal = 0.01f;
+    config.includeDebugInfo = true;
+    config.enableReranking = false;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    auto response = engine->searchWithResponse("alpha", {});
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() >= 2);
+    CHECK(response.value().debugStats.at("graph_community_supported_docs") == "2");
+    CHECK(response.value().debugStats.at("graph_community_edge_count") == "1");
+    CHECK(response.value().debugStats.at("graph_community_largest_size") == "2");
+    CHECK(response.value().debugStats.at("graph_community_boosted_docs") == "2");
+    CHECK(std::stod(response.value().debugStats.at("graph_community_signal_mass")) > 0.0);
+    CHECK(response.value().debugStats.at("graph_community_weight") == "0.1000");
+}
+
+TEST_CASE("SearchEngine: graph rerank can disable community influence while preserving telemetry",
+          "[search][graph][community]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string pathA = "/tmp/community_zero_alpha.md";
+    const std::string pathB = "/tmp/community_zero_beta.md";
+    const std::string hashA = "HASH_COMMUNITY_ZERO_ALPHA";
+    const std::string hashB = "HASH_COMMUNITY_ZERO_BETA";
+
+    fixture.addIndexedDocument(pathA, hashA, "Alpha topic", "alpha matching content");
+    fixture.addIndexedDocument(pathB, hashB, "Beta topic", "alpha matching companion content");
+    fixture.addDocEntityByHash(hashA, "alpha");
+    fixture.addDocEntityByHash(hashB, "alpha");
+    fixture.addReciprocalSemanticNeighborsByHash(hashA, hashB);
+
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 0.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableGraphRerank = true;
+    config.graphRerankTopN = 5;
+    config.graphRerankWeight = 1.0f;
+    config.graphRerankMaxBoost = 1.0f;
+    config.graphRerankMinSignal = 0.01f;
+    config.graphCommunityWeight = 0.0f;
+    config.includeDebugInfo = true;
+    config.enableReranking = false;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    auto response = engine->searchWithResponse("alpha", {});
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() >= 2);
+    CHECK(response.value().debugStats.at("graph_community_supported_docs") == "2");
+    CHECK(response.value().debugStats.at("graph_community_edge_count") == "1");
+    CHECK(response.value().debugStats.at("graph_community_largest_size") == "2");
+    CHECK(response.value().debugStats.at("graph_community_boosted_docs") == "0");
+    CHECK(std::stod(response.value().debugStats.at("graph_community_signal_mass")) > 0.0);
+    CHECK(response.value().debugStats.at("graph_community_weight") == "0.0000");
+}
+
+TEST_CASE("InternalBenchmark: reciprocal community signal improves rank when enabled",
+          "[search][graph][community][benchmark]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string pathTarget = "/tmp/community_bench_target.md";
+    const std::string pathPartner = "/tmp/community_bench_partner.md";
+    const std::string pathRival = "/tmp/community_bench_rival.md";
+    const std::string hashTarget = "HASH_COMMUNITY_BENCH_TARGET";
+    const std::string hashPartner = "HASH_COMMUNITY_BENCH_PARTNER";
+    const std::string hashRival = "HASH_COMMUNITY_BENCH_RIVAL";
+
+    fixture.addIndexedDocument(pathTarget, hashTarget, "Target note", "alpha target evidence");
+    fixture.addIndexedDocument(pathPartner, hashPartner, "Partner note",
+                               "alpha companion evidence");
+    fixture.addIndexedDocument(pathRival, hashRival, "Rival alpha note",
+                               "alpha rival alpha rival evidence");
+    fixture.addReciprocalSemanticNeighborsByHash(hashTarget, hashPartner);
+
+    auto makeEngine = [&](float communityWeight) {
+        SearchEngineConfig config;
+        config.textWeight = 1.0f;
+        config.pathTreeWeight = 0.0f;
+        config.kgWeight = 0.0f;
+        config.vectorWeight = 0.0f;
+        config.entityVectorWeight = 0.0f;
+        config.tagWeight = 0.0f;
+        config.metadataWeight = 0.0f;
+        config.graphTextWeight = 0.0f;
+        config.graphVectorWeight = 0.0f;
+        config.enableParallelExecution = false;
+        config.enableGraphRerank = true;
+        config.graphRerankTopN = 3;
+        config.graphRerankWeight = 1.0f;
+        config.graphRerankMaxBoost = 1.0f;
+        config.graphRerankMinSignal = 0.01f;
+        config.graphCommunityWeight = communityWeight;
+        config.includeDebugInfo = true;
+        config.enableReranking = false;
+        config.maxResults = 3;
+
+        auto engine =
+            createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+        REQUIRE(engine != nullptr);
+        return std::shared_ptr<SearchEngine>(std::move(engine));
+    };
+
+    std::vector<SyntheticQuery> queries;
+    queries.push_back(SyntheticQuery{.text = "alpha rival",
+                                     .expectedDocHash = hashTarget,
+                                     .expectedFilePath = pathTarget,
+                                     .type = QueryType::KNOWN_ITEM,
+                                     .sourcePhrase = "alpha rival"});
+
+    BenchmarkConfig benchConfig;
+    benchConfig.k = 1;
+    benchConfig.warmupQueries = 0;
+    benchConfig.includeExecutions = true;
+
+    auto withoutCommunity = makeEngine(0.0f);
+    auto withCommunity = makeEngine(0.10f);
+
+    InternalBenchmark baselineBench(withoutCommunity, fixture.repo());
+    auto baselineResult = baselineBench.runWithQueries(queries, benchConfig);
+    REQUIRE(baselineResult.has_value());
+
+    InternalBenchmark communityBench(withCommunity, fixture.repo());
+    auto communityResult = communityBench.runWithQueries(queries, benchConfig);
+    REQUIRE(communityResult.has_value());
+
+    REQUIRE(baselineResult.value().executions.size() == 1);
+    REQUIRE(communityResult.value().executions.size() == 1);
+
+    CHECK(baselineResult.value().executions[0].reciprocalRank == 0);
+    CHECK_FALSE(baselineResult.value().executions[0].foundInTopK);
+    CHECK(baselineResult.value().mrr < 1.0f);
+    CHECK(baselineResult.value().recallAtK == Approx(0.0f));
+
+    CHECK(communityResult.value().executions[0].reciprocalRank == 1);
+    CHECK(communityResult.value().executions[0].foundInTopK);
+    CHECK(communityResult.value().mrr == Approx(1.0f));
+    CHECK(communityResult.value().recallAtK == Approx(1.0f));
+
+    auto comparison =
+        InternalBenchmark::compare(baselineResult.value(), communityResult.value(), 0.05f);
+    CHECK(comparison.isImprovement);
+    CHECK_FALSE(comparison.isRegression);
+    CHECK(comparison.mrrDelta > 0.4f);
+    CHECK(comparison.recallDelta > 0.9f);
+
+    auto baselineResponse = withoutCommunity->searchWithResponse("alpha rival", {});
+    REQUIRE(baselineResponse.has_value());
+    CHECK(baselineResponse.value().debugStats.at("graph_community_weight") == "0.0000");
+    CHECK(baselineResponse.value().debugStats.at("graph_community_boosted_docs") == "0");
+    REQUIRE_FALSE(baselineResponse.value().results.empty());
+    CHECK(baselineResponse.value().results.front().document.sha256Hash == hashRival);
+
+    auto communityResponse = withCommunity->searchWithResponse("alpha rival", {});
+    REQUIRE(communityResponse.has_value());
+    CHECK(communityResponse.value().debugStats.at("graph_community_weight") == "0.1000");
+    CHECK(communityResponse.value().debugStats.at("graph_community_supported_docs") == "2");
+    CHECK(communityResponse.value().debugStats.at("graph_community_edge_count") == "1");
+    CHECK(communityResponse.value().debugStats.at("graph_community_boosted_docs") == "2");
+    CHECK(std::stod(communityResponse.value().debugStats.at("graph_community_signal_mass")) > 0.0);
+    REQUIRE_FALSE(communityResponse.value().results.empty());
+    CHECK(communityResponse.value().results.front().document.sha256Hash == hashTarget);
 }
 
 } // namespace yams::search

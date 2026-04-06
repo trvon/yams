@@ -91,8 +91,8 @@ Result<DiffResult> TreeDiffer::computeDiff(const TreeNode& baseTree, const TreeN
             }
         }
 
-        spdlog::info("Diff computed: +{} -{} ~{} renamed:{}", result.filesAdded,
-                     result.filesDeleted, result.filesModified, result.filesRenamed);
+        spdlog::debug("Diff computed: +{} -{} ~{} renamed:{}", result.filesAdded,
+                      result.filesDeleted, result.filesModified, result.filesRenamed);
 
         return result;
     } catch (const std::exception& e) {

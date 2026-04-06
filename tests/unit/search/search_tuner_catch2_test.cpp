@@ -47,6 +47,7 @@ TEST_CASE("TuningState: string conversion", "[unit][search_tuner]") {
 TEST_CASE("TunedParams: SMALL_CODE parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SMALL_CODE);
 
+    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Street);
     CHECK(params.rrfK == 20);
     CHECK(params.textWeight == Approx(0.45f));
     CHECK(params.vectorWeight == Approx(0.15f));
@@ -99,6 +100,7 @@ TEST_CASE("TunedParams: LARGE_PROSE parameters", "[unit][search_tuner][params]")
 TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SCIENTIFIC);
 
+    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Map);
     CHECK(params.rrfK == 12);
     CHECK(params.textWeight == Approx(0.70f));
     CHECK(params.vectorWeight == Approx(0.25f));
@@ -125,6 +127,7 @@ TEST_CASE("TunedParams: MIXED parameters", "[unit][search_tuner][params]") {
 TEST_CASE("TunedParams: MIXED_PRECISION parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::MIXED_PRECISION);
 
+    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
     CHECK(params.rrfK == 45);
     CHECK(params.textWeight == Approx(0.40f));
     CHECK(params.vectorWeight == Approx(0.25f));
@@ -162,6 +165,7 @@ TEST_CASE("TunedParams: JSON serialization", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SMALL_CODE);
     auto json = params.toJson();
 
+    CHECK(json["zoom_level"] == "STREET");
     CHECK(json["rrf_k"] == 20);
     CHECK(json["text_weight"].get<float>() == Approx(0.45f));
     CHECK(json["vector_weight"].get<float>() == Approx(0.15f));
@@ -178,6 +182,7 @@ TEST_CASE("TunedParams: applyTo SearchEngineConfig", "[unit][search_tuner][param
     SearchEngineConfig config;
     params.applyTo(config);
 
+    CHECK(config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
     CHECK(config.textWeight == Approx(0.40f));
     CHECK(config.vectorWeight == Approx(0.45f));
     CHECK(config.entityVectorWeight == Approx(0.00f));
@@ -375,6 +380,7 @@ TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][sea
     auto config = tuner.getConfig();
 
     // Should be SMALL_PROSE
+    CHECK(config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
     CHECK(config.textWeight == Approx(0.50f));
     CHECK(config.vectorWeight == Approx(0.40f));
     CHECK(config.pathTreeWeight == Approx(0.00f));
@@ -399,6 +405,7 @@ TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
     CHECK(json["state"] == "MIXED_PRECISION");
     CHECK_FALSE(json["reason"].get<std::string>().empty());
     CHECK(json["rrf_k"] == 45);
+    CHECK(json["params"]["zoom_level"] == "NEIGHBORHOOD");
     // When KG is present, graph-aware adjustments shift weights toward KG.
     CHECK(json["params"]["text_weight"].get<float>() == Approx(0.323f));
     CHECK(json["params"]["kg_weight"].get<float>() == Approx(0.19f));
@@ -435,6 +442,44 @@ TEST_CASE("SearchTuner: handles missing KG", "[unit][search_tuner][edge]") {
 
     CHECK(state == TuningState::SMALL_CODE);
     CHECK(reason.find("no_kg") != std::string::npos);
+}
+
+TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit graph overrides without KG",
+          "[unit][search_tuner][edge]") {
+    CorpusStats stats;
+    stats.docCount = 500;
+    stats.proseRatio = 0.90f;
+    stats.pathDepthAvg = 6.0f;
+    stats.tagCoverage = 0.02f;
+    stats.symbolDensity = 0.0f;
+
+    SearchTuner tuner(stats);
+
+    SearchEngineConfig config = tuner.getConfig();
+    config.enableGraphRerank = true;
+    config.kgWeight = 0.04f;
+    config.graphRerankTopN = 30;
+    config.graphRerankWeight = 0.18f;
+    config.graphRerankMaxBoost = 0.22f;
+    config.graphRerankMinSignal = 0.01f;
+    config.graphCommunityWeight = 0.10f;
+    config.kgMaxResults = 60;
+    config.graphScoringBudgetMs = 8;
+
+    tuner.seedRuntimeConfig(config);
+    const auto seeded = tuner.getConfig();
+
+    CHECK_FALSE(stats.hasKnowledgeGraph());
+    CHECK(seeded.enableGraphRerank);
+    CHECK(seeded.kgWeight > 0.0f);
+    CHECK(seeded.kgWeight == Approx(0.04f / 1.04f));
+    CHECK(seeded.graphRerankTopN == 30);
+    CHECK(seeded.graphRerankWeight == Approx(0.18f));
+    CHECK(seeded.graphRerankMaxBoost == Approx(0.22f));
+    CHECK(seeded.graphRerankMinSignal == Approx(0.01f));
+    CHECK(seeded.graphCommunityWeight == Approx(0.10f));
+    CHECK(seeded.kgMaxResults == 60);
+    CHECK(seeded.graphScoringBudgetMs == 8);
 }
 
 TEST_CASE("SearchTuner: priority order - MINIMAL takes precedence", "[unit][search_tuner][edge]") {
@@ -559,7 +604,7 @@ TEST_CASE("SearchTuner: adaptive observation trims KG under latency pressure",
     telemetry.topWindow = 25;
     telemetry.stages["kg"] = {.enabled = true,
                               .attempted = true,
-                              .contributed = false,
+                              .contributed = true,
                               .skipped = false,
                               .durationMs = 55.0,
                               .rawHitCount = 20,

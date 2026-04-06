@@ -18,6 +18,10 @@ namespace yams::vector {
 class EmbeddingGenerator;
 }
 
+namespace yams::daemon {
+class IModelProvider;
+}
+
 namespace yams::cli {
 
 /**
@@ -70,6 +74,17 @@ public:
      * Performs lazy initialization on first access to avoid unnecessary daemon connections
      */
     std::shared_ptr<vector::EmbeddingGenerator> getEmbeddingGenerator();
+
+    /**
+     * Get a local model provider instance backed directly by a loaded plugin.
+     * This avoids daemon IPC for local embedding generation workflows.
+     */
+    std::shared_ptr<daemon::IModelProvider> getLocalModelProvider();
+
+    /**
+     * Get the currently selected embedding model name, if one was resolved.
+     */
+    const std::string& getEmbeddingModelName() const { return embeddingModelName_; }
 
     /**
      * Check if embedding generator already exists (without creating it)
@@ -211,6 +226,7 @@ private:
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_; // Unified embedding generator
+    std::shared_ptr<daemon::IModelProvider> localModelProvider_;
 
     // App services context
     std::shared_ptr<app::services::AppContext> appContext_;
@@ -218,6 +234,7 @@ private:
 
     // Configuration
     std::filesystem::path dataPath_;
+    std::string embeddingModelName_;
     bool verbose_ = false;
     bool jsonOutput_ = false;
 

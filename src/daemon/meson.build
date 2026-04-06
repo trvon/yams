@@ -187,6 +187,7 @@ yams_daemon_lib = static_library('yams_daemon',
   include_directories: [
     include_directories('../../include'),
     include_directories('.'),
+    generated_inc,
     pb_system_inc,
   ],
   install: true,
@@ -194,7 +195,7 @@ yams_daemon_lib = static_library('yams_daemon',
 
 yams_daemon_dep = declare_dependency(
   link_with: yams_daemon_lib,
-  include_directories: include_directories('../../include'),
+  include_directories: [include_directories('../../include'), generated_inc],
 )
 
 meson.override_dependency('yams_daemon', yams_daemon_dep)

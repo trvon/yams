@@ -30,6 +30,48 @@ namespace {
 constexpr size_t kMaxTextForEmbeddingBytes = 1'000'000;               // 1MB (advisory)
 constexpr size_t kMaxTextToPersistInMetadataBytes = 16 * 1024 * 1024; // 16 MiB (best-effort)
 
+bool isLikelyTextualMime(std::string_view mimeType) {
+    return mimeType.starts_with("text/") || mimeType == "application/json" ||
+           mimeType == "application/x-yaml" || mimeType == "application/yaml" ||
+           mimeType == "application/javascript" || mimeType == "application/xml" ||
+           mimeType == "application/x-sh";
+}
+
+int embeddingRepairPriority(const metadata::DocumentInfo& doc) {
+    if (doc.contentExtracted || doc.extractionStatus == metadata::ExtractionStatus::Success) {
+        return 0;
+    }
+    if (doc.extractionStatus != metadata::ExtractionStatus::Skipped) {
+        return 1;
+    }
+    return 2;
+}
+
+void prioritizeEmbeddingRepairDocuments(std::vector<metadata::DocumentInfo>& documents) {
+    std::stable_sort(documents.begin(), documents.end(),
+                     [](const metadata::DocumentInfo& lhs, const metadata::DocumentInfo& rhs) {
+                         const int lhsPriority = embeddingRepairPriority(lhs);
+                         const int rhsPriority = embeddingRepairPriority(rhs);
+                         if (lhsPriority != rhsPriority) {
+                             return lhsPriority < rhsPriority;
+                         }
+
+                         const bool lhsLikelyText = isLikelyTextualMime(lhs.mimeType);
+                         const bool rhsLikelyText = isLikelyTextualMime(rhs.mimeType);
+                         if (lhsLikelyText != rhsLikelyText) {
+                             return lhsLikelyText;
+                         }
+
+                         const bool lhsHasContent = lhs.fileSize > 0;
+                         const bool rhsHasContent = rhs.fileSize > 0;
+                         if (lhsHasContent != rhsHasContent) {
+                             return lhsHasContent;
+                         }
+
+                         return false;
+                     });
+}
+
 // File lock for cross-process safety
 class VectorDbLock {
 public:
@@ -209,7 +251,16 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
         return stats; // Nothing to process
     }
 
+    if (documentHashes.empty()) {
+        prioritizeEmbeddingRepairDocuments(documents);
+    }
+
     spdlog::info("Processing {} documents for embedding repair", documents.size());
+
+    std::unordered_set<std::string> embeddedHashes;
+    if (config.skipExisting) {
+        embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
+    }
 
     // Process documents in batches
     for (size_t i = 0; i < documents.size(); i += config.batchSize) {
@@ -229,7 +280,7 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
             stats.documentsProcessed++;
 
             // Check if embedding already exists
-            if (config.skipExisting && vectorDb->hasEmbedding(doc.sha256Hash)) {
+            if (config.skipExisting && embeddedHashes.contains(doc.sha256Hash)) {
                 stats.embeddingsSkipped++;
                 continue;
             }
@@ -356,6 +407,8 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
             std::size_t maxBatch = yams::daemon::TuneAdvisor::getEmbedDocCap();
             if (maxBatch == 0)
                 maxBatch = 64;
+            if (config.batchSize > 0)
+                maxBatch = std::min(maxBatch, config.batchSize);
             if (maxBatch < 1)
                 maxBatch = 1;
 
@@ -535,8 +588,9 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
         // Report progress
         if (progressCallback) {
             progressCallback(std::min(i + config.batchSize, documents.size()), documents.size(),
-                             "Generated " + std::to_string(stats.embeddingsGenerated) +
-                                 " embeddings");
+                             "generated=" + std::to_string(stats.embeddingsGenerated) +
+                                 " skipped=" + std::to_string(stats.embeddingsSkipped) +
+                                 " failed=" + std::to_string(stats.failedOperations));
         }
     }
 
@@ -703,8 +757,6 @@ bool hasEmbedding(const std::string& documentHash, const std::filesystem::path& 
 Result<std::vector<std::string>>
 getDocumentsMissingEmbeddings(std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
                               const std::filesystem::path& dataPath, size_t limit) {
-    std::vector<std::string> missingEmbeddings;
-
     // Get all documents
     auto allDocs = metadata::queryDocumentsByPattern(*metadataRepo, "%");
     if (!allDocs) {
@@ -722,14 +774,26 @@ getDocumentsMissingEmbeddings(std::shared_ptr<metadata::IMetadataRepository> met
         return Error{ErrorCode::DatabaseError, "Failed to initialize vector database"};
     }
 
-    size_t count = 0;
+    const auto embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
+
+    std::vector<metadata::DocumentInfo> missingDocs;
+    missingDocs.reserve(allDocs.value().size());
+
     for (const auto& doc : allDocs.value()) {
-        if (!vectorDb->hasEmbedding(doc.sha256Hash)) {
-            missingEmbeddings.push_back(doc.sha256Hash);
-            count++;
-            if (limit > 0 && count >= limit) {
-                break;
-            }
+        if (!embeddedHashes.contains(doc.sha256Hash)) {
+            missingDocs.push_back(doc);
+        }
+    }
+
+    prioritizeEmbeddingRepairDocuments(missingDocs);
+
+    std::vector<std::string> missingEmbeddings;
+    missingEmbeddings.reserve(limit > 0 ? std::min(limit, missingDocs.size()) : missingDocs.size());
+
+    for (const auto& doc : missingDocs) {
+        missingEmbeddings.push_back(doc.sha256Hash);
+        if (limit > 0 && missingEmbeddings.size() >= limit) {
+            break;
         }
     }
 

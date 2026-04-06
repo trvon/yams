@@ -14,11 +14,15 @@
 // Repair streaming
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/repair/embedding_repair_util.h>
 
 #include <spdlog/spdlog.h>
 #include <array>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <boost/asio/as_tuple.hpp>
@@ -2027,6 +2031,298 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     // Special-case: RepairRequest streams RepairEvent progress and then a final RepairResponse.
     // This is implemented here (rather than in StreamingRequestProcessor) because we need access
     // to request_id for multiplexed chunk framing.
+    if (std::holds_alternative<EmbedDocumentsRequest>(request)) {
+        struct EmbedDocsStreamState {
+            std::mutex mu;
+            std::condition_variable cv;
+            std::deque<Response> queued;
+            std::optional<Response> final;
+            bool done{false};
+            bool aborted{false};
+        };
+
+        auto state = std::make_shared<EmbedDocsStreamState>();
+
+        ServiceManager* sm = dispatcher_ ? dispatcher_->getServiceManager() : nullptr;
+        if (!sm) {
+            ErrorResponse err{ErrorCode::NotInitialized, "ServiceManager not available"};
+            (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
+                                       /*last_chunk=*/true, /*flush=*/true, fsm);
+            co_return Result<void>();
+        }
+
+        auto contentStore = sm->getContentStore();
+        auto metadataRepo = sm->getMetadataRepo();
+        auto modelProvider = sm->getModelProvider();
+        auto contentExtractors = sm->getContentExtractors();
+        auto req = std::get<EmbedDocumentsRequest>(request);
+
+        std::shared_ptr<RequestContext> requestContext;
+        {
+            std::lock_guard<std::mutex> lk(ctx_mtx_);
+            auto it = contexts_.find(request_id);
+            if (it != contexts_.end()) {
+                requestContext = it->second;
+            }
+        }
+
+        auto emitEvent = [state](EmbeddingEvent event) {
+            if (!state)
+                return;
+            {
+                std::lock_guard<std::mutex> lk(state->mu);
+                if (state->aborted)
+                    return;
+                if (state->queued.size() >= 4096) {
+                    state->queued.pop_front();
+                }
+                state->queued.emplace_back(Response{std::move(event)});
+            }
+            state->cv.notify_one();
+        };
+
+        std::thread producer([state, emitEvent = std::move(emitEvent), sm, req = std::move(req),
+                              contentStore, metadataRepo, modelProvider, contentExtractors,
+                              requestContext, workerSignal = config_.worker_job_signal]() mutable {
+            auto finishWithError = [state](ErrorCode code, std::string message) {
+                std::lock_guard<std::mutex> lk(state->mu);
+                if (!state->aborted) {
+                    state->final = Response{ErrorResponse{code, std::move(message)}};
+                    state->done = true;
+                }
+                state->cv.notify_one();
+            };
+
+            try {
+                if (workerSignal) {
+                    workerSignal(true);
+                }
+                auto workerSignalGuard = std::unique_ptr<void, std::function<void(void*)>>(
+                    reinterpret_cast<void*>(1), [workerSignal](void*) {
+                        if (workerSignal) {
+                            workerSignal(false);
+                        }
+                    });
+
+                try {
+                    auto es = sm->getEmbeddingProviderFsmSnapshot();
+                    if (es.state == EmbeddingProviderState::Degraded ||
+                        es.state == EmbeddingProviderState::Failed) {
+                        finishWithError(ErrorCode::InvalidState,
+                                        "Embedding generation disabled: provider degraded");
+                        return;
+                    }
+                } catch (...) {
+                }
+
+                if (!modelProvider || !modelProvider->isAvailable()) {
+                    finishWithError(ErrorCode::NotInitialized, "Model provider not available");
+                    return;
+                }
+                if (!contentStore) {
+                    finishWithError(ErrorCode::NotInitialized, "Content store not available");
+                    return;
+                }
+                if (!metadataRepo) {
+                    finishWithError(ErrorCode::NotInitialized, "Metadata repository not available");
+                    return;
+                }
+
+                std::string modelName = req.modelName;
+                if (modelName.empty()) {
+                    try {
+                        modelName = sm->resolvePreferredModel();
+                    } catch (...) {
+                    }
+                }
+                if (modelName.empty()) {
+                    try {
+                        modelName = sm->getEmbeddingModelName();
+                    } catch (...) {
+                    }
+                }
+                if (modelName.empty()) {
+                    finishWithError(ErrorCode::NotInitialized, "No embedding model configured");
+                    return;
+                }
+
+                EmbeddingEvent started;
+                started.modelName = modelName;
+                started.total = req.documentHashes.size();
+                started.phase = "started";
+                started.message = "embedding repair started";
+                emitEvent(std::move(started));
+
+                yams::repair::EmbeddingRepairConfig repairConfig;
+                repairConfig.batchSize = req.batchSize;
+                repairConfig.skipExisting = req.skipExisting;
+                try {
+                    repairConfig.dataPath = sm->getResolvedDataDir();
+                } catch (...) {
+                }
+                if (requestContext) {
+                    repairConfig.cancelRequested = &requestContext->canceled;
+                }
+
+                auto progress = [emitEvent, modelName](size_t current, size_t total,
+                                                       const std::string& details) mutable {
+                    EmbeddingEvent ev;
+                    ev.modelName = modelName;
+                    ev.processed = current;
+                    ev.total = total;
+                    ev.phase = "working";
+                    ev.message = details;
+                    emitEvent(std::move(ev));
+                };
+
+                auto stats = yams::repair::repairMissingEmbeddings(
+                    contentStore, metadataRepo, modelProvider, modelName, repairConfig,
+                    req.documentHashes, progress, contentExtractors);
+                if (!stats) {
+                    finishWithError(stats.error().code, stats.error().message);
+                    return;
+                }
+
+                const auto& value = stats.value();
+                if (!req.documentHashes.empty() && value.documentsProcessed == 0) {
+                    finishWithError(ErrorCode::NotFound,
+                                    "No requested documents were found in the daemon metadata "
+                                    "repository");
+                    return;
+                }
+
+                EmbeddingEvent completed;
+                completed.modelName = modelName;
+                completed.processed = value.documentsProcessed;
+                completed.total = value.documentsProcessed;
+                completed.success = value.embeddingsGenerated;
+                completed.failure = value.failedOperations;
+                completed.inserted = value.embeddingsGenerated;
+                completed.phase = "completed";
+                completed.message = "embedding repair completed";
+                emitEvent(std::move(completed));
+
+                EmbedDocumentsResponse resp;
+                resp.requested = value.documentsProcessed;
+                resp.embedded = value.embeddingsGenerated;
+                resp.skipped = value.embeddingsSkipped;
+                resp.failed = value.failedOperations;
+                {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    if (!state->aborted) {
+                        state->final = Response{std::move(resp)};
+                        state->done = true;
+                    }
+                }
+                state->cv.notify_one();
+            } catch (const std::exception& e) {
+                finishWithError(ErrorCode::InternalError,
+                                std::string("Embedding repair failed: ") + e.what());
+            } catch (...) {
+                finishWithError(ErrorCode::InternalError, "Embedding repair failed");
+            }
+        });
+
+        const auto wait_timeout = config_.stream_chunk_timeout;
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lk(ctx_mtx_);
+                auto it = contexts_.find(request_id);
+                if (it != contexts_.end() && it->second->canceled.load(std::memory_order_relaxed)) {
+                    {
+                        std::lock_guard<std::mutex> lk2(state->mu);
+                        state->aborted = true;
+                        state->queued.clear();
+                    }
+                    ErrorResponse err{ErrorCode::OperationCancelled, "Request canceled"};
+                    (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
+                                               /*last_chunk=*/true, /*flush=*/true, fsm);
+                    if (producer.joinable())
+                        producer.detach();
+                    co_return Result<void>();
+                }
+            }
+
+            Response next;
+            bool have_next = false;
+            bool have_final = false;
+            Response final;
+
+            {
+                std::unique_lock<std::mutex> lk(state->mu);
+                auto pred = [&] { return state->aborted || !state->queued.empty() || state->done; };
+                if (!pred()) {
+                    if (wait_timeout.count() > 0) {
+                        (void)state->cv.wait_for(lk, wait_timeout, pred);
+                    } else {
+                        state->cv.wait(lk, pred);
+                    }
+                }
+
+                if (state->aborted) {
+                    have_next = false;
+                    have_final = false;
+                } else if (!state->queued.empty()) {
+                    next = std::move(state->queued.front());
+                    state->queued.pop_front();
+                    have_next = true;
+                } else if (state->done && state->final.has_value()) {
+                    final = std::move(*state->final);
+                    state->final.reset();
+                    have_final = true;
+                }
+            }
+
+            if (have_next) {
+                auto wr = co_await write_chunk(socket, std::move(next), request_id,
+                                               /*last_chunk=*/false, /*flush=*/true, fsm);
+                if (!wr) {
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        state->aborted = true;
+                        state->queued.clear();
+                    }
+                    if (producer.joinable())
+                        producer.detach();
+                    co_return wr.error();
+                }
+                chunk_count++;
+                continue;
+            }
+
+            if (have_final) {
+                auto wr = co_await write_chunk(socket, std::move(final), request_id,
+                                               /*last_chunk=*/true, /*flush=*/true, fsm);
+                if (producer.joinable())
+                    producer.join();
+                if (!wr)
+                    co_return wr.error();
+                chunk_count++;
+                break;
+            }
+
+            if (wait_timeout.count() > 0) {
+                SuccessResponse ok{"keepalive"};
+                auto wr = co_await write_chunk(socket, Response{std::move(ok)}, request_id,
+                                               /*last_chunk=*/false, /*flush=*/true, fsm);
+                if (!wr) {
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        state->aborted = true;
+                        state->queued.clear();
+                    }
+                    if (producer.joinable())
+                        producer.detach();
+                    co_return wr.error();
+                }
+                chunk_count++;
+            }
+        }
+
+        spdlog::debug("Sent {} embed-doc chunks (request_id={})", chunk_count, request_id);
+        last_chunk_received = true;
+    }
+
     if (std::holds_alternative<RepairRequest>(request)) {
         struct RepairStreamState {
             std::mutex mu;
@@ -2050,59 +2346,70 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             co_return Result<void>();
         }
 
+        std::shared_ptr<RequestContext> requestContext;
+        {
+            std::lock_guard<std::mutex> lk(ctx_mtx_);
+            auto it = contexts_.find(request_id);
+            if (it != contexts_.end()) {
+                requestContext = it->second;
+            }
+        }
+
         // Producer runs the synchronous repair logic and pushes events into a queue.
         // We use a separate thread so the streaming loop can write chunks concurrently.
-        std::thread producer([state, rs, req = std::get<RepairRequest>(request), request_id]() {
-            try {
-                auto progress = [state](const RepairEvent& ev) {
-                    if (!state)
-                        return;
+        std::thread producer(
+            [state, rs, req = std::get<RepairRequest>(request), request_id, requestContext]() {
+                try {
+                    auto progress = [state](const RepairEvent& ev) {
+                        if (!state)
+                            return;
+                        {
+                            std::lock_guard<std::mutex> lk(state->mu);
+                            if (state->aborted)
+                                return;
+                            // Bound memory if the client stops consuming; drop oldest.
+                            if (state->queued.size() >= 4096) {
+                                state->queued.pop_front();
+                            }
+                            state->queued.emplace_back(Response{ev});
+                        }
+                        state->cv.notify_one();
+                    };
+
+                    RepairResponse resp = rs->executeRepair(
+                        req, progress, requestContext ? &requestContext->canceled : nullptr);
                     {
                         std::lock_guard<std::mutex> lk(state->mu);
-                        if (state->aborted)
-                            return;
-                        // Bound memory if the client stops consuming; drop oldest.
-                        if (state->queued.size() >= 4096) {
-                            state->queued.pop_front();
+                        if (!state->aborted) {
+                            state->final = Response{std::move(resp)};
+                            state->done = true;
                         }
-                        state->queued.emplace_back(Response{ev});
                     }
                     state->cv.notify_one();
-                };
-
-                RepairResponse resp = rs->executeRepair(req, progress);
-                {
-                    std::lock_guard<std::mutex> lk(state->mu);
-                    if (!state->aborted) {
-                        state->final = Response{std::move(resp)};
-                        state->done = true;
+                } catch (const std::exception& e) {
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        if (!state->aborted) {
+                            ErrorResponse err{ErrorCode::InternalError,
+                                              std::string("Repair failed: ") + e.what()};
+                            state->final = Response{std::move(err)};
+                            state->done = true;
+                        }
                     }
-                }
-                state->cv.notify_one();
-            } catch (const std::exception& e) {
-                {
-                    std::lock_guard<std::mutex> lk(state->mu);
-                    if (!state->aborted) {
-                        ErrorResponse err{ErrorCode::InternalError,
-                                          std::string("Repair failed: ") + e.what()};
-                        state->final = Response{std::move(err)};
-                        state->done = true;
+                    state->cv.notify_one();
+                } catch (...) {
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        if (!state->aborted) {
+                            ErrorResponse err{ErrorCode::InternalError, "Repair failed"};
+                            state->final = Response{std::move(err)};
+                            state->done = true;
+                        }
                     }
+                    state->cv.notify_one();
                 }
-                state->cv.notify_one();
-            } catch (...) {
-                {
-                    std::lock_guard<std::mutex> lk(state->mu);
-                    if (!state->aborted) {
-                        ErrorResponse err{ErrorCode::InternalError, "Repair failed"};
-                        state->final = Response{std::move(err)};
-                        state->done = true;
-                    }
-                }
-                state->cv.notify_one();
-            }
-            (void)request_id;
-        });
+                (void)request_id;
+            });
 
         // Consumer loop: write queued events, then the final response as last chunk.
         const auto wait_timeout = config_.stream_chunk_timeout;

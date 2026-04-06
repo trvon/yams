@@ -972,7 +972,44 @@ MessageResult MCPServer::handleRequest(const json& request) {
 }
 
 boost::asio::awaitable<MessageResult> MCPServer::handleRequestAsync(const json& request) {
-    co_return handleRequest(request);
+    auto id = request.value("id", json{});
+    registerCancelable(id);
+    try {
+        std::string method = request.value("method", "");
+        json params = request.value("params", json::object());
+
+        spdlog::debug("MCP server handling async method: '{}' with id: {}", method, id.dump());
+
+        if (method == "tools/call") {
+            recordEarlyFeatureUse();
+            const auto toolName = params.value("name", "");
+            const auto toolArgs = params.value("arguments", json::object());
+            spdlog::debug("MCP async tool call: '{}' with args: {}", toolName, toolArgs.dump());
+            sendProgress("tool", 0.0, std::string("calling ") + toolName);
+
+            json raw = co_await callToolAsync(toolName, toolArgs);
+            if (raw.is_object() && raw.contains("error")) {
+                json err = raw["error"];
+                sendProgress("tool", 100.0, std::string("completed ") + toolName);
+                co_return json{{"jsonrpc", protocol::JSONRPC_VERSION}, {"error", err}, {"id", id}};
+            }
+
+            sendProgress("tool", 100.0, std::string("completed ") + toolName);
+            co_return createResponse(id, raw);
+        }
+
+        if (auto routed = dispatchCoreMethod(id, method, params); routed.has_value()) {
+            co_return std::move(*routed);
+        }
+
+        co_return json{{"jsonrpc", protocol::JSONRPC_VERSION},
+                       {"error", {{"code", -32601}, {"message", "Method not found: " + method}}},
+                       {"id", id}};
+    } catch (const json::exception& e) {
+        co_return Error{ErrorCode::InvalidArgument, std::string("JSON error: ") + e.what()};
+    } catch (const std::exception& e) {
+        co_return Error{ErrorCode::InternalError, std::string("Internal error: ") + e.what()};
+    }
 }
 
 json MCPServer::listTools() {
@@ -1503,25 +1540,24 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
     }
 
-    // Inject instance tag for session-scoped grep
-    if (req.useSession && !instanceId_.empty()) {
-        dreq.filterTags.push_back("inst:" + instanceId_);
-        dreq.matchAllTags = true;
-    }
-
-    // Session scoping for grep: if no explicit paths, use session patterns
-    if (req.useSession && dreq.paths.empty()) {
+    // Session scoping for grep follows the CLI contract: selectors become include filters,
+    // while useSession only enables the hot path. Existing watched corpus documents do not
+    // necessarily carry MCP instance tags, so avoid narrowing grep by instance here.
+    if (req.useSession) {
         auto sess = app::services::makeSessionService(nullptr);
         auto pats = sess->activeIncludePatterns(req.sessionName.empty()
                                                     ? std::optional<std::string>{}
                                                     : std::optional<std::string>{req.sessionName});
         if (!pats.empty()) {
-            size_t added = 0;
             for (const auto& p : pats) {
-                dreq.paths.push_back(p);
-                if (++added >= 64)
-                    break;
+                dreq.includePatterns.push_back(p);
+                const bool hasWild = p.find_first_of("*?") != std::string::npos;
+                if (!hasWild && !p.empty()) {
+                    dreq.includePatterns.push_back(p + "/**");
+                    dreq.includePatterns.push_back(p + "/**/*");
+                }
             }
+            dreq.recursive = true;
         }
     }
 
@@ -2310,11 +2346,17 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             (void)req;
             co_return Error{ErrorCode::NotSupported, "add is not supported on WASI build"};
 #else
+    if (!req.inputError.empty()) {
+        co_return Error{ErrorCode::InvalidArgument, req.inputError};
+    }
+
     // Fast path: reject completely empty inputs before contacting the daemon
     if ((req.path.empty() || req.path == "") && (req.name.empty() || req.name == "") &&
         (req.content.empty() || req.content == "")) {
         co_return Error{ErrorCode::InvalidArgument,
-                        "No content or path provided. Set 'path' to a file or provide 'content'."};
+                        "Provide 'path' (a single file or directory) or inline 'content' with "
+                        "'name'. For code-mode execute/add, use one add operation per path "
+                        "instead of a 'paths' array."};
     }
 
     if (auto ensure = ensureDaemonClient(); !ensure) {
@@ -2496,11 +2538,13 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     if (aopts.path.empty()) {
         if (aopts.content.empty()) {
             co_return Error{ErrorCode::InvalidArgument,
-                            "Provide either 'path' or 'content' + 'name'"};
+                            "Provide 'path' (a single file or directory) or inline 'content' + "
+                            "'name'. For code-mode execute/add, use one add operation per path "
+                            "instead of a 'paths' array."};
         }
         if (aopts.name.empty()) {
             co_return Error{ErrorCode::InvalidArgument,
-                            "Provide 'name' when sending inline 'content'"};
+                            "Provide 'name' when sending inline 'content' to add."};
         }
     }
 
@@ -4299,7 +4343,9 @@ void MCPServer::initializeToolRegistry() {
         "add", [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },
         json{{"type", "object"},
              {"properties",
-              {{"path", {{"type", "string"}, {"description", "File or directory path"}}},
+              {{"path",
+                {{"type", "string"},
+                 {"description", "Single file or directory path for this add call"}}},
                {"content", {{"type", "string"}, {"description", "Inline document content"}}},
                {"name", {{"type", "string"}, {"description", "Document name (for stdin/content)"}}},
                {"mime_type", {{"type", "string"}, {"description", "MIME type override"}}},
@@ -4329,8 +4375,9 @@ void MCPServer::initializeToolRegistry() {
                  {"items", {{"type", "string"}}},
                  {"description", "Document tags"}}},
                {"metadata", {{"type", "object"}, {"description", "Metadata key/value pairs"}}}}}},
-        "Store documents (or directories) with deduplication; mirrors CLI add", "Add Documents",
-        addAnnotation);
+        "Store one file or directory per call with deduplication; for multiple files use "
+        "repeated add calls or a recursive directory path; mirrors CLI add",
+        "Add Documents", addAnnotation);
 
     toolRegistry_->registerTool<MCPRetrieveDocumentRequest, MCPRetrieveDocumentResponse>(
         "get",

@@ -13,9 +13,9 @@
 #include <set>
 #include <thread>
 
+#include "../../common/test_helpers_catch2.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
-#include "../../common/test_helpers_catch2.h"
 #include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -851,7 +851,7 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
 
     const auto* daemon = harness.daemon();
     REQUIRE(daemon != nullptr);
-    auto* serviceManager = daemon->getServiceManager();
+    auto* serviceManager = const_cast<yams::daemon::ServiceManager*>(daemon->getServiceManager());
     REQUIRE(serviceManager != nullptr);
 
     ModelStatusRequest statusReq;
@@ -1110,7 +1110,7 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
 
     const auto* daemon = harness.daemon();
     REQUIRE(daemon != nullptr);
-    const auto* serviceManager = daemon->getServiceManager();
+    auto* serviceManager = daemon->getServiceManager();
     REQUIRE(serviceManager != nullptr);
     auto metadataRepo = serviceManager->getMetadataRepo();
     REQUIRE(metadataRepo != nullptr);
@@ -1595,7 +1595,7 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
 
     const auto* daemon = harness.daemon();
     REQUIRE(daemon != nullptr);
-    const auto* serviceManager = daemon->getServiceManager();
+    auto* serviceManager = daemon->getServiceManager();
     REQUIRE(serviceManager != nullptr);
 
     auto appContext = serviceManager->getAppContext();
@@ -1742,7 +1742,7 @@ TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][
 
     const auto* daemon = harness.daemon();
     REQUIRE(daemon != nullptr);
-    const auto* serviceManager = daemon->getServiceManager();
+    auto* serviceManager = const_cast<yams::daemon::ServiceManager*>(daemon->getServiceManager());
     REQUIRE(serviceManager != nullptr);
 
     std::shared_ptr<yams::daemon::RepairService> repairService;
@@ -1754,6 +1754,24 @@ TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][
         std::this_thread::sleep_for(100ms);
     }
     REQUIRE(repairService != nullptr);
+
+    auto injectedProvider = std::make_shared<StubModelProvider>();
+    REQUIRE(injectedProvider != nullptr);
+    serviceManager->__test_setModelProvider(injectedProvider);
+    REQUIRE(injectedProvider->loadModel("repair-embed-model").has_value());
+
+    EmbedDocumentsRequest embedReq;
+    embedReq.documentHashes = {std::string(64, 'a')};
+    embedReq.modelName = "repair-embed-model";
+    embedReq.normalize = true;
+    embedReq.batchSize = 8;
+    embedReq.skipExisting = false;
+
+    auto embedResult = yams::cli::run_sync(client.call(embedReq), 10s);
+    REQUIRE_FALSE(embedResult.has_value());
+    CHECK(embedResult.error().message.find(
+              "No requested documents were found in the daemon metadata repository") !=
+          std::string::npos);
 
     RepairRequest repairReq;
     repairReq.repairOrphans = true;

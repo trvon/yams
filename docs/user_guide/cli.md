@@ -90,7 +90,7 @@ Options:
 - --non-interactive
   - Run without prompts, using defaults and passed flags.
 - --auto
-  - Auto-initialize with all defaults for containerized/headless environments (enables vector DB, plugins, default model; skips S3).
+  - Run setup with defaults for headless environments.
 - --force
   - Overwrite existing config/keys if already initialized.
 - --no-keygen
@@ -103,16 +103,16 @@ Options:
 Notes:
 - The storage directory can be set globally via --storage/--data-dir or YAMS_STORAGE.
 - On first run, initialization will create the storage directory, database, and configuration.
-- Interactive mode prompts for tree-sitter grammar downloads for symbol extraction.
+- Interactive mode prompts for optional model, grammar, and agent-skill setup.
 - Init also bootstraps a per-project session (scoping + watch).
 - Use `yams watch` to enable auto-ingest for existing projects.
 
 Examples:
 ```bash
-# Interactive initialization (prompts for grammar downloads)
+# Interactive initialization
 yams init
 
-# Auto mode for containers/headless (downloads recommended grammars)
+# Auto mode for headless environments
 yams init --auto
 
 # Non-interactive with explicit storage

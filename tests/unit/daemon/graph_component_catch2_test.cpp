@@ -7,6 +7,7 @@
 
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/kg_topology_analysis.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
@@ -88,6 +89,286 @@ TEST_CASE("GraphComponent: Initialize without dependencies", "[daemon][graph][li
     auto initResult = component.initialize();
     REQUIRE_FALSE(initResult.has_value());
     REQUIRE_FALSE(component.isReady());
+}
+
+TEST_CASE("GraphComponent: validateGraph reports fragmented semantic topology",
+          "[daemon][graph][validate]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    std::vector<KGNode> nodes = {
+        KGNode{
+            .nodeKey = "blob:hash-a", .label = std::string("hash-a"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-a",
+               .label = std::string("/tmp/a.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-b", .label = std::string("hash-b"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-b",
+               .label = std::string("/tmp/b.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-c", .label = std::string("hash-c"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-c",
+               .label = std::string("/tmp/c.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-d", .label = std::string("hash-d"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-d",
+               .label = std::string("/tmp/d.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-e", .label = std::string("hash-e"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-e",
+               .label = std::string("/tmp/e.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-f", .label = std::string("hash-f"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-f",
+               .label = std::string("/tmp/f.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-g", .label = std::string("hash-g"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-g",
+               .label = std::string("/tmp/g.txt"),
+               .type = std::string("document")},
+        KGNode{
+            .nodeKey = "blob:hash-h", .label = std::string("hash-h"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:hash-h",
+               .label = std::string("/tmp/h.txt"),
+               .type = std::string("document")},
+    };
+    auto ids = fixture.kgStore->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    for (std::size_t i = 0; i < ids.value().size(); i += 2) {
+        KGEdge hasBlob{.srcNodeId = ids.value()[i + 1],
+                       .dstNodeId = ids.value()[i],
+                       .relation = "has_blob",
+                       .weight = 1.0f};
+        REQUIRE(fixture.kgStore->addEdge(hasBlob).has_value());
+    }
+
+    auto report = component.validateGraph();
+    REQUIRE(report.has_value());
+    CHECK(report.value().topologyDocumentNodes == 8);
+    CHECK(report.value().topologyDocumentsWithNeighbors == 0);
+    CHECK(report.value().topologyConnectedComponents == 8);
+    CHECK(report.value().topologyLargestComponent == 1);
+    CHECK_FALSE(report.value().issues.empty());
+    CHECK(std::find(report.value().issues.begin(), report.value().issues.end(),
+                    "semantic topology has zero connected document neighborhoods") !=
+          report.value().issues.end());
+}
+
+TEST_CASE("GraphComponent: validateGraph recognizes semantic neighborhood coverage",
+          "[daemon][graph][validate]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    std::vector<KGNode> nodes = {
+        KGNode{.nodeKey = "blob:x", .label = std::string("x"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:x",
+               .label = std::string("/tmp/x.txt"),
+               .type = std::string("document")},
+        KGNode{.nodeKey = "blob:y", .label = std::string("y"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:y",
+               .label = std::string("/tmp/y.txt"),
+               .type = std::string("document")},
+    };
+    auto ids = fixture.kgStore->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    REQUIRE(fixture.kgStore
+                ->addEdgesUnique({KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[0],
+                                         .relation = "has_blob",
+                                         .weight = 1.0f},
+                                  KGEdge{.srcNodeId = ids.value()[3],
+                                         .dstNodeId = ids.value()[2],
+                                         .relation = "has_blob",
+                                         .weight = 1.0f},
+                                  KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[3],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.95f},
+                                  KGEdge{.srcNodeId = ids.value()[3],
+                                         .dstNodeId = ids.value()[1],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.95f}})
+                .has_value());
+
+    auto report = component.validateGraph();
+    REQUIRE(report.has_value());
+    CHECK(report.value().topologyDocumentNodes == 2);
+    CHECK(report.value().topologySemanticEdges == 1);
+    CHECK(report.value().topologyReciprocalSemanticEdges == 1);
+    CHECK(report.value().topologyUnreciprocatedSemanticEdges == 0);
+    CHECK(report.value().topologyDocumentsWithNeighbors == 2);
+    CHECK(report.value().topologyDocumentsWithReciprocalNeighbors == 2);
+    CHECK(report.value().topologyReciprocalCommunityCount == 1);
+    CHECK(report.value().topologyLargestReciprocalCommunity == 2);
+    CHECK(report.value().topologyConnectedComponents == 1);
+    CHECK(report.value().topologyLargestComponent == 2);
+    CHECK(std::find(report.value().issues.begin(), report.value().issues.end(),
+                    "semantic topology has zero connected document neighborhoods") ==
+          report.value().issues.end());
+}
+
+TEST_CASE("GraphComponent: validateGraph flags one-way semantic neighborhoods",
+          "[daemon][graph][validate]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    std::vector<KGNode> nodes = {
+        KGNode{.nodeKey = "blob:a", .label = std::string("a"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:a",
+               .label = std::string("/tmp/a.txt"),
+               .type = std::string("document")},
+        KGNode{.nodeKey = "blob:b", .label = std::string("b"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:b",
+               .label = std::string("/tmp/b.txt"),
+               .type = std::string("document")},
+        KGNode{.nodeKey = "blob:c", .label = std::string("c"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:c",
+               .label = std::string("/tmp/c.txt"),
+               .type = std::string("document")},
+        KGNode{.nodeKey = "blob:d", .label = std::string("d"), .type = std::string("blob")},
+        KGNode{.nodeKey = "doc:d",
+               .label = std::string("/tmp/d.txt"),
+               .type = std::string("document")},
+    };
+    auto ids = fixture.kgStore->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    REQUIRE(fixture.kgStore
+                ->addEdgesUnique({KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[0],
+                                         .relation = "has_blob",
+                                         .weight = 1.0f},
+                                  KGEdge{.srcNodeId = ids.value()[3],
+                                         .dstNodeId = ids.value()[2],
+                                         .relation = "has_blob",
+                                         .weight = 1.0f},
+                                  KGEdge{.srcNodeId = ids.value()[5],
+                                         .dstNodeId = ids.value()[4],
+                                         .relation = "has_blob",
+                                         .weight = 1.0f},
+                                  KGEdge{.srcNodeId = ids.value()[7],
+                                         .dstNodeId = ids.value()[6],
+                                         .relation = "has_blob",
+                                         .weight = 1.0f},
+                                  KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[3],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.95f},
+                                  KGEdge{.srcNodeId = ids.value()[3],
+                                         .dstNodeId = ids.value()[5],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.94f},
+                                  KGEdge{.srcNodeId = ids.value()[5],
+                                         .dstNodeId = ids.value()[7],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.93f}})
+                .has_value());
+
+    auto report = component.validateGraph();
+    REQUIRE(report.has_value());
+    CHECK(report.value().topologyDocumentNodes == 4);
+    CHECK(report.value().topologySemanticEdges == 3);
+    CHECK(report.value().topologyReciprocalSemanticEdges == 0);
+    CHECK(report.value().topologyUnreciprocatedSemanticEdges == 3);
+    CHECK(report.value().topologyDocumentsWithNeighbors == 4);
+    CHECK(report.value().topologyDocumentsWithReciprocalNeighbors == 0);
+    CHECK(report.value().topologyReciprocalCommunityCount == 0);
+    CHECK(report.value().topologyLargestReciprocalCommunity == 0);
+    CHECK(report.value().topologyConnectedComponents == 1);
+    CHECK(report.value().topologyLargestComponent == 4);
+    CHECK(std::find(report.value().issues.begin(), report.value().issues.end(),
+                    "semantic topology has no reciprocal document neighborhoods") !=
+          report.value().issues.end());
+}
+
+TEST_CASE("GraphComponent: maintainSemanticTopology prunes one-way semantic edges",
+          "[daemon][graph][repair]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    std::vector<KGNode> nodes = {
+        KGNode{.nodeKey = "doc:a", .label = std::string("a"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:b", .label = std::string("b"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:c", .label = std::string("c"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:d", .label = std::string("d"), .type = std::string("document")},
+    };
+    auto ids = fixture.kgStore->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    REQUIRE(fixture.kgStore
+                ->addEdgesUnique({KGEdge{.srcNodeId = ids.value()[0],
+                                         .dstNodeId = ids.value()[1],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.95f},
+                                  KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[2],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.94f},
+                                  KGEdge{.srcNodeId = ids.value()[2],
+                                         .dstNodeId = ids.value()[3],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.93f}})
+                .has_value());
+
+    auto maintenance = component.maintainSemanticTopology(false);
+    REQUIRE(maintenance.has_value());
+    CHECK(maintenance.value().semanticEdgesPruned == 3);
+    CHECK(maintenance.value().reciprocalCommunities == 0);
+    CHECK(maintenance.value().largestReciprocalCommunity == 0);
+
+    auto topology = analyzeDocumentTopology(fixture.kgStore.get());
+    REQUIRE(topology.has_value());
+    CHECK(topology->semanticEdgeCount == 0);
+    CHECK(topology->reciprocalCommunityCount == 0);
+}
+
+TEST_CASE("GraphComponent: maintainSemanticTopology keeps reciprocal communities intact",
+          "[daemon][graph][repair]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    std::vector<KGNode> nodes = {
+        KGNode{.nodeKey = "doc:a", .label = std::string("a"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:b", .label = std::string("b"), .type = std::string("document")},
+    };
+    auto ids = fixture.kgStore->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    REQUIRE(fixture.kgStore
+                ->addEdgesUnique({KGEdge{.srcNodeId = ids.value()[0],
+                                         .dstNodeId = ids.value()[1],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.97f},
+                                  KGEdge{.srcNodeId = ids.value()[1],
+                                         .dstNodeId = ids.value()[0],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 0.97f}})
+                .has_value());
+
+    auto maintenance = component.maintainSemanticTopology(false);
+    REQUIRE(maintenance.has_value());
+    CHECK(maintenance.value().semanticEdgesPruned == 0);
+    CHECK(maintenance.value().skipped);
+    CHECK(maintenance.value().reciprocalCommunities == 1);
+    CHECK(maintenance.value().largestReciprocalCommunity == 2);
+
+    auto topology = analyzeDocumentTopology(fixture.kgStore.get());
+    REQUIRE(topology.has_value());
+    CHECK(topology->semanticEdgeCount == 1);
+    CHECK(topology->reciprocalCommunityCount == 1);
 }
 
 TEST_CASE("GraphComponent: Get query service after init", "[daemon][graph][lifecycle]") {

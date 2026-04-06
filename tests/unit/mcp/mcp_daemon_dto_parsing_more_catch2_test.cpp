@@ -225,6 +225,71 @@ TEST_CASE("MCP DTO parsing - AddDirectoryResponse results only when array",
     }
 }
 
+TEST_CASE("MCP DTO parsing - StoreDocumentRequest normalizes direct add aliases",
+          "[mcp][dto][add][store]") {
+    using yams::mcp::MCPStoreDocumentRequest;
+
+    {
+        const auto r = MCPStoreDocumentRequest::fromJson(
+            json{{"paths", json::array({"/tmp/one.md"})},
+                 {"include_patterns", json::array({"*.md", "docs/**"})},
+                 {"exclude_patterns", "node_modules/**"},
+                 {"mimeType", "text/markdown"},
+                 {"snapshotId", "sid"},
+                 {"snapshotLabel", "lab"},
+                 {"disableAutoMime", true},
+                 {"noEmbeddings", true}});
+        CHECK(r.inputError.empty());
+        CHECK(r.path == "/tmp/one.md");
+        CHECK(r.mimeType == "text/markdown");
+        CHECK(r.snapshotId == "sid");
+        CHECK(r.snapshotLabel == "lab");
+        CHECK(r.disableAutoMime == true);
+        CHECK(r.noEmbeddings == true);
+        CHECK(r.includePatterns == std::vector<std::string>{"*.md", "docs/**"});
+        CHECK(r.excludePatterns == std::vector<std::string>{"node_modules/**"});
+    }
+
+    {
+        const auto r =
+            MCPStoreDocumentRequest::fromJson(json{{"directory_path", "/tmp/project-docs"}});
+        CHECK(r.inputError.empty());
+        CHECK(r.path == "/tmp/project-docs");
+        CHECK(r.recursive == true);
+    }
+
+    {
+        const auto r =
+            MCPStoreDocumentRequest::fromJson(json{{"directoryPath", "/tmp/project-docs"}});
+        CHECK(r.inputError.empty());
+        CHECK(r.path == "/tmp/project-docs");
+        CHECK(r.recursive == true);
+    }
+
+    {
+        const auto r = MCPStoreDocumentRequest::fromJson(
+            json{{"paths", json::array({"/tmp/one.md", "/tmp/two.md"})}});
+        CHECK(r.path.empty());
+        CHECK(r.inputError.find("one 'path' per call") != std::string::npos);
+    }
+
+    {
+        const auto r =
+            MCPStoreDocumentRequest::fromJson(json{{"path", json::array({"/tmp/not-valid.md"})}});
+        CHECK(r.inputError.find("expects 'path' to be a string") != std::string::npos);
+    }
+
+    {
+        const auto r = MCPStoreDocumentRequest::fromJson(json{{"url", "https://example.com/a"}});
+        CHECK(r.inputError.find("use 'download'") != std::string::npos);
+    }
+
+    {
+        const auto r = MCPStoreDocumentRequest::fromJson(json{{"content", "hello"}});
+        CHECK(r.inputError.find("requires 'name'") != std::string::npos);
+    }
+}
+
 TEST_CASE("MCP DTO parsing - UpdateMetadataResponse updated_hashes parsing and omission",
           "[mcp][dto][update][catch2]") {
     using yams::mcp::MCPUpdateMetadataResponse;

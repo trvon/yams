@@ -211,6 +211,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
 
         response.queryInfo = serviceResp.queryInfo;
         response.searchStats.insert(serviceResp.searchStats.begin(), serviceResp.searchStats.end());
+        for (const auto& [name, micros] : serviceResp.componentTimingMicros) {
+            response.searchStats[std::string("timing_") + name + "_us"] = std::to_string(micros);
+        }
         response.searchStats["phase_dispatch_service_ms"] = std::to_string(serviceMs);
         response.searchStats["phase_dispatch_service_us"] = std::to_string(serviceUs);
         response.searchStats["phase_dispatch_map_sort_ms"] = std::to_string(mapSortMs);

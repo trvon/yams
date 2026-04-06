@@ -1406,7 +1406,7 @@ struct PingRequest {
 
 struct GenerateEmbeddingRequest {
     std::string text;
-    std::string modelName = "all-MiniLM-L6-v2";
+    std::string modelName;
     bool normalize = true;
 
     template <typename Serializer>
@@ -1441,7 +1441,7 @@ struct GenerateEmbeddingRequest {
 
 struct BatchEmbeddingRequest {
     std::vector<std::string> texts;
-    std::string modelName = "all-MiniLM-L6-v2";
+    std::string modelName;
     bool normalize = true;
     size_t batchSize = 32;
 
@@ -1482,7 +1482,7 @@ struct BatchEmbeddingRequest {
 
 struct EmbedDocumentsRequest {
     std::vector<std::string> documentHashes;
-    std::string modelName = "all-MiniLM-L6-v2";
+    std::string modelName;
     bool normalize = true;
     size_t batchSize = 32;
     bool skipExisting = true;
@@ -4054,6 +4054,9 @@ struct StatusResponse {
     std::string lastError;      // last lifecycle error if any (empty when none)
 
     // Content store diagnostics
+    std::string dataDir;           // absolute daemon-resolved active data dir
+    std::string metadataDbPath;    // absolute live metadata DB file path
+    std::string vectorDbPath;      // absolute live vector DB file path
     std::string contentStoreRoot;  // absolute path to storage root (daemon-resolved)
     std::string contentStoreError; // last initialization error (if any)
 
@@ -4291,8 +4294,8 @@ struct StatusResponse {
         for (const auto& s : skippedPlugins)
             s.serialize(ser);
 
-        // Serialize content store diagnostics (as strings)
-        ser << contentStoreRoot << contentStoreError;
+        // Serialize content store and database diagnostics (as strings)
+        ser << dataDir << metadataDbPath << vectorDbPath << contentStoreRoot << contentStoreError;
 
         // Serialize embedding runtime details
         ser << embeddingAvailable << embeddingBackend << embeddingModel << embeddingModelPath
@@ -4551,7 +4554,19 @@ struct StatusResponse {
             res.skippedPlugins.push_back(std::move(s.value()));
         }
 
-        // Deserialize content store diagnostics
+        // Deserialize content store and database diagnostics
+        auto rdd = deser.readString();
+        if (!rdd)
+            return rdd.error();
+        res.dataDir = std::move(rdd.value());
+        auto mdp = deser.readString();
+        if (!mdp)
+            return mdp.error();
+        res.metadataDbPath = std::move(mdp.value());
+        auto vdp = deser.readString();
+        if (!vdp)
+            return vdp.error();
+        res.vectorDbPath = std::move(vdp.value());
         auto csr = deser.readString();
         if (!csr)
             return csr.error();

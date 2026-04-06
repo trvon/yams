@@ -129,13 +129,49 @@ std::string shellQuote(const std::string& value) {
 
 std::optional<fs::path> findYamsBinary() {
     if (const char* buildRoot = std::getenv("MESON_BUILD_ROOT")) {
+        const fs::path root(buildRoot);
 #ifdef _WIN32
-        fs::path candidate = fs::path(buildRoot) / "src/cli/yams.exe";
+        const std::array<fs::path, 4> candidates = {
+            root / "tools/yams-cli/yams.exe",
+            root / "tools/yams-cli/yams-cli.exe",
+            root / "src/cli/yams.exe",
+            root / "src/cli/yams-cli.exe",
+        };
 #else
-        fs::path candidate = fs::path(buildRoot) / "src/cli/yams";
+        const std::array<fs::path, 4> candidates = {
+            root / "tools/yams-cli/yams",
+            root / "tools/yams-cli/yams-cli",
+            root / "src/cli/yams",
+            root / "src/cli/yams-cli",
+        };
 #endif
-        if (fs::exists(candidate)) {
-            return candidate;
+        for (const auto& candidate : candidates) {
+            if (fs::exists(candidate)) {
+                return candidate;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<fs::path> findYamsDaemonBinary() {
+    if (const char* buildRoot = std::getenv("MESON_BUILD_ROOT")) {
+        const fs::path root(buildRoot);
+#ifdef _WIN32
+        const std::array<fs::path, 2> candidates = {
+            root / "src/daemon/yams-daemon.exe",
+            root / "daemon/yams-daemon.exe",
+        };
+#else
+        const std::array<fs::path, 2> candidates = {
+            root / "src/daemon/yams-daemon",
+            root / "daemon/yams-daemon",
+        };
+#endif
+        for (const auto& candidate : candidates) {
+            if (fs::exists(candidate)) {
+                return candidate;
+            }
         }
     }
     return std::nullopt;
@@ -217,35 +253,58 @@ void cleanupChild(pid_t pid) {
 
 TEST(DaemonCliStartStatusRegression, StatusWorksAfterListBecomesResponsive) {
     auto yamsBinary = findYamsBinary();
+    auto daemonBinary = findYamsDaemonBinary();
     if (!yamsBinary.has_value()) {
         GTEST_SKIP() << "Skipping: build yams binary not found via MESON_BUILD_ROOT";
+    }
+    if (!daemonBinary.has_value()) {
+        GTEST_SKIP() << "Skipping: build yams-daemon binary not found via MESON_BUILD_ROOT";
     }
 
     const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     const fs::path root = fs::temp_directory_path() / ("yams_cli_status_regression_" + unique);
     const fs::path dataDir = root / "data";
     const fs::path runtimeDir = root / "runtime";
-    const fs::path configPath = root / "config.toml";
+    const fs::path socketPath = runtimeDir / "yams-daemon.sock";
+    const fs::path pidFile = runtimeDir / "yams-daemon.pid";
+#ifndef _WIN32
+    const fs::path binDir = root / "bin";
+#endif
 
     fs::create_directories(dataDir);
     fs::create_directories(runtimeDir);
-    {
-        std::ofstream cfg(configPath);
-        cfg << "[storage]\n";
-        cfg << "path = \"" << dataDir.string() << "\"\n";
-    }
+#ifndef _WIN32
+    fs::create_directories(binDir);
+#endif
 
-    ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
     ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
     ScopedEnvVar runtimeEnv("XDG_RUNTIME_DIR", runtimeDir.string());
     ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "0");
+    ScopedEnvVar daemonBinEnv("YAMS_DAEMON_BIN", daemonBinary->string());
+#ifndef _WIN32
+    fs::path psBinary;
+    for (const auto& candidate : {fs::path("/bin/ps"), fs::path("/usr/bin/ps")}) {
+        if (fs::exists(candidate)) {
+            psBinary = candidate;
+            break;
+        }
+    }
+    if (psBinary.empty()) {
+        GTEST_SKIP() << "Skipping: ps binary not found";
+    }
+    std::error_code symlinkEc;
+    fs::create_symlink(psBinary, binDir / "ps", symlinkEc);
+    ASSERT_FALSE(symlinkEc) << "failed to create ps symlink: " << symlinkEc.message();
+#endif
 
     const std::string yams = shellQuote(yamsBinary->string());
+    const std::string socketArg = " --socket " + shellQuote(socketPath.string());
+    const std::string pidArg = " --pid-file " + shellQuote(pidFile.string());
 
-    auto stopRes = runCommandCapture(yams + " daemon stop --force");
+    auto stopRes = runCommandCapture(yams + " daemon stop --force" + socketArg + pidArg);
     (void)stopRes;
 
-    auto startRes = runCommandCapture(yams + " daemon start");
+    auto startRes = runCommandCapture(yams + " daemon start" + socketArg + pidArg);
     ASSERT_EQ(startRes.exitCode, 0) << "daemon start failed:\n" << startRes.output;
 
     bool listSucceeded = false;
@@ -261,15 +320,21 @@ TEST(DaemonCliStartStatusRegression, StatusWorksAfterListBecomesResponsive) {
     ASSERT_TRUE(listSucceeded) << "list never became responsive after daemon start. Last output:\n"
                                << lastList.output;
 
-    auto statusRes = runCommandCapture(yams + " daemon status -d");
+#ifndef _WIN32
+    ScopedEnvVar pathEnv("PATH", binDir.string());
+#endif
+    auto statusRes = runCommandCapture(yams + " daemon status -d" + socketArg + pidArg);
     EXPECT_EQ(statusRes.exitCode, 0) << "daemon status -d failed after list succeeded:\n"
                                      << statusRes.output;
     EXPECT_EQ(statusRes.output.find("YAMS daemon status unavailable (IPC error)"),
               std::string::npos)
         << "status command reported IPC unavailable after daemon was already serving list:\n"
         << statusRes.output;
+    EXPECT_EQ(statusRes.output.find("pgrep: not found"), std::string::npos)
+        << "status command still depends on pgrep:\n"
+        << statusRes.output;
 
-    auto finalStop = runCommandCapture(yams + " daemon stop --force");
+    auto finalStop = runCommandCapture(yams + " daemon stop --force" + socketArg + pidArg);
     (void)finalStop;
 
     std::error_code ec;

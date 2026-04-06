@@ -56,6 +56,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/plugin_trust.h>
+#include <yams/search/internal_benchmark.h>
 
 #include <algorithm>
 #include <cctype>
@@ -502,6 +503,8 @@ struct TestQuery {
     bool useDocIds = false;
 };
 
+enum class SyntheticCorpusMode { Generic, CommunityGraph };
+
 struct CorpusGenerator {
     std::vector<std::string> topics = {"authentication", "database", "network", "parsing",
                                        "encryption",     "testing",  "logging", "storage"};
@@ -511,12 +514,36 @@ struct CorpusGenerator {
     fs::path corpusDir;
     std::vector<std::string> createdFiles;
     std::mt19937 rng{42};
+    SyntheticCorpusMode mode = SyntheticCorpusMode::Generic;
 
-    CorpusGenerator(const fs::path& dir) : corpusDir(dir) {
+    CorpusGenerator(const fs::path& dir,
+                    SyntheticCorpusMode corpusMode = SyntheticCorpusMode::Generic)
+        : corpusDir(dir), mode(corpusMode) {
         yams::common::ensureDirectories(corpusDir);
     }
 
     void generateDocuments(int count) {
+        if (mode == SyntheticCorpusMode::CommunityGraph) {
+            createdFiles.clear();
+
+            struct CommunityDocSpec {
+                const char* filename;
+                const char* content;
+            };
+
+            static constexpr CommunityDocSpec kCommunityDocs[] = {
+                {"community_target.txt", "Target note\n\nalpha rival target evidence\n"},
+                {"community_partner.txt", "Partner note\n\nalpha companion evidence\n"},
+                {"community_rival.txt", "Rival alpha note\n\nalpha rival alpha rival evidence\n"},
+            };
+
+            for (const auto& doc : kCommunityDocs) {
+                std::ofstream(corpusDir / doc.filename) << doc.content;
+                createdFiles.push_back(doc.filename);
+            }
+            return;
+        }
+
         std::uniform_int_distribution<int> topicDist(0, static_cast<int>(topics.size()) - 1);
         std::uniform_int_distribution<int> termDist(0, static_cast<int>(terms.size()) - 1);
         for (int i = 0; i < count; ++i) {
@@ -533,6 +560,20 @@ struct CorpusGenerator {
     }
 
     std::vector<TestQuery> generateQueries(int numQueries) {
+        if (mode == SyntheticCorpusMode::CommunityGraph) {
+            std::vector<TestQuery> queries;
+            const int repeatedQueries = std::max(1, numQueries);
+            for (int i = 0; i < repeatedQueries; ++i) {
+                TestQuery tq;
+                tq.query = "alpha rival";
+                tq.useDocIds = true;
+                tq.relevantDocIds.insert("community_target");
+                tq.relevanceGrades["community_target"] = 3;
+                queries.push_back(std::move(tq));
+            }
+            return queries;
+        }
+
         std::vector<TestQuery> queries;
         std::uniform_int_distribution<int> topicDist(0, static_cast<int>(topics.size()) - 1);
         for (int q = 0; q < numQueries; ++q) {
@@ -655,6 +696,12 @@ struct QueryDiagnosticsSummary {
     std::vector<double> strongVectorOnlyRankEligibleDocsSamples;
     std::vector<double> graphAddedPostFusionSamples;
     std::vector<double> graphDisplacedPostFusionSamples;
+    std::vector<double> graphCommunitySupportedDocsSamples;
+    std::vector<double> graphCommunityEdgeCountSamples;
+    std::vector<double> graphCommunityLargestSizeSamples;
+    std::vector<double> graphCommunitySignalMassSamples;
+    std::vector<double> graphCommunityBoostedDocsSamples;
+    std::vector<double> graphCommunityWeightSamples;
     std::vector<double> multiVectorGeneratedPhraseSamples;
     std::vector<double> multiVectorRawHitSamples;
     std::vector<double> multiVectorAddedNewSamples;
@@ -676,6 +723,7 @@ struct QueryDiagnosticsSummary {
     std::unordered_map<std::string, std::vector<double>> fusionSourceFinalDocSamples;
     std::unordered_map<std::string, std::vector<double>> tunerSignalSamples;
     std::unordered_map<std::string, std::uint64_t> tunerDecisionCounts;
+    std::unordered_map<std::string, std::uint64_t> zoomLevelCounts;
 };
 
 static const std::vector<std::string>& trackedTimingKeys() {
@@ -1127,6 +1175,10 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     if (parseBoolStat(searchStats, "trace_graph_rerank_applied").value_or(false)) {
         summary.graphRerankAppliedQueryCount++;
     }
+    if (auto it = searchStats.find("trace_zoom_level");
+        it != searchStats.end() && !it->second.empty()) {
+        summary.zoomLevelCounts[it->second]++;
+    }
     bool compressedAnnEnabled =
         parseBoolStat(searchStats, "compressed_ann_enabled").value_or(false);
     bool compressedAnnApplied =
@@ -1310,6 +1362,25 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         }
     }
 
+    if (auto v = parseDoubleStat(searchStats, "graph_community_supported_docs")) {
+        summary.graphCommunitySupportedDocsSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_edge_count")) {
+        summary.graphCommunityEdgeCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_largest_size")) {
+        summary.graphCommunityLargestSizeSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_signal_mass")) {
+        summary.graphCommunitySignalMassSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_boosted_docs")) {
+        summary.graphCommunityBoostedDocsSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "graph_community_weight")) {
+        summary.graphCommunityWeightSamples.push_back(*v);
+    }
+
     if (auto stageSummary = searchStats.find("trace_stage_summary_json");
         stageSummary != searchStats.end()) {
         try {
@@ -1490,6 +1561,15 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"graph_added_post_fusion_count", summarizeSamples(summary.graphAddedPostFusionSamples)},
         {"graph_displaced_post_fusion_count",
          summarizeSamples(summary.graphDisplacedPostFusionSamples)},
+        {"graph_community_supported_docs",
+         summarizeSamples(summary.graphCommunitySupportedDocsSamples)},
+        {"graph_community_edge_count", summarizeSamples(summary.graphCommunityEdgeCountSamples)},
+        {"graph_community_largest_size",
+         summarizeSamples(summary.graphCommunityLargestSizeSamples)},
+        {"graph_community_signal_mass", summarizeSamples(summary.graphCommunitySignalMassSamples)},
+        {"graph_community_boosted_docs",
+         summarizeSamples(summary.graphCommunityBoostedDocsSamples)},
+        {"graph_community_weight", summarizeSamples(summary.graphCommunityWeightSamples)},
         {"multi_vector_generated_phrases",
          summarizeSamples(summary.multiVectorGeneratedPhraseSamples)},
         {"multi_vector_raw_hit_count", summarizeSamples(summary.multiVectorRawHitSamples)},
@@ -1564,6 +1644,7 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
     }
     out["tuner_signals"] = tunerSignals;
     out["tuner_decisions"] = summary.tunerDecisionCounts;
+    out["zoom_level_counts"] = summary.zoomLevelCounts;
 
     return out;
 }
@@ -2178,6 +2259,33 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
              {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
              {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+         }},
+        {"mixed_precision_zoom_map",
+         "MIXED_PRECISION with map-level navigation bias",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ZOOM_LEVEL", "MAP"},
+         }},
+        {"mixed_precision_zoom_neighborhood",
+         "MIXED_PRECISION with neighborhood navigation bias",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ZOOM_LEVEL", "NEIGHBORHOOD"},
+         }},
+        {"mixed_precision_zoom_street",
+         "MIXED_PRECISION with street-level precision bias",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ZOOM_LEVEL", "STREET"},
          }},
         {"diag_turboquant_off_mixed_precision",
          "MIXED_PRECISION baseline with TurboQuant rerank forced off",
@@ -3458,6 +3566,19 @@ static double computeLatencyPenalty(double avgHybridQueryMs) {
     return std::clamp(std::max(0.0, avgHybridQueryMs) / 25000.0, 0.0, 0.25);
 }
 
+static double computePrecisionFailurePenalty(const QueryDiagnosticsSummary& summary) {
+    const double queryCount = static_cast<double>(std::max<std::uint64_t>(summary.queryCount, 1));
+    const double noRelevantHitRate =
+        static_cast<double>(summary.queryWithoutRelevantHitCount) / queryCount;
+    const double fusionCutoffRate = static_cast<double>(summary.missFusionCutoffCount) / queryCount;
+    const double rerankDropRate =
+        static_cast<double>(summary.missRerankWindowDropCount) / queryCount;
+    const double topKDropRate = static_cast<double>(summary.missTopKDropCount) / queryCount;
+
+    return std::min(0.20, noRelevantHitRate * 0.18 + fusionCutoffRate * 0.04 +
+                              rerankDropRate * 0.05 + topKDropRate * 0.03);
+}
+
 static std::string summarizeTimingTradeoffs(const json& hybridDiag) {
     if (!hybridDiag.is_object()) {
         return "timings=unavailable";
@@ -3547,16 +3668,20 @@ static std::string summarizeStageTradeoffs(const json& hybridDiag) {
 
 static double computeOptimizationObjective(const RetrievalMetrics& hybrid,
                                            const RetrievalMetrics& keyword,
+                                           const QueryDiagnosticsSummary& hybridDiagnostics,
                                            double avgHybridQueryMs) {
-    // Accuracy-first, but keep latency meaningful so recall probes do not win by default when
-    // they materially slow search without improving quality.
-    const double quality =
-        0.40 * hybrid.mrr + 0.30 * hybrid.ndcgAtK + 0.20 * hybrid.recallAtK + 0.10 * hybrid.map;
+    // Precision-first objective for machine-first navigation: keep top-K correctness high while
+    // still rewarding rank quality and recall. Miss-stage penalties keep the loop focused on the
+    // actual places where relevant documents are lost.
+    const double quality = 0.32 * hybrid.mrr + 0.24 * hybrid.ndcgAtK + 0.24 * hybrid.precisionAtK +
+                           0.12 * hybrid.recallAtK + 0.08 * hybrid.map;
     const double hybridGain = std::max(0.0, hybrid.mrr - keyword.mrr);
     const double regressionPenalty = computeHybridRegressionPenalty(hybrid, keyword);
     const double duplicatePenalty = computeDuplicatePenalty(hybrid);
     const double latencyPenalty = computeLatencyPenalty(avgHybridQueryMs);
-    return quality + 0.10 * hybridGain - regressionPenalty - duplicatePenalty - latencyPenalty;
+    const double precisionFailurePenalty = computePrecisionFailurePenalty(hybridDiagnostics);
+    return quality + 0.10 * hybridGain - regressionPenalty - duplicatePenalty - latencyPenalty -
+           precisionFailurePenalty;
 }
 
 static void appendOptimizationResultJson(const fs::path& outputFile,
@@ -3587,9 +3712,12 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     const double objectiveRegressionPenalty =
         computeHybridRegressionPenalty(result.hybridMetrics, result.keywordMetrics);
     const double objectiveDuplicatePenalty = computeDuplicatePenalty(result.hybridMetrics);
+    const double objectivePrecisionFailurePenalty =
+        computePrecisionFailurePenalty(result.hybridDiagnostics);
     j["objective_penalties"] = {
         {"hybrid_regression", objectiveRegressionPenalty},
         {"duplicate_rate", objectiveDuplicatePenalty},
+        {"precision_failures", objectivePrecisionFailurePenalty},
     };
 
     j["hybrid"] = {
@@ -3979,8 +4107,435 @@ struct BenchFixture {
     std::vector<TestQuery> queries;
     int corpusSize = 50, numQueries = 10, topK = 10;
     bool useBEIR = false;
-    bool warmDataDir = false;    // True when reusing a pre-ingested data directory
+    SyntheticCorpusMode syntheticCorpusMode = SyntheticCorpusMode::Generic;
+    bool warmDataDir = false; // True when reusing a pre-ingested data directory
+    std::string datasetName = "synthetic";
     std::string beirDatasetName; // Name of BEIR dataset (scifact, cqadupstack, etc.)
+
+    bool useSyntheticCommunityCorpus() const {
+        return syntheticCorpusMode == SyntheticCorpusMode::CommunityGraph;
+    }
+
+    bool benchmarkSemanticNeighborSeedingEnabled() const {
+        const char* raw = std::getenv("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS");
+        if (!(raw && *raw)) {
+            return false;
+        }
+        std::string value(raw);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+
+    void seedSyntheticCommunityEdges() {
+        if (!useSyntheticCommunityCorpus()) {
+            return;
+        }
+
+        auto* daemon = harness ? harness->daemon() : nullptr;
+        auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+        auto metadataRepo = serviceManager ? serviceManager->getMetadataRepo() : nullptr;
+        auto kgStore = metadataRepo ? metadataRepo->getKnowledgeGraphStore() : nullptr;
+        if (!metadataRepo || !kgStore) {
+            throw std::runtime_error(
+                "Synthetic community corpus requires metadata and KG stores after ingest");
+        }
+
+        const std::array<std::string, 3> docNames = {
+            "community_target.txt", "community_partner.txt", "community_rival.txt"};
+        std::vector<metadata::KGNode> docNodes;
+        docNodes.reserve(docNames.size());
+
+        for (const auto& docName : docNames) {
+            const auto docPath = (benchCorpusDir / docName).string();
+            auto docResult = metadataRepo->findDocumentByExactPath(docPath);
+            if (!docResult) {
+                throw std::runtime_error("Failed to resolve synthetic community document " +
+                                         docPath + ": " + docResult.error().message);
+            }
+            if (!docResult.value().has_value()) {
+                throw std::runtime_error("Synthetic community document missing from metadata: " +
+                                         docPath);
+            }
+
+            const auto& doc = *docResult.value();
+            metadata::KGNode node;
+            node.nodeKey = "doc:" + doc.sha256Hash;
+            node.label = doc.fileName;
+            node.type = "document";
+            docNodes.push_back(std::move(node));
+        }
+
+        auto nodeIdsResult = kgStore->upsertNodes(docNodes);
+        if (!nodeIdsResult) {
+            throw std::runtime_error("Failed to upsert synthetic community KG nodes: " +
+                                     nodeIdsResult.error().message);
+        }
+
+        const auto& nodeIds = nodeIdsResult.value();
+        if (nodeIds.size() != docNodes.size()) {
+            throw std::runtime_error(
+                "Synthetic community KG node upsert returned unexpected count");
+        }
+
+        std::vector<metadata::KGEdge> edges;
+        metadata::KGEdge forward;
+        forward.srcNodeId = nodeIds[0];
+        forward.dstNodeId = nodeIds[1];
+        forward.relation = "semantic_neighbor";
+        forward.weight = 1.0f;
+        edges.push_back(forward);
+
+        metadata::KGEdge reverse;
+        reverse.srcNodeId = nodeIds[1];
+        reverse.dstNodeId = nodeIds[0];
+        reverse.relation = "semantic_neighbor";
+        reverse.weight = 1.0f;
+        edges.push_back(reverse);
+
+        auto addEdgesResult = kgStore->addEdgesUnique(edges);
+        if (!addEdgesResult) {
+            throw std::runtime_error("Failed to seed synthetic community KG edges: " +
+                                     addEdgesResult.error().message);
+        }
+
+        spdlog::info("Seeded synthetic community KG edges for {} documents", docNames.size());
+    }
+
+    void seedBenchmarkSemanticNeighbors() {
+        if (!benchmarkSemanticNeighborSeedingEnabled()) {
+            return;
+        }
+
+        auto* daemon = harness ? harness->daemon() : nullptr;
+        auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+        auto metadataRepo = serviceManager ? serviceManager->getMetadataRepo() : nullptr;
+        auto kgStore = metadataRepo ? metadataRepo->getKnowledgeGraphStore() : nullptr;
+        auto vectorDb = serviceManager ? serviceManager->getVectorDatabase() : nullptr;
+        if (!metadataRepo || !kgStore || !vectorDb) {
+            throw std::runtime_error(
+                "Semantic benchmark seeding requires metadata, KG, and vector stores");
+        }
+
+        auto parseSizeEnv = [](const char* primary, const char* fallback,
+                               std::size_t defaultValue) {
+            for (const char* key : {primary, fallback}) {
+                if (!key) {
+                    continue;
+                }
+                if (const char* raw = std::getenv(key); raw && *raw) {
+                    try {
+                        return static_cast<std::size_t>(std::max(1, std::stoi(raw)));
+                    } catch (...) {
+                    }
+                }
+            }
+            return defaultValue;
+        };
+        auto parseFloatEnv = [](const char* primary, const char* fallback, float defaultValue) {
+            for (const char* key : {primary, fallback}) {
+                if (!key) {
+                    continue;
+                }
+                if (const char* raw = std::getenv(key); raw && *raw) {
+                    try {
+                        return std::clamp(std::stof(raw), 0.0f, 1.0f);
+                    } catch (...) {
+                    }
+                }
+            }
+            return defaultValue;
+        };
+        auto parseBoolEnv = [](const char* key, bool defaultValue) {
+            if (!(key && *key)) {
+                return defaultValue;
+            }
+            if (const char* raw = std::getenv(key); raw && *raw) {
+                std::string value(raw);
+                std::transform(value.begin(), value.end(), value.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return value == "1" || value == "true" || value == "yes" || value == "on";
+            }
+            return defaultValue;
+        };
+
+        const std::size_t semanticTopK =
+            parseSizeEnv("YAMS_BENCH_SEED_SEMANTIC_TOPK", "YAMS_GRAPH_SEMANTIC_TOPK", 6);
+        const float semanticThreshold = parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
+                                                      "YAMS_GRAPH_SEMANTIC_THRESHOLD", 0.30f);
+        const float semanticWeightFloor =
+            parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_WEIGHT_FLOOR", nullptr, 0.10f);
+        const bool seedQrelCommunities = parseBoolEnv("YAMS_BENCH_SEED_QREL_COMMUNITIES", false) &&
+                                         useBEIR && static_cast<bool>(beirCorpus);
+        const std::size_t qrelTopK = parseSizeEnv("YAMS_BENCH_SEED_QREL_TOPK", nullptr, 4);
+
+        std::vector<std::string> documentPaths;
+        if (useBEIR && beirCorpus) {
+            documentPaths = beirCorpus->getDocumentPaths();
+        } else if (corpus) {
+            documentPaths.reserve(corpus->createdFiles.size());
+            for (const auto& filename : corpus->createdFiles) {
+                documentPaths.push_back((benchCorpusDir / filename).string());
+            }
+        }
+        if (documentPaths.empty()) {
+            throw std::runtime_error("Semantic benchmark seeding found no document paths");
+        }
+
+        struct DocSeedInfo {
+            std::string hash;
+            std::string benchmarkDocId;
+            std::vector<float> embedding;
+            std::int64_t nodeId = 0;
+        };
+
+        std::vector<metadata::KGNode> docNodes;
+        std::vector<DocSeedInfo> docs;
+        docNodes.reserve(documentPaths.size());
+        docs.reserve(documentPaths.size());
+
+        for (const auto& docPath : documentPaths) {
+            auto docResult = metadataRepo->findDocumentByExactPath(docPath);
+            if (!docResult) {
+                throw std::runtime_error("Failed to resolve benchmark document " + docPath + ": " +
+                                         docResult.error().message);
+            }
+            if (!docResult.value().has_value()) {
+                throw std::runtime_error("Benchmark document missing from metadata: " + docPath);
+            }
+
+            const auto& doc = *docResult.value();
+            const auto vectors = vectorDb->getVectorsByDocument(doc.sha256Hash);
+            if (vectors.empty()) {
+                continue;
+            }
+
+            const auto documentLevel = std::find_if(
+                vectors.begin(), vectors.end(), [](const yams::vector::VectorRecord& record) {
+                    return record.level == yams::vector::EmbeddingLevel::DOCUMENT &&
+                           !record.embedding.empty();
+                });
+            const auto chosen =
+                (documentLevel != vectors.end() && !documentLevel->embedding.empty())
+                    ? documentLevel
+                    : std::find_if(vectors.begin(), vectors.end(),
+                                   [](const yams::vector::VectorRecord& record) {
+                                       return !record.embedding.empty();
+                                   });
+            if (chosen == vectors.end() || chosen->embedding.empty()) {
+                continue;
+            }
+
+            metadata::KGNode node;
+            node.nodeKey = "doc:" + doc.sha256Hash;
+            node.label = doc.fileName;
+            node.type = "document";
+            docNodes.push_back(std::move(node));
+            docs.push_back(
+                {doc.sha256Hash, fs::path(docPath).stem().string(), chosen->embedding, 0});
+        }
+
+        if (docs.size() < 2) {
+            spdlog::warn("Skipping semantic benchmark seeding: only {} documents had embeddings",
+                         docs.size());
+            return;
+        }
+
+        auto nodeIdsResult = kgStore->upsertNodes(docNodes);
+        if (!nodeIdsResult) {
+            throw std::runtime_error("Failed to upsert benchmark semantic KG nodes: " +
+                                     nodeIdsResult.error().message);
+        }
+        const auto& nodeIds = nodeIdsResult.value();
+        if (nodeIds.size() != docs.size()) {
+            throw std::runtime_error("Benchmark semantic KG node upsert returned unexpected count");
+        }
+        for (std::size_t i = 0; i < docs.size(); ++i) {
+            docs[i].nodeId = nodeIds[i];
+        }
+
+        std::unordered_map<std::string, std::unordered_map<std::string, float>> neighborScores;
+        neighborScores.reserve(docs.size());
+
+        yams::vector::VectorSearchParams params;
+        params.k = semanticTopK + 4;
+        params.similarity_threshold = semanticThreshold;
+
+        for (const auto& doc : docs) {
+            const auto neighbors = vectorDb->searchSimilar(doc.embedding, params);
+            auto& scores = neighborScores[doc.hash];
+            for (const auto& rec : neighbors) {
+                if (rec.level != yams::vector::EmbeddingLevel::DOCUMENT) {
+                    continue;
+                }
+                if (rec.document_hash.empty() || rec.document_hash == doc.hash) {
+                    continue;
+                }
+                if (rec.relevance_score < semanticThreshold) {
+                    continue;
+                }
+                auto [it, inserted] = scores.emplace(rec.document_hash, rec.relevance_score);
+                if (!inserted) {
+                    it->second = std::max(it->second, rec.relevance_score);
+                }
+                if (scores.size() >= semanticTopK) {
+                    break;
+                }
+            }
+        }
+
+        std::unordered_map<std::string, std::int64_t> nodeIdByHash;
+        nodeIdByHash.reserve(docs.size());
+        std::unordered_map<std::string, std::string> hashByBenchmarkDocId;
+        hashByBenchmarkDocId.reserve(docs.size());
+        for (const auto& doc : docs) {
+            nodeIdByHash.emplace(doc.hash, doc.nodeId);
+            if (!doc.benchmarkDocId.empty()) {
+                hashByBenchmarkDocId.emplace(doc.benchmarkDocId, doc.hash);
+            }
+        }
+
+        std::vector<metadata::KGEdge> edges;
+        std::size_t reciprocalPairs = 0;
+        for (const auto& [srcHash, neighbors] : neighborScores) {
+            for (const auto& [dstHash, forwardScore] : neighbors) {
+                if (srcHash >= dstHash) {
+                    continue;
+                }
+                const auto reverseIt = neighborScores.find(dstHash);
+                if (reverseIt == neighborScores.end()) {
+                    continue;
+                }
+                const auto reverseScoreIt = reverseIt->second.find(srcHash);
+                if (reverseScoreIt == reverseIt->second.end()) {
+                    continue;
+                }
+                const auto srcNodeIt = nodeIdByHash.find(srcHash);
+                const auto dstNodeIt = nodeIdByHash.find(dstHash);
+                if (srcNodeIt == nodeIdByHash.end() || dstNodeIt == nodeIdByHash.end()) {
+                    continue;
+                }
+
+                const float weight =
+                    std::max(semanticWeightFloor, (forwardScore + reverseScoreIt->second) * 0.5f);
+                metadata::KGEdge forward;
+                forward.srcNodeId = srcNodeIt->second;
+                forward.dstNodeId = dstNodeIt->second;
+                forward.relation = "semantic_neighbor";
+                forward.weight = weight;
+                edges.push_back(forward);
+
+                metadata::KGEdge reverse;
+                reverse.srcNodeId = dstNodeIt->second;
+                reverse.dstNodeId = srcNodeIt->second;
+                reverse.relation = "semantic_neighbor";
+                reverse.weight = weight;
+                edges.push_back(reverse);
+                reciprocalPairs += 1;
+            }
+        }
+
+        std::size_t qrelPairs = 0;
+        if (seedQrelCommunities) {
+            std::unordered_map<std::string, std::unordered_map<std::string, int>> overlapCounts;
+            for (auto it = beirCorpus->dataset.qrels.begin();
+                 it != beirCorpus->dataset.qrels.end();) {
+                const auto queryId = it->first;
+                std::vector<std::string> docsForQuery;
+                for (; it != beirCorpus->dataset.qrels.end() && it->first == queryId; ++it) {
+                    const auto& [docId, score] = it->second;
+                    if (score <= 0 || !hashByBenchmarkDocId.contains(docId)) {
+                        continue;
+                    }
+                    docsForQuery.push_back(docId);
+                }
+
+                std::sort(docsForQuery.begin(), docsForQuery.end());
+                docsForQuery.erase(std::unique(docsForQuery.begin(), docsForQuery.end()),
+                                   docsForQuery.end());
+                for (std::size_t i = 0; i < docsForQuery.size(); ++i) {
+                    for (std::size_t j = i + 1; j < docsForQuery.size(); ++j) {
+                        overlapCounts[docsForQuery[i]][docsForQuery[j]] += 1;
+                        overlapCounts[docsForQuery[j]][docsForQuery[i]] += 1;
+                    }
+                }
+            }
+
+            std::set<std::pair<std::string, std::string>> addedPairs;
+            for (const auto& [docId, neighbors] : overlapCounts) {
+                const auto srcHashIt = hashByBenchmarkDocId.find(docId);
+                if (srcHashIt == hashByBenchmarkDocId.end()) {
+                    continue;
+                }
+                const auto srcNodeIt = nodeIdByHash.find(srcHashIt->second);
+                if (srcNodeIt == nodeIdByHash.end()) {
+                    continue;
+                }
+
+                std::vector<std::pair<std::string, int>> ranked(neighbors.begin(), neighbors.end());
+                std::sort(ranked.begin(), ranked.end(), [](const auto& left, const auto& right) {
+                    if (left.second != right.second) {
+                        return left.second > right.second;
+                    }
+                    return left.first < right.first;
+                });
+                if (ranked.size() > qrelTopK) {
+                    ranked.resize(qrelTopK);
+                }
+
+                for (const auto& [neighborDocId, sharedCount] : ranked) {
+                    const auto dstHashIt = hashByBenchmarkDocId.find(neighborDocId);
+                    if (dstHashIt == hashByBenchmarkDocId.end()) {
+                        continue;
+                    }
+                    const auto dstNodeIt = nodeIdByHash.find(dstHashIt->second);
+                    if (dstNodeIt == nodeIdByHash.end() || srcNodeIt->second == dstNodeIt->second) {
+                        continue;
+                    }
+
+                    const auto ordered = std::minmax(srcHashIt->second, dstHashIt->second);
+                    if (!addedPairs.insert(ordered).second) {
+                        continue;
+                    }
+
+                    const float weight = std::clamp(
+                        std::max(semanticWeightFloor, 0.25f * static_cast<float>(sharedCount)),
+                        0.0f, 1.0f);
+                    metadata::KGEdge forward;
+                    forward.srcNodeId = srcNodeIt->second;
+                    forward.dstNodeId = dstNodeIt->second;
+                    forward.relation = "semantic_neighbor";
+                    forward.weight = weight;
+                    edges.push_back(forward);
+
+                    metadata::KGEdge reverse;
+                    reverse.srcNodeId = dstNodeIt->second;
+                    reverse.dstNodeId = srcNodeIt->second;
+                    reverse.relation = "semantic_neighbor";
+                    reverse.weight = weight;
+                    edges.push_back(reverse);
+                    qrelPairs += 1;
+                }
+            }
+        }
+
+        if (edges.empty()) {
+            spdlog::warn("Semantic benchmark seeding produced no reciprocal neighbors (docs={}, "
+                         "topk={}, threshold={:.3f})",
+                         docs.size(), semanticTopK, semanticThreshold);
+            return;
+        }
+
+        auto addEdgesResult = kgStore->addEdgesUnique(edges);
+        if (!addEdgesResult) {
+            throw std::runtime_error("Failed to seed benchmark semantic KG edges: " +
+                                     addEdgesResult.error().message);
+        }
+
+        spdlog::info("Seeded {} embedding-neighbor pairs and {} qrel-neighbor pairs ({} directed "
+                     "edges) for benchmark corpus",
+                     reciprocalPairs, qrelPairs, edges.size());
+    }
 
     void setup() {
         const char* env_dataset = std::getenv("YAMS_BENCH_DATASET");
@@ -4004,16 +4559,17 @@ struct BenchFixture {
         const char* env_topk = std::getenv("YAMS_BENCH_TOPK");
 
         if (env_dataset) {
-            std::string datasetName = env_dataset;
+            std::string requestedDatasetName = env_dataset;
             // Supported BEIR datasets from
             // https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/
             static const std::set<std::string> SUPPORTED_BEIR_DATASETS = {
                 "scifact",        "nfcorpus",    "arguana",    "scidocs", "fiqa",
                 "quora",          "cqadupstack", "hotpotqa",   "fever",   "climate-fever",
                 "dbpedia-entity", "trec-covid",  "touche-2020"};
-            if (SUPPORTED_BEIR_DATASETS.count(datasetName) > 0) {
+            if (SUPPORTED_BEIR_DATASETS.count(requestedDatasetName) > 0) {
                 useBEIR = true;
-                beirDatasetName = datasetName;
+                beirDatasetName = requestedDatasetName;
+                datasetName = requestedDatasetName;
                 // Default to SearchTuner auto mode so benchmark reflects dynamic tuning behavior.
                 // Keep explicit override support for controlled experiments:
                 //   YAMS_BENCH_FORCE_TUNING_OVERRIDE=SCIENTIFIC
@@ -4025,18 +4581,21 @@ struct BenchFixture {
                     spdlog::info(
                         "Set YAMS_TUNING_OVERRIDE={} via YAMS_BENCH_FORCE_TUNING_OVERRIDE for "
                         "BEIR benchmark ({})",
-                        forcedOverride, datasetName);
+                        forcedOverride, requestedDatasetName);
                 } else if (existingOverride && std::strlen(existingOverride) > 0) {
                     spdlog::info("Using pre-set YAMS_TUNING_OVERRIDE={} for BEIR benchmark ({})",
-                                 existingOverride, datasetName);
+                                 existingOverride, requestedDatasetName);
                 } else {
                     spdlog::info("Using SearchTuner auto mode for BEIR benchmark ({})",
-                                 datasetName);
+                                 requestedDatasetName);
                 }
+            } else if (requestedDatasetName == "synthetic-community") {
+                datasetName = requestedDatasetName;
+                syntheticCorpusMode = SyntheticCorpusMode::CommunityGraph;
             } else {
                 spdlog::warn("Unknown dataset '{}', using synthetic. Supported: scifact, "
                              "cqadupstack, nfcorpus, etc.",
-                             datasetName);
+                             requestedDatasetName);
             }
         }
 
@@ -4046,6 +4605,34 @@ struct BenchFixture {
             numQueries = std::stoi(env_queries);
         if (env_topk)
             topK = std::stoi(env_topk);
+
+        if (useSyntheticCommunityCorpus()) {
+            corpusSize = 3;
+            if (!(env_queries && *env_queries)) {
+                numQueries = 1;
+            }
+            if (!(env_topk && *env_topk)) {
+                topK = 1;
+            }
+
+            // Force the graph rerank stage fully on for the synthetic community A/B.
+            // Tiny synthetic corpora are still classified as no_kg by the tuner, so enabling the
+            // stage alone is not enough to produce an actual rerank window.
+            const auto ensureSyntheticEnvDefault = [](const char* key, const char* value) {
+                const char* current = std::getenv(key);
+                if (!(current && *current)) {
+                    setenv(key, value, 0);
+                }
+            };
+            ensureSyntheticEnvDefault("YAMS_ENABLE_ENV_OVERRIDES", "1");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_KG_WEIGHT", "0.00");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_TOPN", "3");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "1.00");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST", "1.00");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_MIN_SIGNAL", "0.01");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_KG_MAX_RESULTS", "3");
+            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_SCORING_BUDGET_MS", "8");
+        }
 
         auto optionalPositiveInt = [](const char* raw) -> std::optional<int> {
             if (!(raw && *raw)) {
@@ -4062,7 +4649,7 @@ struct BenchFixture {
         const std::optional<int> queryLimit = optionalPositiveInt(env_queries);
 
         spdlog::info("Setting up RAG benchmark: {} dataset, {} docs, {} queries, k={}",
-                     useBEIR ? beirDatasetName + " BEIR" : "synthetic", corpusSize, numQueries,
+                     useBEIR ? beirDatasetName + " BEIR" : datasetName, corpusSize, numQueries,
                      topK);
 
         // PBI-05b: Create summary log file for important embedding metrics
@@ -4073,7 +4660,7 @@ struct BenchFixture {
             auto time_t_now = std::chrono::system_clock::to_time_t(now);
             summaryLog << "=== YAMS Retrieval Quality Benchmark ===" << std::endl;
             summaryLog << "Started: " << std::ctime(&time_t_now);
-            summaryLog << "Dataset: " << (useBEIR ? beirDatasetName + " BEIR" : "synthetic")
+            summaryLog << "Dataset: " << (useBEIR ? beirDatasetName + " BEIR" : datasetName)
                        << std::endl;
             summaryLog << "Corpus size: " << corpusSize << std::endl;
             summaryLog << "Num queries: " << numQueries << std::endl;
@@ -4131,11 +4718,22 @@ struct BenchFixture {
         }
 
         const bool graphRerankRequested = envFlagEnabled(graphRerankCanonical);
-        bool requireKgReady = graphRerankRequested;
+        std::optional<bool> explicitRequireKgReady;
         if (const char* envRequireKgReady = std::getenv("YAMS_BENCH_REQUIRE_KG_READY");
             envRequireKgReady && *envRequireKgReady) {
-            requireKgReady = envFlagEnabled(envRequireKgReady);
+            explicitRequireKgReady = envFlagEnabled(envRequireKgReady);
         }
+        const auto kgReadinessPolicy = yams::search::resolveBenchmarkKgReadinessPolicy(
+            graphRerankRequested, explicitRequireKgReady, useBEIR);
+        const bool requireKgReady =
+            kgReadinessPolicy != yams::search::BenchmarkKgReadinessPolicy::Skip;
+        spdlog::info("[Bench] KG readiness policy: {} (graph_rerank_requested={}, beir={}, "
+                     "explicit_override={})",
+                     yams::search::benchmarkKgReadinessPolicyToString(kgReadinessPolicy),
+                     graphRerankRequested ? "true" : "false", useBEIR ? "true" : "false",
+                     explicitRequireKgReady.has_value()
+                         ? (*explicitRequireKgReady ? "true" : "false")
+                         : "none");
 
         fs::path datasetPathForMetadata = env_path ? fs::path(env_path) : fs::path();
         Result<BEIRDataset> preparedBeirDataset =
@@ -4152,7 +4750,7 @@ struct BenchFixture {
         }
 
         BenchCacheMetadata expectedCacheMetadata;
-        expectedCacheMetadata.dataset = useBEIR ? beirDatasetName : "synthetic";
+        expectedCacheMetadata.dataset = useBEIR ? beirDatasetName : datasetName;
         expectedCacheMetadata.datasetPath = canonicalPathOrEmpty(datasetPathForMetadata);
         expectedCacheMetadata.corpusSize = corpusSize;
         expectedCacheMetadata.numQueries = numQueries;
@@ -4438,8 +5036,10 @@ struct BenchFixture {
             expectedCacheMetadata.corpusFingerprint = computePathFingerprint(benchCorpusDir);
         } else {
             benchCorpusDir = harness->rootDir() / "corpus";
-            corpus = std::make_unique<CorpusGenerator>(benchCorpusDir);
+            corpus = std::make_unique<CorpusGenerator>(benchCorpusDir, syntheticCorpusMode);
             corpus->generateDocuments(corpusSize);
+            corpusSize = static_cast<int>(corpus->createdFiles.size());
+            expectedCacheMetadata.expectedDocs = corpusSize;
             expectedCacheMetadata.corpusFingerprint = computePathFingerprint(benchCorpusDir);
         }
 
@@ -5575,7 +6175,34 @@ struct BenchFixture {
             spdlog::error("This is likely due to search engine build not completing.");
         }
 
-        if (requireKgReady) {
+        auto effectiveKgReadinessPolicy = kgReadinessPolicy;
+        if (kgReadinessPolicy != yams::search::BenchmarkKgReadinessPolicy::Skip) {
+            auto statusForKgPolicy = benchRunSync(client->status(true), 5s);
+            if (statusForKgPolicy) {
+                bool tunedGraphRerank = graphRerankRequested;
+                if (auto it =
+                        statusForKgPolicy.value().searchTuningParams.find("enable_graph_rerank");
+                    it != statusForKgPolicy.value().searchTuningParams.end()) {
+                    tunedGraphRerank = it->second > 0.5f;
+                }
+
+                effectiveKgReadinessPolicy = yams::search::refineBenchmarkKgReadinessPolicy(
+                    kgReadinessPolicy, explicitRequireKgReady, tunedGraphRerank);
+                if (effectiveKgReadinessPolicy != kgReadinessPolicy) {
+                    spdlog::info("[Bench] Refined KG readiness policy to {} after search tuning "
+                                 "(state='{}', enable_graph_rerank={})",
+                                 yams::search::benchmarkKgReadinessPolicyToString(
+                                     effectiveKgReadinessPolicy),
+                                 statusForKgPolicy.value().searchTuningState,
+                                 tunedGraphRerank ? "true" : "false");
+                }
+            } else {
+                spdlog::warn("[Bench] Unable to inspect tuned graph rerank before KG wait: {}",
+                             statusForKgPolicy.error().message);
+            }
+        }
+
+        if (effectiveKgReadinessPolicy != yams::search::BenchmarkKgReadinessPolicy::Skip) {
             int kgReadyTimeoutSec = 180;
             if (const char* env = std::getenv("YAMS_BENCH_KG_READY_TIMEOUT")) {
                 kgReadyTimeoutSec = std::max(0, std::stoi(env));
@@ -5687,7 +6314,8 @@ struct BenchFixture {
                 const bool warmReuseIdleReady =
                     reusedWarmCacheWithoutIngest && queuesDrained && lastPostInflight == 0;
 
-                if (queuesDrained && kgSignalReady) {
+                if (yams::search::benchmarkKgReadinessSatisfied(effectiveKgReadinessPolicy,
+                                                                queuesDrained, kgSignalReady)) {
                     stableReadyChecks++;
                     if (stableReadyChecks >= 4) {
                         kgReady = true;
@@ -5711,7 +6339,9 @@ struct BenchFixture {
             if (!kgReady) {
                 throw std::runtime_error(
                     "KG not ready before benchmark queries (has_kg=" +
-                    std::string(lastHasKg ? "true" : "false") +
+                    std::string(lastHasKg ? "true" : "false") + ", policy=" +
+                    std::string(yams::search::benchmarkKgReadinessPolicyToString(
+                        effectiveKgReadinessPolicy)) +
                     ", kg_consumed=" + std::to_string(lastKgConsumed) +
                     ", post_ingest_queue_depth=" + std::to_string(lastQueueDepth) +
                     ", post_ingest_queued=" + std::to_string(lastPostQueued) +
@@ -5725,7 +6355,13 @@ struct BenchFixture {
                     "). Increase YAMS_BENCH_KG_READY_TIMEOUT or reduce ingestion load.");
             }
 
-            if (!lastHasKg) {
+            if (effectiveKgReadinessPolicy ==
+                    yams::search::BenchmarkKgReadinessPolicy::AcceptDrainedWithoutSignal &&
+                !lastHasKg && lastKgConsumed == 0) {
+                spdlog::warn(
+                    "KG readiness satisfied with drained queues under relaxed synthetic policy; "
+                    "no explicit KG signal was observed. Graph signals may be weak.");
+            } else if (!lastHasKg) {
                 if (acceptedWarmReuseIdle) {
                     spdlog::warn(
                         "KG readiness accepted for reused warm cache with drained queues and no "
@@ -5750,6 +6386,10 @@ struct BenchFixture {
             } else {
                 spdlog::info("KG readiness satisfied (queues drained + corpus_stats.has_kg=true)");
             }
+        } else if (requireKgReady) {
+            spdlog::info(
+                "Skipping KG readiness wait because the effective tuned search policy disables "
+                "graph rerank.");
         }
 
         // Verify document count using status metrics (avoids degraded search false negatives)
@@ -5798,6 +6438,9 @@ struct BenchFixture {
             spdlog::error("NO DOCUMENTS IN INDEX! Ingestion failed completely.");
             throw std::runtime_error("No documents indexed - benchmark cannot proceed");
         }
+
+        seedSyntheticCommunityEdges();
+        seedBenchmarkSemanticNeighbors();
 
         // Post-ingest status/stats snapshot + sanity searches.
         // Goal: distinguish "no docs" vs "docs but query returns empty".
@@ -6060,6 +6703,29 @@ struct BenchFixture {
 static std::unique_ptr<BenchFixture> g_fixture;
 void SetupFixture() {
     if (!g_fixture) {
+        if (const char* debugBaseEnv = std::getenv("YAMS_BENCH_DEBUG_FILE");
+            debugBaseEnv && std::strlen(debugBaseEnv) > 0) {
+            if (std::getenv("YAMS_SEARCH_STAGE_TRACE") == nullptr) {
+                setenv("YAMS_SEARCH_STAGE_TRACE", "1", 0);
+            }
+
+            if (std::getenv("YAMS_SEARCH_STAGE_TRACE_TOP_N") == nullptr) {
+                const int traceTopNDefault =
+                    parseIntEnvOrDefault("YAMS_BENCH_TRACE_TOP_N", 50, 1, 10000);
+                setenv("YAMS_SEARCH_STAGE_TRACE_TOP_N", std::to_string(traceTopNDefault).c_str(),
+                       0);
+            }
+
+            if (std::getenv("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N") == nullptr) {
+                const int traceTopNDefault =
+                    parseIntEnvOrDefault("YAMS_BENCH_TRACE_TOP_N", 50, 1, 10000);
+                const int traceComponentDefault = parseIntEnvOrDefault(
+                    "YAMS_BENCH_TRACE_COMPONENT_TOP_N", std::min(traceTopNDefault, 50), 1, 10000);
+                setenv("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N",
+                       std::to_string(traceComponentDefault).c_str(), 0);
+            }
+        }
+
         g_fixture = std::make_unique<BenchFixture>();
         g_fixture->setup();
     }
@@ -6146,7 +6812,8 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
             result.tuningReason = status.value().searchTuningReason;
         }
 
-        g_debugRunContext->dataset = g_fixture->useBEIR ? g_fixture->beirDatasetName : "synthetic";
+        g_debugRunContext->dataset =
+            g_fixture->useBEIR ? g_fixture->beirDatasetName : g_fixture->datasetName;
         g_debugRunContext->corpusSize = g_fixture->corpusSize;
         g_debugRunContext->numQueries = static_cast<int>(g_fixture->queries.size());
         g_debugRunContext->topK = g_fixture->topK;
@@ -6181,8 +6848,9 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
 
         const double avgHybridQueryMs =
             result.hybridEvalMs / std::max(1, result.hybridMetrics.numQueries);
-        result.objectiveScore = computeOptimizationObjective(
-            result.hybridMetrics, result.keywordMetrics, avgHybridQueryMs);
+        result.objectiveScore =
+            computeOptimizationObjective(result.hybridMetrics, result.keywordMetrics,
+                                         result.hybridDiagnostics, avgHybridQueryMs);
         result.success = true;
     } catch (const std::exception& e) {
         result.success = false;

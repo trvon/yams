@@ -12,8 +12,8 @@
 #include <yams/daemon/daemon.h>
 #include <yams/mcp/mcp_server.h>
 
-#include "common/daemon_test_fixture.h"
 #include "../../common/env_compat.h"
+#include "common/daemon_test_fixture.h"
 
 using nlohmann::json;
 using yams::mcp::ITransport;
@@ -434,6 +434,62 @@ TEST_F(MCPDocOpsFixture, SearchAndListTagFiltering) {
     ASSERT_TRUE(searchImpossibleData.has_value()) << searchImpossible.dump();
     ASSERT_TRUE(searchImpossibleData->contains("paths"));
     EXPECT_TRUE((*searchImpossibleData)["paths"].empty()) << searchImpossible.dump();
+}
+
+TEST_F(MCPDocOpsFixture, SessionStartAloneDoesNotNarrowGrepResults) {
+    using nlohmann::json;
+
+    ASSERT_TRUE(startDaemon());
+    ASSERT_TRUE(wait_for_daemon_ready(socketPath())) << "daemon readiness wait failed";
+
+    auto transport = std::make_unique<NullTransport>();
+    MCPServer server(std::move(transport));
+    server.setDaemonClientSocketPathForTest(socketPath());
+
+    const std::string token = "mcp-session-grep-hot-path-token";
+    const std::string firstName = "mcp_session_grep_hot_1.txt";
+    const std::string secondName = "mcp_session_grep_hot_2.txt";
+    const std::string sessionName =
+        "mcp-grep-hot-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+
+    auto addFirst =
+        server.callToolPublic("add", json{{"content", "alpha " + token}, {"name", firstName}});
+    ASSERT_TRUE(addFirst.is_object()) << addFirst.dump();
+    ASSERT_FALSE(addFirst.contains("error")) << addFirst.dump();
+
+    auto addSecond =
+        server.callToolPublic("add", json{{"content", "beta " + token}, {"name", secondName}});
+    ASSERT_TRUE(addSecond.is_object()) << addSecond.dump();
+    ASSERT_FALSE(addSecond.contains("error")) << addSecond.dump();
+
+    auto sessionStart =
+        server.callToolPublic("session_start", json{{"name", sessionName}, {"warm", false}});
+    ASSERT_TRUE(sessionStart.is_object()) << sessionStart.dump();
+    ASSERT_FALSE(sessionStart.contains("error")) << sessionStart.dump();
+
+    auto grepGlobal = server.callToolPublic(
+        "grep", json{{"pattern", token}, {"use_session", false}, {"with_filename", true}});
+    ASSERT_TRUE(grepGlobal.is_object()) << grepGlobal.dump();
+    ASSERT_FALSE(grepGlobal.contains("error")) << grepGlobal.dump();
+    auto grepGlobalData = extract_tool_data(grepGlobal);
+    ASSERT_TRUE(grepGlobalData.has_value()) << grepGlobal.dump();
+    ASSERT_TRUE(grepGlobalData->contains("match_count")) << grepGlobal.dump();
+
+    auto grepSession = server.callToolPublic("grep", json{{"pattern", token},
+                                                          {"use_session", true},
+                                                          {"session", sessionName},
+                                                          {"with_filename", true}});
+    ASSERT_TRUE(grepSession.is_object()) << grepSession.dump();
+    ASSERT_FALSE(grepSession.contains("error")) << grepSession.dump();
+    auto grepSessionData = extract_tool_data(grepSession);
+    ASSERT_TRUE(grepSessionData.has_value()) << grepSession.dump();
+    ASSERT_TRUE(grepSessionData->contains("match_count")) << grepSession.dump();
+
+    EXPECT_GE((*grepGlobalData)["match_count"].get<int>(), 2) << grepGlobal.dump();
+    EXPECT_EQ((*grepSessionData)["match_count"].get<int>(),
+              (*grepGlobalData)["match_count"].get<int>())
+        << grepSession.dump();
 }
 
 // Pagination and dry-run behaviors should be accepted and return structured JSON.

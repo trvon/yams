@@ -35,15 +35,27 @@ auto findBuiltYamsCli() -> fs::path {
     auto cwd = fs::current_path(ec);
     if (!ec) {
         bases.push_back(cwd);
+        if (cwd.parent_path().filename() == "builddir-tsan" ||
+            cwd.parent_path().filename() == "builddir-asan" ||
+            cwd.parent_path().filename() == "builddir-ubsan" ||
+            cwd.parent_path().filename() == "builddir-nosan" ||
+            cwd.parent_path().filename() == "builddir") {
+            bases.push_back(cwd.parent_path().parent_path());
+            bases.push_back(cwd.parent_path());
+        }
         if (cwd.filename() == "asan" || cwd.filename() == "debug" || cwd.filename() == "release" ||
             cwd.filename() == "coverage") {
             bases.push_back(cwd.parent_path().parent_path());
-        } else if (cwd.filename() == "builddir" || cwd.filename() == "builddir-nosan") {
+        } else if (cwd.filename() == "builddir" || cwd.filename() == "builddir-nosan" ||
+                   cwd.filename() == "builddir-asan" || cwd.filename() == "builddir-tsan" ||
+                   cwd.filename() == "builddir-ubsan") {
             bases.push_back(cwd.parent_path());
         }
     }
 
     const std::vector<fs::path> suffixes = {
+        fs::path("builddir-tsan") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-asan") / "tools" / "yams-cli" / "yams-cli",
         fs::path("builddir") / "tools" / "yams-cli" / "yams-cli",
         fs::path("builddir-nosan") / "tools" / "yams-cli" / "yams-cli",
         fs::path("build") / "asan" / "tools" / "yams-cli" / "yams-cli",

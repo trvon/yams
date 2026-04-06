@@ -640,11 +640,21 @@ void YamsDaemon::runLoop() {
             spdlog::info(
                 "[InitWaiter] Thread started, waiting for ServiceManager terminal state...");
 
-            auto snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
-
-            if (stopRequested_.load()) {
-                spdlog::info("[InitWaiter] Stop requested, exiting without dispatching events");
-                return;
+            ServiceManagerSnapshot snapshot{};
+            while (true) {
+                snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
+                if (stopRequested_.load()) {
+                    spdlog::info("[InitWaiter] Stop requested, exiting without dispatching events");
+                    return;
+                }
+                if (snapshot.state == ServiceManagerState::Ready ||
+                    snapshot.state == ServiceManagerState::Failed ||
+                    snapshot.state == ServiceManagerState::Stopped) {
+                    break;
+                }
+                spdlog::info("[InitWaiter] ServiceManager still initializing (state={}), "
+                             "continuing to wait",
+                             static_cast<int>(snapshot.state));
             }
 
             initHandled_.store(true, std::memory_order_release);
@@ -896,11 +906,21 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
             spdlog::info(
                 "[InitWaiter] Thread started, waiting for ServiceManager terminal state...");
 
-            auto snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
-
-            if (stopRequested_.load()) {
-                spdlog::info("[InitWaiter] Stop requested, exiting without dispatching events");
-                return;
+            ServiceManagerSnapshot snapshot{};
+            while (true) {
+                snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
+                if (stopRequested_.load()) {
+                    spdlog::info("[InitWaiter] Stop requested, exiting without dispatching events");
+                    return;
+                }
+                if (snapshot.state == ServiceManagerState::Ready ||
+                    snapshot.state == ServiceManagerState::Failed ||
+                    snapshot.state == ServiceManagerState::Stopped) {
+                    break;
+                }
+                spdlog::info("[InitWaiter] ServiceManager still initializing (state={}), "
+                             "continuing to wait",
+                             static_cast<int>(snapshot.state));
             }
 
             initHandled_.store(true, std::memory_order_release);

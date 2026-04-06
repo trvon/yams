@@ -2,7 +2,9 @@
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/use_future.hpp>
 #if !defined(YAMS_WASI)
 #include <yams/api/content_store.h>
 #include <yams/app/services/document_ingestion_service.h>
@@ -610,7 +612,22 @@ public:
         if (!result) {
             return result.error();
         }
-        return handleRequest(result.value());
+
+        const auto& request = result.value();
+        if (request.is_object() && request.value("method", std::string{}) == "tools/call") {
+#if defined(YAMS_WASI)
+            auto future =
+                boost::asio::co_spawn(boost::asio::system_executor(), handleRequestAsync(request),
+                                      boost::asio::use_future);
+#else
+            auto future =
+                boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(),
+                                      handleRequestAsync(request), boost::asio::use_future);
+#endif
+            return future.get();
+        }
+
+        return handleRequest(request);
     }
 };
 

@@ -39,11 +39,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -67,8 +67,8 @@
 #else
 #include <fcntl.h>
 #include <limits.h>
-#include <sys/wait.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 #include <nlohmann/json.hpp>
@@ -275,6 +275,11 @@ public:
     }
 
 private:
+    static bool isQueryCompositeReadOp(const std::string& op) {
+        return op == "search" || op == "grep" || op == "list" || op == "list_collections" ||
+               op == "list_snapshots" || op == "graph" || op == "get" || op == "status";
+    }
+
     yams::Result<nlohmann::json> queryStepUnlocked(const std::string& op,
                                                    const nlohmann::json& params) {
         nlohmann::json request = nlohmann::json::object();
@@ -282,8 +287,9 @@ private:
         request["id"] = requestId_++;
         request["method"] = "tools/call";
         request["params"] = nlohmann::json::object();
-        request["params"]["name"] = hasQueryTool_ ? "query" : op;
-        if (hasQueryTool_) {
+        const bool useQueryTool = hasQueryTool_ && isQueryCompositeReadOp(op);
+        request["params"]["name"] = useQueryTool ? "query" : op;
+        if (useQueryTool) {
             request["params"]["arguments"] = nlohmann::json::object();
             request["params"]["arguments"]["steps"] =
                 nlohmann::json::array({{{"op", op}, {"params", params}}});
@@ -3113,7 +3119,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     // --- Configurable layout ---
     auto envInt = [](const char* name, int def) {
         if (auto* v = std::getenv(name))
-            return std::max(1, std::atoi(v));
+            return std::atoi(v);
         return def;
     };
     const int defaultSearchClients = externalAgentChurnProfile ? 4 : (extensionLikeProfile ? 6 : 4);
@@ -3128,22 +3134,25 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     const int defaultListInflightCap =
         externalAgentChurnProfile ? 1 : (extensionLikeProfile ? 2 : 0);
 
-    const int kSearchClients = envInt("YAMS_BENCH_SEARCH_CLIENTS", defaultSearchClients);
-    const int kListClients = envInt("YAMS_BENCH_LIST_CLIENTS", defaultListClients);
-    const int kGrepClients = envInt("YAMS_BENCH_GREP_CLIENTS", defaultGrepClients);
-    const int kStatusGetClients = envInt("YAMS_BENCH_STATUS_GET_CLIENTS", defaultStatusGetClients);
+    const int kSearchClients =
+        std::max(0, envInt("YAMS_BENCH_SEARCH_CLIENTS", defaultSearchClients));
+    const int kListClients = std::max(0, envInt("YAMS_BENCH_LIST_CLIENTS", defaultListClients));
+    const int kGrepClients = std::max(0, envInt("YAMS_BENCH_GREP_CLIENTS", defaultGrepClients));
+    const int kStatusGetClients =
+        std::max(0, envInt("YAMS_BENCH_STATUS_GET_CLIENTS", defaultStatusGetClients));
     const int kTotalClients = kSearchClients + kListClients + kGrepClients + kStatusGetClients;
-    const int kOpsPerClient = envInt("YAMS_BENCH_OPS_PER_CLIENT", defaultOpsPerClient);
-    const int kOpTimeoutS = envInt("YAMS_BENCH_OP_TIMEOUT_S", 60);
+    const int kOpsPerClient = std::max(1, envInt("YAMS_BENCH_OPS_PER_CLIENT", defaultOpsPerClient));
+    const int kOpTimeoutS = std::max(1, envInt("YAMS_BENCH_OP_TIMEOUT_S", 60));
     const auto kOpTimeout = std::chrono::seconds(kOpTimeoutS);
     const int kStatusEveryN = std::max(1, envInt("YAMS_BENCH_STATUS_EVERY_N", defaultStatusEveryN));
     const int kCatEveryN = std::max(1, envInt("YAMS_BENCH_CAT_EVERY_N", defaultCatEveryN));
     const int kListInflightCap =
         std::max(0, envInt("YAMS_BENCH_LIST_INFLIGHT_CAP", defaultListInflightCap));
-    const int kDiscoverPageSize = envInt("YAMS_BENCH_DISCOVER_PAGE_SIZE", 500);
-    const int kDiscoverHashLimit = envInt("YAMS_BENCH_DISCOVER_HASH_LIMIT", 5000);
-    const int kHotspotWindowMs = envInt("YAMS_BENCH_HOTSPOT_WINDOW_MS", 1000);
+    const int kDiscoverPageSize = std::max(1, envInt("YAMS_BENCH_DISCOVER_PAGE_SIZE", 500));
+    const int kDiscoverHashLimit = std::max(1, envInt("YAMS_BENCH_DISCOVER_HASH_LIMIT", 5000));
+    const int kHotspotWindowMs = std::max(1, envInt("YAMS_BENCH_HOTSPOT_WINDOW_MS", 1000));
     const bool useMcpPath = cfg.useMcpPath;
+    const bool useSessionGrep = envInt("YAMS_BENCH_GREP_USE_SESSION", 0) != 0;
     const int defaultMcpSessionChurnEveryN = (externalAgentChurnProfile && useMcpPath) ? 6 : 0;
     const int kMcpSessionChurnEveryN =
         std::max(0, envInt("YAMS_BENCH_MCP_SESSION_CHURN_EVERY_N", defaultMcpSessionChurnEveryN));
@@ -3175,6 +3184,10 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                   << (kMcpSessionChurnEveryN > 0 ? std::to_string(kMcpSessionChurnEveryN)
                                                  : std::string("disabled"))
                   << " request(s) uses a fresh MCP session\n";
+    }
+    if (kGrepClients > 0) {
+        std::cout << "  Grep mode:      "
+                  << (useSessionGrep ? "session hot path" : "global cold path") << "\n";
     }
 
     // --- Server-side timeout configuration ---
@@ -3260,6 +3273,37 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             return yams::Error{yams::ErrorCode::InvalidState,
                                std::string("Transient MCP session failed: ") + e.what()};
         }
+    };
+
+    auto setupBenchmarkSession = [&](const std::string& sessionName) -> bool {
+        // Large-corpus grep benchmarks use sessions to exercise the hot path, not to scope
+        // results to the YAMS data directory itself. Adding a watched selector rooted at the
+        // storage dir narrows MCP grep to internal corpus files and stops matching the direct
+        // daemon hot-path workload.
+        if (useMcpPath) {
+            auto startRes = queryMcpStepForSlot(0, "session_start",
+                                                {{"name", sessionName},
+                                                 {"description", "large corpus benchmark session"},
+                                                 {"warm", false},
+                                                 {"limit", 0}});
+            if (!startRes) {
+                WARN("session_start failed: " << startRes.error().message);
+                return false;
+            }
+            return true;
+        }
+
+        MCPPipelineClient sessionClient(harness.socketPath());
+        auto startRes = sessionClient.queryStep("session_start",
+                                                {{"name", sessionName},
+                                                 {"description", "large corpus benchmark session"},
+                                                 {"warm", false},
+                                                 {"limit", 0}});
+        if (!startRes) {
+            WARN("session_start failed: " << startRes.error().message);
+            return false;
+        }
+        return true;
     };
 
     std::vector<std::string> knownHashes;
@@ -3374,6 +3418,13 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
              "daemon reports 0 documents. Verify YAMS_BENCH_DATA_DIR points to populated data.");
     }
 
+    const std::string benchmarkSessionName =
+        "bench_large_corpus_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    if (useSessionGrep) {
+        REQUIRE(setupBenchmarkSession(benchmarkSessionName));
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 1: Single-client warmup — baseline latency without contention
     // ─────────────────────────────────────────────────────────────────────────
@@ -3387,12 +3438,14 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             auto t0 = std::chrono::steady_clock::now();
             yams::Result<nlohmann::json> res;
             if (useMcpPath) {
-                res = queryMcpStepForSlot(0, "search",
-                                          {{"query", "architecture design"}, {"limit", 10}});
+                res = queryMcpStepForSlot(
+                    0, "search",
+                    {{"query", "architecture design"}, {"limit", 10}, {"type", cfg.searchType}});
             } else {
                 SearchRequest req;
                 req.query = "architecture design";
                 req.limit = 10;
+                req.searchType = cfg.searchType;
                 auto direct = yams::cli::run_sync(warmClient.search(req), kOpTimeout);
                 if (direct) {
                     nlohmann::json j;
@@ -3571,6 +3624,26 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::vector<int64_t> searchDispatchResponseUsSamples;
     std::vector<int64_t> searchDispatchTotalMsSamples;
     std::vector<int64_t> searchDispatchTotalUsSamples;
+    std::vector<int64_t> searchTimingEmbeddingUsSamples;
+    std::vector<int64_t> searchTimingTextUsSamples;
+    std::vector<int64_t> searchTimingPathUsSamples;
+    std::vector<int64_t> searchTimingVectorUsSamples;
+    std::vector<int64_t> searchTimingEntityVectorUsSamples;
+    std::vector<int64_t> searchTimingCompressedAnnUsSamples;
+    std::vector<int64_t> searchTimingKgUsSamples;
+    std::vector<int64_t> searchTimingMetadataUsSamples;
+    std::vector<int64_t> searchTimingTagUsSamples;
+    std::vector<int64_t> searchTimingMultiVectorUsSamples;
+    std::vector<int64_t> searchTimingConceptsUsSamples;
+    std::vector<int64_t> searchTimingRerankerUsSamples;
+    std::vector<int64_t> searchTimingGraphRerankUsSamples;
+    std::vector<int64_t> searchSubphraseFtsHitSamples;
+    std::vector<int64_t> searchAggressiveFtsHitSamples;
+    std::vector<int64_t> searchGraphExpansionFtsHitSamples;
+    std::vector<int64_t> searchGraphDocExpansionFtsHitSamples;
+    std::vector<int64_t> searchMultiVectorRawHitSamples;
+    std::vector<int64_t> searchGraphVectorRawHitSamples;
+    std::vector<int64_t> searchGraphQueryNeighborSeedDocSamples;
     std::vector<int64_t> listServiceExecMsSamples;
     std::vector<int64_t> listDispatchServiceMsSamples;
     std::vector<int64_t> listDispatchServiceUsSamples;
@@ -3578,6 +3651,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::vector<int64_t> listDispatchMapUsSamples;
     std::vector<int64_t> listDispatchTotalMsSamples;
     std::vector<int64_t> listDispatchTotalUsSamples;
+    std::vector<nlohmann::json> searchDebugSamples;
 
     auto collectSearchServerTelemetry = [&](const nlohmann::json& payload) {
         const auto searchStats = [&]() -> nlohmann::json {
@@ -3591,6 +3665,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         }();
 
         std::lock_guard<std::mutex> lk(grepServerStatsMutex);
+        if (searchDebugSamples.size() < 3 && !searchStats.empty()) {
+            searchDebugSamples.push_back(searchStats);
+        }
         if (auto v = jsonGetInt64AnyKey(payload, {"execution_time_ms", "executionTimeMs"})) {
             searchExecMsSamples.push_back(*v);
         }
@@ -3623,6 +3700,66 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         }
         if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_total_us"})) {
             searchDispatchTotalUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_embedding_us"})) {
+            searchTimingEmbeddingUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_text_us"})) {
+            searchTimingTextUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_path_us"})) {
+            searchTimingPathUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_vector_us"})) {
+            searchTimingVectorUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_entity_vector_us"})) {
+            searchTimingEntityVectorUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_compressed_ann_us"})) {
+            searchTimingCompressedAnnUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_kg_us"})) {
+            searchTimingKgUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_metadata_us"})) {
+            searchTimingMetadataUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_tag_us"})) {
+            searchTimingTagUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_multi_vector_us"})) {
+            searchTimingMultiVectorUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_concepts_us"})) {
+            searchTimingConceptsUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_reranker_us"})) {
+            searchTimingRerankerUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"timing_graph_rerank_us"})) {
+            searchTimingGraphRerankUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"subphrase_fts_hit_count"})) {
+            searchSubphraseFtsHitSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"aggressive_fts_hit_count"})) {
+            searchAggressiveFtsHitSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"graph_expansion_fts_hit_count"})) {
+            searchGraphExpansionFtsHitSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"graph_doc_expansion_fts_hit_count"})) {
+            searchGraphDocExpansionFtsHitSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"multi_vector_raw_hit_count"})) {
+            searchMultiVectorRawHitSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"graph_vector_raw_hit_count"})) {
+            searchGraphVectorRawHitSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"graph_query_neighbor_seed_docs"})) {
+            searchGraphQueryNeighborSeedDocSamples.push_back(*v);
         }
     };
 
@@ -3725,12 +3862,14 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 SearchRequest req;
                 req.query = corpusQueries[(s * kOpsPerClient + i) % 10];
                 req.limit = (i % 3 == 0) ? 5 : (i % 3 == 1) ? 10 : 25;
+                req.searchType = cfg.searchType;
 
                 auto t0 = std::chrono::steady_clock::now();
                 yams::Result<nlohmann::json> res;
                 if (useMcpPath) {
-                    res = queryMcpStepForSlot(static_cast<size_t>(tid), "search",
-                                              {{"query", req.query}, {"limit", req.limit}});
+                    res = queryMcpStepForSlot(
+                        static_cast<size_t>(tid), "search",
+                        {{"query", req.query}, {"limit", req.limit}, {"type", req.searchType}});
                 } else {
                     auto direct = yams::cli::run_sync(client->search(req), kOpTimeout);
                     if (direct) {
@@ -3883,17 +4022,22 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 auto t0 = std::chrono::steady_clock::now();
                 yams::Result<nlohmann::json> res;
                 if (useMcpPath) {
-                    res = queryMcpStepForSlot(static_cast<size_t>(tid), "grep",
-                                              {{"pattern", pattern},
-                                               {"max_count", (i % 2 == 0) ? 25 : 50},
-                                               {"ignore_case", (i % 3 == 0)},
-                                               {"context", i % 2}});
+                    res = queryMcpStepForSlot(
+                        static_cast<size_t>(tid), "grep",
+                        {{"pattern", pattern},
+                         {"max_count", (i % 2 == 0) ? 25 : 50},
+                         {"ignore_case", (i % 3 == 0)},
+                         {"context", i % 2},
+                         {"use_session", useSessionGrep},
+                         {"session", useSessionGrep ? benchmarkSessionName : ""}});
                 } else {
                     GrepRequest req;
                     req.pattern = pattern;
                     req.maxMatches = static_cast<size_t>((i % 2 == 0) ? 25 : 50);
                     req.caseInsensitive = (i % 3 == 0);
                     req.contextLines = i % 2;
+                    req.useSession = useSessionGrep;
+                    req.sessionName = useSessionGrep ? benchmarkSessionName : std::string{};
                     auto direct = yams::cli::run_sync(client->grep(req), kOpTimeout);
                     if (direct) {
                         nlohmann::json j;
@@ -4107,10 +4251,13 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         SearchRequest req;
                         req.query = corpusQueries[(g * kOpsPerClient + i) % 10];
                         req.limit = 5;
+                        req.searchType = cfg.searchType;
                         yams::Result<nlohmann::json> res;
                         if (useMcpPath) {
                             res = queryMcpStepForSlot(static_cast<size_t>(tid), "search",
-                                                      {{"query", req.query}, {"limit", req.limit}});
+                                                      {{"query", req.query},
+                                                       {"limit", req.limit},
+                                                       {"type", req.searchType}});
                         } else {
                             auto direct = yams::cli::run_sync(client->search(req), kOpTimeout);
                             if (direct) {
@@ -4558,6 +4705,31 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     const json searchDispatchResponseUsStats = summarizeSamples(searchDispatchResponseUsSamples);
     const json searchDispatchTotalStats = summarizeSamples(searchDispatchTotalMsSamples);
     const json searchDispatchTotalUsStats = summarizeSamples(searchDispatchTotalUsSamples);
+    const json searchTimingEmbeddingUsStats = summarizeSamples(searchTimingEmbeddingUsSamples);
+    const json searchTimingTextUsStats = summarizeSamples(searchTimingTextUsSamples);
+    const json searchTimingPathUsStats = summarizeSamples(searchTimingPathUsSamples);
+    const json searchTimingVectorUsStats = summarizeSamples(searchTimingVectorUsSamples);
+    const json searchTimingEntityVectorUsStats =
+        summarizeSamples(searchTimingEntityVectorUsSamples);
+    const json searchTimingCompressedAnnUsStats =
+        summarizeSamples(searchTimingCompressedAnnUsSamples);
+    const json searchTimingKgUsStats = summarizeSamples(searchTimingKgUsSamples);
+    const json searchTimingMetadataUsStats = summarizeSamples(searchTimingMetadataUsSamples);
+    const json searchTimingTagUsStats = summarizeSamples(searchTimingTagUsSamples);
+    const json searchTimingMultiVectorUsStats = summarizeSamples(searchTimingMultiVectorUsSamples);
+    const json searchTimingConceptsUsStats = summarizeSamples(searchTimingConceptsUsSamples);
+    const json searchTimingRerankerUsStats = summarizeSamples(searchTimingRerankerUsSamples);
+    const json searchTimingGraphRerankUsStats = summarizeSamples(searchTimingGraphRerankUsSamples);
+    const json searchSubphraseFtsHitStats = summarizeSamples(searchSubphraseFtsHitSamples);
+    const json searchAggressiveFtsHitStats = summarizeSamples(searchAggressiveFtsHitSamples);
+    const json searchGraphExpansionFtsHitStats =
+        summarizeSamples(searchGraphExpansionFtsHitSamples);
+    const json searchGraphDocExpansionFtsHitStats =
+        summarizeSamples(searchGraphDocExpansionFtsHitSamples);
+    const json searchMultiVectorRawHitStats = summarizeSamples(searchMultiVectorRawHitSamples);
+    const json searchGraphVectorRawHitStats = summarizeSamples(searchGraphVectorRawHitSamples);
+    const json searchGraphQueryNeighborSeedDocStats =
+        summarizeSamples(searchGraphQueryNeighborSeedDocSamples);
     const json listServiceExecStats = summarizeSamples(listServiceExecMsSamples);
     const json listDispatchServiceStats = summarizeSamples(listDispatchServiceMsSamples);
     const json listDispatchServiceUsStats = summarizeSamples(listDispatchServiceUsSamples);
@@ -4677,6 +4849,42 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         std::cout << "    list_total_ms:   mean=" << listDispatchTotalStats.value("mean", 0.0)
                   << " p95=" << listDispatchTotalStats.value("p95", 0)
                   << " max=" << listDispatchTotalStats.value("max", 0) << "\n";
+        auto printSearchComponentUs = [&](const char* label, const json& stats) {
+            if (stats.value("count", 0) <= 0) {
+                return;
+            }
+            std::cout << "    " << label << ": mean=" << (stats.value("mean", 0.0) / 1000.0)
+                      << "ms p95=" << (static_cast<double>(stats.value("p95", 0)) / 1000.0)
+                      << "ms\n";
+        };
+        printSearchComponentUs("timing_embedding", searchTimingEmbeddingUsStats);
+        printSearchComponentUs("timing_text", searchTimingTextUsStats);
+        printSearchComponentUs("timing_path", searchTimingPathUsStats);
+        printSearchComponentUs("timing_vector", searchTimingVectorUsStats);
+        printSearchComponentUs("timing_entity_vector", searchTimingEntityVectorUsStats);
+        printSearchComponentUs("timing_compressed_ann", searchTimingCompressedAnnUsStats);
+        printSearchComponentUs("timing_kg", searchTimingKgUsStats);
+        printSearchComponentUs("timing_metadata", searchTimingMetadataUsStats);
+        printSearchComponentUs("timing_tag", searchTimingTagUsStats);
+        printSearchComponentUs("timing_multi_vector", searchTimingMultiVectorUsStats);
+        printSearchComponentUs("timing_concepts", searchTimingConceptsUsStats);
+        printSearchComponentUs("timing_reranker", searchTimingRerankerUsStats);
+        printSearchComponentUs("timing_graph_rerank", searchTimingGraphRerankUsStats);
+        if (searchGraphDocExpansionFtsHitStats.value("count", 0) > 0) {
+            std::cout << "    graph_doc_expansion_fts_hit_count: mean="
+                      << searchGraphDocExpansionFtsHitStats.value("mean", 0.0)
+                      << " p95=" << searchGraphDocExpansionFtsHitStats.value("p95", 0) << "\n";
+        }
+        if (searchMultiVectorRawHitStats.value("count", 0) > 0) {
+            std::cout << "    multi_vector_raw_hit_count: mean="
+                      << searchMultiVectorRawHitStats.value("mean", 0.0)
+                      << " p95=" << searchMultiVectorRawHitStats.value("p95", 0) << "\n";
+        }
+        if (searchGraphVectorRawHitStats.value("count", 0) > 0) {
+            std::cout << "    graph_vector_raw_hit_count: mean="
+                      << searchGraphVectorRawHitStats.value("mean", 0.0)
+                      << " p95=" << searchGraphVectorRawHitStats.value("p95", 0) << "\n";
+        }
     }
 
     std::cout << "\n  Memory:\n";
@@ -4956,17 +5164,39 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
               {"worker_critical_other_ms", grepWorkerCriticalOtherStats},
               {"regex_search_calls", grepRegexSearchCallsStats},
               {"bmh_prefilter_skips", grepBmhPrefilterSkipsStats}}},
-        {"search_server", json{{"execution_time_ms", searchExecStats},
-                               {"phase_dispatch_service_ms", searchDispatchServiceStats},
-                               {"phase_dispatch_service_us", searchDispatchServiceUsStats},
-                               {"phase_dispatch_map_sort_ms", searchDispatchMapSortStats},
-                               {"phase_dispatch_map_sort_us", searchDispatchMapSortUsStats},
-                               {"phase_dispatch_feedback_ms", searchDispatchFeedbackStats},
-                               {"phase_dispatch_feedback_us", searchDispatchFeedbackUsStats},
-                               {"phase_dispatch_response_ms", searchDispatchResponseStats},
-                               {"phase_dispatch_response_us", searchDispatchResponseUsStats},
-                               {"phase_dispatch_total_ms", searchDispatchTotalStats},
-                               {"phase_dispatch_total_us", searchDispatchTotalUsStats}}},
+        {"search_server",
+         json{{"execution_time_ms", searchExecStats},
+              {"phase_dispatch_service_ms", searchDispatchServiceStats},
+              {"phase_dispatch_service_us", searchDispatchServiceUsStats},
+              {"phase_dispatch_map_sort_ms", searchDispatchMapSortStats},
+              {"phase_dispatch_map_sort_us", searchDispatchMapSortUsStats},
+              {"phase_dispatch_feedback_ms", searchDispatchFeedbackStats},
+              {"phase_dispatch_feedback_us", searchDispatchFeedbackUsStats},
+              {"phase_dispatch_response_ms", searchDispatchResponseStats},
+              {"phase_dispatch_response_us", searchDispatchResponseUsStats},
+              {"phase_dispatch_total_ms", searchDispatchTotalStats},
+              {"phase_dispatch_total_us", searchDispatchTotalUsStats},
+              {"timing_embedding_us", searchTimingEmbeddingUsStats},
+              {"timing_text_us", searchTimingTextUsStats},
+              {"timing_path_us", searchTimingPathUsStats},
+              {"timing_vector_us", searchTimingVectorUsStats},
+              {"timing_entity_vector_us", searchTimingEntityVectorUsStats},
+              {"timing_compressed_ann_us", searchTimingCompressedAnnUsStats},
+              {"timing_kg_us", searchTimingKgUsStats},
+              {"timing_metadata_us", searchTimingMetadataUsStats},
+              {"timing_tag_us", searchTimingTagUsStats},
+              {"timing_multi_vector_us", searchTimingMultiVectorUsStats},
+              {"timing_concepts_us", searchTimingConceptsUsStats},
+              {"timing_reranker_us", searchTimingRerankerUsStats},
+              {"timing_graph_rerank_us", searchTimingGraphRerankUsStats},
+              {"subphrase_fts_hit_count", searchSubphraseFtsHitStats},
+              {"aggressive_fts_hit_count", searchAggressiveFtsHitStats},
+              {"graph_expansion_fts_hit_count", searchGraphExpansionFtsHitStats},
+              {"graph_doc_expansion_fts_hit_count", searchGraphDocExpansionFtsHitStats},
+              {"multi_vector_raw_hit_count", searchMultiVectorRawHitStats},
+              {"graph_vector_raw_hit_count", searchGraphVectorRawHitStats},
+              {"graph_query_neighbor_seed_docs", searchGraphQueryNeighborSeedDocStats}}},
+        {"search_debug_samples", searchDebugSamples},
         {"list_server", json{{"service_execution_time_ms", listServiceExecStats},
                              {"phase_dispatch_service_ms", listDispatchServiceStats},
                              {"phase_dispatch_service_us", listDispatchServiceUsStats},

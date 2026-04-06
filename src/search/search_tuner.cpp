@@ -39,6 +39,28 @@ double shareOf(double part, double total) {
     return std::clamp(part / total, 0.0, 1.0);
 }
 
+double zoomLevelDepth(SearchEngineConfig::NavigationZoomLevel level) {
+    switch (level) {
+        case SearchEngineConfig::NavigationZoomLevel::Auto:
+            return 0.0;
+        case SearchEngineConfig::NavigationZoomLevel::Map:
+            return 1.0;
+        case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
+            return 2.0;
+        case SearchEngineConfig::NavigationZoomLevel::Street:
+            return 3.0;
+    }
+    return 0.0;
+}
+
+nlohmann::json zoomLevelCountJson(const std::map<std::string, std::uint64_t>& counts) {
+    nlohmann::json out = nlohmann::json::object();
+    for (const auto& [level, count] : counts) {
+        out[level] = count;
+    }
+    return out;
+}
+
 const SearchTuner::RuntimeStageSignal* findStage(const SearchTuner::RuntimeTelemetry& telemetry,
                                                  std::string_view name) {
     auto it = telemetry.stages.find(std::string(name));
@@ -81,25 +103,39 @@ void normalizeComponentWeights(TunedParams& params) {
     }
 }
 
-void applyAdaptiveClamp(const storage::CorpusStats& stats, TunedParams& params) {
-    params.rrfK = std::clamp(params.rrfK, kMinRrfK, kMaxRrfK);
-    params.graphRerankTopN =
-        std::clamp(params.graphRerankTopN, kMinGraphRerankTopN, kMaxGraphRerankTopN);
+void clampGraphControls(TunedParams& params) {
+    params.kgWeight = std::max(0.0f, params.kgWeight);
+    params.kgMaxResults = std::clamp(params.kgMaxResults, kMinKgMaxResults, kMaxKgMaxResults);
     params.graphScoringBudgetMs =
         std::clamp(params.graphScoringBudgetMs, kMinGraphBudgetMs, kMaxGraphBudgetMs);
-    params.kgMaxResults = std::clamp(params.kgMaxResults, kMinKgMaxResults, kMaxKgMaxResults);
+    params.enableGraphRerank = params.enableGraphRerank && params.graphRerankTopN > 0;
+    params.graphRerankTopN =
+        std::clamp(params.graphRerankTopN, kMinGraphRerankTopN, kMaxGraphRerankTopN);
+    params.graphRerankWeight = std::max(0.0f, params.graphRerankWeight);
+    params.graphRerankMaxBoost = std::max(0.0f, params.graphRerankMaxBoost);
+    params.graphRerankMinSignal = std::max(0.0f, params.graphRerankMinSignal);
+    params.graphCommunityWeight = std::clamp(params.graphCommunityWeight, 0.0f, 1.0f);
+}
+
+void applyAdaptiveClamp(const storage::CorpusStats& stats, TunedParams& params,
+                        bool preserveExplicitGraphConfig = false) {
+    params.rrfK = std::clamp(params.rrfK, kMinRrfK, kMaxRrfK);
+    clampGraphControls(params);
 
     if (stats.hasKnowledgeGraph()) {
         params.kgWeight = std::clamp(params.kgWeight, kMinKgWeightWhenAvailable, kMaxKgWeight);
     } else {
-        params.kgWeight = 0.0f;
-        params.kgMaxResults = 0;
-        params.graphScoringBudgetMs = 0;
-        params.enableGraphRerank = false;
-        params.graphRerankTopN = 0;
-        params.graphRerankWeight = 0.0f;
-        params.graphRerankMaxBoost = 0.0f;
-        params.graphRerankMinSignal = 0.0f;
+        if (!preserveExplicitGraphConfig) {
+            params.kgWeight = 0.0f;
+            params.kgMaxResults = 0;
+            params.graphScoringBudgetMs = 0;
+            params.enableGraphRerank = false;
+            params.graphRerankTopN = 0;
+            params.graphRerankWeight = 0.0f;
+            params.graphRerankMaxBoost = 0.0f;
+            params.graphRerankMinSignal = 0.0f;
+            params.graphCommunityWeight = 0.0f;
+        }
     }
 
     normalizeComponentWeights(params);
@@ -148,6 +184,7 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
     params.graphRerankWeight = 0.18f + 0.14f * graphRichness;
     params.graphRerankMaxBoost = 0.22f + 0.16f * graphRichness;
     params.graphRerankMinSignal = std::max(0.005f, 0.02f - 0.012f * graphRichness);
+    params.graphCommunityWeight = 0.08f + 0.08f * graphRichness;
     params.kgMaxResults = static_cast<size_t>(std::lround(60.0 + 60.0 * graphRichness));
     params.graphScoringBudgetMs = static_cast<int>(std::lround(8.0 + 6.0 * graphRichness));
 
@@ -156,7 +193,8 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
     std::ostringstream suffix;
     suffix << ", graph=on(symbol_density=" << stats.symbolDensity
            << ", kg_weight=" << params.kgWeight
-           << ", graph_rerank_weight=" << params.graphRerankWeight << ")";
+           << ", graph_rerank_weight=" << params.graphRerankWeight
+           << ", graph_community_weight=" << params.graphCommunityWeight << ")";
     stateReason += suffix.str();
 }
 
@@ -186,6 +224,7 @@ SearchTuner::SearchTuner(const storage::CorpusStats& stats, std::optional<Tuning
 void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     baseConfig_ = config;
+    params_.zoomLevel = config.zoomLevel;
     params_.textWeight = config.textWeight;
     params_.vectorWeight = config.vectorWeight;
     params_.entityVectorWeight = config.entityVectorWeight;
@@ -219,9 +258,15 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.graphRerankWeight = config.graphRerankWeight;
     params_.graphRerankMaxBoost = config.graphRerankMaxBoost;
     params_.graphRerankMinSignal = config.graphRerankMinSignal;
+    params_.graphCommunityWeight = config.graphCommunityWeight;
     params_.kgMaxResults = config.kgMaxResults;
     params_.graphScoringBudgetMs = config.graphScoringBudgetMs;
-    applyAdaptiveClamp(stats_, params_);
+    const bool preserveExplicitGraphConfig =
+        !stats_.hasKnowledgeGraph() &&
+        (config.enableGraphRerank || config.kgWeight > 0.0f || config.graphRerankWeight > 0.0f ||
+         config.graphRerankMaxBoost > 0.0f || config.graphCommunityWeight > 0.0f ||
+         config.kgMaxResults > 0 || config.graphScoringBudgetMs > 0);
+    applyAdaptiveClamp(stats_, params_, preserveExplicitGraphConfig);
     baseParams_ = params_;
 }
 
@@ -252,7 +297,7 @@ void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
     const double kgLatencyShare =
         kgStage ? shareOf(std::max(0.0, kgStage->durationMs), latencyMs) : 0.0;
     const double kgContributionRate =
-        kgStage && kgStage->enabled ? (kgStage->contributed ? 1.0 : 0.0) : 0.0;
+        kgFusion && kgFusion->enabled ? (kgFusion->contributedToFinal ? 1.0 : 0.0) : 0.0;
     const double kgScoreMassShare = kgFusion ? std::clamp(kgFusion->finalScoreMass, 0.0, 1.0) : 0.0;
     const double kgFinalDocShare =
         kgFusion ? shareOf(static_cast<double>(kgFusion->finalTopDocCount),
@@ -284,6 +329,11 @@ void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
         ewmaUpdate(adaptive_.ewmaGraphRerankSkipRate, graphSkipRate, adaptive_.observations);
     adaptive_.ewmaGraphRerankContributionRate = ewmaUpdate(
         adaptive_.ewmaGraphRerankContributionRate, graphContributionRate, adaptive_.observations);
+    adaptive_.ewmaZoomDepth = ewmaUpdate(
+        adaptive_.ewmaZoomDepth, zoomLevelDepth(telemetry.zoomLevel), adaptive_.observations);
+    adaptive_.lastZoomLevel = telemetry.zoomLevel;
+    adaptive_
+        .zoomLevelCounts[SearchEngineConfig::navigationZoomLevelToString(telemetry.zoomLevel)]++;
 
     if (!stats_.hasKnowledgeGraph()) {
         adaptive_.lastDecision = "steady_no_kg";
@@ -408,6 +458,10 @@ nlohmann::json SearchTuner::adaptiveStateToJsonLocked() const {
         {"ewma_graph_rerank_latency_ms", adaptive_.ewmaGraphRerankLatencyMs},
         {"ewma_graph_rerank_skip_rate", adaptive_.ewmaGraphRerankSkipRate},
         {"ewma_graph_rerank_contribution_rate", adaptive_.ewmaGraphRerankContributionRate},
+        {"ewma_zoom_depth", adaptive_.ewmaZoomDepth},
+        {"last_zoom_level",
+         SearchEngineConfig::navigationZoomLevelToString(adaptive_.lastZoomLevel)},
+        {"zoom_level_counts", zoomLevelCountJson(adaptive_.zoomLevelCounts)},
         {"current_params", params_.toJson()},
         {"base_params", baseParams_.toJson()},
     };

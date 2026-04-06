@@ -42,6 +42,7 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_database.h>
+#include <yams/version.hpp>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
@@ -4438,6 +4439,26 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         CHECK(embedResp.failed == 0);
     }
 
+    SECTION("embed documents rejects non-empty hash lists that resolve to no daemon documents") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-missing-hashes.onnx");
+        svc.__test_setModelProvider(provider);
+        svc.__test_setContentStore(std::make_shared<StubContentStore>());
+        svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
+
+        EmbedDocumentsRequest req;
+        req.modelName = "repair-model";
+        req.documentHashes = {std::string(64, 'a')};
+        req.batchSize = 4;
+        req.skipExisting = false;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message.find("requested documents were found") != std::string::npos);
+    }
+
     SECTION("embed documents rejects degraded providers") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-degraded.onnx");
         svc.__test_setModelProvider(provider);
@@ -4500,6 +4521,39 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::NotInitialized);
         CHECK(err.message == "No embedding model configured");
+    }
+
+    SECTION("embed documents uses daemon config resolver when request model is empty") {
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-config-model.onnx");
+        svc.__test_setModelProvider(provider);
+        svc.__test_setContentStore(std::make_shared<StubContentStore>());
+        svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
+
+        const auto configPath = cfg.dataDir / "config.toml";
+        {
+            std::ofstream out(configPath);
+            REQUIRE(out.is_open());
+            out << "[embeddings]\n";
+            out << "preferred_model = \"config-repair-model\"\n";
+        }
+        cfg.configFilePath = configPath;
+
+        DaemonLifecycleFsm configLifecycleFsm;
+        ServiceManager configSvc(cfg, state, configLifecycleFsm);
+        configSvc.__test_setModelProvider(provider);
+        configSvc.__test_setContentStore(std::make_shared<StubContentStore>());
+        configSvc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
+        RequestDispatcher configDispatcher(&lifecycle, &configSvc, &state);
+
+        EmbedDocumentsRequest req;
+        req.modelName.clear();
+        req.batchSize = 4;
+        req.skipExisting = true;
+
+        auto resp = dispatchRequest(configDispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<EmbedDocumentsResponse>(resp));
+        CHECK(provider->isModelLoaded("config-repair-model"));
     }
 }
 
@@ -6147,6 +6201,19 @@ TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",
     }
 }
 
+TEST_CASE("DaemonMetrics: snapshot reports generated build version", "[daemon][metrics][version]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_version_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    CHECK(snap->version == yams::version::string_v);
+}
+
 TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",
           "[daemon][status][protocol][post_ingest]") {
     StatusResponse s{};
@@ -6217,6 +6284,9 @@ TEST_CASE("StatusResponse: Protocol serialization", "[daemon][status][protocol]"
         s.overallStatus = "failed";
         s.lifecycleState = "starting";
         s.lastError = "boom";
+        s.dataDir = "/tmp/daemon-data-dir";
+        s.metadataDbPath = "/tmp/daemon-data-dir/yams.db";
+        s.vectorDbPath = "/tmp/daemon-data-dir/vectors.db";
         s.requestCounts["worker_threads"] = 4;
 
         // FSM-exported fields
@@ -6255,6 +6325,9 @@ TEST_CASE("StatusResponse: Protocol serialization", "[daemon][status][protocol]"
         REQUIRE(decoded.version == "test");
         REQUIRE(decoded.overallStatus == "failed");
         REQUIRE(decoded.lastError == "boom");
+        REQUIRE(decoded.dataDir == "/tmp/daemon-data-dir");
+        REQUIRE(decoded.metadataDbPath == "/tmp/daemon-data-dir/yams.db");
+        REQUIRE(decoded.vectorDbPath == "/tmp/daemon-data-dir/vectors.db");
 
         // Verify FSM state counts
         REQUIRE(decoded.requestCounts.at("worker_threads") == 4);

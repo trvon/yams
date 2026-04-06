@@ -60,6 +60,9 @@ enum class TuningState {
  * a particular corpus profile (size, content type, feature availability).
  */
 struct TunedParams {
+    SearchEngineConfig::NavigationZoomLevel zoomLevel =
+        SearchEngineConfig::NavigationZoomLevel::Auto;
+
     // RRF constant (k in 1/(k+rank))
     // Lower k = more weight on top-ranked items
     // Higher k = smoother ranking across positions
@@ -113,6 +116,7 @@ struct TunedParams {
     float graphRerankWeight = 0.15f;
     float graphRerankMaxBoost = 0.20f;
     float graphRerankMinSignal = 0.01f;
+    float graphCommunityWeight = 0.10f;
     size_t kgMaxResults = 100;
     int graphScoringBudgetMs = 10;
 
@@ -120,6 +124,7 @@ struct TunedParams {
      * @brief Apply tuned parameters to a SearchEngineConfig.
      */
     void applyTo(SearchEngineConfig& config) const {
+        config.zoomLevel = zoomLevel;
         config.textWeight = textWeight;
         config.vectorWeight = vectorWeight;
         config.entityVectorWeight = entityVectorWeight;
@@ -136,6 +141,7 @@ struct TunedParams {
         config.graphRerankWeight = graphRerankWeight;
         config.graphRerankMaxBoost = graphRerankMaxBoost;
         config.graphRerankMinSignal = graphRerankMinSignal;
+        config.graphCommunityWeight = graphCommunityWeight;
         config.kgMaxResults = kgMaxResults;
         config.graphScoringBudgetMs = graphScoringBudgetMs;
         config.vectorOnlyThreshold = vectorOnlyThreshold;
@@ -162,6 +168,7 @@ struct TunedParams {
      */
     [[nodiscard]] nlohmann::json toJson() const {
         return nlohmann::json{
+            {"zoom_level", SearchEngineConfig::navigationZoomLevelToString(zoomLevel)},
             {"rrf_k", rrfK},
             {"text_weight", textWeight},
             {"vector_weight", vectorWeight},
@@ -177,6 +184,7 @@ struct TunedParams {
             {"graph_rerank_weight", graphRerankWeight},
             {"graph_rerank_max_boost", graphRerankMaxBoost},
             {"graph_rerank_min_signal", graphRerankMinSignal},
+            {"graph_community_weight", graphCommunityWeight},
             {"kg_max_results", kgMaxResults},
             {"graph_scoring_budget_ms", graphScoringBudgetMs},
             {"vector_only_threshold", vectorOnlyThreshold},
@@ -205,6 +213,7 @@ struct TunedParams {
 
     switch (state) {
         case TuningState::SMALL_CODE:
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Street;
             params.rrfK = 20;
             params.textWeight = 0.45f;
             params.vectorWeight = 0.15f;
@@ -216,6 +225,7 @@ struct TunedParams {
             break;
 
         case TuningState::LARGE_CODE:
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Street;
             params.rrfK = 60;
             params.textWeight = 0.40f;
             params.vectorWeight = 0.20f;
@@ -227,6 +237,7 @@ struct TunedParams {
             break;
 
         case TuningState::SMALL_PROSE:
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
             params.rrfK = 25;
             params.textWeight = 0.50f;
             params.vectorWeight = 0.40f;
@@ -238,6 +249,7 @@ struct TunedParams {
             break;
 
         case TuningState::LARGE_PROSE:
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
             params.rrfK = 60;
             params.textWeight = 0.40f;
             params.vectorWeight = 0.45f;
@@ -249,6 +261,7 @@ struct TunedParams {
             break;
 
         case TuningState::SCIENTIFIC:
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
             // For scientific/benchmark corpora: balanced text + vector fusion
             // Text-dominant because lexical precision is usually stronger than dense-only
             // semantics on benchmark-style scientific corpora.
@@ -268,6 +281,7 @@ struct TunedParams {
             break;
 
         case TuningState::MIXED:
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
             params.rrfK = 45;
             params.textWeight = 0.40f;
             params.vectorWeight = 0.25f;
@@ -279,6 +293,7 @@ struct TunedParams {
             break;
 
         case TuningState::MIXED_PRECISION:
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
             params.rrfK = 45;
             params.textWeight = 0.40f;
             params.vectorWeight = 0.25f;
@@ -307,6 +322,7 @@ struct TunedParams {
             break;
 
         case TuningState::MINIMAL:
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Street;
             params.rrfK = 15;
             params.textWeight = 0.55f;
             params.vectorWeight = 0.30f;
@@ -374,6 +390,8 @@ public:
         double latencyMs = 0.0;
         std::size_t finalResultCount = 0;
         std::size_t topWindow = 0;
+        SearchEngineConfig::NavigationZoomLevel zoomLevel =
+            SearchEngineConfig::NavigationZoomLevel::Auto;
         std::map<std::string, RuntimeStageSignal> stages;
         std::map<std::string, RuntimeFusionSignal> fusionSources;
     };
@@ -479,7 +497,11 @@ private:
         double ewmaGraphRerankLatencyMs = 0.0;
         double ewmaGraphRerankSkipRate = 0.0;
         double ewmaGraphRerankContributionRate = 0.0;
+        double ewmaZoomDepth = 0.0;
         bool lastObservationChanged = false;
+        SearchEngineConfig::NavigationZoomLevel lastZoomLevel =
+            SearchEngineConfig::NavigationZoomLevel::Auto;
+        std::map<std::string, std::uint64_t> zoomLevelCounts;
         std::string lastDecision;
     };
 

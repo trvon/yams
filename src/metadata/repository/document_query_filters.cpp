@@ -327,6 +327,18 @@ void appendDocumentQueryFilters(const DocumentQueryOptions& options, bool joinFt
         addIntParam(params, options.maxRepairAttempts);
     }
 
+    if (options.hasEmbedding.has_value()) {
+        if (options.hasEmbedding.value()) {
+            conditions.emplace_back(
+                "EXISTS (SELECT 1 FROM document_embeddings_status des "
+                "WHERE des.document_id = documents.id AND des.has_embedding = 1)");
+        } else {
+            conditions.emplace_back(
+                "NOT EXISTS (SELECT 1 FROM document_embeddings_status des "
+                "WHERE des.document_id = documents.id AND des.has_embedding = 1)");
+        }
+    }
+
     if (options.onlyMissingContent) {
         conditions.emplace_back("NOT EXISTS (SELECT 1 FROM document_content c "
                                 "WHERE c.document_id = documents.id)");

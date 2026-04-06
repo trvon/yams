@@ -37,6 +37,16 @@ TEST_CASE("fusionStrategyToString covers all strategies", "[search][config][catc
     CHECK(std::string(SearchEngineConfig::fusionStrategyToString(FS::COMB_MNZ)) == "COMB_MNZ");
 }
 
+TEST_CASE("navigationZoomLevelToString covers all zoom levels", "[search][config][catch2]") {
+    using Z = SearchEngineConfig::NavigationZoomLevel;
+
+    CHECK(std::string(SearchEngineConfig::navigationZoomLevelToString(Z::Auto)) == "AUTO");
+    CHECK(std::string(SearchEngineConfig::navigationZoomLevelToString(Z::Map)) == "MAP");
+    CHECK(std::string(SearchEngineConfig::navigationZoomLevelToString(Z::Neighborhood)) ==
+          "NEIGHBORHOOD");
+    CHECK(std::string(SearchEngineConfig::navigationZoomLevelToString(Z::Street)) == "STREET");
+}
+
 // ────────────────────────────────────────────────────────────────────────────────
 // forProfile
 // ────────────────────────────────────────────────────────────────────────────────
@@ -310,6 +320,7 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     SearchEngineConfig cfg;
 
     CHECK(cfg.corpusProfile == SearchEngineConfig::CorpusProfile::MIXED);
+    CHECK(cfg.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto);
     CHECK(cfg.maxResults == 100);
     CHECK(cfg.similarityThreshold == Approx(0.75f));
     CHECK(cfg.enableParallelExecution == true);

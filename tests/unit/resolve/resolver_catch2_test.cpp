@@ -115,6 +115,32 @@ public:
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 
+    // Semantic duplicate persistence (unused)
+    Result<int64_t>
+    upsertSemanticDuplicateGroup(const yams::metadata::SemanticDuplicateGroup&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<void> replaceSemanticDuplicateGroupMembers(
+        int64_t, const std::vector<yams::metadata::SemanticDuplicateGroupMember>&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<std::optional<yams::metadata::SemanticDuplicateGroup>>
+    getSemanticDuplicateGroupByKey(const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<std::vector<yams::metadata::SemanticDuplicateGroup>>
+    listSemanticDuplicateGroups(int) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<std::unordered_map<int64_t, yams::metadata::SemanticDuplicateGroupDetail>>
+    getSemanticDuplicateGroupsForDocuments(std::span<const int64_t>) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<void> updateSemanticDuplicateGroupStatus(const std::string&,
+                                                    const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+
     // Search history (unused)
     Result<int64_t> insertSearchHistory(const yams::metadata::SearchHistoryEntry&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
@@ -348,6 +374,10 @@ public:
     }
     Result<void> batchUpdateDocumentEmbeddingStatusByHashes(const std::vector<std::string>&, bool,
                                                             const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<void> reconcileDocumentEmbeddingStatusByHashes(const std::vector<std::string>&,
+                                                          const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<bool> hasDocumentEmbeddingByHash(const std::string&) override {

@@ -10,6 +10,19 @@
 
 namespace yams::mcp {
 
+namespace {
+
+json makeTextResourceResult(const std::string& uri, const std::string& mimeType, std::string text) {
+    json content{{"uri", uri}, {"mimeType", mimeType}, {"text", std::move(text)}};
+    return json{{"contents", json::array({std::move(content)})}};
+}
+
+json makeJsonResourceResult(const std::string& uri, json payload) {
+    return makeTextResourceResult(uri, "application/json", payload.dump());
+}
+
+} // namespace
+
 json MCPServer::listResources() {
 #if defined(YAMS_WASI)
     // WASI profile: no file-backed resources.
@@ -61,47 +74,32 @@ json MCPServer::readResource(const std::string& uri) {
     if (uri == "yams://stats") {
         // Get storage statistics
         if (!store_) {
-            return {{"contents",
-                     {{{{"uri", uri},
-                        {"mimeType", "application/json"},
-                        {"text", json({{"error", "Storage not initialized"}}).dump()}}}}}};
+            return makeJsonResourceResult(uri, json{{"error", "Storage not initialized"}});
         }
         auto stats = store_->getStats();
         auto health = store_->checkHealth();
 
-        return {{"contents",
-                 {{{{"uri", uri},
-                    {"mimeType", "application/json"},
-                    {"text", json({{"storage",
-                                    {{"totalObjects", stats.totalObjects},
-                                     {"totalBytes", stats.totalBytes},
-                                     {"uniqueBlocks", stats.uniqueBlocks},
-                                     {"deduplicatedBytes", stats.deduplicatedBytes}}},
-                                   {"health",
-                                    {{"isHealthy", health.isHealthy},
-                                     {"status", health.status},
-                                     {"warnings", health.warnings},
-                                     {"errors", health.errors}}}})
-                                 .dump()}}}}}};
+        return makeJsonResourceResult(uri, json{{"storage",
+                                                 {{"totalObjects", stats.totalObjects},
+                                                  {"totalBytes", stats.totalBytes},
+                                                  {"uniqueBlocks", stats.uniqueBlocks},
+                                                  {"deduplicatedBytes", stats.deduplicatedBytes}}},
+                                                {"health",
+                                                 {{"isHealthy", health.isHealthy},
+                                                  {"status", health.status},
+                                                  {"warnings", health.warnings},
+                                                  {"errors", health.errors}}}});
     } else if (uri == "yams://status") {
         try {
             auto ensure = ensureDaemonClient();
             if (!ensure) {
-                return {{"contents",
-                         {{{{"uri", uri},
-                            {"mimeType", "application/json"},
-                            {"text", json({{"error", std::string("status error: ") +
-                                                         ensure.error().message}})
-                                         .dump()}}}}}};
+                return makeJsonResourceResult(
+                    uri, json{{"error", std::string("status error: ") + ensure.error().message}});
             }
             auto st = yams::cli::run_result(daemon_client_->status(), std::chrono::seconds(3));
             if (!st) {
-                return {{"contents",
-                         {{{{"uri", uri},
-                            {"mimeType", "application/json"},
-                            {"text",
-                             json({{"error", std::string("status error: ") + st.error().message}})
-                                 .dump()}}}}}};
+                return makeJsonResourceResult(
+                    uri, json{{"error", std::string("status error: ") + st.error().message}});
             }
             const auto& s = st.value();
             json j;
@@ -125,26 +123,19 @@ json MCPServer::readResource(const std::string& uri) {
             j["counters"]["mcp_worker_queued"] = 0;
             j["counters"]["mcp_worker_processed"] = 0;
             j["counters"]["mcp_worker_failed"] = 0;
-            return {{"contents",
-                     {{{{"uri", uri}, {"mimeType", "application/json"}, {"text", j.dump()}}}}}};
+            return makeJsonResourceResult(uri, std::move(j));
         } catch (...) {
-            return {{"contents",
-                     {{{{"uri", uri},
-                        {"mimeType", "application/json"},
-                        {"text", json({{"error", "status exception"}}).dump()}}}}}};
+            return makeJsonResourceResult(uri, json{{"error", "status exception"}});
         }
     } else if (uri == "yams://recent") {
         // Get recent documents
         if (!metadataRepo_) {
-            return {
-                {"contents",
-                 {{{{"uri", uri},
-                    {"mimeType", "application/json"},
-                    {"text", json({{"error", "Metadata repository not initialized"}}).dump()}}}}}};
+            return makeJsonResourceResult(uri,
+                                          json{{"error", "Metadata repository not initialized"}});
         }
         auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo_, "%");
         if (!docsResult) {
-            return {{"contents", {{"text", "Failed to list documents"}}}};
+            return makeJsonResourceResult(uri, json{{"error", "Failed to list documents"}});
         }
         auto docs = docsResult.value();
         // Limit to 20 most recent
@@ -160,10 +151,7 @@ json MCPServer::readResource(const std::string& uri) {
                                {"mimeType", doc.mimeType}});
         }
 
-        return {{"contents",
-                 {{{{"uri", uri},
-                    {"mimeType", "application/json"},
-                    {"text", json({{"documents", docList}}).dump()}}}}}};
+        return makeJsonResourceResult(uri, json{{"documents", std::move(docList)}});
     } else {
         throw std::runtime_error("Unknown resource URI: " + uri);
     }
