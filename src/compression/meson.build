@@ -43,7 +43,6 @@ compression_src = files(
   'compression_utils.cpp',
   'compression_header.cpp',
   'compression_policy.cpp',
-  'compression_scheduler.cpp',
   'compression_monitor.cpp',
   'error_handler.cpp',
   'integrity_validator.cpp',

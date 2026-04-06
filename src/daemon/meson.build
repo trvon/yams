@@ -55,6 +55,12 @@ endif
 # pb_system_inc = pb_includedir != '' ? include_directories(pb_includedir, is_system: true) : []
 pb_system_inc = []
 protoc_override = get_option('protoc-path')
+proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
+dep_protoc_prog = disabler()
+if proto_prefix != ''
+  dep_protoc_prog = find_program(join_paths(proto_prefix, 'bin', 'protoc'), required: false)
+endif
+
 # Cross-builds need a build-machine protoc, not the target protobuf package binary.
 if protoc_override != ''
   protoc_prog = find_program(protoc_override, native: meson.is_cross_build(), required: true)
@@ -62,10 +68,46 @@ elif meson.is_cross_build()
   protoc_prog = find_program('protoc', native: true, required: true)
 else
   # Prefer protoc from the protobuf dependency (Conan) to avoid header/runtime mismatch.
-  proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
   protoc_candidate = proto_prefix != '' ? join_paths(proto_prefix, 'bin', 'protoc') : 'protoc'
   protoc_prog = find_program(protoc_candidate, required: protobuf_dep.found())
 endif
+
+if protobuf_dep.found()
+  protobuf_version = protobuf_dep.version()
+  protoc_version_cmd = run_command(protoc_prog, '--version', check: false)
+  protoc_version = ''
+  if protoc_version_cmd.returncode() == 0
+    protoc_version_text = protoc_version_cmd.stdout().strip().split(' ')
+    if protoc_version_text.length() >= 2
+      protoc_version = protoc_version_text[1]
+    endif
+  endif
+
+  if protoc_version != '' and protoc_version != protobuf_version
+    fallback_ok = false
+    fallback_version = ''
+    if dep_protoc_prog.found() and dep_protoc_prog.full_path() != protoc_prog.full_path()
+      fallback_version_cmd = run_command(dep_protoc_prog, '--version', check: false)
+      if fallback_version_cmd.returncode() == 0
+        fallback_version_text = fallback_version_cmd.stdout().strip().split(' ')
+        if fallback_version_text.length() >= 2
+          fallback_version = fallback_version_text[1]
+        endif
+      endif
+      fallback_ok = fallback_version == protobuf_version
+    endif
+
+    if fallback_ok
+      warning('Configured protoc @0@ (version @1@) does not match protobuf dependency version @2@; falling back to @3@.'.format(
+        protoc_prog.full_path(), protoc_version, protobuf_version, dep_protoc_prog.full_path()))
+      protoc_prog = dep_protoc_prog
+    else
+      error('Configured protoc version @0@ does not match protobuf dependency version @1@. Use a matching protoc, or leave -Dprotoc-path empty to use the dependency-provided generator.'.format(
+        protoc_version == '' ? 'unknown' : protoc_version, protobuf_version))
+    endif
+  endif
+endif
+
 proto_source_root = join_paths(meson.project_source_root(), 'include')
 proto_out_dir = join_paths(meson.current_build_dir(), 'libyams_daemon.a.p')
 proto_generator = generator(protoc_prog,
@@ -91,7 +133,6 @@ yams_daemon_lib = static_library('yams_daemon',
     'daemon.cpp',
     'daemon_lifecycle.cpp',
     'embedded_service_host.cpp',
-    'tracy_memory_hooks.cpp',
     'components/BackgroundTaskManager.cpp',
     'components/CheckpointManager.cpp',
     'components/DaemonMetrics.cpp',
@@ -132,14 +173,12 @@ yams_daemon_lib = static_library('yams_daemon',
     'components/EntityGraphService.cpp',
     'components/gliner_query_extractor.cpp',
     'components/SocketServer.cpp',
-    'components/WalMetricsProvider.cpp',
     'resource/mock_model_provider.cpp',
     'components/dispatch_utils.cpp',
     'resource/abi_model_provider_adapter.cpp',
     'resource/abi_entity_extractor_adapter.cpp',
     'resource/abi_symbol_extractor_adapter.cpp',
     'resource/abi_plugin_loader.cpp',
-    'resource/plugin_trust.cpp',
     'resource/plugin_host.cpp',
     'resource/plugin_host_services_shim.cpp',
     'resource/external_plugin_host.cpp',

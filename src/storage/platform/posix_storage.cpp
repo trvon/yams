@@ -1,7 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <yams/storage/storage_engine.h>
 
-#ifdef __unix__
+#if defined(__unix__) || defined(__APPLE__)
 
 #include <cstring>
 #include <fcntl.h>
@@ -142,6 +142,9 @@ Result<void> atomicWriteOptimized(const std::filesystem::path& path,
 
         ::close(fd);
     }
+#else
+    (void)path;
+    (void)data;
 #endif
 
     // Fallback to regular implementation
@@ -188,4 +191,4 @@ Result<void> setSecurePermissions(const std::filesystem::path& path) {
 
 } // namespace yams::storage::platform
 
-#endif // __unix__
+#endif // Unix-like platforms

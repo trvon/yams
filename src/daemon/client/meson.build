@@ -3,16 +3,56 @@ protobuf_dep = dependency('protobuf')
 nlohmann_json_dep = dependency('nlohmann_json')
 
 # Protobuf generation for client
-pb_includedir = protobuf_dep.get_variable(pkgconfig: 'includedir', default_value: '')
 protoc_override = get_option('protoc-path')
+proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
+dep_protoc_prog = disabler()
+if proto_prefix != ''
+  dep_protoc_prog = find_program(join_paths(proto_prefix, 'bin', 'protoc'), required: false)
+endif
+
 if protoc_override != ''
   protoc_prog = find_program(protoc_override, native: meson.is_cross_build(), required: true)
 elif meson.is_cross_build()
   protoc_prog = find_program('protoc', native: true, required: true)
 else
-  proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
   protoc_candidate = proto_prefix != '' ? join_paths(proto_prefix, 'bin', 'protoc') : 'protoc'
   protoc_prog = find_program(protoc_candidate, required: protobuf_dep.found())
+endif
+
+if protobuf_dep.found()
+  protobuf_version = protobuf_dep.version()
+  protoc_version_cmd = run_command(protoc_prog, '--version', check: false)
+  protoc_version = ''
+  if protoc_version_cmd.returncode() == 0
+    protoc_version_text = protoc_version_cmd.stdout().strip().split(' ')
+    if protoc_version_text.length() >= 2
+      protoc_version = protoc_version_text[1]
+    endif
+  endif
+
+  if protoc_version != '' and protoc_version != protobuf_version
+    fallback_ok = false
+    fallback_version = ''
+    if dep_protoc_prog.found() and dep_protoc_prog.full_path() != protoc_prog.full_path()
+      fallback_version_cmd = run_command(dep_protoc_prog, '--version', check: false)
+      if fallback_version_cmd.returncode() == 0
+        fallback_version_text = fallback_version_cmd.stdout().strip().split(' ')
+        if fallback_version_text.length() >= 2
+          fallback_version = fallback_version_text[1]
+        endif
+      endif
+      fallback_ok = fallback_version == protobuf_version
+    endif
+
+    if fallback_ok
+      warning('Configured protoc @0@ (version @1@) does not match protobuf dependency version @2@; falling back to @3@.'.format(
+        protoc_prog.full_path(), protoc_version, protobuf_version, dep_protoc_prog.full_path()))
+      protoc_prog = dep_protoc_prog
+    else
+      error('Configured protoc version @0@ does not match protobuf dependency version @1@. Use a matching protoc, or leave -Dprotoc-path empty to use the dependency-provided generator.'.format(
+        protoc_version == '' ? 'unknown' : protoc_version, protobuf_version))
+    endif
+  endif
 endif
 
 proto_source_root = join_paths(meson.project_source_root(), 'include')

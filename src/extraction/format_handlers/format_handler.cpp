@@ -9,26 +9,30 @@
 namespace yams::extraction::format {
 
 // Helpers
-static inline std::string trim(std::string_view sv) {
-    auto l = sv.begin();
-    auto r = sv.end();
+static inline std::string_view trimView(std::string_view sv) {
+    size_t start = 0;
+    size_t end = sv.size();
 
-    while (l != r && std::isspace(static_cast<unsigned char>(*l))) {
-        ++l;
+    while (start < end && std::isspace(static_cast<unsigned char>(sv[start]))) {
+        ++start;
     }
-    while (r != l) {
-        auto prev = r;
-        --prev;
-        if (!std::isspace(static_cast<unsigned char>(*prev))) {
+    while (end > start) {
+        const char c = sv[end - 1];
+        if (!std::isspace(static_cast<unsigned char>(c))) {
             break;
         }
-        r = prev;
+        --end;
     }
-    return std::string(l, r);
+    return sv.substr(start, end - start);
+}
+
+static inline std::string trim(std::string_view sv) {
+    sv = trimView(sv);
+    return std::string(sv.begin(), sv.end());
 }
 
 static inline bool parseInt(std::string_view sv, int& out) {
-    sv = std::string_view(trim(sv));
+    sv = trimView(sv);
     if (sv.empty())
         return false;
 
