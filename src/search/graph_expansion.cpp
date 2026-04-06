@@ -100,12 +100,13 @@ float surfaceQueryMatchScore(const std::vector<std::string>& queryAliases,
         if (alias == normalizedCandidate) {
             return 1.0f;
         }
-        if (alias.size() >= 4 && (normalizedCandidate.find(alias) != std::string::npos ||
-                                  alias.find(normalizedCandidate) != std::string::npos)) {
+        const auto aliasTokens = tokenizeKgQuery(alias);
+        if (alias.size() >= 4 && (aliasTokens.size() >= 2 || candidateSet.size() == 1) &&
+            (normalizedCandidate.find(alias) != std::string::npos ||
+             alias.find(normalizedCandidate) != std::string::npos)) {
             best = std::max(best, 0.85f);
         }
 
-        const auto aliasTokens = tokenizeKgQuery(alias);
         if (aliasTokens.empty()) {
             continue;
         }
@@ -115,7 +116,7 @@ float surfaceQueryMatchScore(const std::vector<std::string>& queryAliases,
                 ++overlap;
             }
         }
-        if (overlap > 0) {
+        if (overlap >= 2) {
             const float coverage = static_cast<float>(overlap) /
                                    static_cast<float>(std::max<size_t>(1, aliasTokens.size()));
             best = std::max(best, coverage);
@@ -242,7 +243,8 @@ float graphNodeExpansionWeight(const std::optional<std::string>& typeOpt,
         }
     }
     const std::string label = normalizeGraphSurface(labelView);
-    if (type == "document" || type == "file" || type == "date" || type == "time" ||
+    if (type == "document" || type == "file" || type == "path" || type == "directory" ||
+        type == "blob" || type == "text_segment" || type == "date" || type == "time" ||
         type == "duration" || type == "number" || type == "ordinal") {
         return 0.0f;
     }

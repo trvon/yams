@@ -4869,11 +4869,11 @@ struct BenchFixture {
                     defaultPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
 
                 if (fs::exists(localOnnxPlugin)) {
-                    harnessOptions.pluginDir = localOnnxPlugin.parent_path();
+                    harnessOptions.pluginDir = localPluginDir;
                 } else if (fs::exists(nosanOnnxPlugin)) {
-                    harnessOptions.pluginDir = nosanOnnxPlugin.parent_path();
+                    harnessOptions.pluginDir = nosanPluginDir;
                 } else if (fs::exists(defaultOnnxPlugin)) {
-                    harnessOptions.pluginDir = defaultOnnxPlugin.parent_path();
+                    harnessOptions.pluginDir = defaultPluginDir;
                 } else if (fs::exists(installedOnnxPlugin)) {
                     const fs::path stagedPluginDir =
                         fs::temp_directory_path() / "yams_retrieval_bench_plugins";
