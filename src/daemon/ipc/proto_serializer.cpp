@@ -1958,6 +1958,9 @@ template <> struct ProtoBinding<UpdateDocumentResponse> {
         o->set_content_updated(r.contentUpdated);
         o->set_metadata_updated(r.metadataUpdated);
         o->set_tags_updated(r.tagsUpdated);
+        o->set_updates_applied(r.updatesApplied);
+        o->set_tags_added(r.tagsAdded);
+        o->set_tags_removed(r.tagsRemoved);
     }
     static UpdateDocumentResponse get(const Envelope& env) {
         UpdateDocumentResponse r{};
@@ -1966,6 +1969,9 @@ template <> struct ProtoBinding<UpdateDocumentResponse> {
         r.contentUpdated = i.content_updated();
         r.metadataUpdated = i.metadata_updated();
         r.tagsUpdated = i.tags_updated();
+        r.updatesApplied = i.updates_applied();
+        r.tagsAdded = i.tags_added();
+        r.tagsRemoved = i.tags_removed();
         if (!r.contentUpdated && !r.metadataUpdated && !r.tagsUpdated) {
             r.contentUpdated = i.updated();
         }

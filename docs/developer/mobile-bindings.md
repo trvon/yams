@@ -69,8 +69,8 @@ This means mobile bindings should be evaluated as a corpus SDK, not as an infere
 |-----------------------|------------------------------------------------|-------|
 | Context lifecycle     | `yams_mobile_context_create`, `yams_mobile_context_destroy` | Config accepts working/cache dirs and a `telemetry_sink` string (`console`, `stderr`, `noop`, or `file:/path`). |
 | Grep/Search           | `yams_mobile_grep_execute`, `yams_mobile_search_execute`, destroy helpers, `yams_mobile_{grep,search}_result_stats_json` | Blocking calls returning opaque handles plus JSON stats (latency, retry counters). |
-| Document lifecycle    | `yams_mobile_store_document`, `yams_mobile_download`, `yams_mobile_update_document`, `yams_mobile_delete_by_name`, `yams_mobile_remove_document` | CRUD exists, but backend parity and naming cleanup are still in progress. |
-| Document retrieval    | `yams_mobile_list_documents`, `yams_mobile_get_document` | Core surface for app-side prompt assembly and memory recall. |
+| Document lifecycle    | `yams_mobile_store_document`, `yams_mobile_download`, `yams_mobile_update_document`, `yams_mobile_delete_by_name`, `yams_mobile_remove_document` | CRUD exists; delete APIs now align on the common status/payload contract across embedded and daemon mode. Naming cleanup is still in progress. |
+| Document retrieval    | `yams_mobile_list_documents`, `yams_mobile_get_document` | Core surface for app-side prompt assembly and memory recall; `list_documents` and `get_document` now return stable JSON payloads across embedded and daemon mode. |
 | Metadata inspection   | `yams_mobile_get_metadata`, `yams_mobile_metadata_result_json` | JSON payload mirrors DocumentService metadata map. |
 | Graph retrieval       | `yams_mobile_graph_query`, `yams_mobile_graph_query_result_json` | Supported in both daemon and embedded mode for corpus-backed documents; follow-up parity review is still needed for edge cases and cleanup behavior. |
 | Corpus status         | `yams_mobile_get_vector_status`, `yams_mobile_vector_status_result_json` | JSON now reports corpus/index readiness, embedding coverage, and corpus feature signals. The request-side `warmup` flag is deprecated and ignored for ABI compatibility. |
@@ -79,7 +79,11 @@ This means mobile bindings should be evaluated as a corpus SDK, not as an infere
 
 - Embedded and daemon backends do not yet expose identical behavior for all corpus APIs.
 - `get_document.include_content` parity is fixed and covered by daemon/mobile tests, but other corpus APIs still need backend-by-backend review.
-- `update_document` now returns a stable JSON shape in both embedded and daemon mode, but daemon tag-update semantics still need a follow-up parity pass.
+- `list_documents` now returns a stable top-level/document JSON shape in both embedded and daemon mode for the common non-`paths_only` corpus flow.
+- `search_execute` now returns a stable top-level/result JSON shape in both embedded and daemon mode, while preserving the effective search type after runtime fallback.
+- `delete_by_name` now returns the same empty-result payload across backends when nothing matches, while `remove_document` preserves `NOT_FOUND` semantics for strict hash deletes.
+- `update_document` now returns a stable JSON shape in both embedded and daemon mode, including
+  real `updatesApplied`, `tagsAdded`, and `tagsRemoved` counters from the daemon path.
 - Embedded graph query now works for corpus-backed mobile stores, but backend parity still needs review for edge cases and deletion/cleanup behavior.
 - `yams_mobile_get_vector_status` still carries legacy naming and a deprecated `warmup` request field, but the payload is now corpus-shaped and `warmup` is explicitly ignored.
 - The documentation previously implied demo apps and ABI automation that are not present in this checkout.
@@ -94,7 +98,18 @@ This means mobile bindings should be evaluated as a corpus SDK, not as an infere
 - Breaking changes must bump `YAMS_MOBILE_API_VERSION_MAJOR` and ship a parallel symbol surface
   (`yams_mobile_v2_*`) while preserving the previous version for at least one minor release.
 - The current source of truth for compatibility is the versioned C header plus mobile ABI smoke
-  coverage. Symbol-surface automation is still a follow-up item and is not checked into this repo today.
+  coverage. CI now verifies that the built shared library exports every `YAMS_MOBILE_API` symbol
+  declared in the versioned header.
+
+## Build & Distribution
+
+- CI packaging and ABI verification live in [mobile-builds.md](/Users/trevon/work/apps/yams-app/yams/docs/developer/mobile-builds.md).
+- The current CI artifact is a host-native shared library bundle for validation and downstream
+  integration work, not yet a shipped `.xcframework` or `.aar`.
+- The intended layering is:
+  - this repo publishes the native corpus library plus headers
+  - platform wrappers package that library for iOS/Android
+  - the Flutter app/plugin consumes those packaged native artifacts
 
 ## Fixtures & Test Corpora
 - `tests/common/search_corpus_presets.h` exposes `mobileSearchCorpusSpec()` which captures the
@@ -103,10 +118,12 @@ This means mobile bindings should be evaluated as a corpus SDK, not as an infere
 - `tests/mobile/mobile_abi_smoke_test.cpp` now runs on Catch2, validates the round-trip
   ingest/list/search flow against the new corpus, covers daemon `get_document.include_content`
   parity, verifies embedded graph query on a corpus-backed store, checks the corpus-status
-  payload in both embedded and daemon modes, and verifies a stable `update_document` payload
-  shape across embedded and daemon backends. The current suite also retries the first daemon
-  store call in smoke coverage to absorb daemon-startup transport flakiness seen only in
-  full-suite execution.
+  payload in both embedded and daemon modes, and verifies stable `search_execute`,
+  `list_documents`, `delete_by_name`, and `update_document` payload shapes across embedded and
+  daemon backends, plus `remove_document` status parity for missing hashes. `update_document`
+  coverage now also asserts real tag counter parity instead of shape-only presence checks. The
+  current suite also retries the first daemon store call in smoke coverage to absorb
+  daemon-startup transport flakiness seen only in full-suite execution.
 
 ## Platform Wrappers
 

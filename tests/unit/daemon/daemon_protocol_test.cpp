@@ -755,6 +755,9 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         resp.contentUpdated = false;
         resp.metadataUpdated = true;
         resp.tagsUpdated = true;
+        resp.updatesApplied = 2;
+        resp.tagsAdded = 1;
+        resp.tagsRemoved = 1;
 
         auto enc = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 16));
         REQUIRE(enc);
@@ -768,6 +771,9 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         CHECK(got->contentUpdated == resp.contentUpdated);
         CHECK(got->metadataUpdated == resp.metadataUpdated);
         CHECK(got->tagsUpdated == resp.tagsUpdated);
+        CHECK(got->updatesApplied == resp.updatesApplied);
+        CHECK(got->tagsAdded == resp.tagsAdded);
+        CHECK(got->tagsRemoved == resp.tagsRemoved);
     }
 
     SECTION("ListRequest sanitizes invalid UTF-8 filter and session fields") {

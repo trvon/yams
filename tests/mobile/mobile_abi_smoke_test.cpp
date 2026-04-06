@@ -115,6 +115,35 @@ bool store_document_with_retry(yams_mobile_context_t* ctx,
     return false;
 }
 
+bool wait_for_search_results(yams_mobile_context_t* ctx, const char* query,
+                             std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        yams_mobile_search_request searchReq{};
+        searchReq.header = yams_mobile_request_header_default();
+        searchReq.query = query;
+        searchReq.limit = 10;
+
+        yams_mobile_search_result_t* result = nullptr;
+        const auto status = yams_mobile_search_execute(ctx, &searchReq, &result);
+        if (status == YAMS_MOBILE_STATUS_OK && result != nullptr) {
+            const auto payload = yams_mobile_search_result_json(result);
+            if (payload.data != nullptr) {
+                const auto parsed =
+                    nlohmann::json::parse(std::string(payload.data, payload.length), nullptr, false);
+                if (!parsed.is_discarded() && parsed.value("total", 0ULL) >= 1U) {
+                    yams_mobile_search_result_destroy(result);
+                    return true;
+                }
+            }
+        }
+        if (result != nullptr)
+            yams_mobile_search_result_destroy(result);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
+}
+
 void require_stable_update_payload(const nlohmann::json& parsed, const std::string& expectedHash) {
     REQUIRE(parsed.contains("success"));
     REQUIRE(parsed.contains("hash"));
@@ -128,9 +157,10 @@ void require_stable_update_payload(const nlohmann::json& parsed, const std::stri
     CHECK(parsed.at("hash").template get<std::string>() == expectedHash);
     CHECK(parsed.at("success").template get<bool>());
     CHECK(parsed.at("metadataUpdated").template get<bool>());
-    CHECK(parsed.at("updatesApplied").template get<std::uint64_t>() >= 1U);
-    CHECK(parsed.at("tagsAdded").template get<std::uint64_t>() >= 0U);
-    CHECK(parsed.at("tagsRemoved").template get<std::uint64_t>() >= 0U);
+    CHECK(parsed.at("updatesApplied").template get<std::uint64_t>() == 1U);
+    CHECK(parsed.at("tagsUpdated").template get<bool>());
+    CHECK(parsed.at("tagsAdded").template get<std::uint64_t>() == 1U);
+    CHECK(parsed.at("tagsRemoved").template get<std::uint64_t>() == 0U);
 }
 
 } // namespace
@@ -565,6 +595,298 @@ TEST_CASE("Mobile update_document returns a stable payload shape across backends
         require_stable_update_payload(parsed, hashString);
 
         yams_mobile_update_result_destroy(updateResult);
+        yams_mobile_context_destroy(ctx);
+        if (harness) {
+            harness->stop();
+        }
+    };
+
+    SECTION("embedded") {
+        run_case(YAMS_MOBILE_BACKEND_EMBEDDED);
+    }
+
+    SECTION("daemon") {
+        run_case(YAMS_MOBILE_BACKEND_DAEMON);
+    }
+}
+
+TEST_CASE("Mobile search returns a stable payload shape across backends",
+          "[mobile][abi][parity]") {
+    auto run_case = [](yams_mobile_backend_mode backendMode) {
+        const auto workingDir = make_unique_temp_dir();
+        TempDirGuard guard(workingDir);
+        const auto documentPath = std::filesystem::path(workingDir) / "mobile-search-shape.txt";
+
+        {
+            std::ofstream out(documentPath);
+            REQUIRE(out.is_open());
+            out << "offline search parity test\n";
+        }
+
+        std::optional<yams::test::DaemonHarness> harness;
+        yams_mobile_context_config config = yams_mobile_context_config_default();
+        config.working_directory = workingDir.c_str();
+        config.backend_mode = backendMode;
+        std::string daemonSocketPath;
+        if (backendMode == YAMS_MOBILE_BACKEND_DAEMON) {
+            harness.emplace(yams::test::DaemonHarnessOptions{.enableAutoRepair = false});
+            REQUIRE(harness->start(std::chrono::seconds(10)));
+            daemonSocketPath = harness->socketPath().string();
+            config.daemon_socket_path = daemonSocketPath.c_str();
+        }
+
+        yams_mobile_context_t* ctx = nullptr;
+        REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(ctx != nullptr);
+
+        yams_mobile_document_store_request store{};
+        store.header = yams_mobile_request_header_default();
+        store.path = documentPath.c_str();
+
+        yams_mobile_string_view storedHash{};
+        REQUIRE(store_document_with_retry(ctx, store, &storedHash, std::chrono::seconds(5)));
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(storedHash.length > 0U);
+
+        const auto hashString = std::string(storedHash.data, storedHash.length);
+        if (backendMode == YAMS_MOBILE_BACKEND_DAEMON) {
+            REQUIRE(wait_for_document(ctx, hashString, std::chrono::seconds(5)));
+        }
+        constexpr const char* kSearchQuery = "mobile-search-shape.txt";
+        REQUIRE(wait_for_search_results(ctx, kSearchQuery, std::chrono::seconds(30)));
+
+        yams_mobile_search_request searchReq{};
+        searchReq.header = yams_mobile_request_header_default();
+        searchReq.query = kSearchQuery;
+        searchReq.limit = 10;
+
+        yams_mobile_search_result_t* searchResult = nullptr;
+        REQUIRE(yams_mobile_search_execute(ctx, &searchReq, &searchResult) ==
+                YAMS_MOBILE_STATUS_OK);
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(searchResult != nullptr);
+
+        const auto payload = yams_mobile_search_result_json(searchResult);
+        REQUIRE(payload.data != nullptr);
+        const auto parsed = nlohmann::json::parse(std::string(payload.data, payload.length));
+        REQUIRE(parsed.contains("total"));
+        REQUIRE(parsed.contains("type"));
+        REQUIRE(parsed.contains("executionTimeMs"));
+        REQUIRE(parsed.contains("usedHybrid"));
+        REQUIRE(parsed.contains("results"));
+        CHECK_FALSE(parsed.at("type").template get<std::string>().empty());
+        CHECK(parsed.at("usedHybrid").template get<bool>() ==
+              (parsed.at("type").template get<std::string>() == "hybrid"));
+
+        const auto& results = parsed.at("results");
+        REQUIRE_FALSE(results.empty());
+        const auto& first = results.front();
+        CHECK(first.contains("id"));
+        CHECK(first.contains("hash"));
+        CHECK(first.contains("title"));
+        CHECK(first.contains("path"));
+        CHECK(first.contains("fileName"));
+        CHECK(first.contains("score"));
+        CHECK(first.contains("mimeType"));
+        CHECK(first.contains("fileType"));
+        CHECK(first.contains("size"));
+        CHECK(first.contains("created"));
+        CHECK(first.contains("modified"));
+        CHECK(first.contains("indexed"));
+
+        yams_mobile_search_result_destroy(searchResult);
+        yams_mobile_context_destroy(ctx);
+        if (harness) {
+            harness->stop();
+        }
+    };
+
+    SECTION("embedded") {
+        run_case(YAMS_MOBILE_BACKEND_EMBEDDED);
+    }
+
+    SECTION("daemon") {
+        run_case(YAMS_MOBILE_BACKEND_DAEMON);
+    }
+}
+
+TEST_CASE("Mobile list_documents returns a stable payload shape across backends",
+          "[mobile][abi][parity]") {
+    const auto run_case = [](std::uint32_t backendMode) {
+        const auto workingDir = make_unique_temp_dir();
+        TempDirGuard guard(workingDir);
+        const auto documentPath = std::filesystem::path(workingDir) / "mobile-list-shape.txt";
+
+        {
+            std::ofstream out(documentPath);
+            REQUIRE(out.is_open());
+            out << "list parity test\n";
+        }
+
+        std::optional<yams::test::DaemonHarness> harness;
+        yams_mobile_context_config config = yams_mobile_context_config_default();
+        config.working_directory = workingDir.c_str();
+        config.backend_mode = backendMode;
+        std::string daemonSocketPath;
+        if (backendMode == YAMS_MOBILE_BACKEND_DAEMON) {
+            harness.emplace(yams::test::DaemonHarnessOptions{.enableAutoRepair = false});
+            REQUIRE(harness->start(std::chrono::seconds(10)));
+            daemonSocketPath = harness->socketPath().string();
+            config.daemon_socket_path = daemonSocketPath.c_str();
+        }
+
+        yams_mobile_context_t* ctx = nullptr;
+        REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(ctx != nullptr);
+
+        yams_mobile_document_store_request store{};
+        store.header = yams_mobile_request_header_default();
+        store.path = documentPath.c_str();
+
+        yams_mobile_string_view storedHash{};
+        REQUIRE(store_document_with_retry(ctx, store, &storedHash, std::chrono::seconds(5)));
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(storedHash.length > 0U);
+
+        if (backendMode == YAMS_MOBILE_BACKEND_DAEMON) {
+            const auto hashString = std::string(storedHash.data, storedHash.length);
+            REQUIRE(wait_for_document(ctx, hashString, std::chrono::seconds(5)));
+        }
+
+        yams_mobile_list_request listReq{};
+        listReq.header = yams_mobile_request_header_default();
+        listReq.limit = 10;
+
+        yams_mobile_list_result_t* listResult = nullptr;
+        REQUIRE(yams_mobile_list_documents(ctx, &listReq, &listResult) == YAMS_MOBILE_STATUS_OK);
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(listResult != nullptr);
+
+        const auto payload = yams_mobile_list_result_json(listResult);
+        REQUIRE(payload.data != nullptr);
+        const auto parsed = nlohmann::json::parse(std::string(payload.data, payload.length));
+        REQUIRE(parsed.contains("count"));
+        REQUIRE(parsed.contains("totalFound"));
+        REQUIRE(parsed.contains("hasMore"));
+        REQUIRE(parsed.contains("executionTimeMs"));
+        REQUIRE(parsed.contains("documents"));
+
+        const auto& documents = parsed.at("documents");
+        REQUIRE_FALSE(documents.empty());
+        const auto& first = documents.front();
+        CHECK(first.contains("name"));
+        CHECK(first.contains("fileName"));
+        CHECK(first.contains("hash"));
+        CHECK(first.contains("path"));
+        CHECK(first.contains("extension"));
+        CHECK(first.contains("size"));
+        CHECK(first.contains("mimeType"));
+        CHECK(first.contains("fileType"));
+        CHECK(first.contains("created"));
+        CHECK(first.contains("modified"));
+        CHECK(first.contains("indexed"));
+
+        yams_mobile_list_result_destroy(listResult);
+        yams_mobile_context_destroy(ctx);
+        if (harness) {
+            harness->stop();
+        }
+    };
+
+    SECTION("embedded") {
+        run_case(YAMS_MOBILE_BACKEND_EMBEDDED);
+    }
+
+    SECTION("daemon") {
+        run_case(YAMS_MOBILE_BACKEND_DAEMON);
+    }
+}
+
+TEST_CASE("Mobile remove_document returns not_found across backends for missing hashes",
+          "[mobile][abi][parity]") {
+    const auto run_case = [](std::uint32_t backendMode) {
+        const auto workingDir = make_unique_temp_dir();
+        TempDirGuard guard(workingDir);
+
+        std::optional<yams::test::DaemonHarness> harness;
+        yams_mobile_context_config config = yams_mobile_context_config_default();
+        config.working_directory = workingDir.c_str();
+        config.backend_mode = backendMode;
+        std::string daemonSocketPath;
+        if (backendMode == YAMS_MOBILE_BACKEND_DAEMON) {
+            harness.emplace(yams::test::DaemonHarnessOptions{.enableAutoRepair = false});
+            REQUIRE(harness->start(std::chrono::seconds(10)));
+            daemonSocketPath = harness->socketPath().string();
+            config.daemon_socket_path = daemonSocketPath.c_str();
+        }
+
+        yams_mobile_context_t* ctx = nullptr;
+        REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+        REQUIRE(ctx != nullptr);
+
+        const auto status =
+            yams_mobile_remove_document(ctx,
+                                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        CHECK(status == YAMS_MOBILE_STATUS_NOT_FOUND);
+
+        yams_mobile_context_destroy(ctx);
+        if (harness) {
+            harness->stop();
+        }
+    };
+
+    SECTION("embedded") {
+        run_case(YAMS_MOBILE_BACKEND_EMBEDDED);
+    }
+
+    SECTION("daemon") {
+        run_case(YAMS_MOBILE_BACKEND_DAEMON);
+    }
+}
+
+TEST_CASE("Mobile delete_by_name returns an empty result across backends when nothing matches",
+          "[mobile][abi][parity]") {
+    const auto run_case = [](std::uint32_t backendMode) {
+        const auto workingDir = make_unique_temp_dir();
+        TempDirGuard guard(workingDir);
+
+        std::optional<yams::test::DaemonHarness> harness;
+        yams_mobile_context_config config = yams_mobile_context_config_default();
+        config.working_directory = workingDir.c_str();
+        config.backend_mode = backendMode;
+        std::string daemonSocketPath;
+        if (backendMode == YAMS_MOBILE_BACKEND_DAEMON) {
+            harness.emplace(yams::test::DaemonHarnessOptions{.enableAutoRepair = false});
+            REQUIRE(harness->start(std::chrono::seconds(10)));
+            daemonSocketPath = harness->socketPath().string();
+            config.daemon_socket_path = daemonSocketPath.c_str();
+        }
+
+        yams_mobile_context_t* ctx = nullptr;
+        REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+        REQUIRE(ctx != nullptr);
+
+        yams_mobile_delete_request deleteReq{};
+        deleteReq.header = yams_mobile_request_header_default();
+        deleteReq.name = "missing-mobile-delete.txt";
+
+        yams_mobile_delete_result_t* deleteResult = nullptr;
+        REQUIRE(yams_mobile_delete_by_name(ctx, &deleteReq, &deleteResult) == YAMS_MOBILE_STATUS_OK);
+        REQUIRE(deleteResult != nullptr);
+
+        const auto payload = yams_mobile_delete_result_json(deleteResult);
+        REQUIRE(payload.data != nullptr);
+        const auto parsed = nlohmann::json::parse(std::string(payload.data, payload.length));
+        CHECK(parsed.value("dryRun", true) == false);
+        CHECK(parsed.value("count", 1ULL) == 0ULL);
+        REQUIRE(parsed.contains("deleted"));
+        REQUIRE(parsed.contains("errors"));
+        CHECK(parsed.at("deleted").empty());
+        CHECK(parsed.at("errors").empty());
+
+        yams_mobile_delete_result_destroy(deleteResult);
         yams_mobile_context_destroy(ctx);
         if (harness) {
             harness->stop();

@@ -551,6 +551,9 @@ message UpdateDocumentResponse {
   bool content_updated = 3;
   bool metadata_updated = 4;
   bool tags_updated = 5;
+  uint64 updates_applied = 6;
+  uint64 tags_added = 7;
+  uint64 tags_removed = 8;
 }
 message EmbedDocumentsResponse {
   uint64 requested = 1;

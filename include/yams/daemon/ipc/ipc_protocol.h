@@ -5557,11 +5557,15 @@ struct UpdateDocumentResponse {
     bool contentUpdated = false;
     bool metadataUpdated = false;
     bool tagsUpdated = false;
+    uint64_t updatesApplied = 0;
+    uint64_t tagsAdded = 0;
+    uint64_t tagsRemoved = 0;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << hash << contentUpdated << metadataUpdated << tagsUpdated;
+        ser << hash << contentUpdated << metadataUpdated << tagsUpdated << updatesApplied
+            << tagsAdded << tagsRemoved;
     }
 
     template <typename Deserializer>
@@ -5584,6 +5588,12 @@ struct UpdateDocumentResponse {
         if (!t)
             return t.error();
         res.tagsUpdated = t.value();
+        if (auto ua = deser.template read<uint64_t>(); ua)
+            res.updatesApplied = ua.value();
+        if (auto ta = deser.template read<uint64_t>(); ta)
+            res.tagsAdded = ta.value();
+        if (auto tr = deser.template read<uint64_t>(); tr)
+            res.tagsRemoved = tr.value();
         return res;
     }
 };

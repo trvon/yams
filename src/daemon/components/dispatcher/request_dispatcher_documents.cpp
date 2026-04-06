@@ -1472,6 +1472,9 @@ RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequest& req)
             response.metadataUpdated = serviceResp.updatesApplied > 0;
             response.tagsUpdated = (serviceResp.tagsAdded > 0) || (serviceResp.tagsRemoved > 0);
             response.contentUpdated = serviceResp.contentUpdated;
+            response.updatesApplied = serviceResp.updatesApplied;
+            response.tagsAdded = serviceResp.tagsAdded;
+            response.tagsRemoved = serviceResp.tagsRemoved;
             co_return response;
         });
 }
