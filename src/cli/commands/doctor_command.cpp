@@ -2733,16 +2733,6 @@ private:
 
         std::cout << "\nHint: run 'yams doctor plugin <path|name>' for a deep plugin check.\n";
 
-        try {
-            std::cout << "\n" << yams::cli::ui::section_header("Semantic Dedupe") << "\n\n";
-            yams::cli::ui::SpinnerRunner spinner;
-            spinner.start("Scanning for semantic duplicates");
-            const_cast<DoctorCommand*>(this)->dedupeMode_ = "semantic";
-            const_cast<DoctorCommand*>(this)->runDedupe();
-            spinner.stop();
-        } catch (...) {
-        }
-
         // Compact live repair progress (short poll). Non-blocking when no repair activity.
         try {
             using namespace yams::daemon;

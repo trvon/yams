@@ -725,6 +725,66 @@ private:
     std::atomic<bool> running_{false};
 };
 
+inline void clear_stdout_line(std::ostream& os = std::cout) {
+    if (stdout_is_tty()) {
+        os << "\r\033[K" << std::flush;
+    }
+}
+
+class LiveLine {
+public:
+    explicit LiveLine(std::ostream& os = std::cout) : os_(os), tty_(stdout_is_tty()) {}
+
+    void update(std::string_view text) {
+        if (tty_) {
+            active_ = true;
+            last_ = std::string(text);
+            os_ << "\r\033[K" << text << std::flush;
+            return;
+        }
+
+        if (last_ == text) {
+            return;
+        }
+        last_ = std::string(text);
+        os_ << text << '\n' << std::flush;
+    }
+
+    void finish(std::string_view finalText = {}) {
+        if (tty_) {
+            if (!finalText.empty()) {
+                os_ << "\r\033[K" << finalText << '\n' << std::flush;
+            } else if (active_) {
+                os_ << "\r\033[K" << std::flush;
+            }
+            active_ = false;
+            last_.clear();
+            return;
+        }
+
+        if (!finalText.empty() && last_ != finalText) {
+            os_ << finalText << '\n' << std::flush;
+        }
+        last_.clear();
+    }
+
+    void newline() {
+        if (tty_ && active_) {
+            os_ << '\n' << std::flush;
+            active_ = false;
+            last_.clear();
+        }
+    }
+
+    bool active() const { return active_; }
+
+private:
+    std::ostream& os_;
+    bool tty_{false};
+    bool active_{false};
+    std::string last_;
+};
+
 // Bullet point helpers for lists
 inline std::string bullet(std::string_view text, int indent = 0) {
     std::string prefix(indent, ' ');

@@ -133,6 +133,25 @@ TEST_CASE_METHOD(HnswPersistenceFixture,
         CHECK(backend.testingLastHnswMaintenanceMode() !=
               SqliteVecBackend::HnswMaintenanceMode::FullRebuild);
     }
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+
+        auto query = createEmbedding(64, 100.0f + 10.0f);
+        auto search = backend.searchSimilar(query, 20, -2.0f, std::nullopt, {});
+        REQUIRE(search.has_value());
+        REQUIRE_FALSE(search.value().empty());
+
+        bool foundDelta = false;
+        for (const auto& rec : search.value()) {
+            if (rec.document_hash.find("doc_delta_") == 0) {
+                foundDelta = true;
+                break;
+            }
+        }
+        CHECK(foundDelta);
+    }
 }
 
 TEST_CASE_METHOD(HnswPersistenceFixture,

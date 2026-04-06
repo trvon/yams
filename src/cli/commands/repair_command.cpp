@@ -161,15 +161,11 @@ public:
         std::string lastOperation;
         uint64_t lastProcessed = 0;
         uint64_t lastTotal = 0;
-        uint64_t renderedProcessed = 0;
-        uint64_t renderedTotal = 0;
         std::mutex progressMutex;
         std::string lastObservedOperation;
         std::string lastPhase;
         std::string lastMessage;
-        std::string renderedPhase;
-        std::string renderedMessage;
-        const bool tty = ui::stdout_is_tty();
+        ui::LiveLine liveLine;
         const auto startTime = std::chrono::steady_clock::now();
         auto nowMillis = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -195,6 +191,7 @@ public:
             // Print section transitions
             if (ev.operation != lastOperation) {
                 if (!lastOperation.empty()) {
+                    liveLine.finish();
                     std::cout << "\n";
                 }
                 lastOperation = ev.operation;
@@ -203,6 +200,7 @@ public:
 
             // Phase-based rendering
             if (ev.phase == "completed") {
+                liveLine.finish();
                 if (ev.succeeded > 0 || ev.failed > 0) {
                     std::cout << "    " << ui::status_ok("Done") << "  processed=" << ev.processed
                               << " ok=" << ev.succeeded << " failed=" << ev.failed;
@@ -213,37 +211,20 @@ public:
                     std::cout << "    " << ev.message << "\n";
                 }
             } else if (ev.phase == "error") {
+                liveLine.finish();
                 std::cout << "    " << ui::status_warning(ev.message) << "\n";
             } else if (ev.phase == "repairing") {
-                const bool progressChanged = ev.total > 0 && (ev.processed != renderedProcessed ||
-                                                              ev.total != renderedTotal);
-                const bool messageChanged =
-                    (!ev.message.empty() && ev.message != renderedMessage) ||
-                    ev.phase != renderedPhase;
-
-                if (progressChanged || messageChanged || verbose_) {
-                    std::ostringstream line;
-                    line << "    ";
-                    if (ev.total > 0) {
-                        line << "[" << ev.processed << "/" << ev.total << "] ";
-                    }
-                    if (!ev.message.empty()) {
-                        line << ev.message;
-                    } else if (!ev.phase.empty()) {
-                        line << ev.phase;
-                    }
-
-                    if (tty && progressChanged && !messageChanged && !verbose_) {
-                        std::cout << line.str() << "\r" << std::flush;
-                    } else {
-                        std::cout << line.str() << "\n" << std::flush;
-                    }
-
-                    renderedProcessed = ev.processed;
-                    renderedTotal = ev.total;
-                    renderedPhase = ev.phase;
-                    renderedMessage = ev.message;
+                std::ostringstream line;
+                line << "    ";
+                if (ev.total > 0) {
+                    line << "[" << ev.processed << "/" << ev.total << "] ";
                 }
+                if (!ev.message.empty()) {
+                    line << ev.message;
+                } else if (!ev.phase.empty()) {
+                    line << ev.phase;
+                }
+                liveLine.update(line.str());
             }
         };
 
@@ -327,6 +308,8 @@ public:
         if (!res.has_value()) {
             res = fut.get();
         }
+
+        liveLine.finish();
 
         if (!res.value()) {
             return Error{res.value().error().code, res.value().error().message};

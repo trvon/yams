@@ -2596,6 +2596,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     existingDocIds.insert(docId);
                 }
             }
+            std::unordered_set<std::string> graphTextDocIds;
+            graphTextDocIds.reserve(workingConfig.textMaxResults * 2);
+            std::unordered_set<std::string> novelGraphDocIds;
+            novelGraphDocIds.reserve(workingConfig.textMaxResults * 2);
 
             for (const auto& term : docSeedGraphTerms) {
                 auto searchResults =
@@ -2623,8 +2627,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     const auto& sr = searchResults.value().results[rank];
                     const auto docId =
                         documentIdForTrace(sr.document.filePath, sr.document.sha256Hash);
-                    if (!docId.empty() && existingDocIds.contains(docId)) {
+                    const std::string graphKey = !docId.empty() ? docId : sr.document.sha256Hash;
+                    if (!graphTextDocIds.insert(graphKey).second) {
                         continue;
+                    }
+                    if (!docId.empty() && !existingDocIds.contains(docId)) {
+                        novelGraphDocIds.insert(docId);
                     }
 
                     ComponentResult cr;
@@ -2646,12 +2654,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         sr.snippet.empty() ? std::nullopt : std::optional<std::string>(sr.snippet);
                     cr.debugInfo["graph_doc_expansion_term"] = term.text;
                     allComponentResults.push_back(std::move(cr));
-                    if (!docId.empty()) {
-                        existingDocIds.insert(docId);
-                    }
-                    ++graphDocExpansionFtsAddedCount;
                 }
             }
+
+            graphDocExpansionFtsAddedCount = novelGraphDocIds.size();
 
             if (graphDocExpansionFtsAddedCount > 0) {
                 contributing.push_back("graph_doc_text");
@@ -5093,7 +5099,10 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
             }
 
             size_t totalGraphHits = 0;
-            const size_t beforeGraph = results.size();
+            std::unordered_set<std::string> graphTextSeenHashes;
+            graphTextSeenHashes.reserve(limit * 2);
+            std::unordered_set<std::string> novelGraphDocHashes;
+            novelGraphDocHashes.reserve(limit * 2);
             for (const auto& term : graphTerms) {
                 auto graphResults = metadataRepo_->search(term.text, limit, 0);
                 if (!graphResults) {
@@ -5103,14 +5112,68 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
                 const float penalty =
                     std::clamp(config.graphExpansionFtsPenalty * std::clamp(term.score, 0.2f, 1.0f),
                                0.1f, 1.0f);
-                appendResults(graphResults.value(), penalty, true, &seenHashes,
-                              ComponentResult::Source::GraphText);
+
+                double minBm25 = 0.0;
+                double maxBm25 = 0.0;
+                bool bm25RangeInitialized = false;
+                for (const auto& sr : graphResults.value().results) {
+                    const double score = sr.score;
+                    if (!bm25RangeInitialized) {
+                        minBm25 = score;
+                        maxBm25 = score;
+                        bm25RangeInitialized = true;
+                    } else {
+                        minBm25 = std::min(minBm25, score);
+                        maxBm25 = std::max(maxBm25, score);
+                    }
+                }
+
+                const size_t startRank = results.size();
+                for (size_t rank = 0; rank < graphResults.value().results.size(); ++rank) {
+                    const auto& searchResult = graphResults.value().results[rank];
+                    if (!graphTextSeenHashes.insert(searchResult.document.sha256Hash).second) {
+                        continue;
+                    }
+                    if (!seenHashes.contains(searchResult.document.sha256Hash)) {
+                        novelGraphDocHashes.insert(searchResult.document.sha256Hash);
+                    }
+
+                    const auto& filePath = searchResult.document.filePath;
+                    const auto& fileName = searchResult.document.fileName;
+                    auto pruneCategory = magic::getPruneCategory(filePath);
+                    bool isCodeFile = pruneCategory == magic::PruneCategory::BuildObject ||
+                                      pruneCategory == magic::PruneCategory::None;
+
+                    float scoreMultiplier = isCodeFile ? 1.0f : nonCodeFileMultiplier;
+                    scoreMultiplier *= filenamePathBoost(query, filePath, fileName);
+                    scoreMultiplier *= penalty;
+
+                    ComponentResult result;
+                    result.documentHash = searchResult.document.sha256Hash;
+                    result.filePath = filePath;
+                    float rawScore = static_cast<float>(searchResult.score);
+                    float normalizedScore =
+                        normalizedBm25Score(rawScore, config.bm25NormDivisor, minBm25, maxBm25);
+                    result.score = std::clamp(scoreMultiplier * normalizedScore, 0.0f, 1.0f);
+                    if (result.score < config.graphTextMinAdmissionScore) {
+                        if (expansionStats != nullptr) {
+                            ++expansionStats->graphTextBlockedLowScoreCount;
+                        }
+                        continue;
+                    }
+                    result.source = ComponentResult::Source::GraphText;
+                    result.rank = startRank + rank;
+                    result.snippet = searchResult.snippet.empty()
+                                         ? std::nullopt
+                                         : std::optional<std::string>(searchResult.snippet);
+                    result.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
+                    results.push_back(std::move(result));
+                }
             }
 
             if (expansionStats != nullptr) {
                 expansionStats->graphExpansionFtsHitCount = totalGraphHits;
-                expansionStats->graphExpansionFtsAddedCount =
-                    results.size() > beforeGraph ? (results.size() - beforeGraph) : 0;
+                expansionStats->graphExpansionFtsAddedCount = novelGraphDocHashes.size();
             }
 
             if (!graphTerms.empty()) {

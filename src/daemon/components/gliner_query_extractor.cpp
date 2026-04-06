@@ -19,9 +19,12 @@ namespace yams::daemon {
 
 namespace {
 // Default entity types for query concept extraction
-constexpr std::array<const char*, 8> kDefaultEntityTypes = {
+constexpr std::array<const char*, 19> kDefaultEntityTypes = {
     "technology", "concept", "organization", "person",
-    "location",   "product", "language",     "framework"};
+    "location",   "product", "language",     "framework",
+    "protein",    "gene",    "cell",         "disease",
+    "chemical",   "drug",    "pathway",      "biological_process",
+    "biomarker",  "anatomy", "organism"};
 
 // Minimum confidence threshold for including concepts
 constexpr float kMinConfidence = 0.4f;

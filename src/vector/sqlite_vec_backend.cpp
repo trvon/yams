@@ -3538,6 +3538,7 @@ ORDER BY rowid
         hnsw_loaded_ = false;
 
         auto persistedDims = discoverPersistedHnswDimsUnlocked();
+        bool needsCheckpointSave = false;
         for (size_t dim : persistedDims) {
             loadPersistedHnswDimUnlocked(dim);
         }
@@ -3600,16 +3601,26 @@ ORDER BY rowid
 
                 hnsw->build(std::span<const size_t>(ids.data(), ids.size()),
                             std::span<const std::span<const float>>(spans.data(), spans.size()));
-                requireFullSave = true;
                 hnsw_dirty_[dim] = true;
                 last_hnsw_added_count_ += ids.size();
                 spdlog::info("[HNSW] Deferred catch-up dim={} added {} new vectors", dim,
                              ids.size());
+                if (requireFullSave) {
+                    spdlog::info("[HNSW] Deferred catch-up dim={} requires full save due to "
+                                 "structural changes",
+                                 dim);
+                } else {
+                    needsCheckpointSave = true;
+                }
             }
 
             if (requireFullSave) {
                 saveHnswDimFullUnlocked(dim);
             }
+        }
+
+        if (needsCheckpointSave) {
+            saveHnswCheckpointUnlocked();
         }
 
         hnsw_loaded_ = true;
@@ -3925,9 +3936,14 @@ ORDER BY rowid
         if (!db_)
             return;
 
+        const auto checkpointStart = std::chrono::steady_clock::now();
+        size_t dirtyDims = 0;
+
         for (auto& [dim, hnsw] : hnsw_indices_) {
             if (!hnsw || !hnsw_dirty_[dim])
                 continue;
+
+            ++dirtyDims;
 
             std::string table_prefix = hnswTablePrefix(dim);
             char* err = nullptr;
@@ -3937,6 +3953,13 @@ ORDER BY rowid
                 spdlog::warn("[HNSW] Failed to save checkpoint for dim={}: {}", dim, err);
                 sqlite3_free(err);
             }
+        }
+        if (dirtyDims > 0) {
+            const auto checkpointMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - checkpointStart)
+                                          .count();
+            spdlog::info("[HNSW] Saved checkpoint for {} dirty dim(s) in {} ms", dirtyDims,
+                         checkpointMs);
         }
         pending_inserts_ = 0;
     }
