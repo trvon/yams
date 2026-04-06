@@ -423,6 +423,19 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "query - search op dispatches to inte
     CHECK(reachedHandler(result));
 }
 
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "query - top-level search fields are treated like params",
+                 "[mcp][composite][query][router]") {
+    json args = {"steps", json::array({{{"op", "search"}, {"query", "test"}}})};
+
+    auto result = callTool("query", args);
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+    CHECK_FALSE(isCompositeError(result, "Provide 'query' for search text"));
+}
+
 TEST_CASE_METHOD(CompositeDispatchFixture, "query - grep op dispatches to internal handler",
                  "[mcp][composite][query]") {
     json args = {{"steps", json::array({{{"op", "grep"}, {"params", {{"pattern", "TODO"}}}}})}};
@@ -457,6 +470,20 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "query - get op dispatches to interna
     CHECK(reachedHandler(result));
 }
 
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "query - get with query field returns actionable routing error",
+                 "[mcp][composite][query][router]") {
+    json args = {{"steps", json::array({{{"op", "get"}, {"query", "deadbeef01234567"}}})}};
+
+    auto result = callTool("query", args);
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+    CHECK(isCompositeError(result, "Provide 'hash' or 'name' for get"));
+    CHECK(isCompositeError(result, "use op 'search' with 'query'"));
+}
+
 TEST_CASE_METHOD(CompositeDispatchFixture, "query - status op dispatches to internal handler",
                  "[mcp][composite][query]") {
     json args = {{"steps", json::array({{{"op", "status"}}})}};
@@ -477,6 +504,47 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "query - graph op dispatches to inter
     INFO("result: " << result.dump(2));
     CHECK_FALSE(isRoutingError(result));
     CHECK(reachedHandler(result));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "query - graph without target returns actionable routing error",
+                 "[mcp][composite][query][router]") {
+    json args = {{"steps", json::array({{{"op", "graph"}}})}};
+
+    auto result = callTool("query", args);
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+    CHECK(isCompositeError(result, "Provide one of 'hash', 'name', 'node_key', or 'node_id'"));
+    CHECK(isCompositeError(result, "'list_types': true"));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "query - graph camelCase top-level fields are normalized",
+                 "[mcp][composite][query][router]") {
+    json args = {{"steps", json::array({{{"op", "graph"}, {"nodeKey", "entity:abc"}}})}};
+
+    auto result = callTool("query", args);
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+    CHECK_FALSE(
+        isCompositeError(result, "Provide one of 'hash', 'name', 'node_key', or 'node_id'"));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "query - top-level describe target is treated like params",
+                 "[mcp][composite][query][router]") {
+    auto result = callTool(
+        "query", json{{"steps", json::array({{{"op", "describe"}, {"target", "search"}}})}});
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    REQUIRE(result.contains("structuredContent"));
+    auto& data = result["structuredContent"]["data"];
+    CHECK(data["op"] == "search");
 }
 
 TEST_CASE_METHOD(CompositeDispatchFixture,
@@ -625,6 +693,18 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "execute - add op dispatches to inter
     INFO("result: " << result.dump(2));
     CHECK_FALSE(isRoutingError(result));
     CHECK(reachedHandler(result));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture, "execute - top-level add fields are treated like params",
+                 "[mcp][composite][execute][router]") {
+    json args = {"operations", json::array({{{"op", "add"}, {"path", "/tmp/test.txt"}}})};
+
+    auto result = callTool("execute", args);
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+    CHECK_FALSE(isCompositeError(result, "Provide 'path'"));
 }
 
 TEST_CASE_METHOD(CompositeDispatchFixture, "execute - delete maps to delete_by_name internal tool",
@@ -823,6 +903,18 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "execute - add router stress cases st
             CHECK_FALSE(isCompositeError(result, "No content or path provided"));
         }
     }
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture, "composite errors do not duplicate Error prefix",
+                 "[mcp][composite][error-message]") {
+    auto result =
+        callTool("query", json{{"steps", json::array({{{"op", "get"}, {"query", "missing-id"}}})}});
+
+    INFO("result: " << result.dump(2));
+    REQUIRE(result.contains("error"));
+    const auto message = result["error"].value("message", std::string{});
+    CHECK(message.find("Error: Error:") == std::string::npos);
+    CHECK(message.find("Provide 'hash' or 'name' for get") != std::string::npos);
 }
 
 TEST_CASE_METHOD(CompositeDispatchFixture,

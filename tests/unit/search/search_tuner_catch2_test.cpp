@@ -82,6 +82,12 @@ TEST_CASE("TunedParams: SMALL_PROSE parameters", "[unit][search_tuner][params]")
     CHECK(params.kgWeight == Approx(0.00f));
     CHECK(params.tagWeight == Approx(0.05f));
     CHECK(params.metadataWeight == Approx(0.05f));
+    CHECK(params.lexicalFloorTopN == 12);
+    CHECK(params.lexicalFloorBoost == Approx(0.20f));
+    CHECK(params.enableLexicalTieBreak);
+    CHECK(params.lexicalTieBreakEpsilon == Approx(0.010f));
+    CHECK(params.fusionEvidenceRescueSlots == 1);
+    CHECK(params.fusionEvidenceRescueMinScore == Approx(0.012f));
 }
 
 TEST_CASE("TunedParams: LARGE_PROSE parameters", "[unit][search_tuner][params]") {
@@ -146,6 +152,8 @@ TEST_CASE("TunedParams: MIXED_PRECISION parameters", "[unit][search_tuner][param
     CHECK(params.lexicalTieBreakEpsilon == Approx(0.010f));
     CHECK(params.semanticRescueSlots == 1);
     CHECK(params.semanticRescueMinVectorScore == Approx(0.0f));
+    CHECK(params.fusionEvidenceRescueSlots == 1);
+    CHECK(params.fusionEvidenceRescueMinScore == Approx(0.012f));
 }
 
 TEST_CASE("TunedParams: MINIMAL parameters", "[unit][search_tuner][params]") {

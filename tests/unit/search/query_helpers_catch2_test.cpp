@@ -23,6 +23,21 @@ TEST_CASE("query_text_utils normalizes graph and entity surfaces",
     CHECK(trimAndCollapseWhitespace("  a\n\tb   c ") == "a b c");
 }
 
+TEST_CASE("query_text_utils generates shared surface variants",
+          "[search][helpers][query_text][catch2]") {
+    auto biomedical =
+        generateSurfaceVariants("\xCE\xB1-tocopheryl acetate", SurfaceVariantKind::Biomedical, 12);
+    REQUIRE_FALSE(biomedical.empty());
+    CHECK(std::find(biomedical.begin(), biomedical.end(), "alpha tocopheryl acetate") !=
+          biomedical.end());
+    CHECK(std::find(biomedical.begin(), biomedical.end(), "tocopheryl") != biomedical.end());
+
+    auto code = generateSurfaceVariants("MyClass::processTask", SurfaceVariantKind::CodeSymbol, 12);
+    REQUIRE_FALSE(code.empty());
+    CHECK(std::find(code.begin(), code.end(), "myclass processtask") != code.end());
+    CHECK(std::find(code.begin(), code.end(), "process task") != code.end());
+}
+
 TEST_CASE("query_text_utils tokenizes lowercase and preserves query token offsets",
           "[search][helpers][query_text][catch2]") {
     auto lowered = tokenizeLower("Foo\\Bar Baz-7");

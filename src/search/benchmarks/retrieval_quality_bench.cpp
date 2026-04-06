@@ -4667,7 +4667,9 @@ struct BenchFixture {
         };
 
         // Benchmark determinism defaults (can still be overridden by explicit env values).
-        ensureEnvDefault("YAMS_DISABLE_SEARCH_REBUILDS", "1");
+        // Real-ingest graph validation needs the post-ingest rebuild so search tuning sees the
+        // final corpus stats instead of the startup-empty corpus.
+        ensureEnvDefault("YAMS_DISABLE_SEARCH_REBUILDS", "0");
         ensureEnvDefault("YAMS_SEARCH_WAIT_FOR_CONCEPTS", "1");
         ensureEnvDefault("YAMS_HNSW_RANDOM_SEED", "42");
         ensureEnvDefault("YAMS_HNSW_PARALLEL_BUILD_THRESHOLD", "0");
@@ -4848,6 +4850,12 @@ struct BenchFixture {
         if (!vectorsDisabled) {
             bool resetPluginTrustFile = harnessOptions.dataDir.has_value();
             bool useIsolatedBenchmarkConfig = true;
+
+            // Select a plugin root that satisfies the plugins the benchmark enables.
+            // Preferring the first ONNX-capable tree can silently disable entity extraction
+            // when that tree lacks the Glint plugin.
+            std::string glinerModelPath = discoverGlinerModelPath();
+            const bool needsGlintPlugin = !glinerModelPath.empty();
             const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");
             if (envPluginDir) {
                 harnessOptions.pluginDir = fs::path(envPluginDir);
@@ -4856,24 +4864,47 @@ struct BenchFixture {
                 const fs::path installedPluginDir = fs::path("/opt/homebrew/lib/yams/plugins");
                 const fs::path installedOnnxPlugin =
                     installedPluginDir / "libyams_onnx_plugin.dylib";
+                const fs::path installedGlintPlugin = installedPluginDir / "yams_glint.dylib";
                 const fs::path localPluginDir = cwd / "plugins";
                 const fs::path localOnnxPlugin =
                     localPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
+                const fs::path localGlintPlugin = localPluginDir / "glint" / "yams_glint.dylib";
 
                 const fs::path root = cwd;
                 const fs::path nosanPluginDir = root / "builddir-nosan" / "plugins";
                 const fs::path nosanOnnxPlugin =
                     nosanPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
+                const fs::path nosanGlintPlugin = nosanPluginDir / "glint" / "yams_glint.dylib";
                 const fs::path defaultPluginDir = root / "builddir" / "plugins";
                 const fs::path defaultOnnxPlugin =
                     defaultPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
+                const fs::path defaultGlintPlugin = defaultPluginDir / "glint" / "yams_glint.dylib";
 
-                if (fs::exists(localOnnxPlugin)) {
-                    harnessOptions.pluginDir = localPluginDir;
-                } else if (fs::exists(nosanOnnxPlugin)) {
-                    harnessOptions.pluginDir = nosanPluginDir;
-                } else if (fs::exists(defaultOnnxPlugin)) {
-                    harnessOptions.pluginDir = defaultPluginDir;
+                const auto choosePreferredPluginDir = [&]() -> std::optional<fs::path> {
+                    struct Candidate {
+                        fs::path dir;
+                        fs::path onnxPlugin;
+                        fs::path glintPlugin;
+                    };
+                    const std::array<Candidate, 3> candidates = {
+                        {{localPluginDir, localOnnxPlugin, localGlintPlugin},
+                         {defaultPluginDir, defaultOnnxPlugin, defaultGlintPlugin},
+                         {nosanPluginDir, nosanOnnxPlugin, nosanGlintPlugin}}};
+                    for (const auto& candidate : candidates) {
+                        if (!fs::exists(candidate.onnxPlugin)) {
+                            continue;
+                        }
+                        if (needsGlintPlugin && !fs::exists(candidate.glintPlugin)) {
+                            continue;
+                        }
+                        return candidate.dir;
+                    }
+                    return std::nullopt;
+                };
+
+                if (auto preferredPluginDir = choosePreferredPluginDir();
+                    preferredPluginDir.has_value()) {
+                    harnessOptions.pluginDir = *preferredPluginDir;
                 } else if (fs::exists(installedOnnxPlugin)) {
                     const fs::path stagedPluginDir =
                         fs::temp_directory_path() / "yams_retrieval_bench_plugins";
@@ -4929,7 +4960,6 @@ struct BenchFixture {
             }
 
             // Configure Glint plugin with GLiNER model path for NL entity extraction
-            std::string glinerModelPath = discoverGlinerModelPath();
             if (!glinerModelPath.empty()) {
                 json glintConfig;
                 glintConfig["model_path"] = glinerModelPath;
@@ -5557,29 +5587,93 @@ struct BenchFixture {
                 if (const char* env = std::getenv("YAMS_BENCH_EMBED_MAX_WAIT")) {
                     embedMaxWaitSec = std::chrono::seconds(std::stoi(env));
                 }
-                uint64_t lastVectorCount = 0;
-                uint64_t lastDocsEmbeddedCount = 0;
-                uint64_t lastPreparedDocsCount = 0;
-                uint64_t lastPreparedChunksCount = 0;
-                uint64_t lastEmbedQueuedObserved = 0;
-                uint64_t lastEmbedInFlightObserved = 0;
-                uint64_t lastEmbedDroppedObserved = 0;
-                bool seenEmbedMetrics = false;
+                struct EmbedWaitSnapshot {
+                    uint64_t vectorCount = 0;
+                    uint64_t docsEmbedded = 0;
+                    uint64_t preparedDocs = 0;
+                    uint64_t preparedChunks = 0;
+                    uint64_t queueDepth = 0;
+                    uint64_t inFlight = 0;
+                    uint64_t dropped = 0;
+                    uint64_t inferActive = 0;
+                    uint64_t inferOldestMs = 0;
+                    uint64_t inferStarted = 0;
+                    uint64_t inferCompleted = 0;
+                    uint64_t inferWarnCount = 0;
+                    bool hasQueueMetrics = false;
+                    bool vectorDbReady = false;
+
+                    bool queueDrained() const { return queueDepth == 0 && inFlight == 0; }
+
+                    bool inferLikelyActive(std::chrono::seconds timeout) const {
+                        return inferActive > 0 &&
+                               inferOldestMs < static_cast<uint64_t>(timeout.count()) * 1000ull;
+                    }
+
+                    double coverageFor(int totalDocs) const {
+                        return totalDocs > 0 ? (docsEmbedded * 100.0 / totalDocs) : 0.0;
+                    }
+
+                    double avgChunksPerDoc() const {
+                        return preparedDocs > 0 ? static_cast<double>(preparedChunks) /
+                                                      static_cast<double>(preparedDocs)
+                                                : 0.0;
+                    }
+                };
+
+                auto progressSignalChanged = [](const EmbedWaitSnapshot& lhs,
+                                                const EmbedWaitSnapshot& rhs) {
+                    return lhs.vectorCount != rhs.vectorCount ||
+                           lhs.docsEmbedded != rhs.docsEmbedded ||
+                           lhs.preparedDocs != rhs.preparedDocs ||
+                           lhs.preparedChunks != rhs.preparedChunks ||
+                           lhs.queueDepth != rhs.queueDepth || lhs.inFlight != rhs.inFlight ||
+                           lhs.dropped != rhs.dropped || lhs.inferActive != rhs.inferActive ||
+                           lhs.inferStarted != rhs.inferStarted ||
+                           lhs.inferCompleted != rhs.inferCompleted ||
+                           lhs.inferWarnCount != rhs.inferWarnCount;
+                };
+
+                auto getRequestCount = [](const auto& status, std::string_view key) {
+                    auto it = status.requestCounts.find(std::string(key));
+                    return (it == status.requestCounts.end()) ? 0ULL : it->second;
+                };
+
+                auto collectEmbedSnapshot = [&](const auto& status) {
+                    EmbedWaitSnapshot snapshot;
+                    snapshot.vectorDbReady = status.vectorDbReady;
+                    if (auto it = status.readinessStates.find("vector_db");
+                        it != status.readinessStates.end()) {
+                        snapshot.vectorDbReady = it->second;
+                    }
+
+                    snapshot.vectorCount = getRequestCount(status, "vector_count");
+                    snapshot.docsEmbedded = getRequestCount(status, "documents_embedded");
+                    snapshot.preparedDocs =
+                        getRequestCount(status, "bus_embed_prepared_docs_queued");
+                    snapshot.preparedChunks =
+                        getRequestCount(status, "bus_embed_prepared_chunks_queued");
+                    snapshot.queueDepth = getRequestCount(status, "embed_svc_queued");
+                    snapshot.inFlight = getRequestCount(status, "embed_in_flight");
+                    snapshot.dropped = getRequestCount(status, "bus_embed_dropped");
+                    snapshot.inferActive = getRequestCount(status, "embed_infer_active");
+                    snapshot.inferOldestMs = getRequestCount(status, "embed_infer_oldest_ms");
+                    snapshot.inferStarted = getRequestCount(status, "embed_infer_started");
+                    snapshot.inferCompleted = getRequestCount(status, "embed_infer_completed");
+                    snapshot.inferWarnCount = getRequestCount(status, "embed_infer_warn_count");
+                    snapshot.hasQueueMetrics = status.requestCounts.contains("embed_svc_queued") ||
+                                               status.requestCounts.contains("embed_in_flight");
+                    return snapshot;
+                };
+
+                EmbedWaitSnapshot observedSnapshot;
+                EmbedWaitSnapshot lastProgressSnapshot;
+                bool haveObservedSnapshot = false;
+                bool haveProgressSnapshot = false;
                 int stableCount = 0;
-                uint64_t embedDropped = 0;
                 bool embeddingDrainSatisfied = false;
                 auto embedStartTime = std::chrono::steady_clock::now();
                 auto lastEmbedProgressTime = embedStartTime;
-                uint64_t lastObservedVectorCount = 0;
-                uint64_t lastObservedDocsEmbedded = 0;
-                uint64_t lastObservedPreparedDocs = 0;
-                uint64_t lastObservedPreparedChunks = 0;
-                uint64_t lastObservedEmbedQueued = 0;
-                uint64_t lastObservedEmbedInFlight = 0;
-                uint64_t lastObservedEmbedDropped = 0;
-                uint64_t initialObservedVectorCount = 0;
-                uint64_t initialObservedDocsEmbedded = 0;
-                bool capturedInitialEmbedSnapshot = false;
 
                 // Phase 1: Wait for embedding queue to drain and embedded documents to reach
                 // target. Uses progress-based stall detection (like ingestion wait) to avoid
@@ -5597,24 +5691,27 @@ struct BenchFixture {
                             "Embedding wait exceeded hard limit (" +
                             std::to_string(embedMaxWaitSec.count()) +
                             "s) before benchmark queries (embed_svc_queued=" +
-                            std::to_string(lastObservedEmbedQueued) +
-                            ", embed_in_flight=" + std::to_string(lastObservedEmbedInFlight) +
-                            ", docs_embedded=" + std::to_string(lastObservedDocsEmbedded) +
-                            ", vectors=" + std::to_string(lastObservedVectorCount) +
-                            ", dropped=" + std::to_string(lastObservedEmbedDropped) +
+                            std::to_string(observedSnapshot.queueDepth) +
+                            ", embed_in_flight=" + std::to_string(observedSnapshot.inFlight) +
+                            ", docs_embedded=" + std::to_string(observedSnapshot.docsEmbedded) +
+                            ", vectors=" + std::to_string(observedSnapshot.vectorCount) +
+                            ", dropped=" + std::to_string(observedSnapshot.dropped) +
                             "). Increase YAMS_BENCH_EMBED_MAX_WAIT or tune embedding concurrency.");
                     }
 
-                    if (sinceProgress > embedProgressTimeoutSec) {
+                    const bool inferLikelyActive =
+                        observedSnapshot.inferLikelyActive(embedProgressTimeoutSec);
+
+                    if (sinceProgress > embedProgressTimeoutSec && !inferLikelyActive) {
                         throw std::runtime_error(
                             "Embedding wait stalled for " +
                             std::to_string(embedProgressTimeoutSec.count()) +
                             "s before benchmark queries (embed_svc_queued=" +
-                            std::to_string(lastObservedEmbedQueued) +
-                            ", embed_in_flight=" + std::to_string(lastObservedEmbedInFlight) +
-                            ", docs_embedded=" + std::to_string(lastObservedDocsEmbedded) +
-                            ", vectors=" + std::to_string(lastObservedVectorCount) +
-                            ", dropped=" + std::to_string(lastObservedEmbedDropped) +
+                            std::to_string(observedSnapshot.queueDepth) +
+                            ", embed_in_flight=" + std::to_string(observedSnapshot.inFlight) +
+                            ", docs_embedded=" + std::to_string(observedSnapshot.docsEmbedded) +
+                            ", vectors=" + std::to_string(observedSnapshot.vectorCount) +
+                            ", dropped=" + std::to_string(observedSnapshot.dropped) +
                             "). Increase timeout/concurrency or investigate model/provider "
                             "stalls.");
                     }
@@ -5622,99 +5719,24 @@ struct BenchFixture {
                     if (now >= embedHeartbeatAt) {
                         embedHeartbeatAt = now + std::chrono::seconds(5);
                         spdlog::info("Embed wait heartbeat: elapsed={}s since_progress={}s "
-                                     "last_docs_embedded={} last_vectors={} queue={} in_flight={}",
+                                     "last_docs_embedded={} last_vectors={} queue={} in_flight={} "
+                                     "infer_active={} infer_oldest_ms={} infer_started={} "
+                                     "infer_completed={}",
                                      elapsed.count(), sinceProgress.count(),
-                                     lastObservedDocsEmbedded, lastObservedVectorCount,
-                                     lastObservedEmbedQueued, lastObservedEmbedInFlight);
+                                     observedSnapshot.docsEmbedded, observedSnapshot.vectorCount,
+                                     observedSnapshot.queueDepth, observedSnapshot.inFlight,
+                                     observedSnapshot.inferActive, observedSnapshot.inferOldestMs,
+                                     observedSnapshot.inferStarted,
+                                     observedSnapshot.inferCompleted);
                     }
                     auto statusResult = benchRunSync(client->status(true), 5s);
                     if (statusResult) {
-                        bool vectorDbReady = statusResult.value().vectorDbReady;
-                        if (auto it = statusResult.value().readinessStates.find("vector_db");
-                            it != statusResult.value().readinessStates.end()) {
-                            vectorDbReady = it->second;
-                        }
-                        // Access vector count from requestCounts map
-                        uint64_t vectorCount = 0;
-                        auto it = statusResult.value().requestCounts.find("vector_count");
-                        if (it != statusResult.value().requestCounts.end()) {
-                            vectorCount = it->second;
-                        }
-
-                        uint64_t docsEmbedded = 0;
-                        auto itDocsEmbedded =
-                            statusResult.value().requestCounts.find("documents_embedded");
-                        if (itDocsEmbedded != statusResult.value().requestCounts.end()) {
-                            docsEmbedded = itDocsEmbedded->second;
-                        }
-
-                        uint64_t preparedDocsQueued = 0;
-                        auto itPreparedDocs = statusResult.value().requestCounts.find(
-                            "bus_embed_prepared_docs_queued");
-                        if (itPreparedDocs != statusResult.value().requestCounts.end()) {
-                            preparedDocsQueued = itPreparedDocs->second;
-                        }
-
-                        uint64_t preparedChunksQueued = 0;
-                        auto itPreparedChunks = statusResult.value().requestCounts.find(
-                            "bus_embed_prepared_chunks_queued");
-                        if (itPreparedChunks != statusResult.value().requestCounts.end()) {
-                            preparedChunksQueued = itPreparedChunks->second;
-                        }
-
-                        // Check embed queue status (jobs waiting in EmbeddingService queue)
-                        // NOTE: The key is "embed_svc_queued" in requestCounts (StatusResponse),
-                        // NOT "bus_embed_queued" which is in additionalStats (GetStatsResponse)
-                        uint64_t embedQueued = 0;
-                        auto itQ = statusResult.value().requestCounts.find("embed_svc_queued");
-                        if (itQ != statusResult.value().requestCounts.end()) {
-                            embedQueued = itQ->second;
-                        }
-
-                        // Check embed in-flight status (jobs being processed)
-                        uint64_t embedInFlight = 0;
-                        auto itInFlight =
-                            statusResult.value().requestCounts.find("embed_in_flight");
-                        if (itInFlight != statusResult.value().requestCounts.end()) {
-                            embedInFlight = itInFlight->second;
-                        }
-
-                        auto itD = statusResult.value().requestCounts.find("bus_embed_dropped");
-                        if (itD != statusResult.value().requestCounts.end()) {
-                            embedDropped = itD->second;
-                        }
-
-                        lastObservedVectorCount = vectorCount;
-                        lastObservedDocsEmbedded = docsEmbedded;
-                        lastObservedPreparedDocs = preparedDocsQueued;
-                        lastObservedPreparedChunks = preparedChunksQueued;
-                        lastObservedEmbedQueued = embedQueued;
-                        lastObservedEmbedInFlight = embedInFlight;
-                        lastObservedEmbedDropped = embedDropped;
-
-                        if (!capturedInitialEmbedSnapshot) {
-                            initialObservedVectorCount = vectorCount;
-                            initialObservedDocsEmbedded = docsEmbedded;
-                            capturedInitialEmbedSnapshot = true;
-                        }
-
-                        const bool haveQueueMetrics =
-                            (itQ != statusResult.value().requestCounts.end()) ||
-                            (itInFlight != statusResult.value().requestCounts.end());
-
-                        bool metricsChanged = false;
-                        if (!seenEmbedMetrics) {
-                            seenEmbedMetrics = true;
-                            metricsChanged = true;
-                        }
-                        if (vectorCount != lastVectorCount ||
-                            docsEmbedded != lastDocsEmbeddedCount ||
-                            preparedDocsQueued != lastPreparedDocsCount ||
-                            preparedChunksQueued != lastPreparedChunksCount ||
-                            embedQueued != lastEmbedQueuedObserved ||
-                            embedInFlight != lastEmbedInFlightObserved) {
-                            metricsChanged = true;
-                        }
+                        const auto snapshot = collectEmbedSnapshot(statusResult.value());
+                        const bool metricsChanged =
+                            !haveObservedSnapshot ||
+                            progressSignalChanged(snapshot, observedSnapshot);
+                        observedSnapshot = snapshot;
+                        haveObservedSnapshot = true;
 
                         if (metricsChanged) {
                             lastEmbedProgressTime = now;
@@ -5723,21 +5745,21 @@ struct BenchFixture {
                             stableCount++;
                         }
 
-                        if (vectorCount != lastVectorCount ||
-                            docsEmbedded != lastDocsEmbeddedCount) {
-                            double docCoverage =
-                                corpusSize > 0 ? (docsEmbedded * 100.0 / corpusSize) : 0;
-                            double preparedAvgChunksPerDoc =
-                                preparedDocsQueued > 0 ? static_cast<double>(preparedChunksQueued) /
-                                                             static_cast<double>(preparedDocsQueued)
-                                                       : 0.0;
+                        if (!haveProgressSnapshot ||
+                            observedSnapshot.vectorCount != lastProgressSnapshot.vectorCount ||
+                            observedSnapshot.docsEmbedded != lastProgressSnapshot.docsEmbedded) {
+                            const double docCoverage = observedSnapshot.coverageFor(corpusSize);
+                            const double preparedAvgChunksPerDoc =
+                                observedSnapshot.avgChunksPerDoc();
                             spdlog::info(
                                 "Embedding progress: docs={} / {} ({:.1f}%) vectors={} "
                                 "prepared_docs={} prepared_chunks={} avg_chunks_per_doc={:.2f} "
                                 "| queue={} in_flight={} dropped={}",
-                                docsEmbedded, corpusSize, docCoverage, vectorCount,
-                                preparedDocsQueued, preparedChunksQueued, preparedAvgChunksPerDoc,
-                                embedQueued, embedInFlight, embedDropped);
+                                observedSnapshot.docsEmbedded, corpusSize, docCoverage,
+                                observedSnapshot.vectorCount, observedSnapshot.preparedDocs,
+                                observedSnapshot.preparedChunks, preparedAvgChunksPerDoc,
+                                observedSnapshot.queueDepth, observedSnapshot.inFlight,
+                                observedSnapshot.dropped);
 
                             // Log progress to summary file
                             if (summaryLog) {
@@ -5745,48 +5767,48 @@ struct BenchFixture {
                                     std::chrono::duration_cast<std::chrono::milliseconds>(
                                         std::chrono::steady_clock::now() - embedStartTime)
                                         .count();
-                                summaryLog
-                                    << "[" << elapsed << "ms] DocsEmbedded: " << docsEmbedded
-                                    << " / " << corpusSize << " (" << std::fixed
-                                    << std::setprecision(1) << docCoverage << "%)"
-                                    << " | vectors=" << vectorCount
-                                    << " | prepared_docs=" << preparedDocsQueued
-                                    << " prepared_chunks=" << preparedChunksQueued
-                                    << " avg_chunks_per_doc=" << std::fixed << std::setprecision(2)
-                                    << preparedAvgChunksPerDoc << " | queue=" << embedQueued
-                                    << " in_flight=" << embedInFlight << " dropped=" << embedDropped
-                                    << std::endl;
+                                summaryLog << "[" << elapsed
+                                           << "ms] DocsEmbedded: " << observedSnapshot.docsEmbedded
+                                           << " / " << corpusSize << " (" << std::fixed
+                                           << std::setprecision(1) << docCoverage << "%)"
+                                           << " | vectors=" << observedSnapshot.vectorCount
+                                           << " | prepared_docs=" << observedSnapshot.preparedDocs
+                                           << " prepared_chunks=" << observedSnapshot.preparedChunks
+                                           << " avg_chunks_per_doc=" << std::fixed
+                                           << std::setprecision(2) << preparedAvgChunksPerDoc
+                                           << " | queue=" << observedSnapshot.queueDepth
+                                           << " in_flight=" << observedSnapshot.inFlight
+                                           << " dropped=" << observedSnapshot.dropped << std::endl;
                                 summaryLog.flush();
                             }
 
-                            lastVectorCount = vectorCount;
-                            lastDocsEmbeddedCount = docsEmbedded;
-                            lastPreparedDocsCount = preparedDocsQueued;
-                            lastPreparedChunksCount = preparedChunksQueued;
+                            lastProgressSnapshot = observedSnapshot;
+                            haveProgressSnapshot = true;
                         }
-
-                        lastEmbedQueuedObserved = embedQueued;
-                        lastEmbedInFlightObserved = embedInFlight;
-                        lastEmbedDroppedObserved = embedDropped;
 
                         // Success condition: embedded docs >= corpusSize AND queue drained.
                         // vector_count tracks rows (chunks + doc records), not documents.
-                        bool queueDrained = (embedQueued == 0 && embedInFlight == 0);
-                        if (haveQueueMetrics && docsEmbedded >= static_cast<uint64_t>(corpusSize) &&
-                            queueDrained) {
+                        if (observedSnapshot.hasQueueMetrics &&
+                            observedSnapshot.docsEmbedded >= static_cast<uint64_t>(corpusSize) &&
+                            observedSnapshot.queueDrained()) {
                             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - embedStartTime)
                                                .count();
                             spdlog::info(
                                 "Full embedding coverage achieved: {} embedded docs for {} "
                                 "target docs (queue drained, vector_db_ready={})",
-                                docsEmbedded, corpusSize, (vectorDbReady ? "true" : "false"));
+                                observedSnapshot.docsEmbedded, corpusSize,
+                                (observedSnapshot.vectorDbReady ? "true" : "false"));
                             if (summaryLog) {
                                 summaryLog << "\n*** SUCCESS: Full coverage in " << elapsed
                                            << "ms ***" << std::endl;
-                                summaryLog << "Final embedded docs: " << docsEmbedded << std::endl;
-                                summaryLog << "Final vectors: " << vectorCount << std::endl;
-                                summaryLog << "Total dropped: " << embedDropped << std::endl;
+                                summaryLog
+                                    << "Final embedded docs: " << observedSnapshot.docsEmbedded
+                                    << std::endl;
+                                summaryLog << "Final vectors: " << observedSnapshot.vectorCount
+                                           << std::endl;
+                                summaryLog << "Total dropped: " << observedSnapshot.dropped
+                                           << std::endl;
                                 summaryLog.flush();
                             }
                             embeddingDrainSatisfied = true;
@@ -5797,57 +5819,64 @@ struct BenchFixture {
                         // This handles cases where some docs have no content to embed
                         // IMPORTANT: Require minimum 90% coverage to prevent premature exit from
                         // transient queue drain (e.g., between embedding batches)
-                        double coverage = corpusSize > 0 ? (docsEmbedded * 100.0 / corpusSize) : 0;
+                        const double coverage = observedSnapshot.coverageFor(corpusSize);
                         constexpr double MIN_COVERAGE_THRESHOLD = 90.0;
-                        if (haveQueueMetrics && stableCount >= 40 && queueDrained &&
-                            docsEmbedded > 0 && coverage >= MIN_COVERAGE_THRESHOLD) {
+                        if (observedSnapshot.hasQueueMetrics && stableCount >= 40 &&
+                            observedSnapshot.queueDrained() && observedSnapshot.docsEmbedded > 0 &&
+                            coverage >= MIN_COVERAGE_THRESHOLD) {
                             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - embedStartTime)
                                                .count();
                             spdlog::info(
                                 "Embedding generation complete (queue drained, stable): {} "
                                 "embedded docs ({:.1f}% coverage, vector_db_ready={})",
-                                docsEmbedded, coverage, (vectorDbReady ? "true" : "false"));
+                                observedSnapshot.docsEmbedded, coverage,
+                                (observedSnapshot.vectorDbReady ? "true" : "false"));
                             if (summaryLog) {
                                 summaryLog << "\n*** Complete (queue drained) in " << elapsed
                                            << "ms ***" << std::endl;
-                                summaryLog << "Final embedded docs: " << docsEmbedded << " ("
-                                           << coverage << "%)" << std::endl;
-                                summaryLog << "Final vectors: " << vectorCount << std::endl;
+                                summaryLog
+                                    << "Final embedded docs: " << observedSnapshot.docsEmbedded
+                                    << " (" << coverage << "%)" << std::endl;
+                                summaryLog << "Final vectors: " << observedSnapshot.vectorCount
+                                           << std::endl;
                                 summaryLog.flush();
                             }
                             embeddingDrainSatisfied = true;
                             break;
                         }
 
-                        if (haveQueueMetrics && stableCount >= 40 && queueDrained &&
-                            docsEmbedded == 0) {
+                        if (observedSnapshot.hasQueueMetrics && stableCount >= 40 &&
+                            observedSnapshot.queueDrained() && observedSnapshot.docsEmbedded == 0) {
                             throw std::runtime_error(
                                 "Embedding failed before benchmark queries (queue "
                                 "drained, no documents "
                                 "embedded, dropped=" +
-                                std::to_string(embedDropped) +
+                                std::to_string(observedSnapshot.dropped) +
                                 "). Check embedding provider/model availability.");
                         }
 
-                        if (haveQueueMetrics && queueDrained && docsEmbedded == 0 &&
+                        if (observedSnapshot.hasQueueMetrics && observedSnapshot.queueDrained() &&
+                            observedSnapshot.docsEmbedded == 0 &&
                             elapsed > std::chrono::seconds(60)) {
                             throw std::runtime_error(
                                 "Embedding appears unavailable for this candidate (queue drained, "
                                 "no "
                                 "documents embedded after " +
                                 std::to_string(elapsed.count()) +
-                                "s, dropped=" + std::to_string(embedDropped) +
+                                "s, dropped=" + std::to_string(observedSnapshot.dropped) +
                                 "). Aborting candidate to keep optimization loop progressing.");
                         }
 
                         // If stable but queue NOT drained, warn about potential issues
-                        if (haveQueueMetrics && stableCount >= 20 && !queueDrained &&
-                            docsEmbedded > 0) {
-                            // coverage already computed above
+                        if (observedSnapshot.hasQueueMetrics && stableCount >= 20 &&
+                            !observedSnapshot.queueDrained() &&
+                            !observedSnapshot.inferLikelyActive(embedProgressTimeoutSec) &&
+                            observedSnapshot.docsEmbedded > 0) {
                             spdlog::warn("Embedding stalled at {:.1f}% but queue not drained "
                                          "(queue={}, in_flight={}). Continuing to wait...",
-                                         coverage, embedQueued, embedInFlight);
+                                         coverage, observedSnapshot.queueDepth,
+                                         observedSnapshot.inFlight);
                             // Don't break - keep waiting for queue to drain
                         }
                     }
@@ -5861,7 +5890,7 @@ struct BenchFixture {
 
                         if (vectorDb && metadataRepo) {
                             auto embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
-                            if (embeddedHashes.size() > lastObservedDocsEmbedded) {
+                            if (embeddedHashes.size() > observedSnapshot.docsEmbedded) {
                                 std::vector<std::string> reconciledHashes;
                                 reconciledHashes.reserve(embeddedHashes.size());
                                 for (const auto& hash : embeddedHashes) {
@@ -5878,8 +5907,10 @@ struct BenchFixture {
                                 } else {
                                     spdlog::info("Reconciled embedded-doc status from vector rows: "
                                                  "{} -> {}",
-                                                 lastObservedDocsEmbedded, reconciledHashes.size());
-                                    lastObservedDocsEmbedded = reconciledHashes.size();
+                                                 observedSnapshot.docsEmbedded,
+                                                 reconciledHashes.size());
+                                    observedSnapshot.docsEmbedded = reconciledHashes.size();
+                                    lastProgressSnapshot.docsEmbedded = reconciledHashes.size();
                                 }
                             }
                         }

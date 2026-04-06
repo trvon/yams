@@ -248,6 +248,8 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.lexicalTieBreakEpsilon = config.lexicalTieBreakEpsilon;
     params_.semanticRescueSlots = config.semanticRescueSlots;
     params_.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
+    params_.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
+    params_.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
     params_.enableAdaptiveVectorFallback = config.enableAdaptiveVectorFallback;
     params_.adaptiveVectorSkipMinTier1Hits = config.adaptiveVectorSkipMinTier1Hits;
     params_.adaptiveVectorSkipRequireTextSignal = config.adaptiveVectorSkipRequireTextSignal;

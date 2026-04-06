@@ -652,6 +652,7 @@ RepairService::backgroundLoop(std::shared_ptr<ShutdownState> shutdownState) {
             InternalEventBus::EmbedJob job{
                 missingEmbeddings, static_cast<uint32_t>(shutdownState->config.maxBatch), true,
                 std::string{},     std::vector<InternalEventBus::EmbedPreparedDoc>{},     nullptr};
+            job.updateSemanticGraph = false;
             const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
@@ -2756,6 +2757,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
                                        modelName,
                                        std::vector<InternalEventBus::EmbedPreparedDoc>{},
                                        monitor};
+        job.updateSemanticGraph = false;
 
         int retries = 0;
         bool pushed = false;

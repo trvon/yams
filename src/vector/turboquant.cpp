@@ -195,24 +195,9 @@ static std::vector<float> padToPowerOf2(const std::vector<float>& data, size_t t
 void TurboQuantMSE::generateCentroids() {
     const uint8_t bits = config_.bits_per_channel;
 
-    // Use pre-computed Lloyd-Max centroids from the table (bits 1–6)
-    if (bits <= 6) {
-        size_t bits_idx = static_cast<size_t>(bits) - 1;
-        const auto& centroid_table = g_lloydMaxCentroids[bits_idx][0];
-        centroids_ = centroid_table;
-
-        // Boundaries come from the extended static table for bits ≤ 6
-        if (bits <= 6 && bits_idx < g_lloydMaxBoundaries.size()) {
-            decision_boundaries_ = g_lloydMaxBoundaries[bits_idx];
-            return;
-        }
-    }
-
-    // Fallback for bits > 6: generate centroids using k-means on N(0,1) samples.
-    // This is a one-time cost during quantizer construction.
-    // For bits 7 (128 levels) and bits 8 (256 levels), the static tables are
-    // too large to embed. k-means initialization on a modest sample (5000 draws)
-    // produces Lloyd-Max-quality centroids without code churn.
+    // Generate centroids via sample-based Lloyd-Max refinement for every bit-width.
+    // The embedded tables have drifted from the active encode/score path; deriving
+    // centroids and boundaries together keeps the quantizer internally consistent.
     const size_t num_centroids = 1u << bits;
     centroids_.resize(num_centroids);
     decision_boundaries_.resize(num_centroids - 1);
@@ -343,15 +328,6 @@ std::vector<uint8_t> TurboQuantMSE::encode(const std::vector<float>& vector) {
         rotated[i] *= diagonal_signs_[i];
     }
 
-    // Scale coordinates by 1/sqrt(d) so variance ~1 for Lloyd-Max quantizer.
-    // The Hadamard transform preserves l2-norm; for a unit vector x:
-    //   ||H·x||² = n·||x||²  (Hadamard has l2-norm up to n)
-    // So scaling by 1/sqrt(d) gives variance ~1/d per coordinate.
-    float scale = 1.0f / std::sqrt(static_cast<float>(d));
-    for (size_t i = 0; i < d; ++i) {
-        rotated[i] *= scale;
-    }
-
     // Quantize each coordinate with Lloyd-Max scalar quantizer (per-coordinate scale aware).
     // For coordinate i: encode `rotated[i] / per_coord_scales_[i]` against the global
     // centroid table. This is equivalent to finding the centroid c_j that minimizes
@@ -419,12 +395,6 @@ std::vector<float> TurboQuantMSE::decode(const std::vector<uint8_t>& indices) {
         dequantized[i] = centroid_val * per_coord_scales_[i];
     }
 
-    // Scale up (undo the 1/sqrt(d) scaling from encode)
-    float unscale = std::sqrt(static_cast<float>(d));
-    for (size_t i = 0; i < d; ++i) {
-        dequantized[i] *= unscale;
-    }
-
     // Inverse transform: x = D · H · y (Hadamard is self-inverse up to 1/n factor)
     // Apply diagonal signs
     for (size_t i = 0; i < d; ++i) {
@@ -437,8 +407,9 @@ std::vector<float> TurboQuantMSE::decode(const std::vector<uint8_t>& indices) {
     // Extract only the first d elements and normalize to unit sphere
     std::vector<float> result(d);
     float norm_sq = 0.0f;
+    const float inv_dim = 1.0f / static_cast<float>(n);
     for (size_t i = 0; i < d; ++i) {
-        result[i] = dequantized[i];
+        result[i] = dequantized[i] * inv_dim;
         norm_sq += result[i] * result[i];
     }
     float norm = std::sqrt(norm_sq);
@@ -559,13 +530,7 @@ std::vector<float> TurboQuantMSE::transformQuery(const std::vector<float>& query
         rotated[i] *= diagonal_signs_[i];
     }
 
-    // Step 4: Scale by 1/sqrt(d) — this matches the encode() scaling
-    float scale = 1.0f / std::sqrt(static_cast<float>(d));
-    for (size_t i = 0; i < d; ++i) {
-        rotated[i] *= scale;
-    }
-
-    // Step 5: Truncate to first d elements (drop padding)
+    // Step 4: Truncate to first d elements (drop padding)
     std::vector<float> result(d);
     for (size_t i = 0; i < d; ++i) {
         result[i] = rotated[i];
@@ -600,13 +565,7 @@ void TurboQuantMSE::transformQueryInPlace(const std::vector<float>& query,
         rotated[i] *= diagonal_signs_[i];
     }
 
-    // Step 4: Scale by 1/sqrt(d) — this matches the encode() scaling
-    float scale = 1.0f / std::sqrt(static_cast<float>(d));
-    for (size_t i = 0; i < d; ++i) {
-        rotated[i] *= scale;
-    }
-
-    // Step 5: Copy first d elements to output span
+    // Step 4: Copy first d elements to output span
     for (size_t i = 0; i < d; ++i) {
         output[i] = rotated[i];
     }
@@ -668,7 +627,7 @@ float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query
         accumulator += y_q[i] * centroid_val * scales[i];
     }
 
-    return accumulator;
+    return std::clamp(accumulator / static_cast<float>(d), -1.0f, 1.0f);
 }
 
 float TurboQuantMSE::scoreFromPacked(std::span<const float> transformed_query,
@@ -711,7 +670,7 @@ float TurboQuantMSE::scoreFromPacked(std::span<const float> transformed_query,
         accumulator += y_q[i] * centroid_val * scales[i];
     }
 
-    return accumulator;
+    return std::clamp(accumulator / static_cast<float>(d), -1.0f, 1.0f);
 }
 
 void TurboQuantMSE::transformPackedCode(std::span<const uint8_t> packed_code,
@@ -803,8 +762,7 @@ void TurboQuantMSE::fitPerCoordScales(const std::vector<std::vector<float>>& vec
         fwht(h);
 
         for (size_t i = 0; i < d; ++i) {
-            h[i] *= diagonal_signs_[i];                        // Apply diagonal signs
-            h[i] *= (1.0f / std::sqrt(static_cast<float>(d))); // Scale by 1/sqrt(d)
+            h[i] *= diagonal_signs_[i]; // Apply diagonal signs
 
             double abs_h = std::abs(h[i]);
             double delta = abs_h - mean_abs[i];
@@ -864,7 +822,6 @@ void TurboQuantMSE::fitPerCoordCentroids(const std::vector<std::vector<float>>& 
         fwht(h);
         for (size_t i = 0; i < d; ++i) {
             h[i] *= diagonal_signs_[i];
-            h[i] *= (1.0f / std::sqrt(static_cast<float>(d)));
             coord_samples[i][v] = h[i];
         }
     }

@@ -1679,12 +1679,6 @@ struct ProviderSingleton {
                         namespace fs = std::filesystem;
                         std::string modelsRoot = c->pool ? c->pool->getModelsRoot() : "";
 
-                        if (modelsRoot.empty()) {
-                            spdlog::debug(
-                                "[ONNX Plugin] No modelsRoot configured, reranker unavailable");
-                            return YAMS_ERR_UNSUPPORTED;
-                        }
-
                         auto tryInitReranker = [&](const fs::path& onnxPath,
                                                    const std::string& modelName) {
                             if (!fs::exists(onnxPath)) {
@@ -1733,7 +1727,7 @@ struct ProviderSingleton {
                             initialized = tryInitReranker(onnxPath, c->rerankerModelName);
                         }
 
-                        if (!initialized) {
+                        if (!initialized && !modelsRoot.empty()) {
                             // Look for common reranker models in the configured models directory
                             const std::vector<std::string> rerankerModels = {
                                 "bge-reranker-v2-m3", "bge-reranker-base", "bge-reranker-large",
@@ -1750,8 +1744,14 @@ struct ProviderSingleton {
                         }
 
                         if (!c->reranker) {
-                            spdlog::debug("[ONNX Plugin] No reranker model found in: {}",
-                                          modelsRoot);
+                            if (modelsRoot.empty()) {
+                                spdlog::debug(
+                                    "[ONNX Plugin] Reranker unavailable: modelsRoot is empty and "
+                                    "no explicit reranker model path/name resolved");
+                            } else {
+                                spdlog::debug("[ONNX Plugin] No reranker model found in: {}",
+                                              modelsRoot);
+                            }
                             return YAMS_ERR_UNSUPPORTED;
                         }
                     }

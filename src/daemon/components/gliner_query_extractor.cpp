@@ -1,7 +1,6 @@
 #include <yams/daemon/components/gliner_query_extractor.h>
 
 #include <spdlog/spdlog.h>
-#include <array>
 #include <cctype>
 #include <chrono>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
@@ -12,27 +11,14 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <unordered_map>
 #include <unordered_set>
 
 namespace yams::daemon {
 
 namespace {
-// Default entity types for query concept extraction
-constexpr std::array<const char*, 19> kDefaultEntityTypes = {
-    "technology", "concept", "organization", "person",
-    "location",   "product", "language",     "framework",
-    "protein",    "gene",    "cell",         "disease",
-    "chemical",   "drug",    "pathway",      "biological_process",
-    "biomarker",  "anatomy", "organism"};
-
 // Minimum confidence threshold for including concepts
 constexpr float kMinConfidence = 0.4f;
 constexpr std::size_t kMaxEntityTextLen = 160;
-
-std::string toLowerCopy(std::string_view input) {
-    return yams::search::toLowerCopy(input);
-}
 
 std::string trimAndCollapse(std::string_view input) {
     std::string out = yams::search::trimAndCollapseWhitespace(input);
@@ -49,25 +35,7 @@ std::string trimAndCollapse(std::string_view input) {
     return out;
 }
 
-std::string normalizeType(std::string_view type) {
-    static const std::unordered_map<std::string, std::string> kAliases = {
-        {"org", "organization"},  {"company", "organization"}, {"institution", "organization"},
-        {"loc", "location"},      {"place", "location"},       {"tool", "technology"},
-        {"library", "framework"},
-    };
-
-    std::string lowered = toLowerCopy(trimAndCollapse(type));
-    if (lowered.empty()) {
-        return "concept";
-    }
-    auto it = kAliases.find(lowered);
-    if (it != kAliases.end()) {
-        return it->second;
-    }
-    return lowered;
-}
-
-bool isLikelyNoiseEntity(std::string_view text) {
+bool isLikelyNoiseEntity(std::string_view text, std::string_view normalizedType) {
     if (text.size() < 2 || text.size() > kMaxEntityTextLen) {
         return true;
     }
@@ -87,12 +55,8 @@ bool isLikelyNoiseEntity(std::string_view text) {
         return true;
     }
 
-    static const std::unordered_set<std::string> kStopwords = {
-        "a",  "an", "and", "are", "as", "at",  "by",   "for",  "from", "in",   "is",    "it",
-        "of", "on", "or",  "the", "to", "was", "were", "with", "this", "that", "these", "those"};
-
-    std::string lowered = toLowerCopy(text);
-    if (kStopwords.find(lowered) != kStopwords.end()) {
+    const std::string normalizedText = yams::search::normalizeEntityTextForKey(text);
+    if (yams::search::isLowValueEntityText(normalizedText, normalizedType)) {
         return true;
     }
 
@@ -142,14 +106,14 @@ createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter
         std::vector<const char*> types;
         std::unordered_set<std::string> requestedTypes;
         if (entityTypes.empty()) {
-            for (const auto* t : kDefaultEntityTypes) {
-                types.push_back(t);
-                requestedTypes.insert(normalizeType(t));
+            for (const auto& t : yams::search::defaultQueryEntityTypes()) {
+                types.push_back(t.data());
+                requestedTypes.insert(yams::search::canonicalizeEntityType(t));
             }
         } else {
             for (const auto& t : entityTypes) {
                 types.push_back(t.c_str());
-                requestedTypes.insert(normalizeType(t));
+                requestedTypes.insert(yams::search::canonicalizeEntityType(t));
             }
         }
 
@@ -184,13 +148,14 @@ createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter
 
             search::QueryConcept qc;
             qc.text = trimAndCollapse(entity.text ? entity.text : "");
-            qc.type = normalizeType(entity.type ? entity.type : "");
+            qc.type = yams::search::canonicalizeEntityType(entity.type ? entity.type : "", qc.text);
             qc.confidence = entity.confidence;
             qc.startOffset = entity.start_offset;
             qc.endOffset = entity.end_offset;
 
             // Only include concepts with reasonable confidence
-            if (qc.confidence < kMinConfidence || qc.text.empty() || isLikelyNoiseEntity(qc.text)) {
+            if (qc.confidence < kMinConfidence || qc.text.empty() ||
+                isLikelyNoiseEntity(qc.text, qc.type)) {
                 continue;
             }
 
@@ -200,7 +165,7 @@ createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter
 
             std::string dedupeKey = qc.type;
             dedupeKey.push_back('|');
-            dedupeKey.append(toLowerCopy(qc.text));
+            dedupeKey.append(yams::search::normalizeEntityTextForKey(qc.text));
 
             auto it = bestByKey.find(dedupeKey);
             if (it == bestByKey.end() || qc.confidence > it->second.confidence) {

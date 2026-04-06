@@ -46,11 +46,6 @@ namespace {
 constexpr size_t kMaxGlinerChars = 2000;
 constexpr float kMinTitleConfidence = 0.55f;
 constexpr float kMinNlEntityConfidence = 0.45f;
-const std::unordered_set<std::string> kLowValueNlEntityTexts = {
-    "encoded protein product", "crossover products", "study participants", "control group",
-    "treatment group",         "study period",       "follow up",          "follow-up",
-    "patient cohort",
-};
 
 std::string normalizeGraphPath(const std::string& path) {
     if (path.empty()) {
@@ -75,85 +70,12 @@ std::string normalizeEntityTextForKey(std::string_view text) {
     return yams::search::normalizeEntityTextForKey(text);
 }
 
-bool looksLikeBiomedicalSymbol(std::string_view text) {
-    size_t alphaCount = 0;
-    size_t digitCount = 0;
-    size_t upperCount = 0;
-    for (unsigned char c : text) {
-        if (std::isalpha(c)) {
-            ++alphaCount;
-            if (std::isupper(c)) {
-                ++upperCount;
-            }
-        } else if (std::isdigit(c)) {
-            ++digitCount;
-        }
-    }
-    if (text.size() < 2 || text.size() > 24) {
-        return false;
-    }
-    if (alphaCount == 0) {
-        return false;
-    }
-    if (digitCount > 0 && upperCount > 0) {
-        return true;
-    }
-    if (upperCount >= 2 && alphaCount == upperCount && text.size() <= 8) {
-        return true;
-    }
-    return false;
-}
-
 std::string canonicalizeNlEntityType(std::string_view rawType, std::string_view rawText) {
-    std::string type = normalizeEntityTextForKey(rawType);
-    const std::string text = normalizeEntityTextForKey(rawText);
-
-    if (looksLikeBiomedicalSymbol(rawText) || text.starts_with("il ") || text.starts_with("cd") ||
-        text.find("protein") != std::string::npos || text.find("receptor") != std::string::npos ||
-        text.find("kinase") != std::string::npos || text.find("interleukin") != std::string::npos ||
-        text.find("tet") != std::string::npos || text.find("erg") != std::string::npos) {
-        return "protein";
-    }
-    if (text.find("cell") != std::string::npos || text.find("bipolar") != std::string::npos ||
-        text.find("monocyte") != std::string::npos || text.find("stem cell") != std::string::npos) {
-        return "cell";
-    }
-    if (text.find("cancer") != std::string::npos || text.find("disease") != std::string::npos ||
-        text.find("tumor") != std::string::npos || text.find("metast") != std::string::npos) {
-        return "disease";
-    }
-    if (type == "technology") {
-        return "method";
-    }
-    return type.empty() ? "concept" : type;
+    return yams::search::canonicalizeEntityType(rawType, rawText);
 }
 
 bool isLowValueNlEntity(std::string_view normalizedText, std::string_view normalizedType) {
-    if (normalizedText.empty()) {
-        return true;
-    }
-    if (kLowValueNlEntityTexts.find(std::string(normalizedText)) != kLowValueNlEntityTexts.end()) {
-        return true;
-    }
-    if (normalizedType == "date" || normalizedType == "time" || normalizedType == "duration" ||
-        normalizedType == "number" || normalizedType == "percentage" ||
-        normalizedType == "ordinal") {
-        return true;
-    }
-    if (normalizedText.find("january") != std::string::npos ||
-        normalizedText.find("february") != std::string::npos ||
-        normalizedText.find("march") != std::string::npos ||
-        normalizedText.find("april") != std::string::npos ||
-        normalizedText.find("june") != std::string::npos ||
-        normalizedText.find("july") != std::string::npos ||
-        normalizedText.find("august") != std::string::npos ||
-        normalizedText.find("september") != std::string::npos ||
-        normalizedText.find("october") != std::string::npos ||
-        normalizedText.find("november") != std::string::npos ||
-        normalizedText.find("december") != std::string::npos) {
-        return true;
-    }
-    return false;
+    return yams::search::isLowValueEntityText(normalizedText, normalizedType);
 }
 
 bool isHighValueGraphType(std::string_view normalizedType) {
@@ -282,13 +204,20 @@ bool isUsefulNlEntity(const search::QueryConcept& qc) {
     return true;
 }
 
-std::vector<std::pair<std::string, float>> buildNlAliasVariants(const std::string& entityText,
-                                                                const std::string& entityType,
-                                                                float baseConfidence) {
-    std::vector<std::pair<std::string, float>> variants;
-    std::unordered_set<std::string> seen;
+struct NlAliasVariant {
+    std::string text;
+    float confidence = 1.0f;
+    std::string sourceTag;
+};
 
-    auto addVariant = [&](const std::string& value, float confScale) {
+std::vector<NlAliasVariant> buildNlAliasVariants(const std::string& entityText,
+                                                 const std::string& entityType,
+                                                 float baseConfidence) {
+    std::vector<NlAliasVariant> variants;
+    std::unordered_set<std::string> seen;
+    const auto kind = yams::search::surfaceVariantKindForEntityType(entityType);
+
+    auto addVariant = [&](const std::string& value, float confScale, std::string sourceTag) {
         std::string normalized = normalizeEntityTextForKey(value);
         if (normalized.size() < 2) {
             return;
@@ -297,29 +226,26 @@ std::vector<std::pair<std::string, float>> buildNlAliasVariants(const std::strin
             return;
         }
         float conf = std::clamp(baseConfidence * confScale, 0.05f, 1.0f);
-        variants.emplace_back(std::move(normalized), conf);
+        variants.push_back(NlAliasVariant{std::move(normalized), conf, std::move(sourceTag)});
+    };
+
+    auto addGeneratedVariants = [&](const std::string& value, float primaryScale,
+                                    float secondaryScale, std::string primarySource,
+                                    std::string secondarySource) {
+        auto generated = yams::search::generateSurfaceVariants(value, kind, 8);
+        for (size_t i = 0; i < generated.size() && variants.size() < 8; ++i) {
+            addVariant(generated[i], i == 0 ? primaryScale : secondaryScale,
+                       i == 0 ? primarySource : secondarySource);
+        }
     };
 
     // Primary alias: full normalized entity text.
-    addVariant(entityText, 1.0f);
+    addGeneratedVariants(entityText, 1.0f, 0.72f, "surface", "variant");
 
     // Type-qualified alias helps disambiguation for collisions.
     if (!entityType.empty()) {
-        addVariant(entityType + " " + entityText, 0.95f);
-    }
-
-    // Token aliases allow query token matching in queryKnowledgeGraph().
-    std::istringstream iss(entityText);
-    std::string token;
-    while (iss >> token) {
-        std::string t = normalizeEntityTextForKey(token);
-        if (t.size() < 3 && !looksLikeBiomedicalSymbol(token)) {
-            continue;
-        }
-        addVariant(t, 0.72f);
-        if (variants.size() >= 8) {
-            break;
-        }
+        addGeneratedVariants(entityType + " " + entityText, 0.95f, 0.68f, "type_qualified",
+                             "type_qualified");
     }
 
     return variants;
@@ -2101,12 +2027,11 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
                 // Add aliases for query-time KG resolution. KGWriteQueue resolves nodeId from
                 // source when encoded as "source|nodeKey".
-                for (const auto& [aliasText, aliasConfidence] :
-                     buildNlAliasVariants(text, type, qc->confidence)) {
+                for (const auto& aliasVariant : buildNlAliasVariants(text, type, qc->confidence)) {
                     metadata::KGAlias alias;
-                    alias.alias = aliasText;
-                    alias.source = std::string("gliner|") + nodeKey;
-                    alias.confidence = aliasConfidence;
+                    alias.alias = aliasVariant.text;
+                    alias.source = std::string("gliner.") + aliasVariant.sourceTag + "|" + nodeKey;
+                    alias.confidence = aliasVariant.confidence;
                     batch->aliases.push_back(std::move(alias));
                 }
 

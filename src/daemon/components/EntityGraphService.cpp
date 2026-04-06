@@ -25,6 +25,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/plugins/symbol_extractor_v1.h>
+#include <yams/search/query_text_utils.h>
 
 namespace yams::daemon {
 
@@ -549,23 +550,26 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
         const auto& sym = result->symbols[i];
         const std::string& nodeKey = canonicalNodeKeys[i];
 
+        auto addAliasVariants = [&](std::string_view rawAlias, std::string_view sourcePrefix,
+                                    float confidence) {
+            for (const auto& variant : yams::search::generateSurfaceVariants(
+                     rawAlias, yams::search::SurfaceVariantKind::CodeSymbol, 12)) {
+                yams::metadata::KGAlias alias;
+                alias.nodeId = 0; // Will be resolved
+                alias.alias = variant;
+                alias.source = std::string(sourcePrefix) + "|" + nodeKey;
+                alias.confidence = confidence;
+                batch->aliases.push_back(std::move(alias));
+            }
+        };
+
         // Store nodeKey in alias.source field for resolution (hacky but works)
         // The KGWriteQueue will resolve these based on the nodeKey->nodeId map
         if (sym.name) {
-            yams::metadata::KGAlias alias;
-            alias.nodeId = 0; // Will be resolved
-            alias.alias = std::string(sym.name);
-            alias.source = "symbol_name|" + nodeKey;
-            alias.confidence = 1.0f;
-            batch->aliases.push_back(alias);
+            addAliasVariants(sym.name, "symbol_name", 1.0f);
         }
         if (sym.qualified_name && sym.qualified_name != sym.name) {
-            yams::metadata::KGAlias alias;
-            alias.nodeId = 0;
-            alias.alias = std::string(sym.qualified_name);
-            alias.source = "qualified_name|" + nodeKey;
-            alias.confidence = 1.0f;
-            batch->aliases.push_back(alias);
+            addAliasVariants(sym.qualified_name, "qualified_name", 1.0f);
         }
         // Partial qualified name aliases
         if (sym.qualified_name) {
@@ -574,12 +578,7 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             while ((pos = qn.find("::", pos)) != std::string::npos) {
                 std::string partial = qn.substr(pos + 2);
                 if (!partial.empty() && partial != sym.name) {
-                    yams::metadata::KGAlias alias;
-                    alias.nodeId = 0;
-                    alias.alias = partial;
-                    alias.source = "partial_qualified|" + nodeKey;
-                    alias.confidence = 0.8f;
-                    batch->aliases.push_back(alias);
+                    addAliasVariants(partial, "partial_qualified", 0.8f);
                 }
                 pos += 2;
             }

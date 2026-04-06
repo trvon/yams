@@ -498,6 +498,46 @@ public:
         });
     }
 
+    Result<std::vector<KGAlias>> getAliasesForNode(std::int64_t nodeId, std::size_t limit,
+                                                   std::size_t offset) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGAlias>> {
+            auto stmtR = db.prepare("SELECT id, node_id, alias, source, confidence "
+                                    "FROM kg_aliases WHERE node_id = ? "
+                                    "ORDER BY confidence DESC, alias ASC LIMIT ? OFFSET ?");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            auto br = stmt.bind(1, nodeId);
+            if (!br)
+                return br.error();
+            br = stmt.bind(2, static_cast<int64_t>(limit));
+            if (!br)
+                return br.error();
+            br = stmt.bind(3, static_cast<int64_t>(offset));
+            if (!br)
+                return br.error();
+
+            std::vector<KGAlias> out;
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                KGAlias alias;
+                alias.id = stmt.getInt64(0);
+                alias.nodeId = stmt.getInt64(1);
+                alias.alias = stmt.getString(2);
+                alias.source =
+                    stmt.isNull(3) ? std::nullopt : std::optional<std::string>(stmt.getString(3));
+                alias.confidence = static_cast<float>(stmt.getDouble(4));
+                out.push_back(std::move(alias));
+            }
+            return out;
+        });
+    }
+
     Result<std::vector<AliasResolution>> resolveAliasFuzzy(std::string_view aliasQuery,
                                                            std::size_t limit) override {
         if (!cfg_.enable_alias_fts) {

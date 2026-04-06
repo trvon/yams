@@ -90,7 +90,7 @@ private:
 
     ServiceManager* sm_;
     StateComponent* state_;
-    WorkCoordinator* coordinator_;
+    [[maybe_unused]] WorkCoordinator* coordinator_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::atomic<bool> running_{false};
     std::future<void> tuningFuture_{};

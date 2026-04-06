@@ -2243,12 +2243,16 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                      successHashes.size(), repairStatusResult.error().message);
     }
 
-    if (getKgStore_) {
+    if (job.updateSemanticGraph && getKgStore_) {
         auto kgStore = getKgStore_();
         if (kgStore) {
             updateSemanticNeighborGraph(kgStore, vdb, modelName, job.preparedDocs,
                                         documentEmbeddings);
         }
+    } else if (!job.updateSemanticGraph) {
+        spdlog::debug(
+            "EmbeddingService: semantic neighbor graph update skipped for job={} model='{}'",
+            jobTag, modelName);
     }
 
     logPhase("metadata_update", tMeta,

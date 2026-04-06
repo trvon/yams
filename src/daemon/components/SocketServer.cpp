@@ -1122,6 +1122,11 @@ void SocketServer::execute_on_io_context(std::function<void()> fn) {
         return;
     }
 
+    if (!ioCoordinator_ || !ioCoordinator_->isRunning()) {
+        fn();
+        return;
+    }
+
     auto io_context = ioCoordinator_->getIOContext();
     auto executor = ioCoordinator_->getExecutor();
     if (io_context->stopped() || executor.running_in_this_thread()) {

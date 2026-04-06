@@ -242,6 +242,10 @@ public:
     virtual Result<std::vector<AliasResolution>> resolveAliasExact(std::string_view alias,
                                                                    std::size_t limit = 50) = 0;
 
+    // Enumerate aliases for a single node in descending confidence order.
+    virtual Result<std::vector<KGAlias>>
+    getAliasesForNode(std::int64_t nodeId, std::size_t limit = 64, std::size_t offset = 0) = 0;
+
     // FTS-assisted alias resolution when enabled; returns node ids with scores
     virtual Result<std::vector<AliasResolution>> resolveAliasFuzzy(std::string_view aliasQuery,
                                                                    std::size_t limit = 50) = 0;

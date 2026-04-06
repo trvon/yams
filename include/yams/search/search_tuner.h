@@ -102,6 +102,8 @@ struct TunedParams {
     float lexicalTieBreakEpsilon = 0.0f;
     size_t semanticRescueSlots = 0;
     float semanticRescueMinVectorScore = 0.0f;
+    size_t fusionEvidenceRescueSlots = 0;
+    float fusionEvidenceRescueMinScore = 0.0f;
 
     // Adaptive semantic skip behavior
     bool enableAdaptiveVectorFallback = false;
@@ -156,6 +158,8 @@ struct TunedParams {
         config.lexicalTieBreakEpsilon = lexicalTieBreakEpsilon;
         config.semanticRescueSlots = semanticRescueSlots;
         config.semanticRescueMinVectorScore = semanticRescueMinVectorScore;
+        config.fusionEvidenceRescueSlots = fusionEvidenceRescueSlots;
+        config.fusionEvidenceRescueMinScore = fusionEvidenceRescueMinScore;
         config.enableAdaptiveVectorFallback = enableAdaptiveVectorFallback;
         config.adaptiveVectorSkipMinTier1Hits = adaptiveVectorSkipMinTier1Hits;
         config.adaptiveVectorSkipRequireTextSignal = adaptiveVectorSkipRequireTextSignal;
@@ -199,6 +203,8 @@ struct TunedParams {
             {"lexical_tie_break_epsilon", lexicalTieBreakEpsilon},
             {"semantic_rescue_slots", semanticRescueSlots},
             {"semantic_rescue_min_vector_score", semanticRescueMinVectorScore},
+            {"fusion_evidence_rescue_slots", fusionEvidenceRescueSlots},
+            {"fusion_evidence_rescue_min_score", fusionEvidenceRescueMinScore},
             {"enable_adaptive_vector_fallback", enableAdaptiveVectorFallback},
             {"adaptive_vector_skip_min_tier1_hits", adaptiveVectorSkipMinTier1Hits},
             {"adaptive_vector_skip_require_text_signal", adaptiveVectorSkipRequireTextSignal},
@@ -246,6 +252,12 @@ struct TunedParams {
             params.kgWeight = 0.00f;
             params.tagWeight = 0.05f;
             params.metadataWeight = 0.05f;
+            params.lexicalFloorTopN = 12;
+            params.lexicalFloorBoost = 0.20f;
+            params.enableLexicalTieBreak = true;
+            params.lexicalTieBreakEpsilon = 0.010f;
+            params.fusionEvidenceRescueSlots = 1;
+            params.fusionEvidenceRescueMinScore = 0.012f;
             break;
 
         case TuningState::LARGE_PROSE:
@@ -314,6 +326,8 @@ struct TunedParams {
             params.lexicalTieBreakEpsilon = 0.010f;
             params.semanticRescueSlots = 1;
             params.semanticRescueMinVectorScore = 0.0f;
+            params.fusionEvidenceRescueSlots = 1;
+            params.fusionEvidenceRescueMinScore = 0.012f;
             params.enableAdaptiveVectorFallback = true;
             params.adaptiveVectorSkipMinTier1Hits = 80;
             params.adaptiveVectorSkipRequireTextSignal = true;

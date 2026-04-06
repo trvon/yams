@@ -147,6 +147,19 @@ void clear_session_index_on_start() {
         spdlog::warn("Failed to clear session index {}: {}", index.string(), e.what());
     }
 }
+
+std::filesystem::path extractExplicitDataDirFromArgv(int argc, char* argv[]) {
+    for (int i = 1; i < argc; ++i) {
+        if (!argv[i]) {
+            continue;
+        }
+        std::string_view arg{argv[i]};
+        if ((arg == "--data-dir" || arg == "--storage") && i + 1 < argc && argv[i + 1]) {
+            return std::filesystem::path(argv[i + 1]);
+        }
+    }
+    return {};
+}
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -159,6 +172,7 @@ int main(int argc, char* argv[]) {
 
     yams::daemon::DaemonConfig config;
     std::string configPath;
+    const auto argvExplicitDataDir = extractExplicitDataDirFromArgv(argc, argv);
 
     // Capture CLI-provided data dir separately so explicit CLI can win over config and env.
     std::filesystem::path cliDataDir;
@@ -172,8 +186,7 @@ int main(int argc, char* argv[]) {
         CLI::App app{"YAMS Daemon - background service"};
         app.add_option("--config", configPath, "Configuration file path");
         app.add_option("--socket", config.socketPath, "Unix domain socket path");
-        auto* dataDirOpt =
-            app.add_option("--data-dir,--storage", cliDataDir, "Data directory for storage");
+        app.add_option("--data-dir,--storage", cliDataDir, "Data directory for storage");
         app.add_option("--pid-file", config.pidFile, "PID file path");
         app.add_option("--log-file", config.logFile, "Log file path");
         app.add_option("--max-memory", config.maxMemoryGb, "Maximum memory usage (GB)")
@@ -184,7 +197,7 @@ int main(int argc, char* argv[]) {
         app.add_flag("--no-plugins", noPlugins, "Disable plugin loading");
         app.add_flag("-f,--foreground", foreground, "Run in foreground (don't daemonize)");
         CLI11_PARSE(app, argc, argv);
-        cliProvidedDataDir = (dataDirOpt && dataDirOpt->count() > 0);
+        cliProvidedDataDir = !cliDataDir.empty();
     }
 #else
     // Minimal fallback parser for environments without CLI11 (e.g., some Linux builds)
@@ -1001,18 +1014,18 @@ int main(int argc, char* argv[]) {
         spdlog::debug("Path normalization error (best-effort): {}", e.what());
     }
 
-    // If dataDir not specified, allow environment to define it (YAMS_STORAGE or YAMS_DATA_DIR)
-    if (config.dataDir.empty()) {
+    // Precedence for daemon storage root:
+    //   explicit CLI --data-dir > config file > env > default
+    if (!argvExplicitDataDir.empty()) {
+        config.dataDir = argvExplicitDataDir;
+    } else if (cliProvidedDataDir && !cliDataDir.empty()) {
+        config.dataDir = std::filesystem::path(cliDataDir);
+    } else if (config.dataDir.empty()) {
         if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
             config.dataDir = std::filesystem::path(storageEnv);
         } else if (const char* dataEnv = std::getenv("YAMS_DATA_DIR")) {
             config.dataDir = std::filesystem::path(dataEnv);
         }
-    }
-
-    // Lastly, if still not specified and CLI provided --data-dir, use it as the lowest priority
-    if (config.dataDir.empty() && cliProvidedDataDir && !cliDataDir.empty()) {
-        config.dataDir = cliDataDir;
     }
 
     // Resolve log file path if not specified

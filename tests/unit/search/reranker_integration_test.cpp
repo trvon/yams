@@ -655,6 +655,58 @@ TEST_CASE("SearchEngine: reranker preview preserves tail evidence for long metad
         [&](const std::string& doc) { return doc.size() <= config.rerankSnippetMaxChars + 3; }));
 }
 
+TEST_CASE("SearchEngine: score gap guard still reranks when another strong fused candidate exists",
+          "[search][reranker][score-gap]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string pathTop = "/tmp/reranker_gap_top.md";
+    const std::string pathSecond = "/tmp/reranker_gap_second.md";
+    const std::string pathThird = "/tmp/reranker_gap_third.md";
+    const std::string hashTop = "HASH_RERANK_GAP_TOP";
+    const std::string hashSecond = "HASH_RERANK_GAP_SECOND";
+    const std::string hashThird = "HASH_RERANK_GAP_THIRD";
+
+    fixture.addIndexedDocument(pathTop, hashTop, "alpha target top",
+                               "alpha target top alpha target top");
+    fixture.addIndexedDocument(pathSecond, hashSecond, "alpha filler", "alpha filler");
+    fixture.addIndexedDocument(pathThird, hashThird, "alpha target third",
+                               "alpha target third alpha target third alpha target third");
+
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 0.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableReranking = true;
+    config.rerankTopK = 3;
+    config.rerankScoreGapThreshold = 0.05f;
+    config.rerankReplaceScores = true;
+    config.includeDebugInfo = true;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, nullptr, config);
+    REQUIRE(engine != nullptr);
+
+    auto reranker = std::make_shared<MockReranker>();
+    reranker->setScores({0.2f, 0.1f, 0.95f});
+    engine->setReranker(reranker);
+
+    auto response = engine->searchWithResponse("alpha target", {});
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() >= 3);
+
+    CHECK(reranker->getCallCount() == 1);
+    CHECK(std::find(response.value().skippedComponents.begin(),
+                    response.value().skippedComponents.end(),
+                    "reranker") == response.value().skippedComponents.end());
+    CHECK(std::any_of(response.value().results.begin(), response.value().results.end(),
+                      [](const auto& result) { return result.rerankerScore.has_value(); }));
+}
+
 TEST_CASE("SearchEngine: graph rerank emits reciprocal community telemetry",
           "[search][graph][community]") {
     SearchEngineRerankerFixture fixture;

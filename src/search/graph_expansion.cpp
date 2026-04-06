@@ -125,14 +125,22 @@ float surfaceQueryMatchScore(const std::vector<std::string>& queryAliases,
     return best;
 }
 
+void appendSurfaceVariants(std::vector<std::pair<std::string, float>>& out, std::string_view text,
+                           SurfaceVariantKind kind, float weight, size_t maxVariants) {
+    for (const auto& variant : generateSurfaceVariants(text, kind, maxVariants)) {
+        out.emplace_back(variant, weight);
+    }
+}
+
+void appendSurfaceAliases(std::vector<std::string>& out, std::string_view text,
+                          SurfaceVariantKind kind, size_t maxVariants) {
+    auto generated = generateSurfaceVariants(text, kind, maxVariants);
+    out.insert(out.end(), generated.begin(), generated.end());
+}
+
 } // namespace
 
 std::vector<std::string> tokenizeKgQuery(std::string_view query) {
-    static const std::unordered_set<std::string> kStopwords = {
-        "the", "a",   "an",   "and", "or",   "not",  "to",    "of",   "in",
-        "on",  "for", "with", "by",  "from", "is",   "are",   "was",  "were",
-        "be",  "as",  "at",   "it",  "this", "that", "these", "those"};
-
     auto flushTokenVariants = [](const std::string& raw, std::vector<std::string>& dest) {
         if (raw.empty()) {
             return;
@@ -190,7 +198,7 @@ std::vector<std::string> tokenizeKgQuery(std::string_view query) {
     filtered.reserve(rawTokens.size());
     std::unordered_set<std::string> seen;
     for (const auto& token : rawTokens) {
-        if (token.size() < 2 || kStopwords.contains(token)) {
+        if (token.size() < 2) {
             continue;
         }
         if (seen.insert(token).second) {
@@ -256,10 +264,61 @@ float graphNodeExpansionWeight(const std::optional<std::string>& typeOpt,
     if (type == "location" || type == "person" || type == "organization") {
         return 0.25f;
     }
-    if (label == "encoded protein product" || label == "crossover products") {
-        return 0.05f;
-    }
     return 0.60f;
+}
+
+float aliasSourceExpansionWeight(const std::optional<std::string>& sourceOpt) {
+    if (!sourceOpt.has_value() || sourceOpt->empty()) {
+        return 0.80f;
+    }
+
+    const std::string source = toLowerCopy(*sourceOpt);
+    if (source == "gliner.surface" || source == "symbol_name" || source == "ghidra") {
+        return 1.0f;
+    }
+    if (source == "qualified_name") {
+        return 0.90f;
+    }
+    if (source == "gliner.variant") {
+        return 0.70f;
+    }
+    if (source == "partial_qualified") {
+        return 0.65f;
+    }
+    if (source == "gliner.type_qualified") {
+        return 0.0f;
+    }
+    return 0.75f;
+}
+
+void addNodeSurfaceTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
+                         std::unordered_map<std::string, float>& termScores, std::int64_t nodeId,
+                         std::string_view fallbackLabel, float score, std::size_t aliasLimit = 8) {
+    const auto addSurface = [&](std::string_view surface, float surfaceScore) {
+        const std::string normalized = normalizeGraphSurface(surface);
+        if (normalized.size() < 3) {
+            return;
+        }
+        termScores[normalized] = std::max(termScores[normalized], surfaceScore);
+    };
+
+    bool emittedAlias = false;
+    auto aliases = kgStore->getAliasesForNode(nodeId, aliasLimit, 0);
+    if (aliases) {
+        for (const auto& alias : aliases.value()) {
+            const float sourceWeight = aliasSourceExpansionWeight(alias.source);
+            if (sourceWeight <= 0.0f) {
+                continue;
+            }
+            emittedAlias = true;
+            addSurface(alias.alias,
+                       score * std::clamp(alias.confidence, 0.2f, 1.0f) * sourceWeight);
+        }
+    }
+
+    if (!emittedAlias) {
+        addSurface(fallbackLabel, score);
+    }
 }
 
 std::vector<GraphExpansionTerm>
@@ -271,23 +330,17 @@ generateGraphExpansionTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>
     }
 
     std::vector<std::pair<std::string, float>> queryTerms;
-    const auto rawQueryTerms = tokenizeKgQuery(query);
-    queryTerms.reserve(rawQueryTerms.size() + concepts.size() * 2);
-    for (const auto& term : rawQueryTerms) {
-        queryTerms.emplace_back(term, 1.0f);
-    }
+    appendSurfaceVariants(queryTerms, query, SurfaceVariantKind::General, 1.0f,
+                          std::max<size_t>(config.maxTerms, 8));
+    queryTerms.reserve(queryTerms.size() + concepts.size() * 4);
     for (const auto& queryConcept : concepts) {
         if (queryConcept.text.empty() || queryConcept.confidence < 0.35f) {
             continue;
         }
-        const std::string normalized = normalizeGraphSurface(queryConcept.text);
-        if (normalized.size() >= 3) {
-            queryTerms.emplace_back(normalized,
-                                    std::clamp(queryConcept.confidence + 0.15f, 0.2f, 1.0f));
-        }
-        for (const auto& term : tokenizeKgQuery(queryConcept.text)) {
-            queryTerms.emplace_back(term, std::clamp(queryConcept.confidence, 0.2f, 1.0f));
-        }
+        const auto kind = surfaceVariantKindForEntityType(queryConcept.type);
+        appendSurfaceVariants(queryTerms, queryConcept.text, kind,
+                              std::clamp(queryConcept.confidence + 0.15f, 0.2f, 1.0f),
+                              std::max<size_t>(config.maxTerms, 8));
     }
     if (queryTerms.empty()) {
         return {};
@@ -378,19 +431,13 @@ generateGraphExpansionTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>
     }
 
     std::unordered_map<std::string, float> termScores;
-    const auto addTerm = [&](std::string candidate, float score) {
-        const std::string normalized = normalizeGraphSurface(candidate);
-        if (normalized.size() < 3) {
-            return;
-        }
-        termScores[normalized] = std::max(termScores[normalized], score);
-    };
 
     for (const auto& seed : seeds) {
         if (auto node = getNodeCached(seed.nodeId); node.has_value()) {
             const float nodeWeight =
                 graphNodeExpansionWeight(node->type, node->label.value_or(node->nodeKey));
-            addTerm(node->label.value_or(node->nodeKey), seed.score * nodeWeight);
+            addNodeSurfaceTerms(kgStore, termScores, seed.nodeId,
+                                node->label.value_or(node->nodeKey), seed.score * nodeWeight);
         }
 
         auto edges = kgStore->getEdgesFrom(seed.nodeId, std::nullopt, config.maxNeighbors, 0);
@@ -408,8 +455,9 @@ generateGraphExpansionTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>
                 continue;
             }
             const float relationWeight = relationExpansionWeight(edge);
-            addTerm(neighbor->label.value_or(neighbor->nodeKey),
-                    seed.score * nodeWeight * relationWeight * std::clamp(edge.weight, 0.1f, 1.0f));
+            addNodeSurfaceTerms(
+                kgStore, termScores, neighbor->id, neighbor->label.value_or(neighbor->nodeKey),
+                seed.score * nodeWeight * relationWeight * std::clamp(edge.weight, 0.1f, 1.0f));
         }
     }
 
@@ -434,20 +482,18 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
         return {};
     }
 
-    std::vector<std::string> queryAliases = tokenizeKgQuery(query);
-    queryAliases.reserve(queryAliases.size() + concepts.size() * 2);
+    std::vector<std::string> queryAliases;
+    queryAliases.reserve(config.maxTerms * 4);
+    appendSurfaceAliases(queryAliases, query, SurfaceVariantKind::General,
+                         std::max<size_t>(config.maxTerms, 8));
     for (const auto& qc : concepts) {
         if (qc.text.empty() || qc.confidence < 0.35f) {
             continue;
         }
-        const std::string normalized = normalizeGraphSurface(qc.text);
-        if (normalized.size() >= 3) {
-            queryAliases.push_back(normalized);
-        }
-        const auto conceptTokens = tokenizeKgQuery(qc.text);
-        queryAliases.insert(queryAliases.end(), conceptTokens.begin(), conceptTokens.end());
+        appendSurfaceAliases(queryAliases, qc.text, surfaceVariantKindForEntityType(qc.type),
+                             std::max<size_t>(config.maxTerms, 8));
     }
-
+    std::unordered_set<std::string> queryAliasSet(queryAliases.begin(), queryAliases.end());
     std::vector<GraphExpansionSeedDoc> docs = seedDocs;
     std::stable_sort(docs.begin(), docs.end(),
                      [](const auto& a, const auto& b) { return a.score > b.score; });
@@ -457,6 +503,7 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
 
     std::unordered_map<std::int64_t, metadata::KGNode> nodeCache;
     nodeCache.reserve(config.maxTerms * 2 + docs.size() * 4);
+    std::unordered_map<std::int64_t, float> nodeMatchCache;
 
     const auto getNodeCached = [&](std::int64_t nodeId) -> std::optional<metadata::KGNode> {
         auto it = nodeCache.find(nodeId);
@@ -472,19 +519,36 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
     };
 
     std::unordered_map<std::string, float> termScores;
-    const auto addTerm = [&](std::string candidate, float score) {
-        const std::string normalized = normalizeGraphSurface(candidate);
-        if (normalized.size() < 3) {
-            return;
+    const auto matchScoreForNode = [&](std::int64_t nodeId, std::string_view fallbackText) {
+        auto cached = nodeMatchCache.find(nodeId);
+        if (cached != nodeMatchCache.end()) {
+            return cached->second;
         }
-        const float queryMatch = surfaceQueryMatchScore(queryAliases, normalized);
-        if (queryMatch <= 0.0f) {
-            return;
-        }
-        termScores[normalized] =
-            std::max(termScores[normalized], score * std::clamp(queryMatch, 0.2f, 1.0f));
-    };
 
+        float best = surfaceQueryMatchScore(queryAliases, fallbackText);
+        auto aliases = kgStore->getAliasesForNode(nodeId, 24, 0);
+        if (aliases) {
+            for (const auto& alias : aliases.value()) {
+                const float sourceWeight = aliasSourceExpansionWeight(alias.source);
+                if (sourceWeight <= 0.0f) {
+                    continue;
+                }
+                const auto exactAlias = normalizeEntityTextForKey(alias.alias);
+                const auto graphAlias = normalizeGraphSurface(alias.alias);
+                float aliasMatch = 0.0f;
+                if (queryAliasSet.contains(exactAlias) || queryAliasSet.contains(graphAlias)) {
+                    aliasMatch = 1.0f;
+                } else {
+                    aliasMatch = surfaceQueryMatchScore(queryAliases, alias.alias);
+                }
+                best = std::max(best, aliasMatch * std::clamp(alias.confidence, 0.2f, 1.0f) *
+                                          sourceWeight);
+            }
+        }
+
+        nodeMatchCache[nodeId] = best;
+        return best;
+    };
     for (const auto& doc : docs) {
         auto docId = resolveKgDocumentId(kgStore, doc);
         if (!docId.has_value()) {
@@ -559,7 +623,14 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
 
             const float baseScore =
                 std::clamp(doc.score, 0.1f, 1.0f) * confidence * nodeWeight * anchorBoost;
-            addTerm(node->label.value_or(node->nodeKey), baseScore);
+            const float nodeMatch =
+                matchScoreForNode(*ent.nodeId, node->label.value_or(node->nodeKey));
+            if (nodeMatch <= 0.0f) {
+                continue;
+            }
+            addNodeSurfaceTerms(kgStore, termScores, *ent.nodeId,
+                                node->label.value_or(node->nodeKey),
+                                baseScore * std::clamp(nodeMatch, 0.2f, 1.0f));
 
             for (const auto& edge : edges.value()) {
                 auto neighbor = getNodeCached(edge.dstNodeId);
@@ -571,9 +642,16 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
                 if (neighborWeight <= 0.0f) {
                     continue;
                 }
-                addTerm(neighbor->label.value_or(neighbor->nodeKey),
-                        baseScore * neighborWeight * relationExpansionWeight(edge) *
-                            std::clamp(edge.weight, 0.1f, 1.0f));
+                const float neighborMatch =
+                    matchScoreForNode(neighbor->id, neighbor->label.value_or(neighbor->nodeKey));
+                if (neighborMatch <= 0.0f) {
+                    continue;
+                }
+                addNodeSurfaceTerms(kgStore, termScores, neighbor->id,
+                                    neighbor->label.value_or(neighbor->nodeKey),
+                                    baseScore * neighborWeight * relationExpansionWeight(edge) *
+                                        std::clamp(edge.weight, 0.1f, 1.0f) *
+                                        std::clamp(neighborMatch, 0.2f, 1.0f));
             }
         }
 
@@ -657,8 +735,15 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
                         if (!neighborAnchored) {
                             continue;
                         }
-                        addTerm(node->label.value_or(node->nodeKey),
-                                neighborDoc.score * nodeWeight * confidence * neighborAnchorBoost);
+                        const float nodeMatch =
+                            matchScoreForNode(*ent.nodeId, node->label.value_or(node->nodeKey));
+                        if (nodeMatch <= 0.0f) {
+                            continue;
+                        }
+                        addNodeSurfaceTerms(
+                            kgStore, termScores, *ent.nodeId, node->label.value_or(node->nodeKey),
+                            neighborDoc.score * nodeWeight * confidence * neighborAnchorBoost *
+                                std::clamp(nodeMatch, 0.2f, 1.0f));
                     }
                 }
             }

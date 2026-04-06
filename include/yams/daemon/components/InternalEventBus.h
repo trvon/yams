@@ -279,6 +279,7 @@ public:
         std::string modelName;
         std::vector<EmbedPreparedDoc> preparedDocs;
         std::shared_ptr<EmbedJobMonitor> monitor;
+        bool updateSemanticGraph{true};
     };
 
     enum class Fts5Operation {

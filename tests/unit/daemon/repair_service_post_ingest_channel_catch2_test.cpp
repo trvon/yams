@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <functional>
@@ -106,7 +107,7 @@ public:
 
     Result<std::vector<float>> generateEmbeddingFor(const std::string& modelName,
                                                     const std::string& text) override {
-        ++singleCalls_;
+        singleCalls_.fetch_add(1, std::memory_order_relaxed);
         if (!isModelLoaded(modelName)) {
             return Error{ErrorCode::NotFound, "model not loaded"};
         }
@@ -119,7 +120,7 @@ public:
     Result<std::vector<std::vector<float>>>
     generateBatchEmbeddingsFor(const std::string& modelName,
                                const std::vector<std::string>& texts) override {
-        ++batchCalls_;
+        batchCalls_.fetch_add(1, std::memory_order_relaxed);
         if (!isModelLoaded(modelName)) {
             return Error{ErrorCode::NotFound, "model not loaded"};
         }
@@ -132,7 +133,7 @@ public:
     }
 
     Result<void> loadModel(const std::string& modelName) override {
-        ++loadCalls_;
+        loadCalls_.fetch_add(1, std::memory_order_relaxed);
         if (progress_) {
             ModelLoadEvent ev;
             ev.modelName = modelName;
@@ -199,9 +200,9 @@ public:
     void releaseUnusedResources() override {}
     void shutdown() override {}
 
-    std::size_t batchCalls() const { return batchCalls_; }
-    std::size_t loadCalls() const { return loadCalls_; }
-    std::size_t singleCalls() const { return singleCalls_; }
+    std::size_t batchCalls() const { return batchCalls_.load(std::memory_order_relaxed); }
+    std::size_t loadCalls() const { return loadCalls_.load(std::memory_order_relaxed); }
+    std::size_t singleCalls() const { return singleCalls_.load(std::memory_order_relaxed); }
 
 private:
     size_t dim_;
@@ -209,9 +210,9 @@ private:
     std::string defaultModelName_;
     std::function<void(const ModelLoadEvent&)> progress_;
     std::vector<std::string> loadedModels_;
-    std::size_t loadCalls_{0};
-    std::size_t batchCalls_{0};
-    std::size_t singleCalls_{0};
+    std::atomic<std::size_t> loadCalls_{0};
+    std::atomic<std::size_t> batchCalls_{0};
+    std::atomic<std::size_t> singleCalls_{0};
 };
 
 } // namespace
@@ -625,6 +626,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                  "[daemon][repair][regression][foreground-embeddings]") {
     yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
     yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
     yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::nullopt);
     yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
                                                 std::optional<std::string>{"1"});
@@ -742,6 +744,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                  "[daemon][repair][regression][embedding-service]") {
     yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
     yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
     yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::nullopt);
     yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
                                                 std::optional<std::string>{"1"});
@@ -831,6 +834,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                  "[daemon][repair][regression][embedding-service]") {
     yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
     yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
     yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::nullopt);
     yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
                                                 std::optional<std::string>{"1"});

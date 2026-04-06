@@ -145,7 +145,7 @@ public:
         if (!texts.empty()) {
             lastTextArg_ = texts.front();
         }
-        if (generateBatchError_) {
+        if (generateBatchError_ && !isWarmupBatch(texts)) {
             return *generateBatchError_;
         }
         if (!batchEmbeddingResult_.empty()) {
@@ -253,6 +253,13 @@ public:
     void clearSingleTextErrors() { singleTextErrors_.clear(); }
 
 private:
+    static bool isWarmupBatch(const std::vector<std::string>& texts) {
+        static const std::array<std::string, 4> kWarmupTexts = {
+            "warmup text one", "warmup text two", "warmup text three", "warmup text four"};
+        return texts.size() == kWarmupTexts.size() &&
+               std::equal(texts.begin(), texts.end(), kWarmupTexts.begin());
+    }
+
     size_t dim_;
     std::string path_;
     bool available_;
@@ -4147,6 +4154,8 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
           "[daemon][embedding][dispatcher]") {
     DaemonConfig cfg;
     cfg.dataDir = makeTempDir("yams_embedding_dispatcher_");
+    cfg.configFilePath = cfg.dataDir / "missing-config.toml";
+    EnvGuard preferredModelGuard("YAMS_PREFERRED_MODEL", nullptr);
 
     StubLifecycle lifecycle;
     StateComponent state;
@@ -4192,7 +4201,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
             Error{ErrorCode::InvalidState, "generator unavailable"});
         svc.__test_setModelProvider(provider);
 
-        GenerateEmbeddingRequest req{"hello world", "", true};
+        GenerateEmbeddingRequest req{"hello world", "embed-error", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
 
         REQUIRE(std::holds_alternative<ErrorResponse>(resp));
@@ -4255,7 +4264,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("generate embedding converts isModelLoaded exceptions into internal errors") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-throw.onnx");
-        provider->setThrowOnIsModelLoaded(true);
+        provider->setThrowOnIsModelLoadedCount(2);
         svc.__test_setModelProvider(provider);
 
         GenerateEmbeddingRequest req{"hello world", "embed-throw", true};
@@ -4276,7 +4285,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
         BatchEmbeddingRequest req;
         req.texts = {"one", "two"};
-        req.modelName = "";
+        req.modelName = "batch-fallback";
         req.normalize = false;
         req.batchSize = 2;
 
@@ -4290,7 +4299,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         CHECK(batchResp.successCount == 2);
         CHECK(batchResp.failureCount == 0);
         CHECK(batchResp.dimensions == 2);
-        CHECK(batchResp.modelUsed.empty());
+        CHECK(batchResp.modelUsed == "batch-fallback");
     }
 
     SECTION("batch embedding counts per-item failures during fallback") {
@@ -4302,7 +4311,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
         BatchEmbeddingRequest req;
         req.texts = {"good", "bad", "good-again"};
-        req.modelName = "";
+        req.modelName = "batch-partial";
 
         auto resp = dispatchRequest(dispatcher, Request{req});
 
@@ -4312,6 +4321,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         CHECK(batchResp.successCount == 2);
         CHECK(batchResp.failureCount == 1);
         CHECK(batchResp.dimensions == 2);
+        CHECK(batchResp.modelUsed == "batch-partial");
     }
 
     SECTION("batch embedding forwards non-fallback errors") {
@@ -4321,7 +4331,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
         BatchEmbeddingRequest req;
         req.texts = {"one", "two"};
-        req.modelName = "";
+        req.modelName = "batch-error";
 
         auto resp = dispatchRequest(dispatcher, Request{req});
 
@@ -4376,7 +4386,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("batch embedding converts isModelLoaded exceptions into internal errors") {
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-throw.onnx");
-        provider->setThrowOnIsModelLoaded(true);
+        provider->setThrowOnIsModelLoadedCount(2);
         svc.__test_setModelProvider(provider);
 
         BatchEmbeddingRequest req;

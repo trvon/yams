@@ -70,3 +70,41 @@ TEST_CASE("Graph expansion ignores text segment nodes", "[search][graph-expansio
     CHECK(graphNodeExpansionWeight(std::optional<std::string>{"text_segment"},
                                    "long abstract-like segment") == 0.0f);
 }
+
+TEST_CASE("Graph expansion suppresses low-signal alias sources", "[search][graph-expansion]") {
+    GraphExpansionFixture fixture;
+
+    KGNode node{.nodeKey = "nl_entity:disease:chronic disease",
+                .label = std::string("chronic disease"),
+                .type = std::string("disease")};
+    auto nodeId = fixture.store->upsertNode(node);
+    REQUIRE(nodeId.has_value());
+
+    REQUIRE(fixture.store
+                ->addAliases({KGAlias{.nodeId = nodeId.value(),
+                                      .alias = std::string("chronic disease"),
+                                      .source = std::string("gliner.surface"),
+                                      .confidence = 1.0f},
+                              KGAlias{.nodeId = nodeId.value(),
+                                      .alias = std::string("organization chronic disease"),
+                                      .source = std::string("gliner.type_qualified"),
+                                      .confidence = 0.95f}})
+                .has_value());
+
+    auto terms = generateGraphExpansionTerms(
+        fixture.store, "chronic disease", {},
+        GraphExpansionConfig{.maxTerms = 8, .maxSeeds = 6, .maxNeighbors = 6});
+
+    bool sawSurface = false;
+    bool sawTypeQualified = false;
+    for (const auto& term : terms) {
+        if (term.text == "chronic disease") {
+            sawSurface = true;
+        }
+        if (term.text == "organization chronic disease") {
+            sawTypeQualified = true;
+        }
+    }
+    CHECK(sawSurface);
+    CHECK_FALSE(sawTypeQualified);
+}

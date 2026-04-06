@@ -3538,7 +3538,6 @@ ORDER BY rowid
         hnsw_loaded_ = false;
 
         auto persistedDims = discoverPersistedHnswDimsUnlocked();
-        bool needsCheckpointSave = false;
         for (size_t dim : persistedDims) {
             loadPersistedHnswDimUnlocked(dim);
         }
@@ -3599,28 +3598,21 @@ ORDER BY rowid
                     spans.emplace_back(embedding.data(), embedding.size());
                 }
 
-                hnsw->build(std::span<const size_t>(ids.data(), ids.size()),
-                            std::span<const std::span<const float>>(spans.data(), spans.size()));
+                for (size_t i = 0; i < ids.size(); ++i) {
+                    hnsw->insert(ids[i], spans[i]);
+                }
                 hnsw_dirty_[dim] = true;
                 last_hnsw_added_count_ += ids.size();
                 spdlog::info("[HNSW] Deferred catch-up dim={} added {} new vectors", dim,
                              ids.size());
-                if (requireFullSave) {
-                    spdlog::info("[HNSW] Deferred catch-up dim={} requires full save due to "
-                                 "structural changes",
-                                 dim);
-                } else {
-                    needsCheckpointSave = true;
-                }
+                requireFullSave = true;
+                spdlog::info("[HNSW] Deferred catch-up dim={} requires full save after delta add",
+                             dim);
             }
 
             if (requireFullSave) {
                 saveHnswDimFullUnlocked(dim);
             }
-        }
-
-        if (needsCheckpointSave) {
-            saveHnswCheckpointUnlocked();
         }
 
         hnsw_loaded_ = true;

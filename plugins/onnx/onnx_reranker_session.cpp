@@ -23,6 +23,16 @@ namespace fs = std::filesystem;
 
 namespace {
 
+std::string lowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+bool inputNameMatches(const std::string& inputName, const char* needle) {
+    return lowerCopy(inputName).find(needle) != std::string::npos;
+}
+
 size_t rerankerMaxSubBatchSize() {
     constexpr size_t kDefault = 64;
     if (const char* env = std::getenv("YAMS_RERANK_MAX_SUBBATCH_SIZE")) {
@@ -226,8 +236,9 @@ public:
             parseModelConfig();
 
             isLoaded_ = true;
-            spdlog::info("[Reranker] Session ready (inputs={}, outputs={}, max_seq={})", numInputs,
-                         numOutputs, maxSequenceLength_);
+            spdlog::info(
+                "[Reranker] Session ready (inputs={}, outputs={}, max_seq={}, input_names={})",
+                numInputs, numOutputs, maxSequenceLength_, fmt::join(inputNames_, ", "));
             return Result<void>();
 
         } catch (const Ort::Exception& e) {
@@ -385,19 +396,33 @@ private:
         // Attention mask: all 1s (no padding in single-doc path)
         std::vector<int64_t> attentionMask(seqLen, 1);
 
-        std::vector<Ort::Value> inputs;
-        inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-            memoryInfo, inputIds64.data(), inputIds64.size(), inputShape.data(), 2));
-        inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-            memoryInfo, attentionMask.data(), attentionMask.size(), inputShape.data(), 2));
-        if (inputNames_.size() >= 3) {
-            inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-                memoryInfo, tokenTypeIds64.data(), tokenTypeIds64.size(), inputShape.data(), 2));
-        }
-
         std::vector<const char*> inNames;
-        for (auto& n : inputNames_)
+        std::vector<Ort::Value> inputs;
+        inNames.reserve(inputNames_.size());
+        inputs.reserve(inputNames_.size());
+        for (size_t i = 0; i < inputNames_.size(); ++i) {
+            const auto& n = inputNames_[i];
             inNames.push_back(n.c_str());
+            if (inputNameMatches(n, "attention_mask")) {
+                inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo, attentionMask.data(), attentionMask.size(), inputShape.data(), 2));
+            } else if (inputNameMatches(n, "token_type_ids") ||
+                       inputNameMatches(n, "segment_ids")) {
+                inputs.push_back(
+                    Ort::Value::CreateTensor<int64_t>(memoryInfo, tokenTypeIds64.data(),
+                                                      tokenTypeIds64.size(), inputShape.data(), 2));
+            } else if (inputNameMatches(n, "input_ids") || i == 0) {
+                inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo, inputIds64.data(), inputIds64.size(), inputShape.data(), 2));
+            } else if (i == 1) {
+                inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo, attentionMask.data(), attentionMask.size(), inputShape.data(), 2));
+            } else {
+                inputs.push_back(
+                    Ort::Value::CreateTensor<int64_t>(memoryInfo, tokenTypeIds64.data(),
+                                                      tokenTypeIds64.size(), inputShape.data(), 2));
+            }
+        }
 
         std::vector<const char*> outNames;
         for (auto& n : outputNames_)
@@ -507,6 +532,7 @@ private:
         auto memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         std::vector<const char*> inNames;
+        inNames.reserve(inputNames_.size());
         for (auto& n : inputNames_)
             inNames.push_back(n.c_str());
         std::vector<const char*> outNames;
@@ -544,15 +570,31 @@ private:
             }
 
             std::vector<Ort::Value> inputs;
-            inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-                memoryInfo, inputIdsBatch.data(), inputIdsBatch.size(), inputShape.data(), 2));
-            inputs.push_back(
-                Ort::Value::CreateTensor<int64_t>(memoryInfo, attentionMaskBatch.data(),
-                                                  attentionMaskBatch.size(), inputShape.data(), 2));
-            if (inputNames_.size() >= 3) {
-                inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-                    memoryInfo, tokenTypeIdsBatch.data(), tokenTypeIdsBatch.size(),
-                    inputShape.data(), 2));
+            inputs.reserve(inputNames_.size());
+            for (size_t i = 0; i < inputNames_.size(); ++i) {
+                const auto& name = inputNames_[i];
+                if (inputNameMatches(name, "attention_mask")) {
+                    inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                        memoryInfo, attentionMaskBatch.data(), attentionMaskBatch.size(),
+                        inputShape.data(), 2));
+                } else if (inputNameMatches(name, "token_type_ids") ||
+                           inputNameMatches(name, "segment_ids")) {
+                    inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                        memoryInfo, tokenTypeIdsBatch.data(), tokenTypeIdsBatch.size(),
+                        inputShape.data(), 2));
+                } else if (inputNameMatches(name, "input_ids") || i == 0) {
+                    inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                        memoryInfo, inputIdsBatch.data(), inputIdsBatch.size(), inputShape.data(),
+                        2));
+                } else if (i == 1) {
+                    inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                        memoryInfo, attentionMaskBatch.data(), attentionMaskBatch.size(),
+                        inputShape.data(), 2));
+                } else {
+                    inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                        memoryInfo, tokenTypeIdsBatch.data(), tokenTypeIdsBatch.size(),
+                        inputShape.data(), 2));
+                }
             }
 
             try {
