@@ -2346,59 +2346,70 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             co_return Result<void>();
         }
 
+        std::shared_ptr<RequestContext> requestContext;
+        {
+            std::lock_guard<std::mutex> lk(ctx_mtx_);
+            auto it = contexts_.find(request_id);
+            if (it != contexts_.end()) {
+                requestContext = it->second;
+            }
+        }
+
         // Producer runs the synchronous repair logic and pushes events into a queue.
         // We use a separate thread so the streaming loop can write chunks concurrently.
-        std::thread producer([state, rs, req = std::get<RepairRequest>(request), request_id]() {
-            try {
-                auto progress = [state](const RepairEvent& ev) {
-                    if (!state)
-                        return;
+        std::thread producer(
+            [state, rs, req = std::get<RepairRequest>(request), request_id, requestContext]() {
+                try {
+                    auto progress = [state](const RepairEvent& ev) {
+                        if (!state)
+                            return;
+                        {
+                            std::lock_guard<std::mutex> lk(state->mu);
+                            if (state->aborted)
+                                return;
+                            // Bound memory if the client stops consuming; drop oldest.
+                            if (state->queued.size() >= 4096) {
+                                state->queued.pop_front();
+                            }
+                            state->queued.emplace_back(Response{ev});
+                        }
+                        state->cv.notify_one();
+                    };
+
+                    RepairResponse resp = rs->executeRepair(
+                        req, progress, requestContext ? &requestContext->canceled : nullptr);
                     {
                         std::lock_guard<std::mutex> lk(state->mu);
-                        if (state->aborted)
-                            return;
-                        // Bound memory if the client stops consuming; drop oldest.
-                        if (state->queued.size() >= 4096) {
-                            state->queued.pop_front();
+                        if (!state->aborted) {
+                            state->final = Response{std::move(resp)};
+                            state->done = true;
                         }
-                        state->queued.emplace_back(Response{ev});
                     }
                     state->cv.notify_one();
-                };
-
-                RepairResponse resp = rs->executeRepair(req, progress);
-                {
-                    std::lock_guard<std::mutex> lk(state->mu);
-                    if (!state->aborted) {
-                        state->final = Response{std::move(resp)};
-                        state->done = true;
+                } catch (const std::exception& e) {
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        if (!state->aborted) {
+                            ErrorResponse err{ErrorCode::InternalError,
+                                              std::string("Repair failed: ") + e.what()};
+                            state->final = Response{std::move(err)};
+                            state->done = true;
+                        }
                     }
-                }
-                state->cv.notify_one();
-            } catch (const std::exception& e) {
-                {
-                    std::lock_guard<std::mutex> lk(state->mu);
-                    if (!state->aborted) {
-                        ErrorResponse err{ErrorCode::InternalError,
-                                          std::string("Repair failed: ") + e.what()};
-                        state->final = Response{std::move(err)};
-                        state->done = true;
+                    state->cv.notify_one();
+                } catch (...) {
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        if (!state->aborted) {
+                            ErrorResponse err{ErrorCode::InternalError, "Repair failed"};
+                            state->final = Response{std::move(err)};
+                            state->done = true;
+                        }
                     }
+                    state->cv.notify_one();
                 }
-                state->cv.notify_one();
-            } catch (...) {
-                {
-                    std::lock_guard<std::mutex> lk(state->mu);
-                    if (!state->aborted) {
-                        ErrorResponse err{ErrorCode::InternalError, "Repair failed"};
-                        state->final = Response{std::move(err)};
-                        state->done = true;
-                    }
-                }
-                state->cv.notify_one();
-            }
-            (void)request_id;
-        });
+                (void)request_id;
+            });
 
         // Consumer loop: write queued events, then the final response as last chunk.
         const auto wait_timeout = config_.stream_chunk_timeout;

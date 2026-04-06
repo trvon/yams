@@ -1006,7 +1006,8 @@ void RepairService::updateProgressPct() {
 // On-demand Repair (RPC entry point)
 // ============================================================================
 
-RepairResponse RepairService::executeRepair(const RepairRequest& request, ProgressFn progress) {
+RepairResponse RepairService::executeRepair(const RepairRequest& request, ProgressFn progress,
+                                            std::atomic<bool>* cancelRequested) {
     std::unique_lock<std::mutex> lock(repairMutex_, std::try_to_lock);
     if (!lock.owns_lock()) {
         // Another repair RPC is already running — return immediately.
@@ -1049,8 +1050,27 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     RepairResponse response;
     std::vector<RepairOperationResult> results;
     std::vector<std::string> errors;
+    auto isCanceled = [&]() {
+        return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
+    };
+
+    auto emitCancel = [&](const std::string& operation) {
+        if (!progress) {
+            return;
+        }
+        RepairEvent ev;
+        ev.phase = "error";
+        ev.operation = operation;
+        ev.message = "Repair canceled";
+        progress(ev);
+    };
 
     auto runOp = [&](const std::string& name, auto&& fn) {
+        if (isCanceled()) {
+            emitCancel(name);
+            errors.push_back("Repair canceled");
+            return false;
+        }
         if (progress) {
             RepairEvent ev;
             ev.phase = "repairing";
@@ -1077,6 +1097,12 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
             ev.message = result.message;
             progress(ev);
         }
+        if (isCanceled()) {
+            emitCancel(name);
+            errors.push_back("Repair canceled");
+            return false;
+        }
+        return true;
     };
 
     bool doOrphans = request.repairOrphans || request.repairAll;
@@ -1094,46 +1120,63 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
 
     // Phase 0: Stuck document recovery
     if (doStuckDocs)
-        runOp("stuck_docs", [&] { return recoverStuckDocuments(request, progress); });
+        if (!runOp("stuck_docs", [&] { return recoverStuckDocuments(request, progress); }))
+            goto finalize;
 
     // Phase 1: Metadata repair
     if (doOrphans)
-        runOp("orphans",
-              [&] { return cleanOrphanedMetadata(request.dryRun, request.verbose, progress); });
+        if (!runOp("orphans", [&] {
+                return cleanOrphanedMetadata(request.dryRun, request.verbose, progress);
+            }))
+            goto finalize;
     if (doMime)
-        runOp("mime", [&] { return repairMimeTypes(request.dryRun, request.verbose, progress); });
+        if (!runOp("mime",
+                   [&] { return repairMimeTypes(request.dryRun, request.verbose, progress); }))
+            goto finalize;
     if (doDownloads)
-        runOp("downloads",
-              [&] { return repairDownloads(request.dryRun, request.verbose, progress); });
+        if (!runOp("downloads",
+                   [&] { return repairDownloads(request.dryRun, request.verbose, progress); }))
+            goto finalize;
     if (doPathTree)
-        runOp("path_tree",
-              [&] { return rebuildPathTree(request.dryRun, request.verbose, progress); });
+        if (!runOp("path_tree",
+                   [&] { return rebuildPathTree(request.dryRun, request.verbose, progress); }))
+            goto finalize;
     if (doDedupe)
-        runOp("dedupe", [&] { return applySemanticDedupe(request, progress); });
+        if (!runOp("dedupe", [&] { return applySemanticDedupe(request, progress); }))
+            goto finalize;
 
     // Phase 2: Storage repair
     if (doChunks)
-        runOp("chunks",
-              [&] { return cleanOrphanedChunks(request.dryRun, request.verbose, progress); });
+        if (!runOp("chunks",
+                   [&] { return cleanOrphanedChunks(request.dryRun, request.verbose, progress); }))
+            goto finalize;
     if (doBlockRefs)
-        runOp("block_refs",
-              [&] { return repairBlockReferences(request.dryRun, request.verbose, progress); });
+        if (!runOp("block_refs", [&] {
+                return repairBlockReferences(request.dryRun, request.verbose, progress);
+            }))
+            goto finalize;
 
     // Phase 2.5: Knowledge graph repair
     if (doGraph)
-        runOp("graph", [&] { return repairKnowledgeGraph(request, progress); });
+        if (!runOp("graph", [&] { return repairKnowledgeGraph(request, progress); }))
+            goto finalize;
 
     // Phase 3: Search index repair
     if (doFts5)
-        runOp("fts5", [&] { return rebuildFts5Index(request, progress); });
+        if (!runOp("fts5", [&] { return rebuildFts5Index(request, progress); }))
+            goto finalize;
     if (doEmbeddings)
-        runOp("embeddings", [&] { return generateMissingEmbeddings(request, progress); });
+        if (!runOp("embeddings",
+                   [&] { return generateMissingEmbeddings(request, progress, cancelRequested); }))
+            goto finalize;
 
     // Phase 4: Database maintenance
     if (doOptimize)
-        runOp("optimize",
-              [&] { return optimizeDatabase(request.dryRun, request.verbose, progress); });
+        if (!runOp("optimize",
+                   [&] { return optimizeDatabase(request.dryRun, request.verbose, progress); }))
+            goto finalize;
 
+finalize:
     response.success = errors.empty();
     response.errors = std::move(errors);
     response.operationResults = std::move(results);
@@ -2543,9 +2586,14 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
 }
 
 RepairOperationResult RepairService::generateMissingEmbeddings(const RepairRequest& req,
-                                                               ProgressFn progress) {
+                                                               ProgressFn progress,
+                                                               std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "embeddings";
+
+    auto isCanceled = [&]() {
+        return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
+    };
 
     auto meta = services_ ? services_->getMetadataRepo() : nullptr;
     if (!meta) {
@@ -2553,7 +2601,19 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         return result;
     }
 
-    auto docs = metadata::queryDocumentsByPattern(*meta, "%");
+    if (progress) {
+        RepairEvent ev;
+        ev.phase = "repairing";
+        ev.operation = "embeddings";
+        ev.message = "Scanning metadata candidates for missing embeddings";
+        progress(ev);
+    }
+
+    metadata::DocumentQueryOptions queryOpts;
+    if (!req.force) {
+        queryOpts.hasEmbedding = false;
+    }
+    auto docs = meta->queryDocumentsForGrepCandidates(queryOpts);
     if (!docs) {
         result.message = "Failed to query";
         return result;
@@ -2585,40 +2645,28 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
             ++eligibleByExtractedText;
             hashes.push_back(d.sha256Hash);
         } else if (excludedSamples.size() < 8) {
-            excludedSamples.push_back(
-                d.fileName + " mime=" + d.mimeType +
-                " extracted=" + (d.contentExtracted ? "1" : "0") +
-                " status=" + metadata::ExtractionStatusUtils::toString(d.extractionStatus));
+            excludedSamples.push_back(d.filePath + " mime=" + d.mimeType +
+                                      " extracted=" + std::string(d.contentExtracted ? "1" : "0"));
         }
     }
 
-    spdlog::info("RepairService::generateMissingEmbeddings candidates: total_docs={} eligible={} "
-                 "eligible_by_mime={} eligible_by_extracted_text={} excluded_samples=[{}]",
+    spdlog::info("RepairService::generateMissingEmbeddings candidates: scanned={} eligible={} "
+                 "eligible_by_mime={} eligible_by_extracted_text={} excluded_samples=[{}] "
+                 "force={} missing_only_query={}",
                  docs.value().size(), hashes.size(), eligibleByMime, eligibleByExtractedText,
-                 excludedSamples.size());
+                 excludedSamples.size(), req.force ? 1 : 0, req.force ? 0 : 1);
 
-    // Incremental mode: skip documents that already have embeddings.
-    // Batch-fetch all embedded hashes in a single query for efficiency.
-    // Use --force to regenerate embeddings for all documents unconditionally.
-    size_t skippedExisting = 0;
-    if (!req.force) {
-        auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
-        if (vectorDb) {
-            auto embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
-            if (!embeddedHashes.empty()) {
-                std::vector<std::string> missing;
-                missing.reserve(hashes.size());
-                for (auto& h : hashes) {
-                    if (embeddedHashes.count(h) == 0) {
-                        missing.push_back(std::move(h));
-                    } else {
-                        ++skippedExisting;
-                    }
-                }
-                hashes = std::move(missing);
-            }
-        }
+    if (progress) {
+        RepairEvent ev;
+        ev.phase = "repairing";
+        ev.operation = "embeddings";
+        ev.total = hashes.size();
+        ev.message =
+            "Found " + std::to_string(hashes.size()) + " eligible documents missing embeddings";
+        progress(ev);
     }
+
+    size_t skippedExisting = 0;
 
     result.processed = hashes.size() + skippedExisting;
     result.skipped = skippedExisting;
@@ -2643,26 +2691,65 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         return result;
     }
 
-    // Queue via InternalEventBus for the embedding pipeline to handle
+    std::string modelName = req.embeddingModel;
+    if (modelName.empty() && services_) {
+        try {
+            modelName = services_->resolvePreferredModel();
+        } catch (...) {
+        }
+    }
+    if (modelName.empty() && services_) {
+        try {
+            modelName = services_->getEmbeddingModelName();
+        } catch (...) {
+        }
+    }
+    if (req.foreground && modelName.empty()) {
+        result.failed = hashes.size();
+        result.message = "No embedding model configured";
+        return result;
+    }
+    if (isCanceled()) {
+        result.failed = hashes.size();
+        result.message = "Repair canceled";
+        return result;
+    }
+
     const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
     auto embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", embedCap);
 
-    // Split into batches
-    size_t batchSize = cfg_.maxBatch;
-    for (size_t i = 0; i < hashes.size(); i += batchSize) {
-        size_t end = std::min(i + batchSize, hashes.size());
-        std::vector<std::string> batch(hashes.begin() + i, hashes.begin() + end);
+    const std::size_t batchSize = std::max<std::size_t>(1u, cfg_.maxBatch);
+    const std::size_t totalDocs = hashes.size() + skippedExisting;
+    const std::size_t totalBatches = (hashes.size() + batchSize - 1) / batchSize;
+    std::size_t completedDocs = 0;
+    std::size_t failedDocs = 0;
+    std::size_t skippedDocs = skippedExisting;
 
-        InternalEventBus::EmbedJob job{batch, static_cast<uint32_t>(batchSize), true,
-                                       req.embeddingModel,
+    for (std::size_t i = 0; i < hashes.size(); i += batchSize) {
+        if (isCanceled()) {
+            result.failed += (hashes.size() - i);
+            result.message = "Repair canceled";
+            return result;
+        }
+
+        const std::size_t end = std::min(i + batchSize, hashes.size());
+        std::vector<std::string> batch(hashes.begin() + i, hashes.begin() + end);
+        const std::size_t batchIndex = i / batchSize;
+
+        if (meta) {
+            (void)meta->batchUpdateDocumentRepairStatuses(batch,
+                                                          metadata::RepairStatus::Processing);
+        }
+
+        InternalEventBus::EmbedJob job{batch, static_cast<uint32_t>(batch.size()), !req.force,
+                                       modelName,
                                        std::vector<InternalEventBus::EmbedPreparedDoc>{}};
 
-        // Retry push with backoff (synchronous version for on-demand repair)
         int retries = 0;
         bool pushed = false;
         while (!pushed && retries < 20) {
-            pushed = embedQ->try_push(std::move(job));
+            pushed = embedQ->try_push(job);
             if (!pushed) {
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(50 * (1 << std::min(retries, 5))));
@@ -2670,29 +2757,132 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
             }
         }
 
-        if (pushed) {
-            result.succeeded += batch.size();
-            InternalEventBus::instance().incEmbedQueued();
-        } else {
+        if (!pushed) {
             result.failed += batch.size();
+            if (meta) {
+                (void)meta->batchUpdateDocumentRepairStatuses(batch,
+                                                              metadata::RepairStatus::Pending);
+            }
             InternalEventBus::instance().incEmbedDropped();
+            continue;
         }
 
-        if (progress) {
-            RepairEvent ev;
-            ev.phase = "repairing";
-            ev.operation = "embeddings";
-            ev.processed = std::min(i + batchSize, hashes.size());
-            ev.total = hashes.size();
-            ev.succeeded = result.succeeded;
-            ev.failed = result.failed;
-            progress(ev);
+        InternalEventBus::instance().incEmbedQueued();
+
+        if (!req.foreground) {
+            result.succeeded += batch.size();
+            if (progress) {
+                RepairEvent ev;
+                ev.phase = "repairing";
+                ev.operation = "embeddings";
+                ev.processed = std::min(i + batchSize, hashes.size());
+                ev.total = hashes.size();
+                ev.succeeded = result.succeeded;
+                ev.failed = result.failed;
+                ev.skipped = result.skipped;
+                progress(ev);
+            }
+            continue;
+        }
+
+        std::size_t lastReportedProcessed = static_cast<std::size_t>(-1);
+        auto lastReport = std::chrono::steady_clock::time_point{};
+        while (true) {
+            if (isCanceled()) {
+                result.message = "Repair canceled";
+                return result;
+            }
+
+            std::size_t batchCompleted = 0;
+            std::size_t batchFailed = 0;
+            std::size_t batchSkipped = 0;
+            std::size_t batchProcessing = 0;
+            std::size_t batchPending = 0;
+            for (const auto& hash : batch) {
+                auto docRes = meta->getDocumentByHash(hash);
+                if (!docRes || !docRes.value().has_value()) {
+                    ++batchFailed;
+                    continue;
+                }
+                switch (docRes.value()->repairStatus) {
+                    case metadata::RepairStatus::Completed:
+                        ++batchCompleted;
+                        break;
+                    case metadata::RepairStatus::Failed:
+                        ++batchFailed;
+                        break;
+                    case metadata::RepairStatus::Skipped:
+                        ++batchSkipped;
+                        break;
+                    case metadata::RepairStatus::Processing:
+                        ++batchProcessing;
+                        break;
+                    case metadata::RepairStatus::Pending:
+                    default:
+                        ++batchPending;
+                        break;
+                }
+            }
+
+            const std::size_t batchProcessed = batchCompleted + batchFailed + batchSkipped;
+            const auto now = std::chrono::steady_clock::now();
+            if (progress && (batchProcessed != lastReportedProcessed ||
+                             lastReport.time_since_epoch().count() == 0 ||
+                             (now - lastReport) >= std::chrono::seconds(1))) {
+                RepairEvent ev;
+                ev.phase = "repairing";
+                ev.operation = "embeddings";
+                ev.processed = completedDocs + failedDocs + skippedDocs + batchProcessed;
+                ev.total = totalDocs;
+                ev.succeeded = completedDocs + batchCompleted;
+                ev.failed = failedDocs + batchFailed;
+                ev.skipped = skippedDocs + batchSkipped;
+                if (batchProcessed >= batch.size()) {
+                    ev.message = "completed daemon embed batch " + std::to_string(batchIndex + 1) +
+                                 "/" + std::to_string(totalBatches);
+                } else {
+                    ev.message = "waiting on daemon embed batch " + std::to_string(batchIndex + 1) +
+                                 "/" + std::to_string(totalBatches) +
+                                 " processing=" + std::to_string(batchProcessing) +
+                                 " pending=" + std::to_string(batchPending);
+                }
+                progress(ev);
+                lastReportedProcessed = batchProcessed;
+                lastReport = now;
+            }
+
+            if (batchProcessed >= batch.size()) {
+                completedDocs += batchCompleted;
+                failedDocs += batchFailed;
+                skippedDocs += batchSkipped;
+                result.processed = completedDocs + failedDocs + skippedDocs;
+                result.succeeded = completedDocs;
+                result.failed = failedDocs;
+                result.skipped = skippedDocs;
+                break;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
     }
 
-    result.message = "Queued " + std::to_string(result.succeeded) + " docs for embedding";
-    if (result.skipped > 0) {
-        result.message += " (" + std::to_string(result.skipped) + " already embedded, skipped)";
+    if (req.foreground) {
+        result.message = "Generated " + std::to_string(result.succeeded) + " embeddings";
+        if (result.skipped > 0 || result.failed > 0) {
+            result.message += ", skipped=" + std::to_string(result.skipped) +
+                              ", failed=" + std::to_string(result.failed);
+        }
+        if (state_) {
+            state_->stats.repairEmbeddingsGenerated.store(result.succeeded,
+                                                          std::memory_order_relaxed);
+            state_->stats.repairEmbeddingsSkipped.store(result.skipped, std::memory_order_relaxed);
+            state_->stats.repairFailedOperations.store(result.failed, std::memory_order_relaxed);
+        }
+    } else {
+        result.message = "Queued " + std::to_string(result.succeeded) + " docs for embedding";
+        if (result.skipped > 0) {
+            result.message += " (" + std::to_string(result.skipped) + " already embedded, skipped)";
+        }
     }
     return result;
 }

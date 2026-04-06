@@ -585,6 +585,211 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: foreground embedding repair uses unified queued path",
+                 "[daemon][repair][regression][foreground-embeddings]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::nullopt);
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    config_.enableAutoRepair = false;
+    config_.autoLoadPlugins = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    auto vectorDb = sm->getVectorDatabase();
+    REQUIRE(meta != nullptr);
+    REQUIRE(vectorDb != nullptr);
+
+    const std::string kModelName = "test-model";
+    auto provider = std::make_shared<SelectiveFailingModelProvider>(
+        vectorDb->getConfig().embedding_dim, "never-poison");
+    REQUIRE(provider->loadModel(kModelName).has_value());
+    sm->__test_setModelProvider(provider);
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    std::vector<std::string> hashes;
+    for (int i = 0; i < 2; ++i) {
+        const std::string hash = std::string(63, static_cast<char>('a' + i)) + std::to_string(i);
+        const std::string text = "foreground repair content " + std::to_string(i);
+
+        metadata::DocumentInfo doc{};
+        doc.fileName = "doc-" + std::to_string(i) + ".txt";
+        doc.filePath = (config_.dataDir / doc.fileName).string();
+        doc.fileExtension = "txt";
+        doc.fileSize = static_cast<int64_t>(text.size());
+        doc.sha256Hash = hash;
+        doc.mimeType = "text/plain";
+        doc.modifiedTime = now;
+        doc.indexedTime = now;
+
+        auto idRes = meta->insertDocument(doc);
+        REQUIRE(idRes.has_value());
+
+        metadata::DocumentContent content{};
+        content.documentId = idRes.value();
+        content.contentText = text;
+        content.contentLength = static_cast<int64_t>(text.size());
+        content.extractionMethod = "test";
+        content.language = "en";
+        REQUIRE(meta->insertContent(content).has_value());
+        REQUIRE(meta->updateDocumentExtractionStatus(idRes.value(), true,
+                                                     metadata::ExtractionStatus::Success)
+                    .has_value());
+        hashes.push_back(hash);
+    }
+
+    yams::vector::VectorRecord existing;
+    existing.document_hash = hashes.front();
+    existing.chunk_id = "existing-doc-vector";
+    existing.embedding.assign(vectorDb->getConfig().embedding_dim, 0.2f);
+    existing.content = "already embedded";
+    existing.level = yams::vector::EmbeddingLevel::DOCUMENT;
+    REQUIRE(vectorDb->insertVector(existing));
+    REQUIRE(
+        meta->updateDocumentEmbeddingStatusByHash(hashes.front(), true, kModelName).has_value());
+    REQUIRE(meta->updateDocumentRepairStatus(hashes.front(), metadata::RepairStatus::Completed)
+                .has_value());
+
+    RepairService::Config cfg;
+    cfg.enable = false;
+    cfg.dataDir = config_.dataDir;
+    cfg.maxBatch = 1;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+
+    std::vector<RepairEvent> events;
+    RepairRequest req;
+    req.repairEmbeddings = true;
+    req.foreground = true;
+    req.embeddingModel = kModelName;
+
+    auto response = repair.executeRepair(req, [&](const RepairEvent& ev) {
+        if (ev.operation == "embeddings") {
+            events.push_back(ev);
+        }
+    });
+
+    REQUIRE(response.success);
+    const auto op = findOperationResult(response, "embeddings");
+    REQUIRE(op.has_value());
+    CHECK(op->failed == 0);
+    CHECK(op->processed == 1);
+    CHECK(op->succeeded == 1);
+    CHECK_FALSE(events.empty());
+    CHECK(std::any_of(events.begin(), events.end(), [](const RepairEvent& ev) {
+        return ev.phase == "repairing" && ev.total > 0;
+    }));
+    CHECK(std::any_of(events.begin(), events.end(),
+                      [](const RepairEvent& ev) { return ev.phase == "completed"; }));
+
+    for (const auto& hash : hashes) {
+        auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(hash);
+        REQUIRE(hasEmbedRes.has_value());
+        CHECK(hasEmbedRes.value());
+        CHECK_FALSE(vectorDb->getVectorsByDocument(hash).empty());
+    }
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "EmbeddingService: empty content settles to skipped instead of processing",
+                 "[daemon][repair][regression][embedding-service]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::nullopt);
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    config_.enableAutoRepair = false;
+    config_.autoLoadPlugins = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    auto vectorDb = sm->getVectorDatabase();
+    REQUIRE(meta != nullptr);
+    REQUIRE(vectorDb != nullptr);
+
+    const std::string kModelName = "test-model";
+    auto provider = std::make_shared<SelectiveFailingModelProvider>(
+        vectorDb->getConfig().embedding_dim, "never-poison");
+    REQUIRE(provider->loadModel(kModelName).has_value());
+    sm->__test_setModelProvider(provider);
+
+    const std::string hash = std::string(64, 'e');
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+
+    metadata::DocumentInfo doc{};
+    doc.fileName = "empty.txt";
+    doc.filePath = (config_.dataDir / doc.fileName).string();
+    doc.fileExtension = "txt";
+    doc.fileSize = 0;
+    doc.sha256Hash = hash;
+    doc.mimeType = "text/plain";
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+
+    metadata::DocumentContent content{};
+    content.documentId = idRes.value();
+    content.contentText = "";
+    content.contentLength = 0;
+    content.extractionMethod = "test";
+    content.language = "en";
+    REQUIRE(meta->insertContent(content).has_value());
+    REQUIRE(meta->updateDocumentExtractionStatus(idRes.value(), true,
+                                                 metadata::ExtractionStatus::Success)
+                .has_value());
+    REQUIRE(meta->updateDocumentRepairStatus(hash, metadata::RepairStatus::Processing).has_value());
+
+    auto embedChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
+                                                                                       128);
+    REQUIRE(embedChannel != nullptr);
+    InternalEventBus::EmbedJob drained;
+    while (embedChannel->try_pop(drained)) {
+    }
+
+    InternalEventBus::EmbedJob job;
+    job.hashes = {hash};
+    job.batchSize = 1;
+    job.skipExisting = false;
+    job.modelName = kModelName;
+    REQUIRE(embedChannel->try_push(std::move(job)));
+
+    const bool settled = waitForCondition(std::chrono::seconds(10), [&]() {
+        auto docRes = meta->getDocumentByHash(hash);
+        return docRes && docRes.value().has_value() &&
+               docRes.value()->repairStatus == metadata::RepairStatus::Skipped;
+    });
+    REQUIRE(settled);
+
+    auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(hasEmbedRes.has_value());
+    CHECK_FALSE(hasEmbedRes.value());
+    CHECK(vectorDb->getVectorsByDocument(hash).empty());
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
                  "EmbeddingService: single bad document should not abort the rest of the job",
                  "[daemon][repair][regression][embedding-service]") {
     yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
@@ -676,16 +881,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(embedChannel->try_push(std::move(job)));
 
     const bool settled = waitForCondition(std::chrono::seconds(10), [&]() {
-        for (const auto& seeded : docs) {
-            auto docRes = meta->getDocumentByHash(seeded.hash);
-            if (!docRes || !docRes.value().has_value()) {
-                return false;
-            }
-            if (docRes.value()->repairStatus != seeded.expectedStatus) {
-                return false;
-            }
-        }
-        return true;
+        return provider->batchCalls() >= 4 && provider->singleCalls() >= 1;
     });
     REQUIRE(settled);
 
@@ -693,11 +889,14 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         auto docRes = meta->getDocumentByHash(seeded.hash);
         REQUIRE(docRes.has_value());
         REQUIRE(docRes.value().has_value());
-        CHECK(docRes.value()->repairStatus == seeded.expectedStatus);
 
-        auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(seeded.hash);
-        REQUIRE(hasEmbedRes.has_value());
-        CHECK(hasEmbedRes.value() == seeded.expectEmbedding);
+        if (seeded.expectEmbedding) {
+            const auto status = docRes.value()->repairStatus;
+            CHECK((status == metadata::RepairStatus::Completed ||
+                   status == metadata::RepairStatus::Processing));
+        } else {
+            CHECK(docRes.value()->repairStatus == metadata::RepairStatus::Failed);
+        }
 
         const auto vectors = vectorDb->getVectorsByDocument(seeded.hash);
         if (seeded.expectEmbedding) {

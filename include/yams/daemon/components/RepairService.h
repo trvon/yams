@@ -90,7 +90,8 @@ public:
     void enqueueEmbeddingRepair(const std::vector<std::string>& hashes);
 
     // ── On-demand repair (from RPC) ──
-    RepairResponse executeRepair(const RepairRequest& request, ProgressFn progress);
+    RepairResponse executeRepair(const RepairRequest& request, ProgressFn progress,
+                                 std::atomic<bool>* cancelRequested = nullptr);
 
     /// Returns true if an on-demand repair RPC is currently executing.
     bool isRepairInProgress() const noexcept {
@@ -150,7 +151,8 @@ private:
     RepairOperationResult repairKnowledgeGraph(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult applySemanticDedupe(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult rebuildFts5Index(const RepairRequest& req, ProgressFn progress);
-    RepairOperationResult generateMissingEmbeddings(const RepairRequest& req, ProgressFn progress);
+    RepairOperationResult generateMissingEmbeddings(const RepairRequest& req, ProgressFn progress,
+                                                    std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult optimizeDatabase(bool dryRun, bool verbose, ProgressFn progress);
 
     // ── NEW: stuck document recovery ──

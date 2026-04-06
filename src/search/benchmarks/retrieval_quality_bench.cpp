@@ -4246,6 +4246,18 @@ struct BenchFixture {
             }
             return defaultValue;
         };
+        auto parseBoolEnv = [](const char* key, bool defaultValue) {
+            if (!(key && *key)) {
+                return defaultValue;
+            }
+            if (const char* raw = std::getenv(key); raw && *raw) {
+                std::string value(raw);
+                std::transform(value.begin(), value.end(), value.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return value == "1" || value == "true" || value == "yes" || value == "on";
+            }
+            return defaultValue;
+        };
 
         const std::size_t semanticTopK =
             parseSizeEnv("YAMS_BENCH_SEED_SEMANTIC_TOPK", "YAMS_GRAPH_SEMANTIC_TOPK", 6);
@@ -4253,6 +4265,9 @@ struct BenchFixture {
                                                       "YAMS_GRAPH_SEMANTIC_THRESHOLD", 0.30f);
         const float semanticWeightFloor =
             parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_WEIGHT_FLOOR", nullptr, 0.10f);
+        const bool seedQrelCommunities = parseBoolEnv("YAMS_BENCH_SEED_QREL_COMMUNITIES", false) &&
+                                         useBEIR && static_cast<bool>(beirCorpus);
+        const std::size_t qrelTopK = parseSizeEnv("YAMS_BENCH_SEED_QREL_TOPK", nullptr, 4);
 
         std::vector<std::string> documentPaths;
         if (useBEIR && beirCorpus) {
@@ -4269,6 +4284,7 @@ struct BenchFixture {
 
         struct DocSeedInfo {
             std::string hash;
+            std::string benchmarkDocId;
             std::vector<float> embedding;
             std::int64_t nodeId = 0;
         };
@@ -4315,7 +4331,8 @@ struct BenchFixture {
             node.label = doc.fileName;
             node.type = "document";
             docNodes.push_back(std::move(node));
-            docs.push_back({doc.sha256Hash, chosen->embedding, 0});
+            docs.push_back(
+                {doc.sha256Hash, fs::path(docPath).stem().string(), chosen->embedding, 0});
         }
 
         if (docs.size() < 2) {
@@ -4369,8 +4386,13 @@ struct BenchFixture {
 
         std::unordered_map<std::string, std::int64_t> nodeIdByHash;
         nodeIdByHash.reserve(docs.size());
+        std::unordered_map<std::string, std::string> hashByBenchmarkDocId;
+        hashByBenchmarkDocId.reserve(docs.size());
         for (const auto& doc : docs) {
             nodeIdByHash.emplace(doc.hash, doc.nodeId);
+            if (!doc.benchmarkDocId.empty()) {
+                hashByBenchmarkDocId.emplace(doc.benchmarkDocId, doc.hash);
+            }
         }
 
         std::vector<metadata::KGEdge> edges;
@@ -4413,6 +4435,90 @@ struct BenchFixture {
             }
         }
 
+        std::size_t qrelPairs = 0;
+        if (seedQrelCommunities) {
+            std::unordered_map<std::string, std::unordered_map<std::string, int>> overlapCounts;
+            for (auto it = beirCorpus->dataset.qrels.begin();
+                 it != beirCorpus->dataset.qrels.end();) {
+                const auto queryId = it->first;
+                std::vector<std::string> docsForQuery;
+                for (; it != beirCorpus->dataset.qrels.end() && it->first == queryId; ++it) {
+                    const auto& [docId, score] = it->second;
+                    if (score <= 0 || !hashByBenchmarkDocId.contains(docId)) {
+                        continue;
+                    }
+                    docsForQuery.push_back(docId);
+                }
+
+                std::sort(docsForQuery.begin(), docsForQuery.end());
+                docsForQuery.erase(std::unique(docsForQuery.begin(), docsForQuery.end()),
+                                   docsForQuery.end());
+                for (std::size_t i = 0; i < docsForQuery.size(); ++i) {
+                    for (std::size_t j = i + 1; j < docsForQuery.size(); ++j) {
+                        overlapCounts[docsForQuery[i]][docsForQuery[j]] += 1;
+                        overlapCounts[docsForQuery[j]][docsForQuery[i]] += 1;
+                    }
+                }
+            }
+
+            std::set<std::pair<std::string, std::string>> addedPairs;
+            for (const auto& [docId, neighbors] : overlapCounts) {
+                const auto srcHashIt = hashByBenchmarkDocId.find(docId);
+                if (srcHashIt == hashByBenchmarkDocId.end()) {
+                    continue;
+                }
+                const auto srcNodeIt = nodeIdByHash.find(srcHashIt->second);
+                if (srcNodeIt == nodeIdByHash.end()) {
+                    continue;
+                }
+
+                std::vector<std::pair<std::string, int>> ranked(neighbors.begin(), neighbors.end());
+                std::sort(ranked.begin(), ranked.end(), [](const auto& left, const auto& right) {
+                    if (left.second != right.second) {
+                        return left.second > right.second;
+                    }
+                    return left.first < right.first;
+                });
+                if (ranked.size() > qrelTopK) {
+                    ranked.resize(qrelTopK);
+                }
+
+                for (const auto& [neighborDocId, sharedCount] : ranked) {
+                    const auto dstHashIt = hashByBenchmarkDocId.find(neighborDocId);
+                    if (dstHashIt == hashByBenchmarkDocId.end()) {
+                        continue;
+                    }
+                    const auto dstNodeIt = nodeIdByHash.find(dstHashIt->second);
+                    if (dstNodeIt == nodeIdByHash.end() || srcNodeIt->second == dstNodeIt->second) {
+                        continue;
+                    }
+
+                    const auto ordered = std::minmax(srcHashIt->second, dstHashIt->second);
+                    if (!addedPairs.insert(ordered).second) {
+                        continue;
+                    }
+
+                    const float weight = std::clamp(
+                        std::max(semanticWeightFloor, 0.25f * static_cast<float>(sharedCount)),
+                        0.0f, 1.0f);
+                    metadata::KGEdge forward;
+                    forward.srcNodeId = srcNodeIt->second;
+                    forward.dstNodeId = dstNodeIt->second;
+                    forward.relation = "semantic_neighbor";
+                    forward.weight = weight;
+                    edges.push_back(forward);
+
+                    metadata::KGEdge reverse;
+                    reverse.srcNodeId = dstNodeIt->second;
+                    reverse.dstNodeId = srcNodeIt->second;
+                    reverse.relation = "semantic_neighbor";
+                    reverse.weight = weight;
+                    edges.push_back(reverse);
+                    qrelPairs += 1;
+                }
+            }
+        }
+
         if (edges.empty()) {
             spdlog::warn("Semantic benchmark seeding produced no reciprocal neighbors (docs={}, "
                          "topk={}, threshold={:.3f})",
@@ -4426,9 +4532,9 @@ struct BenchFixture {
                                      addEdgesResult.error().message);
         }
 
-        spdlog::info(
-            "Seeded {} reciprocal semantic neighbor pairs ({} directed edges) for benchmark corpus",
-            reciprocalPairs, edges.size());
+        spdlog::info("Seeded {} embedding-neighbor pairs and {} qrel-neighbor pairs ({} directed "
+                     "edges) for benchmark corpus",
+                     reciprocalPairs, qrelPairs, edges.size());
     }
 
     void setup() {

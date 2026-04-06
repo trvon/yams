@@ -7,9 +7,9 @@
 #include <sstream>
 #include <thread>
 #include <yams/app/services/services.hpp>
-#include <yams/core/uuid.h>
 #include <yams/common/pattern_utils.h>
 #include <yams/core/magic_numbers.hpp>
+#include <yams/core/uuid.h>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -364,6 +364,24 @@ public:
                                         continue;
                                     }
                                     kgNodesCreated++;
+
+                                    // Create a document node keyed by content hash so later graph
+                                    // stages can attach semantic neighbor edges to the canonical
+                                    // document identity used by search.
+                                    metadata::KGNode docNode;
+                                    docNode.nodeKey = "doc:" + result.hash;
+                                    docNode.label = result.path;
+                                    docNode.type = "document";
+                                    auto docNodeIds = ctx_.kgStore->upsertNodes(
+                                        std::vector<metadata::KGNode>{std::move(docNode)});
+                                    if (!docNodeIds) {
+                                        spdlog::debug("[IndexingService] KG upsert doc node failed "
+                                                      "for {}: {}",
+                                                      result.hash.substr(0, 8),
+                                                      docNodeIds.error().message);
+                                    } else {
+                                        kgNodesCreated++;
+                                    }
 
                                     // Create path node for this file in this snapshot
                                     metadata::PathNodeDescriptor pathDesc;

@@ -183,6 +183,10 @@ struct DocumentQueryOptions {
     std::vector<RepairStatus> repairStatuses;
     /// Only return docs whose repair_attempts < this value (0 = no filter).
     int32_t maxRepairAttempts{0};
+    /// Filter by embedding status from document_embeddings_status.
+    /// true => only docs with has_embedding=1.
+    /// false => only docs without a has_embedding=1 row (missing or stale false rows).
+    std::optional<bool> hasEmbedding;
     /// Only return docs that have NO matching row in document_content.
     bool onlyMissingContent{false};
     /// Only return docs indexed/modified before this epoch-seconds value (for stalled detection).
