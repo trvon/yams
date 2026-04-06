@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <exception>
 #include <functional>
 #include <future>
@@ -12,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
@@ -94,6 +96,7 @@ namespace yams::daemon {
 class IngestService;
 class GraphComponent;
 class RepairService;
+struct ModelLoadEvent;
 
 class ServiceManager : public IComponent, public std::enable_shared_from_this<ServiceManager> {
 public:
@@ -139,6 +142,15 @@ public:
         return loadMetadataRepo(); // Fallback to old member
     }
     std::shared_ptr<IModelProvider> getModelProvider() const { return loadModelProvider(); }
+    Result<std::string>
+    ensureEmbeddingModelReadySync(const std::string& requestedModel,
+                                  std::function<void(const ModelLoadEvent&)> progress = {},
+                                  int timeoutMs = 0, bool keepHot = true, bool warmup = true);
+    boost::asio::awaitable<Result<std::string>>
+    co_ensureEmbeddingModelReady(const std::string& requestedModel,
+                                 std::function<void(const ModelLoadEvent&)> progress = {},
+                                 int timeoutMs = 0, bool keepHot = true, bool warmup = true);
+    bool startEmbeddingWarmupIfConfigured();
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
     const std::string& getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
@@ -652,6 +664,12 @@ private:
     std::atomic<std::uint64_t> snapshotsPersisted_{0};
 
     bool embeddingPreloadOnStartup_{false};
+    mutable std::mutex embeddingModelReadyMutex_{};
+    std::condition_variable embeddingModelReadyCv_{};
+    bool embeddingModelReadyActive_{false};
+    std::string embeddingModelReadyActiveModel_;
+    std::unordered_set<std::string> warmedEmbeddingModels_;
+    std::string hotEmbeddingModel_;
 
     std::shared_ptr<yams::search::SearchEngine> searchEngine_;
     mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, searchEngineMutex_); // Allow concurrent reads

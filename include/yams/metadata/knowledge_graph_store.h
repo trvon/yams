@@ -419,6 +419,8 @@ public:
     // -----------------------------------------------------------------------------
 
     virtual Result<std::int64_t> ensureBlobNode(std::string_view sha256) = 0;
+    virtual Result<std::int64_t> ensureDocumentNode(std::string_view sha256,
+                                                    std::string_view label = {}) = 0;
     virtual Result<std::int64_t> ensurePathNode(const PathNodeDescriptor& descriptor) = 0;
     virtual Result<void> linkPathVersion(std::int64_t pathNodeId, std::int64_t blobNodeId,
                                          std::int64_t diffId) = 0;

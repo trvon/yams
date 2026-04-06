@@ -256,12 +256,29 @@ public:
         std::vector<EmbedPreparedChunk> chunks;
     };
 
+    struct EmbedJobMonitor {
+        std::atomic<bool> cancelRequested{false};
+        mutable std::mutex mutex;
+        std::condition_variable cv;
+        std::string phase{"queued"};
+        std::string detail;
+        uint64_t totalDocs{0};
+        uint64_t processedDocs{0};
+        uint64_t succeededDocs{0};
+        uint64_t failedDocs{0};
+        uint64_t skippedDocs{0};
+        uint64_t totalChunks{0};
+        uint64_t processedChunks{0};
+        bool done{false};
+    };
+
     struct EmbedJob {
         std::vector<std::string> hashes;
         uint32_t batchSize{0};
         bool skipExisting{true};
         std::string modelName;
         std::vector<EmbedPreparedDoc> preparedDocs;
+        std::shared_ptr<EmbedJobMonitor> monitor;
     };
 
     enum class Fts5Operation {

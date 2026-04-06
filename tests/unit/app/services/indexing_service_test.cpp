@@ -6,6 +6,7 @@
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
@@ -116,9 +117,16 @@ struct IndexingFixture {
         contentStore_ = std::shared_ptr<IContentStore>(
             const_cast<std::unique_ptr<IContentStore>&>(storeResult.value()).release());
 
+        KnowledgeGraphStoreConfig kgConfig;
+        auto kgResult = makeSqliteKnowledgeGraphStore(*pool_, kgConfig);
+        REQUIRE(kgResult.has_value());
+        kgStore_ = std::shared_ptr<KnowledgeGraphStore>(std::move(kgResult).value());
+        metadataRepo_->setKnowledgeGraphStore(kgStore_);
+
         appContext_.service_manager = nullptr;
         appContext_.store = contentStore_;
         appContext_.metadataRepo = metadataRepo_;
+        appContext_.kgStore = kgStore_;
         appContext_.searchEngine = nullptr;
 
         indexingService_ = makeIndexingService(appContext_);
@@ -157,6 +165,7 @@ struct IndexingFixture {
     std::unique_ptr<Database> database_;
     std::unique_ptr<ConnectionPool> pool_;
     std::shared_ptr<MetadataRepository> metadataRepo_;
+    std::shared_ptr<KnowledgeGraphStore> kgStore_;
     std::shared_ptr<IContentStore> contentStore_;
     std::shared_ptr<search::SearchEngine> searchEngine_;
     AppContext appContext_;
@@ -179,6 +188,36 @@ TEST_CASE("IndexingService - Basic Operations", "[indexing][service][basic]") {
         CHECK(result.value().filesSkipped == 0);
         CHECK(result.value().filesFailed == 0);
         CHECK(result.value().filesProcessed == 1);
+    }
+
+    SECTION("Indexing populates canonical doc and blob KG nodes") {
+        auto filePath = fixture.createFile("docs/kg.txt", "Knowledge graph ingest coverage.");
+
+        auto request = fixture.createRequest(fixture.testDir_ / "docs", "kg-collection");
+        auto result = fixture.indexingService_->addDirectory(request);
+
+        REQUIRE(result);
+        REQUIRE(result.value().filesIndexed == 1);
+
+        auto docInfo = fixture.metadataRepo_->findDocumentByExactPath(filePath.string());
+        REQUIRE(docInfo);
+        REQUIRE(docInfo.value().has_value());
+
+        const auto& document = *docInfo.value();
+        auto docNode = fixture.kgStore_->getNodeByKey("doc:" + document.sha256Hash);
+        REQUIRE(docNode);
+        REQUIRE(docNode.value().has_value());
+        CHECK(docNode.value()->type == std::optional<std::string>{"document"});
+
+        auto blobNode = fixture.kgStore_->getNodeByKey("blob:" + document.sha256Hash);
+        REQUIRE(blobNode);
+        REQUIRE(blobNode.value().has_value());
+        CHECK(blobNode.value()->type == std::optional<std::string>{"blob"});
+
+        auto edges = fixture.kgStore_->getEdgesFrom(docNode.value()->id, "has_blob", 10, 0);
+        REQUIRE(edges);
+        REQUIRE(edges.value().size() == 1);
+        CHECK(edges.value().front().dstNodeId == blobNode.value()->id);
     }
 
     SECTION("Index multiple files in directory") {

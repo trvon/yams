@@ -4143,8 +4143,8 @@ struct BenchFixture {
 
         const std::array<std::string, 3> docNames = {
             "community_target.txt", "community_partner.txt", "community_rival.txt"};
-        std::vector<metadata::KGNode> docNodes;
-        docNodes.reserve(docNames.size());
+        std::vector<std::int64_t> nodeIds;
+        nodeIds.reserve(docNames.size());
 
         for (const auto& docName : docNames) {
             const auto docPath = (benchCorpusDir / docName).string();
@@ -4159,23 +4159,12 @@ struct BenchFixture {
             }
 
             const auto& doc = *docResult.value();
-            metadata::KGNode node;
-            node.nodeKey = "doc:" + doc.sha256Hash;
-            node.label = doc.fileName;
-            node.type = "document";
-            docNodes.push_back(std::move(node));
-        }
-
-        auto nodeIdsResult = kgStore->upsertNodes(docNodes);
-        if (!nodeIdsResult) {
-            throw std::runtime_error("Failed to upsert synthetic community KG nodes: " +
-                                     nodeIdsResult.error().message);
-        }
-
-        const auto& nodeIds = nodeIdsResult.value();
-        if (nodeIds.size() != docNodes.size()) {
-            throw std::runtime_error(
-                "Synthetic community KG node upsert returned unexpected count");
+            auto nodeIdResult = kgStore->ensureDocumentNode(doc.sha256Hash, doc.fileName);
+            if (!nodeIdResult) {
+                throw std::runtime_error("Failed to ensure synthetic community KG node: " +
+                                         nodeIdResult.error().message);
+            }
+            nodeIds.push_back(nodeIdResult.value());
         }
 
         std::vector<metadata::KGEdge> edges;
@@ -4289,9 +4278,7 @@ struct BenchFixture {
             std::int64_t nodeId = 0;
         };
 
-        std::vector<metadata::KGNode> docNodes;
         std::vector<DocSeedInfo> docs;
-        docNodes.reserve(documentPaths.size());
         docs.reserve(documentPaths.size());
 
         for (const auto& docPath : documentPaths) {
@@ -4326,32 +4313,19 @@ struct BenchFixture {
                 continue;
             }
 
-            metadata::KGNode node;
-            node.nodeKey = "doc:" + doc.sha256Hash;
-            node.label = doc.fileName;
-            node.type = "document";
-            docNodes.push_back(std::move(node));
-            docs.push_back(
-                {doc.sha256Hash, fs::path(docPath).stem().string(), chosen->embedding, 0});
+            auto nodeIdResult = kgStore->ensureDocumentNode(doc.sha256Hash, doc.fileName);
+            if (!nodeIdResult) {
+                throw std::runtime_error("Failed to ensure benchmark semantic KG node: " +
+                                         nodeIdResult.error().message);
+            }
+            docs.push_back({doc.sha256Hash, fs::path(docPath).stem().string(), chosen->embedding,
+                            nodeIdResult.value()});
         }
 
         if (docs.size() < 2) {
             spdlog::warn("Skipping semantic benchmark seeding: only {} documents had embeddings",
                          docs.size());
             return;
-        }
-
-        auto nodeIdsResult = kgStore->upsertNodes(docNodes);
-        if (!nodeIdsResult) {
-            throw std::runtime_error("Failed to upsert benchmark semantic KG nodes: " +
-                                     nodeIdsResult.error().message);
-        }
-        const auto& nodeIds = nodeIdsResult.value();
-        if (nodeIds.size() != docs.size()) {
-            throw std::runtime_error("Benchmark semantic KG node upsert returned unexpected count");
-        }
-        for (std::size_t i = 0; i < docs.size(); ++i) {
-            docs[i].nodeId = nodeIds[i];
         }
 
         std::unordered_map<std::string, std::unordered_map<std::string, float>> neighborScores;

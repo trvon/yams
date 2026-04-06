@@ -850,13 +850,26 @@ struct ProviderSingleton {
                     }
                 } catch (...) {
                 }
+                std::optional<bool> hotModel;
                 std::string modelIdStr(model_id);
+                if (options_json && *options_json) {
+                    try {
+                        auto j = nlohmann::json::parse(options_json);
+                        if (j.contains("hot") && j["hot"].is_boolean()) {
+                            hotModel = j["hot"].get<bool>();
+                        }
+                    } catch (...) {
+                    }
+                }
 
                 // FSM: if already loading/ready, return OK
                 {
                     std::lock_guard<std::mutex> lk(c->mu);
                     auto& st = c->model_states[modelIdStr];
                     if (st == ProviderCtx::State::Ready) {
+                        if (hotModel.has_value()) {
+                            (void)c->pool->setModelHot(modelIdStr, hotModel.value());
+                        }
                         spdlog::debug("[ONNX Plugin] load_model: '{}' already ready", model_id);
                         return YAMS_OK;
                     }
@@ -887,6 +900,9 @@ struct ProviderSingleton {
                         c->clearFailure(modelIdStr);
                     }
                     spdlog::info("[ONNX Plugin] load_model: '{}' loaded successfully", model_id);
+                    if (hotModel.has_value()) {
+                        (void)c->pool->setModelHot(modelIdStr, hotModel.value());
+                    }
                     emit_progress(c, model_id, YAMS_MODEL_PHASE_READY, "ready");
                     auto q =
                         yams::daemon::InternalEventBus::instance()

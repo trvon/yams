@@ -31,6 +31,7 @@ namespace daemon {
 
 class IModelProvider;
 class WorkCoordinator;
+struct ModelLoadEvent;
 
 /**
  * @brief Embedding service that processes embed jobs from InternalEventBus
@@ -49,11 +50,13 @@ public:
     Result<void> initialize() override;
     void shutdown() override;
 
-    void
-    setProviders(std::function<std::shared_ptr<IModelProvider>()> providerGetter,
-                 std::function<std::string()> modelNameGetter,
-                 std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter,
-                 std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> kgGetter = {});
+    void setProviders(std::function<std::shared_ptr<IModelProvider>()> providerGetter,
+                      std::function<std::string()> modelNameGetter,
+                      std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter,
+                      std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> kgGetter = {},
+                      std::function<Result<std::string>(const std::string&,
+                                                        std::function<void(const ModelLoadEvent&)>)>
+                          ensureModelReady = {});
 
     std::size_t processed() const { return processed_.load(); }
     std::size_t failed() const { return failed_.load(); }
@@ -108,6 +111,9 @@ private:
     std::function<std::string()> getPreferredModel_;
     std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
     std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore_;
+    std::function<Result<std::string>(const std::string&,
+                                      std::function<void(const ModelLoadEvent&)>)>
+        ensureModelReady_;
     std::function<void()> compressedAnnInvalidator_; // called after batch insert
 
     std::atomic<bool> stop_{false};

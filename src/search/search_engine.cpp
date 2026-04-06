@@ -1961,7 +1961,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 }
                 graphQueryNeighborSeedDocCount = seedDocs.size();
 
-                if (!seedDocs.empty()) {
+                // Only let query-neighbor docs elaborate an already graph-grounded query.
+                // Pure vector-neighbor fanout can drift and perturb ranking without any
+                // graph/text anchor from the query itself.
+                if (!seedDocs.empty() && !graphExpansionTerms.empty()) {
                     auto neighborTerms = generateGraphExpansionTermsFromDocuments(
                         kgStore_, query, concepts, seedDocs,
                         GraphExpansionConfig{.maxTerms = workingConfig.graphExpansionMaxTerms,

@@ -651,7 +651,7 @@ RepairService::backgroundLoop(std::shared_ptr<ShutdownState> shutdownState) {
 
             InternalEventBus::EmbedJob job{
                 missingEmbeddings, static_cast<uint32_t>(shutdownState->config.maxBatch), true,
-                std::string{}, std::vector<InternalEventBus::EmbedPreparedDoc>{}};
+                std::string{},     std::vector<InternalEventBus::EmbedPreparedDoc>{},     nullptr};
             const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
@@ -2742,9 +2742,20 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
                                                           metadata::RepairStatus::Processing);
         }
 
-        InternalEventBus::EmbedJob job{batch, static_cast<uint32_t>(batch.size()), !req.force,
+        std::shared_ptr<InternalEventBus::EmbedJobMonitor> monitor;
+        if (req.foreground) {
+            monitor = std::make_shared<InternalEventBus::EmbedJobMonitor>();
+            monitor->totalDocs = batch.size();
+            monitor->phase = "queued";
+            monitor->detail = "queued daemon embed batch";
+        }
+
+        InternalEventBus::EmbedJob job{batch,
+                                       static_cast<uint32_t>(batch.size()),
+                                       !req.force,
                                        modelName,
-                                       std::vector<InternalEventBus::EmbedPreparedDoc>{}};
+                                       std::vector<InternalEventBus::EmbedPreparedDoc>{},
+                                       monitor};
 
         int retries = 0;
         bool pushed = false;
@@ -2789,6 +2800,10 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         auto lastReport = std::chrono::steady_clock::time_point{};
         while (true) {
             if (isCanceled()) {
+                if (monitor) {
+                    monitor->cancelRequested.store(true, std::memory_order_relaxed);
+                    monitor->cv.notify_all();
+                }
                 result.message = "Repair canceled";
                 return result;
             }
@@ -2796,35 +2811,22 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
             std::size_t batchCompleted = 0;
             std::size_t batchFailed = 0;
             std::size_t batchSkipped = 0;
-            std::size_t batchProcessing = 0;
-            std::size_t batchPending = 0;
-            for (const auto& hash : batch) {
-                auto docRes = meta->getDocumentByHash(hash);
-                if (!docRes || !docRes.value().has_value()) {
-                    ++batchFailed;
-                    continue;
-                }
-                switch (docRes.value()->repairStatus) {
-                    case metadata::RepairStatus::Completed:
-                        ++batchCompleted;
-                        break;
-                    case metadata::RepairStatus::Failed:
-                        ++batchFailed;
-                        break;
-                    case metadata::RepairStatus::Skipped:
-                        ++batchSkipped;
-                        break;
-                    case metadata::RepairStatus::Processing:
-                        ++batchProcessing;
-                        break;
-                    case metadata::RepairStatus::Pending:
-                    default:
-                        ++batchPending;
-                        break;
-                }
+            std::size_t batchProcessed = 0;
+            std::string batchPhase = "queued";
+            std::string batchDetail;
+            bool batchDone = false;
+            {
+                std::unique_lock<std::mutex> lk(monitor->mutex);
+                monitor->cv.wait_for(lk, std::chrono::milliseconds(250));
+                batchCompleted = static_cast<std::size_t>(monitor->succeededDocs);
+                batchFailed = static_cast<std::size_t>(monitor->failedDocs);
+                batchSkipped = static_cast<std::size_t>(monitor->skippedDocs);
+                batchProcessed = static_cast<std::size_t>(monitor->processedDocs);
+                batchPhase = monitor->phase;
+                batchDetail = monitor->detail;
+                batchDone = monitor->done;
             }
 
-            const std::size_t batchProcessed = batchCompleted + batchFailed + batchSkipped;
             const auto now = std::chrono::steady_clock::now();
             if (progress && (batchProcessed != lastReportedProcessed ||
                              lastReport.time_since_epoch().count() == 0 ||
@@ -2837,21 +2839,22 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
                 ev.succeeded = completedDocs + batchCompleted;
                 ev.failed = failedDocs + batchFailed;
                 ev.skipped = skippedDocs + batchSkipped;
-                if (batchProcessed >= batch.size()) {
+                if (batchDone) {
                     ev.message = "completed daemon embed batch " + std::to_string(batchIndex + 1) +
                                  "/" + std::to_string(totalBatches);
                 } else {
-                    ev.message = "waiting on daemon embed batch " + std::to_string(batchIndex + 1) +
-                                 "/" + std::to_string(totalBatches) +
-                                 " processing=" + std::to_string(batchProcessing) +
-                                 " pending=" + std::to_string(batchPending);
+                    ev.message = "daemon embed batch " + std::to_string(batchIndex + 1) + "/" +
+                                 std::to_string(totalBatches) + " phase=" + batchPhase;
+                    if (!batchDetail.empty()) {
+                        ev.message += " " + batchDetail;
+                    }
                 }
                 progress(ev);
                 lastReportedProcessed = batchProcessed;
                 lastReport = now;
             }
 
-            if (batchProcessed >= batch.size()) {
+            if (batchDone) {
                 completedDocs += batchCompleted;
                 failedDocs += batchFailed;
                 skippedDocs += batchSkipped;

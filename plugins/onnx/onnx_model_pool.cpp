@@ -2730,6 +2730,17 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
     return Result<void>();
 }
 
+Result<void> OnnxModelPool::setModelHot(const std::string& modelName, bool hot) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto it = models_.find(modelName);
+    if (it == models_.end()) {
+        return Error{ErrorCode::NotFound, "Model not found: " + modelName};
+    }
+    it->second.isHot = hot;
+    spdlog::info("[ONNX Plugin] Model '{}' hot={} ", modelName, hot ? "true" : "false");
+    return Result<void>();
+}
+
 Result<void> OnnxModelPool::setModelThreading(const std::string& modelName, int intraThreads,
                                               int interThreads, bool applyNow) {
     auto valid = [](int value) { return value == -1 || (value >= 1 && value <= 64); };

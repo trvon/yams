@@ -1682,6 +1682,64 @@ public:
         });
     }
 
+    Result<std::int64_t> ensureDocumentNode(std::string_view sha256,
+                                            std::string_view label = std::string_view{}) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto selectStmt = db.prepare(
+                "SELECT id, label FROM kg_nodes WHERE node_key = ? AND type = 'document'");
+            if (!selectStmt)
+                return selectStmt.error();
+
+            auto& stmt = selectStmt.value();
+            std::string nodeKey = std::string("doc:") + std::string(sha256);
+            auto bindRes = stmt.bindAll(nodeKey);
+            if (!bindRes)
+                return bindRes.error();
+
+            auto stepRes = stmt.step();
+            if (!stepRes)
+                return stepRes.error();
+
+            if (stepRes.value()) {
+                const auto nodeId = stmt.getInt64(0);
+                const auto existingLabel = stmt.isNull(1) ? std::string{} : stmt.getString(1);
+                if (!label.empty() && existingLabel != label) {
+                    auto updateStmt = db.prepare(
+                        "UPDATE kg_nodes SET label = ?, updated_time = unixepoch() WHERE id = ?");
+                    if (!updateStmt)
+                        return updateStmt.error();
+                    auto& update = updateStmt.value();
+                    auto updateBind = update.bindAll(std::string(label), nodeId);
+                    if (!updateBind)
+                        return updateBind.error();
+                    auto updateExec = update.execute();
+                    if (!updateExec)
+                        return updateExec.error();
+                }
+                return nodeId;
+            }
+
+            auto insertStmt =
+                db.prepare("INSERT INTO kg_nodes (node_key, label, type, created_time) "
+                           "VALUES (?, ?, 'document', unixepoch())");
+            if (!insertStmt)
+                return insertStmt.error();
+
+            auto& insert = insertStmt.value();
+            const std::string resolvedLabel =
+                label.empty() ? std::string(sha256).substr(0, 16) + "..." : std::string(label);
+            auto insertBind = insert.bindAll(nodeKey, resolvedLabel);
+            if (!insertBind)
+                return insertBind.error();
+
+            auto execRes = insert.execute();
+            if (!execRes)
+                return execRes.error();
+
+            return db.lastInsertRowId();
+        });
+    }
+
     Result<std::int64_t> ensurePathNode(const PathNodeDescriptor& descriptor) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
             // Node key: path:<snapshot_id>:<normalized_path>

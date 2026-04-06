@@ -60,6 +60,7 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/gliner_query_extractor.h>
@@ -97,6 +98,39 @@
 #include <yams/vector/vector_database.h>
 
 namespace {
+int resolveEmbeddingLoadTimeoutMs(int requestedMs) {
+    int timeoutMs = requestedMs > 0 ? requestedMs : 30000;
+    if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
+        try {
+            timeoutMs = std::stoi(env);
+        } catch (...) {
+        }
+    }
+    return std::max(1000, timeoutMs);
+}
+
+std::string makeHotLoadOptions(bool hot) {
+    return hot ? std::string{"{\"hot\":true}"} : std::string{"{\"hot\":false}"};
+}
+
+const std::vector<std::string>& embeddingWarmupTexts() {
+    static const std::vector<std::string> texts = {"warmup text one", "warmup text two",
+                                                   "warmup text three", "warmup text four"};
+    return texts;
+}
+
+void emitModelLoadProgress(const std::function<void(const yams::daemon::ModelLoadEvent&)>& progress,
+                           const std::string& modelName, std::string phase, std::string message) {
+    if (!progress) {
+        return;
+    }
+    yams::daemon::ModelLoadEvent ev;
+    ev.modelName = modelName;
+    ev.phase = std::move(phase);
+    ev.message = std::move(message);
+    progress(ev);
+}
+
 bool isEphemeralDataDir(const std::filesystem::path& path) {
     namespace fs = std::filesystem;
 
@@ -1198,6 +1232,14 @@ void ServiceManager::shutdown() {
     } else {
         spdlog::info("[ServiceManager] Phase 6.6: No model provider to shut down");
     }
+    {
+        std::lock_guard lk(embeddingModelReadyMutex_);
+        embeddingModelReadyActive_ = false;
+        embeddingModelReadyActiveModel_.clear();
+        warmedEmbeddingModels_.clear();
+        hotEmbeddingModel_.clear();
+        embeddingModelReadyCv_.notify_all();
+    }
 
     // Shutdown search engine
     spdlog::info("[ServiceManager] Phase 6.7: Resetting search engine");
@@ -2091,10 +2133,17 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
         auto initRes = embeddingService->initialize();
         if (initRes) {
-            embeddingService->setProviders([this]() { return this->loadModelProvider(); },
-                                           [this]() { return this->resolvePreferredModel(); },
-                                           [this]() { return this->loadVectorDatabase(); },
-                                           [this]() { return this->getKgStore(); });
+            embeddingService->setProviders(
+                [this]() { return this->loadModelProvider(); },
+                [this]() { return this->resolvePreferredModel(); },
+                [this]() { return this->loadVectorDatabase(); },
+                [this]() { return this->getKgStore(); },
+                [this](const std::string& model,
+                       std::function<void(const ModelLoadEvent&)> progress) {
+                    return this->ensureEmbeddingModelReadySync(model, std::move(progress),
+                                                               /*timeoutMs=*/0,
+                                                               /*keepHot=*/true, /*warmup=*/true);
+                });
             embeddingService->start();
             std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
                                        std::memory_order_release);
@@ -3359,6 +3408,208 @@ uint64_t ServiceManager::getEmbeddingSemanticUpdateErrors() const {
         return embeddingService->semanticUpdateErrors();
     }
     return 0;
+}
+
+Result<std::string>
+ServiceManager::ensureEmbeddingModelReadySync(const std::string& requestedModel,
+                                              std::function<void(const ModelLoadEvent&)> progress,
+                                              int timeoutMs, bool keepHot, bool warmup) {
+    auto provider = loadModelProvider();
+    if (!provider || !provider->isAvailable()) {
+        return Error{ErrorCode::InvalidState, "Model provider not available"};
+    }
+
+    std::string model = requestedModel;
+    if (model.empty()) {
+        try {
+            model = resolvePreferredModel();
+        } catch (...) {
+        }
+    }
+    if (model.empty()) {
+        model = embeddingModelName_;
+    }
+    if (model.empty()) {
+        try {
+            auto loaded = provider->getLoadedModels();
+            if (!loaded.empty()) {
+                model = loaded.front();
+            }
+        } catch (...) {
+        }
+    }
+    if (model.empty()) {
+        return Error{ErrorCode::NotFound, "No embedding model configured"};
+    }
+
+    const auto timeout = std::chrono::milliseconds(resolveEmbeddingLoadTimeoutMs(timeoutMs));
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    auto isReadyUnderLock = [&]() {
+        bool loaded = false;
+        try {
+            loaded = provider->isModelLoaded(model);
+        } catch (...) {
+            loaded = false;
+        }
+        if (!loaded) {
+            warmedEmbeddingModels_.erase(model);
+            if (hotEmbeddingModel_ == model) {
+                hotEmbeddingModel_.clear();
+            }
+            return false;
+        }
+        return !warmup || warmedEmbeddingModels_.contains(model);
+    };
+
+    {
+        std::unique_lock lk(embeddingModelReadyMutex_);
+        while (embeddingModelReadyActive_) {
+            if (!embeddingModelReadyCv_.wait_until(
+                    lk, deadline, [this]() { return !embeddingModelReadyActive_; })) {
+                return Error{ErrorCode::Timeout,
+                             "Timed out waiting for another embedding model warmup"};
+            }
+        }
+
+        if (isReadyUnderLock()) {
+            if (keepHot) {
+                hotEmbeddingModel_ = model;
+            }
+            return model;
+        }
+
+        embeddingModelReadyActive_ = true;
+        embeddingModelReadyActiveModel_ = model;
+    }
+
+    struct ReadyGuard {
+        ServiceManager* self;
+        ~ReadyGuard() {
+            std::lock_guard lk(self->embeddingModelReadyMutex_);
+            self->embeddingModelReadyActive_ = false;
+            self->embeddingModelReadyActiveModel_.clear();
+            self->embeddingModelReadyCv_.notify_all();
+        }
+    } readyGuard{this};
+
+    const auto providerProgress = [progress, model](const ModelLoadEvent& ev) {
+        if (!progress) {
+            return;
+        }
+        if (!ev.modelName.empty() && ev.modelName != model) {
+            return;
+        }
+        progress(ev);
+    };
+    provider->setProgressCallback(providerProgress);
+    auto progressReset = std::unique_ptr<void, std::function<void(void*)>>(
+        reinterpret_cast<void*>(1), [provider](void*) {
+            try {
+                provider->setProgressCallback({});
+            } catch (...) {
+            }
+        });
+
+    if (!provider->isModelLoaded(model)) {
+        emitModelLoadProgress(progress, model, "loading", "Loading embedding model");
+        Result<void> loadResult;
+        if (keepHot) {
+            loadResult = provider->loadModelWithOptions(model, makeHotLoadOptions(true));
+        } else {
+            loadResult = provider->loadModel(model);
+        }
+        if (!loadResult) {
+            emitModelLoadProgress(progress, model, "failed",
+                                  "Failed to load embedding model: " + loadResult.error().message);
+            return loadResult.error();
+        }
+    }
+
+    if (warmup) {
+        bool needsWarm = false;
+        {
+            std::lock_guard lk(embeddingModelReadyMutex_);
+            needsWarm = !warmedEmbeddingModels_.contains(model);
+        }
+        if (needsWarm) {
+            emitModelLoadProgress(progress, model, "warming", "Warming embedding model");
+            auto warmupResult = provider->generateBatchEmbeddingsFor(model, embeddingWarmupTexts());
+            if (!warmupResult) {
+                emitModelLoadProgress(progress, model, "failed",
+                                      "Embedding model warmup failed: " +
+                                          warmupResult.error().message);
+                return warmupResult.error();
+            }
+            std::lock_guard lk(embeddingModelReadyMutex_);
+            warmedEmbeddingModels_.insert(model);
+        }
+    }
+
+    if (keepHot) {
+        std::string previousHot;
+        {
+            std::lock_guard lk(embeddingModelReadyMutex_);
+            previousHot = hotEmbeddingModel_;
+            hotEmbeddingModel_ = model;
+        }
+        if (!previousHot.empty() && previousHot != model && provider->isModelLoaded(previousHot)) {
+            (void)provider->loadModelWithOptions(previousHot, makeHotLoadOptions(false));
+        }
+        if (provider->isModelLoaded(model)) {
+            (void)provider->loadModelWithOptions(model, makeHotLoadOptions(true));
+        }
+    }
+
+    emitModelLoadProgress(progress, model, "completed", "Embedding model ready");
+    return model;
+}
+
+boost::asio::awaitable<Result<std::string>>
+ServiceManager::co_ensureEmbeddingModelReady(const std::string& requestedModel,
+                                             std::function<void(const ModelLoadEvent&)> progress,
+                                             int timeoutMs, bool keepHot, bool warmup) {
+    co_return co_await yams::daemon::dispatch::offload_to_worker(
+        this, [this, requestedModel, progress = std::move(progress), timeoutMs, keepHot,
+               warmup]() mutable {
+            return ensureEmbeddingModelReadySync(requestedModel, std::move(progress), timeoutMs,
+                                                 keepHot, warmup);
+        });
+}
+
+bool ServiceManager::startEmbeddingWarmupIfConfigured() {
+    if (!embeddingPreloadOnStartup_) {
+        return false;
+    }
+    embeddingPreloadOnStartup_ = false;
+
+    std::shared_ptr<ServiceManager> self;
+    try {
+        self = shared_from_this();
+    } catch (const std::bad_weak_ptr& e) {
+        spdlog::warn("[Warmup] failed to start background warmup: {}", e.what());
+        return false;
+    }
+
+    boost::asio::co_spawn(
+        getWorkerExecutor(),
+        [self]() -> boost::asio::awaitable<void> {
+            auto result = co_await self->co_ensureEmbeddingModelReady(
+                "",
+                [](const ModelLoadEvent& ev) {
+                    spdlog::info("[Warmup] model='{}' phase={} {}", ev.modelName, ev.phase,
+                                 ev.message);
+                },
+                /*timeoutMs=*/60000, /*keepHot=*/true, /*warmup=*/true);
+            if (result) {
+                spdlog::info("[Warmup] embedding model ready: {}", result.value());
+            } else {
+                spdlog::warn("[Warmup] embedding model warmup failed: {}", result.error().message);
+            }
+            co_return;
+        },
+        boost::asio::detached);
+    return true;
 }
 
 std::string ServiceManager::resolvePreferredModel() const {

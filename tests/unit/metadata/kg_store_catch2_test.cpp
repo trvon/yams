@@ -145,6 +145,27 @@ TEST_CASE("KG Store: ensurePathNode links logical path to snapshot path", "[unit
     CHECK(edges.value()[0].dstNodeId == snapshotId.value());
 }
 
+TEST_CASE("KG Store: ensureDocumentNode is idempotent and refreshes label",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    auto first = fix.store_->ensureDocumentNode(
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "/tmp/a.txt");
+    REQUIRE(first.has_value());
+
+    auto second = fix.store_->ensureDocumentNode(
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "/tmp/renamed-a.txt");
+    REQUIRE(second.has_value());
+    CHECK(first.value() == second.value());
+
+    auto node = fix.store_->getNodeByKey(
+        "doc:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    REQUIRE(node.has_value());
+    REQUIRE(node.value().has_value());
+    CHECK(node.value()->type == std::optional<std::string>{"document"});
+    CHECK(node.value()->label == std::optional<std::string>{"/tmp/renamed-a.txt"});
+}
+
 TEST_CASE("KG topology analysis summarizes semantic neighborhoods", "[unit][metadata][kg]") {
     KGStoreFixture fix;
 

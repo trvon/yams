@@ -176,6 +176,7 @@ public:
     // Warm up the pool for a specific model by acquiring a session and doing a dummy inference
     // This triggers lazy loading so subsequent real requests are faster
     Result<void> warmupModel(const std::string& modelName);
+    Result<void> setModelHot(const std::string& modelName, bool hot);
 
     Result<void> setModelThreading(const std::string& modelName, int intraThreads, int interThreads,
                                    bool applyNow = true);

@@ -80,31 +80,21 @@ RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest
         const auto& provider = provRes.value();
         spdlog::info("Embedding request: model='{}' normalize={} text_len={}", req.modelName,
                      req.normalize ? "true" : "false", req.text.size());
-        if (!req.modelName.empty() && !provider->isModelLoaded(req.modelName)) {
-            int timeout_ms = 30000;
-            if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
-                try {
-                    timeout_ms = std::stoi(env);
-                    if (timeout_ms < 1000)
-                        timeout_ms = 1000;
-                } catch (...) {
-                }
-            }
-            auto lr = co_await yams::daemon::dispatch::ensure_model_loaded(
-                serviceManager_, provider, req.modelName, timeout_ms);
-            if (!lr) {
-                co_return makeErrorResponse(lr.error().code, lr.error().message);
-            }
+        auto readyModel = co_await serviceManager_->co_ensureEmbeddingModelReady(
+            req.modelName, {}, /*timeoutMs=*/0, /*keepHot=*/req.modelName.empty(),
+            /*warmup=*/true);
+        if (!readyModel) {
+            co_return makeErrorResponse(readyModel.error().code, readyModel.error().message);
         }
-        auto r = yams::daemon::dispatch::generate_single(provider.get(), req.modelName, req.text,
-                                                         req.normalize);
+        auto r = yams::daemon::dispatch::generate_single(provider.get(), readyModel.value(),
+                                                         req.text, req.normalize);
         if (!r) {
             co_return makeErrorResponse(r.error().code, r.error().message);
         }
         EmbeddingResponse resp;
         resp.embedding = std::move(r.value());
         resp.dimensions = resp.embedding.size();
-        resp.modelUsed = req.modelName;
+        resp.modelUsed = readyModel.value();
         resp.processingTimeMs = 0;
         co_return resp;
     } catch (const std::exception& e) {
@@ -139,32 +129,22 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
         spdlog::info("Batch embedding request: model='{}' count={} normalize={} batchSize={}",
                      req.modelName, req.texts.size(), req.normalize ? "true" : "false",
                      req.batchSize);
-        if (!req.modelName.empty() && !provider->isModelLoaded(req.modelName)) {
-            int timeout_ms = 30000;
-            if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
-                try {
-                    timeout_ms = std::stoi(env);
-                    if (timeout_ms < 1000)
-                        timeout_ms = 1000;
-                } catch (...) {
-                }
-            }
-            Result<void> r = co_await yams::daemon::dispatch::ensure_model_loaded(
-                serviceManager_, provider, req.modelName, timeout_ms);
-            if (!r) {
-                co_return makeErrorResponse(r.error().code, r.error().message);
-            }
+        auto readyModel = co_await serviceManager_->co_ensureEmbeddingModelReady(
+            req.modelName, {}, /*timeoutMs=*/0, /*keepHot=*/req.modelName.empty(),
+            /*warmup=*/true);
+        if (!readyModel) {
+            co_return makeErrorResponse(readyModel.error().code, readyModel.error().message);
         }
         BatchEmbeddingResponse resp{};
-        auto rr = yams::daemon::dispatch::generate_batch(provider.get(), req.modelName, req.texts,
-                                                         req.normalize);
+        auto rr = yams::daemon::dispatch::generate_batch(provider.get(), readyModel.value(),
+                                                         req.texts, req.normalize);
         if (!rr) {
             // Fallback to per-item when NotImplemented
             if (rr.error().code == ErrorCode::NotImplemented) {
                 resp.embeddings.reserve(req.texts.size());
                 for (const auto& t : req.texts) {
-                    auto r1 = yams::daemon::dispatch::generate_single(provider.get(), req.modelName,
-                                                                      t, req.normalize);
+                    auto r1 = yams::daemon::dispatch::generate_single(
+                        provider.get(), readyModel.value(), t, req.normalize);
                     if (!r1) {
                         resp.failureCount++;
                         continue;
@@ -183,7 +163,7 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
                                     : 0;
         }
         resp.dimensions = resp.embeddings.empty() ? 0 : resp.embeddings.front().size();
-        resp.modelUsed = req.modelName;
+        resp.modelUsed = readyModel.value();
         resp.processingTimeMs = 0;
         (void)t0;
         co_return resp;
@@ -242,6 +222,15 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
         } else if (!metadataRepo) {
             result = Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         } else {
+            auto readyModel = co_await serviceManager_->co_ensureEmbeddingModelReady(
+                modelName, {}, /*timeoutMs=*/0, /*keepHot=*/true, /*warmup=*/true);
+            if (!readyModel) {
+                result = Error{readyModel.error().code, readyModel.error().message};
+            } else {
+                modelName = readyModel.value();
+            }
+        }
+        if (!result.has_value()) {
             // Limit concurrent repair embedding requests to avoid ONNX slot starvation.
             // Max 2 concurrent repairs leaves slots for normal ingest/search embeddings.
             static std::counting_semaphore<8> repairEmbedSemaphore{2};

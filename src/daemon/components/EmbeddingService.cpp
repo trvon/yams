@@ -183,11 +183,15 @@ void EmbeddingService::setProviders(
     std::function<std::shared_ptr<IModelProvider>()> providerGetter,
     std::function<std::string()> modelNameGetter,
     std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter,
-    std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> kgGetter) {
+    std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> kgGetter,
+    std::function<Result<std::string>(const std::string&,
+                                      std::function<void(const ModelLoadEvent&)>)>
+        ensureModelReady) {
     getModelProvider_ = std::move(providerGetter);
     getPreferredModel_ = std::move(modelNameGetter);
     getVectorDatabase_ = std::move(dbGetter);
     getKgStore_ = std::move(kgGetter);
+    ensureModelReady_ = std::move(ensureModelReady);
 }
 
 void EmbeddingService::setCompressedAnnInvalidator(std::function<void()> cb) {
@@ -637,9 +641,15 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 
             std::vector<InternalEventBus::EmbedJob> deferred;
             deferred.reserve(this->pendingJobs_.size());
+            std::vector<InternalEventBus::EmbedJob> passthrough;
+            passthrough.reserve(this->pendingJobs_.size());
 
             for (auto& pending : this->pendingJobs_) {
                 if (pending.hashes.empty()) {
+                    continue;
+                }
+                if (pending.monitor) {
+                    passthrough.push_back(std::move(pending));
                     continue;
                 }
                 if (pending.modelName.empty() && !defaultModel.empty()) {
@@ -796,6 +806,17 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                 spdlog::info("[EmbeddingService] dispatch order [{}]", order);
             }
 
+            for (auto& job : passthrough) {
+                if (stop_.load(std::memory_order_acquire)) {
+                    break;
+                }
+                if (inFlight_.load() >= effectiveMaxConcurrent) {
+                    this->pendingJobs_.push_back(std::move(job));
+                    continue;
+                }
+                dispatchJob(std::move(job));
+            }
+
             for (auto& entry : orderedBuckets) {
                 auto& bucket = *entry.bucket;
                 if (stop_.load(std::memory_order_acquire)) {
@@ -898,6 +919,56 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     spdlog::debug(
         "[EmbeddingService] processEmbedJob job={} hashes={} skipExisting={} modelHint='{}'",
         jobTag, job.hashes.size(), job.skipExisting ? "true" : "false", job.modelName);
+    auto monitor = job.monitor;
+    auto withMonitor = [&](auto&& fn) {
+        if (!monitor) {
+            return;
+        }
+        std::lock_guard<std::mutex> lk(monitor->mutex);
+        fn(*monitor);
+        monitor->cv.notify_all();
+    };
+    auto updateMonitor = [&](std::string phase, std::string detail) {
+        withMonitor([&](InternalEventBus::EmbedJobMonitor& mon) {
+            mon.phase = std::move(phase);
+            mon.detail = std::move(detail);
+        });
+    };
+    auto updateMonitorCounts =
+        [&](const std::function<void(InternalEventBus::EmbedJobMonitor&)>& fn) {
+            withMonitor([&](InternalEventBus::EmbedJobMonitor& mon) { fn(mon); });
+        };
+    auto finishMonitor = [&](std::string phase, std::string detail) {
+        withMonitor([&](InternalEventBus::EmbedJobMonitor& mon) {
+            mon.phase = std::move(phase);
+            mon.detail = std::move(detail);
+            mon.processedDocs = mon.succeededDocs + mon.failedDocs + mon.skippedDocs;
+            mon.done = true;
+        });
+    };
+    auto approxProcessedDocs = [](const InternalEventBus::EmbedJobMonitor& mon) -> uint64_t {
+        const uint64_t terminal = mon.succeededDocs + mon.failedDocs + mon.skippedDocs;
+        if (mon.totalChunks == 0 || mon.totalDocs == 0) {
+            return terminal;
+        }
+        const uint64_t approx = std::min<uint64_t>(
+            mon.totalDocs,
+            (mon.processedChunks * mon.totalDocs + mon.totalChunks - 1) / mon.totalChunks);
+        return std::max<uint64_t>(terminal, approx);
+    };
+    if (monitor) {
+        std::lock_guard<std::mutex> lk(monitor->mutex);
+        monitor->totalDocs = job.hashes.size();
+        monitor->processedDocs = 0;
+        monitor->succeededDocs = 0;
+        monitor->failedDocs = 0;
+        monitor->skippedDocs = 0;
+        monitor->totalChunks = 0;
+        monitor->processedChunks = 0;
+        monitor->done = false;
+        monitor->phase = "queued";
+        monitor->detail = "queued for embedding";
+    }
     std::shared_ptr<IModelProvider> provider;
     std::string modelName;
     std::shared_ptr<yams::vector::VectorDatabase> vdb;
@@ -916,6 +987,45 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         modelName = job.modelName;
     }
 
+    auto markHashesFailed = [&](std::string_view reason) {
+        if (!job.hashes.empty()) {
+            (void)meta_->batchUpdateDocumentRepairStatuses(job.hashes,
+                                                           metadata::RepairStatus::Failed);
+        }
+        failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
+        finishMonitor("failed", std::string(reason));
+    };
+    auto isJobCanceled = [&]() {
+        return monitor && monitor->cancelRequested.load(std::memory_order_relaxed);
+    };
+
+    if (isJobCanceled()) {
+        if (!job.hashes.empty()) {
+            (void)meta_->batchUpdateDocumentRepairStatuses(job.hashes,
+                                                           metadata::RepairStatus::Pending);
+        }
+        finishMonitor("cancelled", "embedding job canceled before model preparation");
+        return;
+    }
+
+    if (ensureModelReady_) {
+        auto ready = ensureModelReady_(modelName, [&](const ModelLoadEvent& ev) {
+            std::string detail = ev.message;
+            if (detail.empty()) {
+                detail = "model " + (ev.modelName.empty() ? modelName : ev.modelName);
+            }
+            updateMonitor(ev.phase.empty() ? std::string{"loading"} : ev.phase, std::move(detail));
+        });
+        if (!ready) {
+            markHashesFailed("embedding model not ready: " + ready.error().message);
+            return;
+        }
+        modelName = ready.value();
+        if (getModelProvider_) {
+            provider = getModelProvider_();
+        }
+    }
+
     if (!provider || modelName.empty() || !vdb) {
         // Common case during ingestion runs with embeddings disabled: PostIngestQueue may still
         // enqueue jobs, but the provider/model/vdb are intentionally unset.
@@ -923,15 +1033,24 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                       "(provider={}, model='{}', vdb={})",
                       job.hashes.size(), provider ? "available" : "null", modelName,
                       vdb ? "available" : "null");
-        failed_.fetch_add(job.hashes.size());
+        markHashesFailed("embedding providers unavailable");
         return;
     }
 
     if (stop_.load(std::memory_order_acquire)) {
-        failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
         InternalEventBus::instance().incEmbedDropped(job.hashes.size());
         spdlog::info("EmbeddingService: aborting job={} model='{}' docs={} due to shutdown", jobTag,
                      modelName, job.hashes.size());
+        markHashesFailed("embedding service shutting down");
+        return;
+    }
+
+    if (isJobCanceled()) {
+        if (!job.hashes.empty()) {
+            (void)meta_->batchUpdateDocumentRepairStatuses(job.hashes,
+                                                           metadata::RepairStatus::Pending);
+        }
+        finishMonitor("cancelled", "embedding job canceled before gather");
         return;
     }
 
@@ -969,6 +1088,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     spdlog::debug("EmbeddingService: processing batch of {} documents with model '{}'",
                   job.hashes.size(), modelName);
     logPoolState("job_start");
+    updateMonitor("gathering", "gathering content for embedding");
 
     // ============================================================
     // Phase 1: Gather all document content and metadata
@@ -1096,11 +1216,33 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         (void)meta_->batchUpdateDocumentRepairStatuses(failedGatherHashes,
                                                        metadata::RepairStatus::Failed);
     }
+    updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
+        mon.succeededDocs += completedGatherHashes.size();
+        mon.skippedDocs += skippedGatherHashes.size();
+        mon.failedDocs += failedGatherHashes.size();
+        mon.processedDocs = approxProcessedDocs(mon);
+        mon.detail = "gathered docs=" + std::to_string(docsToEmbed.size()) +
+                     " skipped=" + std::to_string(skippedGatherHashes.size()) +
+                     " failed=" + std::to_string(failedGatherHashes.size());
+    });
 
     if (docsToEmbed.empty()) {
         logPhase("gather", tGather,
                  fmt::format("docs_to_embed=0 skipped={} failed_gather={}", skipped, failedGather));
         spdlog::debug("EmbeddingService: no documents to embed after gathering");
+        finishMonitor("completed", "no documents left after gather");
+        return;
+    }
+
+    if (isJobCanceled()) {
+        std::vector<std::string> pendingHashes;
+        pendingHashes.reserve(docsToEmbed.size());
+        for (const auto& doc : docsToEmbed) {
+            pendingHashes.push_back(doc.hash);
+        }
+        (void)meta_->batchUpdateDocumentRepairStatuses(pendingHashes,
+                                                       metadata::RepairStatus::Pending);
+        finishMonitor("cancelled", "embedding job canceled before chunking");
         return;
     }
 
@@ -1116,6 +1258,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
         (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
                                                        metadata::RepairStatus::Failed);
+        finishMonitor("failed", "embedding service shutting down before chunking");
         return;
     }
 
@@ -1128,6 +1271,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     // ============================================================
     // Phase 2: Chunk all documents
     // ============================================================
+    updateMonitor("chunking", "chunking gathered documents");
     const auto tChunk = std::chrono::steady_clock::now();
     struct ChunkInfo {
         size_t docIdx;       // Index into docsToEmbed
@@ -1180,18 +1324,30 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     // Chunk any remaining docs the legacy way.
     const bool needChunker = std::any_of(docHasPreparedChunks.begin(), docHasPreparedChunks.end(),
                                          [](bool v) { return !v; });
-    auto markChunkingAborted = [&]() {
+    auto markChunkingAborted = [&](bool cancelled) {
+        std::vector<std::string> hashesToUpdate;
+        hashesToUpdate.reserve(docsToEmbed.size());
+        for (const auto& doc : docsToEmbed) {
+            hashesToUpdate.push_back(doc.hash);
+        }
+
+        if (cancelled) {
+            spdlog::info(
+                "EmbeddingService: aborting job={} during chunking (docs={}) due to cancel", jobTag,
+                docsToEmbed.size());
+            (void)meta_->batchUpdateDocumentRepairStatuses(hashesToUpdate,
+                                                           metadata::RepairStatus::Pending);
+            finishMonitor("cancelled", "embedding job canceled during chunking");
+            return;
+        }
+
         spdlog::info("EmbeddingService: aborting job={} during chunking (docs={}) due to shutdown",
                      jobTag, docsToEmbed.size());
         failed_.fetch_add(docsToEmbed.size(), std::memory_order_relaxed);
         InternalEventBus::instance().incEmbedDropped(docsToEmbed.size());
-        std::vector<std::string> failedHashes;
-        failedHashes.reserve(docsToEmbed.size());
-        for (const auto& doc : docsToEmbed) {
-            failedHashes.push_back(doc.hash);
-        }
-        (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
+        (void)meta_->batchUpdateDocumentRepairStatuses(hashesToUpdate,
                                                        metadata::RepairStatus::Failed);
+        finishMonitor("failed", "embedding service shutting down during chunking");
     };
 
     struct ChunkBuildResult {
@@ -1207,6 +1363,10 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     auto buildChunksForDoc = [&](std::size_t docIdx) {
         if (preparedDocPtr[docIdx]) {
+            return;
+        }
+        if (isJobCanceled()) {
+            abortedDuringChunking = true;
             return;
         }
         if (stop_.load(std::memory_order_acquire)) {
@@ -1261,7 +1421,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
     }
     if (abortedDuringChunking) {
-        markChunkingAborted();
+        markChunkingAborted(isJobCanceled());
         return;
     }
 
@@ -1281,6 +1441,12 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     spdlog::debug("EmbeddingService: chunked {} documents into {} chunks", docsToEmbed.size(),
                   allChunks.size());
+    updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
+        mon.totalChunks = allChunks.size();
+        mon.processedDocs = approxProcessedDocs(mon);
+        mon.detail = "chunked docs=" + std::to_string(docsToEmbed.size()) +
+                     " chunks=" + std::to_string(allChunks.size());
+    });
 
     const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
 
@@ -1537,6 +1703,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
         (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
                                                        metadata::RepairStatus::Failed);
+        finishMonitor("failed", "embedding job failed");
     };
 
     struct DocEmbeddingAccumulator {
@@ -1560,6 +1727,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                      jobTag, kMaxBatchSize, job.hashes.size(), docsToEmbed.size(),
                      allChunks.size());
     }
+    updateMonitor("inferring", "generating embeddings");
 
     uint64_t inferWarnMs = 15000;
     if (const char* s = std::getenv("YAMS_EMBED_SUBBATCH_WARN_MS")) {
@@ -1730,6 +1898,12 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         failed_.fetch_add(1, std::memory_order_relaxed);
         (void)meta_->updateDocumentEmbeddingStatusByHash(doc.hash, false, modelName);
         (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Failed);
+        updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
+            mon.failedDocs += 1;
+            mon.processedDocs = approxProcessedDocs(mon);
+            mon.detail =
+                "failed document " + doc.hash.substr(0, std::min<std::size_t>(12, doc.hash.size()));
+        });
         spdlog::warn("EmbeddingService: skipping document {} after embedding failure: {}", doc.hash,
                      reason);
     };
@@ -1741,6 +1915,22 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     std::size_t start = 0;
     while (start < allChunks.size()) {
+        if (isJobCanceled()) {
+            std::vector<std::string> pendingHashes;
+            pendingHashes.reserve(docsToEmbed.size());
+            for (std::size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
+                if (!docFailed[docIdx]) {
+                    pendingHashes.push_back(docsToEmbed[docIdx].hash);
+                    (void)vdb->deleteVectorsByDocument(docsToEmbed[docIdx].hash);
+                }
+            }
+            if (!pendingHashes.empty()) {
+                (void)meta_->batchUpdateDocumentRepairStatuses(pendingHashes,
+                                                               metadata::RepairStatus::Pending);
+            }
+            finishMonitor("cancelled", "embedding job canceled during inference");
+            return;
+        }
         if (stop_.load(std::memory_order_acquire)) {
             spdlog::info(
                 "EmbeddingService: aborting job={} before infer sub-batch start={} (chunks={} "
@@ -1753,6 +1943,10 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
         const std::size_t take = std::min(adaptiveBatchCap, allChunks.size() - start);
         size_t end = start + take;
+        updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
+            mon.detail =
+                "infer chunks=" + std::to_string(start) + "/" + std::to_string(allChunks.size());
+        });
         subChunkIndices.clear();
         subBatch.clear();
         subChunkIndices.reserve(take);
@@ -1949,6 +2143,13 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             }
         }
 
+        updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
+            mon.processedChunks = std::min<uint64_t>(allChunks.size(), end);
+            mon.processedDocs = approxProcessedDocs(mon);
+            mon.detail = "infer chunks=" + std::to_string(mon.processedChunks) + "/" +
+                         std::to_string(mon.totalChunks);
+        });
+
         start = end;
     }
 
@@ -2049,6 +2250,12 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     logPhase("metadata_update", tMeta,
              fmt::format("docs={} model='{}'", successHashes.size(), modelName));
+    updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
+        mon.succeededDocs += successHashes.size();
+        mon.processedChunks = mon.totalChunks;
+        mon.processedDocs = mon.totalDocs;
+        mon.detail = "completed docs=" + std::to_string(successHashes.size());
+    });
 
     // Milestone 11: invalidate compressed ANN index after each document ingest
     // so the next query rebuilds from the current database state.
@@ -2057,6 +2264,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     }
 
     logPoolState("job_end");
+    finishMonitor("completed", "embedding job completed");
 
     processed_.fetch_add(docsToEmbed.size());
 

@@ -22,6 +22,40 @@ jobs:
       minor: ${{ steps.rp.outputs.minor }}
       patch: ${{ steps.rp.outputs.patch }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Align manifest with latest published stable release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest_version="$(sed -n 's/^[[:space:]]*"\."[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .release-please-manifest.json | head -n 1)"
+          if [ -z "${manifest_version}" ]; then
+            echo "ERROR: Could not read current version from .release-please-manifest.json" >&2
+            exit 1
+          fi
+
+          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq 'first(.[] | select((.draft | not) and (.prerelease | not) and (.tag_name | startswith("v"))) | .tag_name) // ""')"
+          if [ -z "${latest_tag}" ]; then
+            echo "No published stable release found; leaving manifest at ${manifest_version}."
+            exit 0
+          fi
+
+          latest_version="${latest_tag#v}"
+          highest_version="$(printf '%s\n%s\n' "${manifest_version}" "${latest_version}" | sort -V | tail -n 1)"
+          if [ "${highest_version}" != "${latest_version}" ] || [ "${manifest_version}" = "${latest_version}" ]; then
+            echo "Manifest already current enough for release-please (manifest=${manifest_version}, latest_published=${latest_version})."
+            exit 0
+          fi
+
+          echo "Manifest is behind latest published stable release; syncing ${manifest_version} -> ${latest_version} before release-please runs."
+          printf '{\n  ".": "%s"\n}\n' "${latest_version}" > .release-please-manifest.json
+
       - uses: googleapis/release-please-action@v4
         id: rp
         with:

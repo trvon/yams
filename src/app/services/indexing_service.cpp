@@ -365,20 +365,16 @@ public:
                                     }
                                     kgNodesCreated++;
 
-                                    // Create a document node keyed by content hash so later graph
-                                    // stages can attach semantic neighbor edges to the canonical
-                                    // document identity used by search.
-                                    metadata::KGNode docNode;
-                                    docNode.nodeKey = "doc:" + result.hash;
-                                    docNode.label = result.path;
-                                    docNode.type = "document";
-                                    auto docNodeIds = ctx_.kgStore->upsertNodes(
-                                        std::vector<metadata::KGNode>{std::move(docNode)});
-                                    if (!docNodeIds) {
-                                        spdlog::debug("[IndexingService] KG upsert doc node failed "
-                                                      "for {}: {}",
+                                    // Keep doc:<sha256> creation on the normal ingest path so
+                                    // later graph stages can attach semantic neighbors to the
+                                    // canonical document identity used by search.
+                                    auto docNodeId =
+                                        ctx_.kgStore->ensureDocumentNode(result.hash, result.path);
+                                    if (!docNodeId) {
+                                        spdlog::debug("[IndexingService] KG ensureDocumentNode "
+                                                      "failed for {}: {}",
                                                       result.hash.substr(0, 8),
-                                                      docNodeIds.error().message);
+                                                      docNodeId.error().message);
                                     } else {
                                         kgNodesCreated++;
                                     }
@@ -411,6 +407,24 @@ public:
                                         continue;
                                     }
                                     kgEdgesCreated++;
+
+                                    if (docNodeId) {
+                                        metadata::KGEdge hasBlob;
+                                        hasBlob.srcNodeId = docNodeId.value();
+                                        hasBlob.dstNodeId = blobNodeResult.value();
+                                        hasBlob.relation = "has_blob";
+                                        hasBlob.weight = 1.0f;
+                                        auto hasBlobResult =
+                                            ctx_.kgStore->addEdgesUnique({hasBlob});
+                                        if (!hasBlobResult) {
+                                            spdlog::debug("[IndexingService] KG has_blob edge "
+                                                          "failed for {}: {}",
+                                                          result.hash.substr(0, 8),
+                                                          hasBlobResult.error().message);
+                                        } else {
+                                            kgEdgesCreated++;
+                                        }
+                                    }
                                 }
 
                                 if (kgNodesCreated > 0 || kgEdgesCreated > 0) {

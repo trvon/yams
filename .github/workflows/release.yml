@@ -2136,11 +2136,22 @@ jobs:
           verify_asset_url() {
             local asset_name="$1"
             local url="https://github.com/${REPO}/releases/download/${TAG}/${asset_name}"
-            if ! curl -fsIL "$url" >/dev/null; then
-              echo "ERROR: Homebrew asset URL not reachable after publish: $url" >&2
-              return 1
-            fi
-            echo "Verified Homebrew asset URL: $url"
+            local attempts=12
+
+            for attempt in $(seq 1 "$attempts"); do
+              if curl -fsIL "$url" >/dev/null; then
+                echo "Verified Homebrew asset URL: $url"
+                return 0
+              fi
+
+              if [ "$attempt" -eq "$attempts" ]; then
+                echo "ERROR: Homebrew asset URL not reachable after publish: $url" >&2
+                return 1
+              fi
+
+              echo "Homebrew asset URL not reachable yet (attempt ${attempt}/${attempts}); waiting 10s: $url" >&2
+              sleep 10
+            done
           }
 
           verify_asset_url "$(basename "${arm64_candidates[0]}")"

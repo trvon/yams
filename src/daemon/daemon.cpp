@@ -967,7 +967,9 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
                     }
                     if (!modelPreloadSkipped_) {
                         modelPreloadSkipped_ = true;
-                        spdlog::info("Model preload disabled - models will load on first use");
+                        if (!serviceManager_->startEmbeddingWarmupIfConfigured()) {
+                            spdlog::info("Model preload disabled - models will load on first use");
+                        }
                     }
                 } catch (const std::exception& e) {
                     spdlog::warn("[InitWaiter] Failed to start deferred services: {}", e.what());

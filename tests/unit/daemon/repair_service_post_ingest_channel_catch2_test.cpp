@@ -90,6 +90,10 @@ public:
     SelectiveFailingModelProvider(size_t dim, std::string poisonNeedle)
         : dim_(dim), poisonNeedle_(std::move(poisonNeedle)) {}
 
+    void setProgressCallback(std::function<void(const ModelLoadEvent&)> cb) override {
+        progress_ = std::move(cb);
+    }
+
     Result<std::vector<float>> generateEmbedding(const std::string& text) override {
         return generateEmbeddingFor(defaultModelName_, text);
     }
@@ -127,11 +131,26 @@ public:
     }
 
     Result<void> loadModel(const std::string& modelName) override {
+        ++loadCalls_;
+        if (progress_) {
+            ModelLoadEvent ev;
+            ev.modelName = modelName;
+            ev.phase = "loading";
+            ev.message = "mock loading";
+            progress_(ev);
+        }
         if (std::find(loadedModels_.begin(), loadedModels_.end(), modelName) ==
             loadedModels_.end()) {
             loadedModels_.push_back(modelName);
         }
         defaultModelName_ = modelName;
+        if (progress_) {
+            ModelLoadEvent ev;
+            ev.modelName = modelName;
+            ev.phase = "completed";
+            ev.message = "mock ready";
+            progress_(ev);
+        }
         return Result<void>();
     }
 
@@ -180,13 +199,16 @@ public:
     void shutdown() override {}
 
     std::size_t batchCalls() const { return batchCalls_; }
+    std::size_t loadCalls() const { return loadCalls_; }
     std::size_t singleCalls() const { return singleCalls_; }
 
 private:
     size_t dim_;
     std::string poisonNeedle_;
     std::string defaultModelName_;
+    std::function<void(const ModelLoadEvent&)> progress_;
     std::vector<std::string> loadedModels_;
+    std::size_t loadCalls_{0};
     std::size_t batchCalls_{0};
     std::size_t singleCalls_{0};
 };
@@ -611,7 +633,6 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     const std::string kModelName = "test-model";
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "never-poison");
-    REQUIRE(provider->loadModel(kModelName).has_value());
     sm->__test_setModelProvider(provider);
 
     const auto now =
@@ -683,9 +704,19 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK(op->failed == 0);
     CHECK(op->processed == 1);
     CHECK(op->succeeded == 1);
+    CHECK(provider->loadCalls() == 1);
+    CHECK(provider->batchCalls() >= 2);
     CHECK_FALSE(events.empty());
     CHECK(std::any_of(events.begin(), events.end(), [](const RepairEvent& ev) {
         return ev.phase == "repairing" && ev.total > 0;
+    }));
+    CHECK(std::any_of(events.begin(), events.end(), [](const RepairEvent& ev) {
+        return ev.phase == "repairing" &&
+               ev.message.find("Loading embedding model") != std::string::npos;
+    }));
+    CHECK(std::any_of(events.begin(), events.end(), [](const RepairEvent& ev) {
+        return ev.phase == "repairing" &&
+               ev.message.find("Warming embedding model") != std::string::npos;
     }));
     CHECK(std::any_of(events.begin(), events.end(),
                       [](const RepairEvent& ev) { return ev.phase == "completed"; }));
