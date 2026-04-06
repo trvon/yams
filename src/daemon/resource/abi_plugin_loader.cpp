@@ -183,50 +183,63 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
     for (const auto& entry : std::filesystem::directory_iterator(dir))
         entries.push_back(entry);
 
-    for (const auto& entry : entries) {
-        if (!entry.is_regular_file())
-            continue;
-        auto p = entry.path();
+    auto scanCandidate = [&](const std::filesystem::path& p) {
         // Match *.so / *.dylib / *.dll
         auto ext = p.extension().string();
-        if (ext == ".so" || ext == ".dylib" || ext == ".dll") {
-            // Reduce risk: only consider files that look like YAMS plugins by name
-            // Accept: libyams_*.* or yams_*.*
-            auto fname = p.filename().string();
-            bool looks_like_yams = false;
-            try {
-                looks_like_yams =
-                    (fname.rfind("libyams_", 0) == 0) || (fname.rfind("yams_", 0) == 0);
-            } catch (...) {
+        if (!(ext == ".so" || ext == ".dylib" || ext == ".dll")) {
+            return;
+        }
+
+        // Reduce risk: only consider files that look like YAMS plugins by name
+        // Accept: libyams_*.* or yams_*.*
+        auto fname = p.filename().string();
+        bool looks_like_yams = false;
+        try {
+            looks_like_yams = (fname.rfind("libyams_", 0) == 0) || (fname.rfind("yams_", 0) == 0);
+        } catch (...) {
+        }
+        if (!looks_like_yams) {
+            if (namePolicy_ == NamePolicy::Spec) {
+                lastSkips_.push_back(SkipInfo{p, "name policy: require libyams_* or yams_*"});
             }
-            if (!looks_like_yams) {
-                if (namePolicy_ == NamePolicy::Spec) {
-                    lastSkips_.push_back(SkipInfo{p, "name policy: require libyams_* or yams_*"});
-                }
-                continue;
-            }
-            // Deduplicate by base name: on UNIX, prefer non-'lib' variant when both exist
+            return;
+        }
+
+        // Deduplicate by base name: on UNIX, prefer non-'lib' variant when both exist
 #if !defined(_WIN32)
-            try {
-                auto fname = p.filename().string();
-                if (fname.rfind("lib", 0) == 0) {
-                    auto alt = p.parent_path() / fname.substr(3);
-                    if (std::filesystem::exists(alt) && std::filesystem::is_regular_file(alt)) {
-                        lastSkips_.push_back(
-                            SkipInfo{p, "duplicate variant; prefer non-lib prefix"});
-                        continue;
-                    }
+        try {
+            if (fname.rfind("lib", 0) == 0) {
+                auto alt = p.parent_path() / fname.substr(3);
+                if (std::filesystem::exists(alt) && std::filesystem::is_regular_file(alt)) {
+                    lastSkips_.push_back(SkipInfo{p, "duplicate variant; prefer non-lib prefix"});
+                    return;
                 }
-            } catch (...) {
             }
+        } catch (...) {
+        }
 #endif
 
-            auto sr = scanTarget(p);
-            if (sr) {
-                out.push_back(sr.value());
-            } else {
-                lastSkips_.push_back(SkipInfo{p, sr.error().message});
+        auto sr = scanTarget(p);
+        if (sr) {
+            out.push_back(sr.value());
+        } else {
+            lastSkips_.push_back(SkipInfo{p, sr.error().message});
+        }
+    };
+
+    for (const auto& entry : entries) {
+        if (entry.is_regular_file()) {
+            scanCandidate(entry.path());
+            continue;
+        }
+        if (!entry.is_directory()) {
+            continue;
+        }
+        for (const auto& nested : std::filesystem::directory_iterator(entry.path())) {
+            if (!nested.is_regular_file()) {
+                continue;
             }
+            scanCandidate(nested.path());
         }
     }
     return Result<std::vector<ScanResult>>(std::move(out));

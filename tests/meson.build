@@ -1323,6 +1323,7 @@ if catch2_dep.found()
     files(
       'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/entity_linker_catch2_test.cpp',
+      'unit/search/graph_expansion_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/query_helpers_catch2_test.cpp',
       'unit/search/query_parser_catch2_test.cpp',

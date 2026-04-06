@@ -3511,11 +3511,13 @@ ServiceManager::ensureEmbeddingModelReadySync(const std::string& requestedModel,
             }
         });
 
+    bool appliedHotDuringLoad = false;
     if (!provider->isModelLoaded(model)) {
         emitModelLoadProgress(progress, model, "loading", "Loading embedding model");
         Result<void> loadResult;
         if (keepHot) {
             loadResult = provider->loadModelWithOptions(model, makeHotLoadOptions(true));
+            appliedHotDuringLoad = true;
         } else {
             loadResult = provider->loadModel(model);
         }
@@ -3556,7 +3558,7 @@ ServiceManager::ensureEmbeddingModelReadySync(const std::string& requestedModel,
         if (!previousHot.empty() && previousHot != model && provider->isModelLoaded(previousHot)) {
             (void)provider->loadModelWithOptions(previousHot, makeHotLoadOptions(false));
         }
-        if (provider->isModelLoaded(model)) {
+        if (!appliedHotDuringLoad && provider->isModelLoaded(model)) {
             (void)provider->loadModelWithOptions(model, makeHotLoadOptions(true));
         }
     }

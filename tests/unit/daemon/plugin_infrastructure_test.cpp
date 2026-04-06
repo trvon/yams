@@ -514,6 +514,35 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         CHECK(found_mock);
     }
 
+    SECTION("Plugin discovery - scan directory finds plugins in nested plugin folders") {
+        AbiPluginHost host(nullptr);
+        host.setTrustFile(fixture.trustFile_);
+
+        fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
+        auto rootDir = fixture.tempDir_ / "nested_plugins";
+        auto nestedDir = rootDir / "mock_model";
+        fs::create_directories(nestedDir);
+
+        auto nestedPluginPath = nestedDir / pluginPath.filename();
+        std::error_code ec;
+        fs::copy_file(pluginPath, nestedPluginPath, fs::copy_options::overwrite_existing, ec);
+        REQUIRE_FALSE(ec);
+
+        auto res = host.scanDirectory(rootDir);
+        REQUIRE(res);
+
+        auto plugins = res.value();
+        bool found_mock = false;
+        for (const auto& p : plugins) {
+            if (p.name == "mock_model") {
+                found_mock = true;
+                CHECK(p.path == nestedPluginPath);
+                CHECK(p.abiVersion > 0);
+            }
+        }
+        CHECK(found_mock);
+    }
+
     SECTION("Plugin discovery - getLastScanSkips after scan") {
         AbiPluginHost host(nullptr);
         host.setTrustFile(fixture.trustFile_);

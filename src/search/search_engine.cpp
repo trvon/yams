@@ -2696,7 +2696,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (graphTerms.size() > workingConfig.graphExpansionMaxTerms) {
             graphTerms.resize(workingConfig.graphExpansionMaxTerms);
         }
-        if (!workingConfig.enableGraphQueryExpansion) {
+        if (!workingConfig.enableGraphQueryExpansion ||
+            textExpansionStats.graphExpansionFtsAddedCount == 0) {
             graphTerms.clear();
         }
         graphVectorGeneratedTerms = graphTerms.size();
