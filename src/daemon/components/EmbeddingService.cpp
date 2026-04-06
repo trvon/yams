@@ -998,6 +998,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     auto isJobCanceled = [&]() {
         return monitor && monitor->cancelRequested.load(std::memory_order_relaxed);
     };
+    bool modelPreparedByCoordinator = false;
 
     if (isJobCanceled()) {
         if (!job.hashes.empty()) {
@@ -1021,6 +1022,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             return;
         }
         modelName = ready.value();
+        modelPreparedByCoordinator = true;
         if (getModelProvider_) {
             provider = getModelProvider_();
         }
@@ -1753,7 +1755,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     const auto& gpuInfo = yams::daemon::resource::detectGpu();
     const bool coremlUnified =
         gpuInfo.detected && gpuInfo.provider == "coreml" && gpuInfo.unifiedMemory;
-    const std::size_t defaultAdaptiveStartCap = coremlUnified ? 8u : 16u;
+    const std::size_t defaultAdaptiveStartCap =
+        (coremlUnified && !modelPreparedByCoordinator) ? 8u : 16u;
     std::size_t adaptiveBatchCap = std::min<std::size_t>(kMaxBatchSize, defaultAdaptiveStartCap);
     const char* safeCapEnv = std::getenv("YAMS_EMBED_GPU_SAFE_BATCH_CAP");
     if (safeCapEnv) {

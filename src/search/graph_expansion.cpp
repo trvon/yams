@@ -490,6 +490,11 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
         if (!docId.has_value()) {
             continue;
         }
+        std::optional<std::int64_t> docNodeId;
+        auto docNode = kgStore->getNodeByKey("doc:" + doc.documentHash);
+        if (docNode && docNode.value().has_value()) {
+            docNodeId = docNode.value()->id;
+        }
         auto ents = kgStore->getDocEntitiesForDocument(*docId, 128, 0);
         if (!ents) {
             continue;
@@ -514,33 +519,48 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
                 continue;
             }
 
-            const float baseScore = std::clamp(doc.score, 0.1f, 1.0f) * confidence * nodeWeight;
-            float segmentBoost = 1.0f;
-            auto segEdges = kgStore->getEdgesFrom(
-                *ent.nodeId, std::string_view("mentioned_in_segment"), config.maxNeighbors, 0);
-            if (segEdges) {
-                for (const auto& segEdge : segEdges.value()) {
-                    if (!segEdge.properties.has_value()) {
-                        continue;
+            auto edges = kgStore->getEdgesFrom(*ent.nodeId, std::nullopt,
+                                               std::max<std::size_t>(config.maxNeighbors, 16), 0);
+            if (!edges) {
+                continue;
+            }
+
+            float anchorBoost = 0.0f;
+            bool anchoredToTitleOrPrimary = false;
+            bool anchoredToBodyClaim = false;
+            for (const auto& edge : edges.value()) {
+                if (docNodeId.has_value() && edge.dstNodeId == *docNodeId) {
+                    if (edge.relation == "primary_topic_of") {
+                        anchoredToTitleOrPrimary = true;
+                        anchorBoost = std::max(anchorBoost, 1.30f);
+                    } else if (edge.relation == "title_mentions") {
+                        anchoredToTitleOrPrimary = true;
+                        anchorBoost = std::max(anchorBoost, 1.20f);
                     }
+                }
+                if (edge.relation == "mentioned_in_segment" && edge.properties.has_value()) {
                     try {
-                        auto props = nlohmann::json::parse(*segEdge.properties);
+                        auto props = nlohmann::json::parse(*edge.properties);
                         const std::string region = props.value("region", "");
                         if (region == "body_claim") {
-                            segmentBoost = std::max(segmentBoost, 1.30f);
+                            anchoredToBodyClaim = true;
+                            anchorBoost = std::max(anchorBoost, 1.15f);
                         } else if (region == "title") {
-                            segmentBoost = std::max(segmentBoost, 1.20f);
+                            anchoredToTitleOrPrimary = true;
+                            anchorBoost = std::max(anchorBoost, 1.20f);
                         }
                     } catch (...) {
                     }
                 }
             }
-            addTerm(node->label.value_or(node->nodeKey), baseScore * segmentBoost);
-
-            auto edges = kgStore->getEdgesFrom(*ent.nodeId, std::nullopt, config.maxNeighbors, 0);
-            if (!edges) {
+            if (!(anchoredToTitleOrPrimary || anchoredToBodyClaim)) {
                 continue;
             }
+
+            const float baseScore =
+                std::clamp(doc.score, 0.1f, 1.0f) * confidence * nodeWeight * anchorBoost;
+            addTerm(node->label.value_or(node->nodeKey), baseScore);
+
             for (const auto& edge : edges.value()) {
                 auto neighbor = getNodeCached(edge.dstNodeId);
                 if (!neighbor.has_value()) {
@@ -557,7 +577,6 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
             }
         }
 
-        auto docNode = kgStore->getNodeByKey("doc:" + doc.documentHash);
         if (docNode && docNode.value().has_value()) {
             auto semanticEdges = kgStore->getEdgesFrom(
                 docNode.value()->id, std::string_view("semantic_neighbor"), config.maxNeighbors, 0);
@@ -597,8 +616,49 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
                             continue;
                         }
                         const float confidence = ent.confidence.value_or(0.5f);
+                        auto neighborDocNode =
+                            kgStore->getNodeByKey("doc:" + neighborDoc.documentHash);
+                        std::optional<std::int64_t> neighborDocNodeId;
+                        if (neighborDocNode && neighborDocNode.value().has_value()) {
+                            neighborDocNodeId = neighborDocNode.value()->id;
+                        }
+                        auto entEdges = kgStore->getEdgesFrom(
+                            *ent.nodeId, std::nullopt,
+                            std::max<std::size_t>(config.maxNeighbors, 16), 0);
+                        if (!entEdges) {
+                            continue;
+                        }
+                        float neighborAnchorBoost = 0.0f;
+                        bool neighborAnchored = false;
+                        for (const auto& edge : entEdges.value()) {
+                            if (neighborDocNodeId.has_value() &&
+                                edge.dstNodeId == *neighborDocNodeId &&
+                                (edge.relation == "primary_topic_of" ||
+                                 edge.relation == "title_mentions")) {
+                                neighborAnchored = true;
+                                neighborAnchorBoost =
+                                    std::max(neighborAnchorBoost,
+                                             edge.relation == "primary_topic_of" ? 1.30f : 1.20f);
+                            }
+                            if (edge.relation == "mentioned_in_segment" &&
+                                edge.properties.has_value()) {
+                                try {
+                                    auto props = nlohmann::json::parse(*edge.properties);
+                                    const std::string region = props.value("region", "");
+                                    if (region == "body_claim" || region == "title") {
+                                        neighborAnchored = true;
+                                        neighborAnchorBoost = std::max(
+                                            neighborAnchorBoost, region == "title" ? 1.20f : 1.15f);
+                                    }
+                                } catch (...) {
+                                }
+                            }
+                        }
+                        if (!neighborAnchored) {
+                            continue;
+                        }
                         addTerm(node->label.value_or(node->nodeKey),
-                                neighborDoc.score * nodeWeight * confidence);
+                                neighborDoc.score * nodeWeight * confidence * neighborAnchorBoost);
                     }
                 }
             }

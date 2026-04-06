@@ -161,10 +161,15 @@ public:
         std::string lastOperation;
         uint64_t lastProcessed = 0;
         uint64_t lastTotal = 0;
+        uint64_t renderedProcessed = 0;
+        uint64_t renderedTotal = 0;
         std::mutex progressMutex;
         std::string lastObservedOperation;
         std::string lastPhase;
         std::string lastMessage;
+        std::string renderedPhase;
+        std::string renderedMessage;
+        const bool tty = ui::stdout_is_tty();
         const auto startTime = std::chrono::steady_clock::now();
         auto nowMillis = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -182,8 +187,7 @@ public:
                     lastObservedOperation = ev.operation;
                 lastPhase = ev.phase;
                 lastMessage = ev.message;
-                if (ev.processed > 0)
-                    lastProcessed = ev.processed;
+                lastProcessed = ev.processed;
                 if (ev.total > 0)
                     lastTotal = ev.total;
             }
@@ -210,17 +214,35 @@ public:
                 }
             } else if (ev.phase == "error") {
                 std::cout << "    " << ui::status_warning(ev.message) << "\n";
-            } else if (ev.phase == "repairing" && ev.total > 0 && ev.processed != lastProcessed) {
-                // Show progress for long-running operations (fts5, embeddings)
-                // even without --verbose, so the user knows it's not hung.
-                std::cout << "    [" << ev.processed << "/" << ev.total << "] " << ev.message
-                          << "\r" << std::flush;
-                lastProcessed = ev.processed;
-                lastTotal = ev.total;
-            } else if (verbose_ && ev.phase == "repairing") {
-                // Extra detail in verbose mode for operations without a total count
-                if (!ev.message.empty()) {
-                    std::cout << "    " << ev.message << "\r" << std::flush;
+            } else if (ev.phase == "repairing") {
+                const bool progressChanged = ev.total > 0 && (ev.processed != renderedProcessed ||
+                                                              ev.total != renderedTotal);
+                const bool messageChanged =
+                    (!ev.message.empty() && ev.message != renderedMessage) ||
+                    ev.phase != renderedPhase;
+
+                if (progressChanged || messageChanged || verbose_) {
+                    std::ostringstream line;
+                    line << "    ";
+                    if (ev.total > 0) {
+                        line << "[" << ev.processed << "/" << ev.total << "] ";
+                    }
+                    if (!ev.message.empty()) {
+                        line << ev.message;
+                    } else if (!ev.phase.empty()) {
+                        line << ev.phase;
+                    }
+
+                    if (tty && progressChanged && !messageChanged && !verbose_) {
+                        std::cout << line.str() << "\r" << std::flush;
+                    } else {
+                        std::cout << line.str() << "\n" << std::flush;
+                    }
+
+                    renderedProcessed = ev.processed;
+                    renderedTotal = ev.total;
+                    renderedPhase = ev.phase;
+                    renderedMessage = ev.message;
                 }
             }
         };
