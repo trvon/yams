@@ -332,10 +332,14 @@ struct SearchEngineConfig {
     size_t rerankTopK = 5;                 // Number of top results to rerank
     size_t rerankSnippetMaxChars = 256;    // Max snippet chars sent to reranker
     float rerankScoreGapThreshold = 0.05f; // Skip rerank if top1-top2 gap exceeds this
-    float rerankWeight = 0.60f;            // Blend weight for model reranking
-    bool rerankReplaceScores = true;       // If true, replace scores entirely; if false, blend
-    bool rerankAdaptiveBlend = false;      // Scale blend weight by reranker confidence
-    float rerankAdaptiveFloor = 0.10f;     // Minimum effective blend weight when adaptive
+    // Minimum score ratio for a multi-source doc to count as "competitive anchored evidence"
+    // and override the score-gap guard. 0.0 = any multi-source doc counts (prior behavior).
+    // E.g. 0.70 means the competitor must score >= 70% of rank-1's score.
+    float rerankAnchoredMinRelativeScore = 0.0f;
+    float rerankWeight = 0.60f;        // Blend weight for model reranking
+    bool rerankReplaceScores = true;   // If true, replace scores entirely; if false, blend
+    bool rerankAdaptiveBlend = false;  // Scale blend weight by reranker confidence
+    float rerankAdaptiveFloor = 0.10f; // Minimum effective blend weight when adaptive
 
     // Fusion candidate limit: how many fused results to keep before reranking
     // 0 = auto: max(userLimit, max(rerankTopK, graphRerankTopN))

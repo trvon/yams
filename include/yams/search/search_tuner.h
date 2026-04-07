@@ -116,6 +116,12 @@ struct TunedParams {
     bool enableSubPhraseRescoring = false;
     float subPhraseScoringPenalty = 0.70f;
 
+    // Cross-reranker controls
+    size_t rerankTopK = 5;
+    // Minimum relative score (vs. rank-1) for a multi-source doc to count as "competitive
+    // anchored evidence" and override the score-gap guard. 0.0 = any doc counts (default).
+    float rerankAnchoredMinRelativeScore = 0.0f;
+
     // Graph reranking controls (dynamically adapted by SearchTuner)
     bool enableGraphRerank = false;
     size_t graphRerankTopN = 25;
@@ -171,6 +177,8 @@ struct TunedParams {
         config.adaptiveVectorSkipMinTopTextScore = adaptiveVectorSkipMinTopTextScore;
         config.enableSubPhraseRescoring = enableSubPhraseRescoring;
         config.subPhraseScoringPenalty = subPhraseScoringPenalty;
+        config.rerankTopK = rerankTopK;
+        config.rerankAnchoredMinRelativeScore = rerankAnchoredMinRelativeScore;
     }
 
     /**
@@ -217,7 +225,9 @@ struct TunedParams {
             {"adaptive_vector_skip_min_text_hits", adaptiveVectorSkipMinTextHits},
             {"adaptive_vector_skip_min_top_text_score", adaptiveVectorSkipMinTopTextScore},
             {"enable_sub_phrase_rescoring", enableSubPhraseRescoring},
-            {"sub_phrase_scoring_penalty", subPhraseScoringPenalty}};
+            {"sub_phrase_scoring_penalty", subPhraseScoringPenalty},
+            {"rerank_top_k", rerankTopK},
+            {"rerank_anchored_min_relative_score", rerankAnchoredMinRelativeScore}};
     }
 };
 
@@ -266,6 +276,11 @@ struct TunedParams {
             params.lexicalTieBreakEpsilon = 0.010f;
             params.fusionEvidenceRescueSlots = 1;
             params.fusionEvidenceRescueMinScore = 0.012f;
+            // Re-score already-retrieved documents via sub-phrase AND queries.
+            // Helps when base FTS returns the entire corpus at low scores and
+            // the standard expansion gates (baseFtsHitCount < N) never fire.
+            params.enableSubPhraseRescoring = true;
+            params.subPhraseScoringPenalty = 0.70f;
             break;
 
         case TuningState::LARGE_PROSE:

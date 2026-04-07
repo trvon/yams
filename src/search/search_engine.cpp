@@ -3731,11 +3731,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             double bestRemainingFusedScore = response.results[1].score;
             bool hasCompetitiveAnchoredEvidence = false;
             rerankGuardAnchoredDocIds.clear();
+            // Minimum score for a multi-source doc to count as "competitive".
+            // 0.0 means any multi-source doc counts (original behavior).
+            const double anchoredMinScore =
+                workingConfig.rerankAnchoredMinRelativeScore > 0.0f
+                    ? response.results[0].score *
+                          static_cast<double>(workingConfig.rerankAnchoredMinRelativeScore)
+                    : 0.0;
             for (size_t i = 1; i < rerankWindow; ++i) {
                 bestRemainingFusedScore =
                     std::max(bestRemainingFusedScore, response.results[i].score);
                 const auto* signal = preFusionSignalForResult(response.results[i]);
-                if (signal != nullptr && signal->hasAnchoring && signal->sources.size() > 1) {
+                if (signal != nullptr && signal->hasAnchoring && signal->sources.size() > 1 &&
+                    response.results[i].score >= anchoredMinScore) {
                     hasCompetitiveAnchoredEvidence = true;
                     rerankGuardAnchoredDocIds.push_back(
                         documentIdForTrace(response.results[i].document.filePath,
