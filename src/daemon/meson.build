@@ -83,7 +83,11 @@ if protobuf_dep.found()
     endif
   endif
 
-  if protoc_version != '' and protoc_version != protobuf_version
+  # Normalize versions: protoc may report "34.1" while protobuf pkg-config
+  # reports "34.1.0". Treat them as matching if one is a prefix of the other.
+  _versions_match = protoc_version == protobuf_version or protobuf_version.startswith(protoc_version + '.') or protoc_version.startswith(protobuf_version + '.')
+
+  if protoc_version != '' and not _versions_match
     fallback_ok = false
     fallback_version = ''
     if dep_protoc_prog.found() and dep_protoc_prog.full_path() != protoc_prog.full_path()
@@ -94,7 +98,7 @@ if protobuf_dep.found()
           fallback_version = fallback_version_text[1]
         endif
       endif
-      fallback_ok = fallback_version == protobuf_version
+      fallback_ok = fallback_version == protobuf_version or protobuf_version.startswith(fallback_version + '.') or fallback_version.startswith(protobuf_version + '.')
     endif
 
     if fallback_ok

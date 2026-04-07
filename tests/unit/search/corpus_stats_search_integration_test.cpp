@@ -42,6 +42,7 @@ TEST_CASE("CorpusStats Search Integration - Windows skip",
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
+#include <yams/search/search_tuner.h>
 #include <yams/storage/corpus_stats.h>
 
 #include <boost/asio/awaitable.hpp>
@@ -643,6 +644,99 @@ TEST_CASE("CorpusStats: ready for SearchTuner FSM", "[corpus_stats][search][inte
     // auto config = tuner.getConfig();
     // CHECK(config.rrfK == 20);
     // CHECK(config.textWeight == Approx(0.50));
+}
+
+// =============================================================================
+// Community Detection: Observability + Latency
+// =============================================================================
+
+namespace {
+
+// Shared helper: build a SMALL_PROSE-tuned SearchEngine over a prose corpus.
+// proseRatio=0.85, pathRelativeDepthAvg=3.0 (not flat) → isScientific()=false → SMALL_PROSE.
+std::unique_ptr<SearchEngine> makeSmallProseEngine(std::shared_ptr<MetadataRepository> repo) {
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.vectorWeight = 0.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.enableParallelExecution = false;
+
+    auto engine = createSearchEngine(repo, nullptr, nullptr, nullptr, config);
+
+    CorpusStats tunerStats;
+    tunerStats.docCount = 500;
+    tunerStats.codeRatio = 0.1f;
+    tunerStats.proseRatio = 0.85f;
+    tunerStats.pathRelativeDepthAvg = 3.0; // not flat → isScientific()=false
+    tunerStats.tagCoverage = 0.3f;         // has tags → isScientific()=false
+    engine->setSearchTuner(std::make_shared<SearchTuner>(tunerStats));
+
+    return engine;
+}
+
+} // namespace
+
+TEST_CASE("community detection: timing key always present when tuner is installed",
+          "[community_detection][search]") {
+    CorpusStatsSearchFixture fix;
+    fix.populateProseCorpus();
+
+    auto engine = makeSmallProseEngine(fix.metadataRepo());
+    REQUIRE(engine != nullptr);
+
+    auto result = engine->searchWithResponse("documents and files", {});
+    REQUIRE(result.has_value());
+
+    const auto& timing = result.value().componentTimingMicros;
+    REQUIRE(timing.count("community_detection") > 0);
+    // Vocabulary scan is O(tokens × vocab_size) — must complete well under 5ms.
+    CHECK(timing.at("community_detection") < 5000);
+}
+
+TEST_CASE("community detection: scientific query sets community_override in debug stats",
+          "[community_detection][search]") {
+    CorpusStatsSearchFixture fix;
+    fix.populateProseCorpus();
+
+    auto engine = makeSmallProseEngine(fix.metadataRepo());
+    REQUIRE(engine != nullptr);
+
+    // 4 scientific vocab hits (protein, gene, disease, treatment) — threshold is 2.
+    auto result = engine->searchWithResponse("protein gene disease treatment", {});
+    REQUIRE(result.has_value());
+
+    const auto& debug = result.value().debugStats;
+    REQUIRE(debug.count("community_override") > 0);
+    CHECK(debug.at("community_override") == "SCIENTIFIC");
+
+    // Timing must still be present.
+    const auto& timing = result.value().componentTimingMicros;
+    REQUIRE(timing.count("community_detection") > 0);
+    CHECK(timing.at("community_detection") < 5000);
+}
+
+TEST_CASE("community detection: neutral query does not set community_override",
+          "[community_detection][search]") {
+    CorpusStatsSearchFixture fix;
+    fix.populateProseCorpus();
+
+    auto engine = makeSmallProseEngine(fix.metadataRepo());
+    REQUIRE(engine != nullptr);
+
+    // No scientific or media vocabulary — override must not fire.
+    auto result = engine->searchWithResponse("how to open a file", {});
+    REQUIRE(result.has_value());
+
+    const auto& debug = result.value().debugStats;
+    CHECK(debug.count("community_override") == 0);
+
+    // Timing key still present (detection always runs when tuner is set).
+    const auto& timing = result.value().componentTimingMicros;
+    REQUIRE(timing.count("community_detection") > 0);
 }
 
 #endif // Windows skip

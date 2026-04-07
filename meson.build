@@ -558,6 +558,27 @@ if not _tl_expected_dep.found()
 endif
 meson.override_dependency('tl-expected', _tl_expected_dep)
 
+# --- libarchive global resolution ---
+# Homebrew on macOS installs libarchive as keg-only; pkg-config won't find it
+# without the Conan-generated pkg_config_path. Resolve once and override only
+# in the fallback path — overriding an already-resolved dependency is an error.
+_libarchive_dep = dependency('libarchive', required: false)
+if not _libarchive_dep.found() and host_machine.system() == 'darwin'
+  _brew_libarchive = '/opt/homebrew/opt/libarchive'
+  if fs.exists(_brew_libarchive / 'include' / 'archive.h')
+    _libarchive_lib = cpp.find_library('archive',
+      dirs: [_brew_libarchive / 'lib'],
+      required: false)
+    if _libarchive_lib.found()
+      _libarchive_dep = declare_dependency(
+        dependencies: _libarchive_lib,
+        include_directories: include_directories(_brew_libarchive / 'include', is_system: true),
+      )
+      meson.override_dependency('libarchive', _libarchive_dep)
+    endif
+  endif
+endif
+
 if wasi_enabled
   # WASI profile: compile a minimal subset (no daemon IPC, no plugins, no downloads).
   # Keep this intentionally small so cross-compilers don't need system libs like

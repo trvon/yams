@@ -40,12 +40,22 @@ struct CorpusStats {
     int64_t docsWithTags{0}; // Documents with at least one tag
     double tagCoverage{0.0}; // docsWithTags / docCount
 
-    int64_t symbolCount{0};    // Total KG entities (from kg_doc_entities)
+    int64_t symbolCount{0};    // Total KG entities (from kg_doc_entities, all extractors)
     double symbolDensity{0.0}; // symbolCount / docCount (entities per document)
 
+    // Entity counts split by extractor source.
+    // nativeSymbolCount: treesitter code symbols (extractor = 'symbol_extractor_v1')
+    // nerEntityCount: GLiNER NER annotations (extractor LIKE 'gliner%')
+    // Keeping symbolCount as the unfiltered total so hasKnowledgeGraph() still works.
+    int64_t nativeSymbolCount{0};
+    double nativeSymbolDensity{0.0};
+    int64_t nerEntityCount{0};
+    double nerEntityDensity{0.0};
+
     // --- Path structure ---
-    double pathDepthAvg{0.0}; // Average path depth (number of '/' segments)
-    double pathDepthMax{0.0}; // Maximum path depth
+    double pathDepthAvg{0.0};         // Average absolute path depth (number of '/' segments)
+    double pathDepthMax{0.0};         // Maximum absolute path depth
+    double pathRelativeDepthAvg{0.0}; // AVG(depth) - MIN(depth): nesting within corpus root
 
     // --- Language distribution (optional, for future use) ---
     std::unordered_map<std::string, int64_t> extensionCounts; // extension -> count
@@ -77,13 +87,17 @@ struct CorpusStats {
 
     // Scientific corpus detection (benchmark-like prose corpora with weak structure)
     //
-    // Historical note: pathDepthAvg alone can be misleading when absolute paths are
-    // indexed (depth appears high even for flat datasets). We therefore accept
-    // either explicitly flat paths OR a low-structure corpus signature.
+    // Uses pathRelativeDepthAvg (nesting depth within the corpus root) to avoid false
+    // negatives from deep absolute filesystem paths — a corpus at /Users/x/papers/ with
+    // all files in one folder has pathDepthAvg≈10 but pathRelativeDepthAvg≈0.
+    //
+    // Uses nativeSymbolDensity (treesitter code symbols only) to avoid false negatives
+    // from GLiNER NER annotations, which are expected to be high in scientific prose
+    // corpora and must not be conflated with code structure signals.
     [[nodiscard]] bool isScientific() const noexcept {
-        const bool flatPaths = pathDepthAvg < 1.5;
-        const bool lowStructure = tagCoverage < 0.1 && symbolDensity < 0.1;
-        return isProseDominant() && (flatPaths || lowStructure);
+        const bool flatPaths = pathRelativeDepthAvg < 1.5;
+        const bool lowCodeStructure = tagCoverage < 0.1 && nativeSymbolDensity < 0.1;
+        return isProseDominant() && (flatPaths || lowCodeStructure);
     }
 
     /**
@@ -104,8 +118,13 @@ struct CorpusStats {
         j["tag_coverage"] = tagCoverage;
         j["symbol_count"] = symbolCount;
         j["symbol_density"] = symbolDensity;
+        j["native_symbol_count"] = nativeSymbolCount;
+        j["native_symbol_density"] = nativeSymbolDensity;
+        j["ner_entity_count"] = nerEntityCount;
+        j["ner_entity_density"] = nerEntityDensity;
         j["path_depth_avg"] = pathDepthAvg;
         j["path_depth_max"] = pathDepthMax;
+        j["path_relative_depth_avg"] = pathRelativeDepthAvg;
         j["computed_at_ms"] = computedAtMs;
 
         // Extension breakdown (top 10)
@@ -170,10 +189,20 @@ struct CorpusStats {
             stats.symbolCount = j["symbol_count"].get<int64_t>();
         if (j.contains("symbol_density"))
             stats.symbolDensity = j["symbol_density"].get<double>();
+        if (j.contains("native_symbol_count"))
+            stats.nativeSymbolCount = j["native_symbol_count"].get<int64_t>();
+        if (j.contains("native_symbol_density"))
+            stats.nativeSymbolDensity = j["native_symbol_density"].get<double>();
+        if (j.contains("ner_entity_count"))
+            stats.nerEntityCount = j["ner_entity_count"].get<int64_t>();
+        if (j.contains("ner_entity_density"))
+            stats.nerEntityDensity = j["ner_entity_density"].get<double>();
         if (j.contains("path_depth_avg"))
             stats.pathDepthAvg = j["path_depth_avg"].get<double>();
         if (j.contains("path_depth_max"))
             stats.pathDepthMax = j["path_depth_max"].get<double>();
+        if (j.contains("path_relative_depth_avg"))
+            stats.pathRelativeDepthAvg = j["path_relative_depth_avg"].get<double>();
         if (j.contains("computed_at_ms"))
             stats.computedAtMs = j["computed_at_ms"].get<int64_t>();
         if (j.contains("top_extensions") && j["top_extensions"].is_object()) {

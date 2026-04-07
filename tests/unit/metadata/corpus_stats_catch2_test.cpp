@@ -22,6 +22,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/search/search_tuner.h>
 #include <yams/storage/corpus_stats.h>
 
 #include <chrono>
@@ -109,6 +110,21 @@ struct CorpusStatsFixture {
         REQUIRE(result.has_value());
     }
 
+    // Helper to insert a kg_doc_entities row directly (for extractor-split tests).
+    void addDocEntity(int64_t docId, const std::string& entityText, const std::string& extractor) {
+        auto result = pool_->withConnection([&](auto& db) -> yams::Result<void> {
+            auto stmtR = db.prepare("INSERT INTO kg_doc_entities "
+                                    "(document_id, entity_text, node_id, start_offset, end_offset, "
+                                    "confidence, extractor) VALUES (?, ?, NULL, 0, 0, 1.0, ?)");
+            REQUIRE(stmtR.has_value());
+            auto& stmt = stmtR.value();
+            REQUIRE(stmt.bindAll(docId, entityText, extractor).has_value());
+            REQUIRE(stmt.step().has_value());
+            return {};
+        });
+        REQUIRE(result.has_value());
+    }
+
     std::filesystem::path dbPath_;
     std::unique_ptr<ConnectionPool> pool_;
     std::unique_ptr<MetadataRepository> repository_;
@@ -169,12 +185,53 @@ TEST_CASE("CorpusStats: classification helpers", "[unit][corpus_stats]") {
         CHECK(stats.isMixed());
     }
 
-    SECTION("scientific corpus detection") {
+    SECTION("scientific corpus detection - flat relative depth") {
         CorpusStats stats;
-        stats.docCount = 1000;
-        stats.proseRatio = 0.9;
-        stats.pathDepthAvg = 1.0;
+        stats.docCount = 150;
+        stats.proseRatio = 0.95;
+        // Corpus stored at deep absolute path (e.g. /Users/x/papers/), but internally flat.
+        stats.pathDepthAvg = 10.0;        // absolute depth is high
+        stats.pathRelativeDepthAvg = 0.3; // but relative nesting is near-zero
+        stats.tagCoverage = 0.02;
+        stats.nativeSymbolDensity = 0.0; // no code symbols (treesitter)
+        stats.nerEntityDensity = 1.5;    // high GLiNER NER — expected for biomedical prose
+        stats.symbolDensity = 1.5;       // total = NER (hasKnowledgeGraph uses this)
+
+        CHECK(stats.isScientific()); // passes via flatPaths on relative depth
+    }
+
+    SECTION("scientific corpus detection - low code structure") {
+        CorpusStats stats;
+        stats.docCount = 200;
+        stats.proseRatio = 0.90;
+        stats.pathRelativeDepthAvg = 2.0; // not flat — needs the lowCodeStructure path
         stats.tagCoverage = 0.05;
+        stats.nativeSymbolDensity = 0.0; // no code symbols
+
+        CHECK(stats.isScientific()); // passes via lowCodeStructure (no native symbols)
+    }
+
+    SECTION("scientific corpus blocked by high nativeSymbolDensity") {
+        CorpusStats stats;
+        stats.docCount = 100;
+        stats.proseRatio = 0.75;
+        stats.pathRelativeDepthAvg = 3.0; // not flat
+        stats.tagCoverage = 0.03;
+        stats.nativeSymbolDensity = 2.5; // real treesitter code symbols present
+
+        CHECK_FALSE(stats.isScientific());
+    }
+
+    SECTION("absolute pathDepthAvg alone no longer determines scientific") {
+        CorpusStats stats;
+        stats.docCount = 150;
+        stats.proseRatio = 0.95;
+        // Old behaviour: pathDepthAvg = 10 would cause isScientific() = false.
+        // New behaviour: pathRelativeDepthAvg = 0 → isScientific() = true.
+        stats.pathDepthAvg = 10.0;
+        stats.pathRelativeDepthAvg = 0.0;
+        stats.tagCoverage = 0.01;
+        stats.nativeSymbolDensity = 0.0;
 
         CHECK(stats.isScientific());
     }
@@ -277,8 +334,13 @@ TEST_CASE("CorpusStats: JSON roundtrip", "[unit][corpus_stats]") {
     original.tagCoverage = 0.32;
     original.symbolCount = 5000;
     original.symbolDensity = 4.05;
+    original.nativeSymbolCount = 2000;
+    original.nativeSymbolDensity = 1.62;
+    original.nerEntityCount = 3000;
+    original.nerEntityDensity = 2.43;
     original.pathDepthAvg = 3.5;
     original.pathDepthMax = 8.0;
+    original.pathRelativeDepthAvg = 1.2;
     original.computedAtMs = 1704067200000;
     original.extensionCounts[".cpp"] = 300;
     original.extensionCounts[".py"] = 200;
@@ -311,8 +373,13 @@ TEST_CASE("CorpusStats: JSON roundtrip", "[unit][corpus_stats]") {
     CHECK(restored.tagCoverage == Approx(original.tagCoverage));
     CHECK(restored.symbolCount == original.symbolCount);
     CHECK(restored.symbolDensity == Approx(original.symbolDensity));
+    CHECK(restored.nativeSymbolCount == original.nativeSymbolCount);
+    CHECK(restored.nativeSymbolDensity == Approx(original.nativeSymbolDensity));
+    CHECK(restored.nerEntityCount == original.nerEntityCount);
+    CHECK(restored.nerEntityDensity == Approx(original.nerEntityDensity));
     CHECK(restored.pathDepthAvg == Approx(original.pathDepthAvg));
     CHECK(restored.pathDepthMax == Approx(original.pathDepthMax));
+    CHECK(restored.pathRelativeDepthAvg == Approx(original.pathRelativeDepthAvg));
     CHECK(restored.computedAtMs == original.computedAtMs);
     CHECK(restored.extensionCounts[".cpp"] == 300);
     CHECK(restored.extensionCounts[".py"] == 200);
@@ -518,9 +585,13 @@ TEST_CASE("getCorpusStats: scientific corpus pattern", "[unit][corpus_stats][int
     // All prose, shallow paths (depth=2 for root-level files), no tags
     CHECK(stats.isProseDominant());
     CHECK(stats.pathDepthAvg == Approx(2.0).margin(0.1)); // Root-level files have depth 2
+    // pathRelativeDepthAvg = AVG - MIN = 2 - 2 = 0 (all files at same depth)
+    CHECK(stats.pathRelativeDepthAvg == Approx(0.0).margin(0.1));
     CHECK(stats.tagCoverage < 0.1);
-    // Note: isScientific() checks pathDepthAvg < 1.5, which won't match for root-level files
-    // This is expected behavior - scientific detection may need tuning for actual use cases
+    CHECK(stats.nativeSymbolDensity == 0.0); // no code symbols inserted
+    // isScientific() uses pathRelativeDepthAvg < 1.5 (flat) and nativeSymbolDensity < 0.1
+    // Both hold here, so the corpus is correctly classified as scientific.
+    CHECK(stats.isScientific());
 }
 
 TEST_CASE("getCorpusStats: timestamp is set", "[unit][corpus_stats][integration]") {
@@ -585,5 +656,135 @@ TEST_CASE("Extension classification sets", "[unit][corpus_stats]") {
             CHECK(kCodeExtensions.count(ext) == 0);
             CHECK(kBinaryExtensions.count(ext) == 0);
         }
+    }
+}
+
+// =============================================================================
+// Extractor-split entity count tests (nativeSymbolCount / nerEntityCount)
+// =============================================================================
+
+TEST_CASE("getCorpusStats: extractor-split entity counts", "[unit][corpus_stats][integration]") {
+    CorpusStatsFixture fix;
+
+    auto docId1 = fix.insertDocument("/paper1.txt", "hash1", 5000);
+    auto docId2 = fix.insertDocument("/paper2.txt", "hash2", 6000);
+
+    // Insert 3 GLiNER NER entities across the two documents
+    fix.addDocEntity(docId1, "monocytes", "gliner_title_nl");
+    fix.addDocEntity(docId1, "inflammatory disease", "gliner_title_nl");
+    fix.addDocEntity(docId2, "cytokine", "gliner_title_nl");
+
+    // Insert 2 treesitter symbols (simulating a code file also in the corpus)
+    fix.addDocEntity(docId1, "parseResult", "symbol_extractor_v1");
+    fix.addDocEntity(docId2, "TokenStream", "symbol_extractor_v1");
+
+    fix.repository_->signalCorpusStatsStale();
+    auto result = fix.repository_->getCorpusStats();
+    REQUIRE(result.has_value());
+
+    auto stats = result.value();
+
+    // Total (all extractors)
+    CHECK(stats.symbolCount == 5);
+    CHECK(stats.symbolDensity == Approx(5.0 / 2.0).margin(0.01));
+
+    // Treesitter symbols only
+    CHECK(stats.nativeSymbolCount == 2);
+    CHECK(stats.nativeSymbolDensity == Approx(2.0 / 2.0).margin(0.01));
+
+    // GLiNER NER only
+    CHECK(stats.nerEntityCount == 3);
+    CHECK(stats.nerEntityDensity == Approx(3.0 / 2.0).margin(0.01));
+}
+
+TEST_CASE("getCorpusStats: pathRelativeDepthAvg correctness", "[unit][corpus_stats][integration]") {
+    CorpusStatsFixture fix;
+
+    // All files at the same absolute depth (depth=2 for "/file.txt" style paths)
+    fix.insertDocument("/paper1.txt", "h1", 1000);
+    fix.insertDocument("/paper2.txt", "h2", 1000);
+    fix.insertDocument("/paper3.txt", "h3", 1000);
+
+    auto result = fix.repository_->getCorpusStats();
+    REQUIRE(result.has_value());
+
+    // All files at same depth → relative depth = AVG - MIN = 0
+    CHECK(result.value().pathRelativeDepthAvg == Approx(0.0).margin(0.01));
+
+    // Add a nested file
+    fix.insertDocument("/subdir/nested.txt", "h4", 1000);
+    fix.repository_->signalCorpusStatsStale();
+
+    auto result2 = fix.repository_->getCorpusStats();
+    REQUIRE(result2.has_value());
+
+    // Depths: 2, 2, 2, 3 → AVG=2.25, MIN=2 → relative=0.25
+    CHECK(result2.value().pathRelativeDepthAvg == Approx(0.25).margin(0.05));
+    // pathDepthAvg is still absolute (2.25)
+    CHECK(result2.value().pathDepthAvg == Approx(2.25).margin(0.05));
+}
+
+// =============================================================================
+// SearchTuner FSM tests using corrected CorpusStats
+// =============================================================================
+
+TEST_CASE("SearchTuner: biomedical prose corpus selects SCIENTIFIC profile",
+          "[unit][corpus_stats][search_tuner]") {
+    using namespace yams::search;
+
+    // Simulate SciFact-like corpus: 150 prose docs, deep absolute paths, zero code symbols,
+    // high GLiNER NER density (1.5 annotations/doc).
+    CorpusStats stats;
+    stats.docCount = 150;
+    stats.proseRatio = 0.95;
+    stats.codeRatio = 0.05;
+    stats.binaryRatio = 0.0;
+    stats.pathDepthAvg = 10.0;        // deep absolute path (e.g. /Users/x/.yams/papers/)
+    stats.pathRelativeDepthAvg = 0.3; // but corpus is internally flat
+    stats.tagCoverage = 0.02;
+    stats.nativeSymbolDensity = 0.0; // no treesitter code symbols
+    stats.nerEntityDensity = 1.5;    // GLiNER NER annotations (biomedical)
+    stats.symbolDensity = 1.5;       // total = NER
+    stats.symbolCount = 225;
+    stats.embeddingCoverage = 0.95;
+
+    SearchTuner tuner(stats);
+    CHECK(tuner.currentState() == TuningState::SCIENTIFIC);
+
+    // SCIENTIFIC profile should apply lower similarity threshold and sub-phrase rescoring
+    auto config = tuner.getConfig();
+    CHECK(config.similarityThreshold == Approx(0.40f).margin(0.01f));
+    CHECK(config.enableSubPhraseRescoring == true);
+    CHECK(config.rerankAnchoredMinRelativeScore == Approx(0.70f).margin(0.01f));
+}
+
+TEST_CASE("SearchTuner: code corpus still selects code profile after CorpusStats fix",
+          "[unit][corpus_stats][search_tuner]") {
+    using namespace yams::search;
+
+    CorpusStats stats;
+    stats.docCount = 500;
+    stats.codeRatio = 0.85;
+    stats.proseRatio = 0.15;
+    stats.pathDepthAvg = 4.0;
+    stats.pathRelativeDepthAvg = 2.0;
+    stats.nativeSymbolDensity = 3.5; // many treesitter symbols
+    stats.tagCoverage = 0.0;
+
+    SearchTuner tuner(stats);
+    CHECK(tuner.currentState() == TuningState::SMALL_CODE);
+}
+
+TEST_CASE("SearchTuner: tuningStateToString covers all states",
+          "[unit][corpus_stats][search_tuner]") {
+    using namespace yams::search;
+
+    // Verify every enum value has a non-UNKNOWN string mapping
+    for (auto state : {TuningState::SMALL_CODE, TuningState::LARGE_CODE, TuningState::SMALL_PROSE,
+                       TuningState::LARGE_PROSE, TuningState::SCIENTIFIC, TuningState::MIXED,
+                       TuningState::MIXED_PRECISION, TuningState::MINIMAL, TuningState::MEDIA}) {
+        std::string name = tuningStateToString(state);
+        CHECK(name != std::string("UNKNOWN"));
+        CHECK(!name.empty());
     }
 }

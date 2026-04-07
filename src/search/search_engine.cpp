@@ -945,6 +945,71 @@ QueryIntent detectQueryIntent(const std::string& query) {
     return QueryIntent::Mixed;
 }
 
+// Detect which content community a query targets and return a tuning-state override
+// if the query clearly belongs to a different domain than the global corpus profile.
+// Returns std::nullopt when no confident override can be made.
+// This is pure lexical signal matching — no inference, no ONNX calls.
+std::optional<TuningState> detectQueryCommunity(const std::string& query, QueryIntent intent,
+                                                TuningState globalState) {
+    // Code / path queries always benefit from a code profile regardless of corpus type.
+    if (intent == QueryIntent::Code || intent == QueryIntent::Path) {
+        const bool alreadyCode =
+            (globalState == TuningState::SMALL_CODE || globalState == TuningState::LARGE_CODE);
+        if (!alreadyCode) {
+            return TuningState::SMALL_CODE;
+        }
+        return std::nullopt;
+    }
+
+    if (intent == QueryIntent::Prose || intent == QueryIntent::Mixed) {
+        const auto tokens = tokenizeLower(query);
+
+        // Scientific vocabulary: require ≥ 2 hits for sufficient confidence.
+        static constexpr std::array kScientificTerms = {
+            std::string_view{"study"},       std::string_view{"analysis"},
+            std::string_view{"trial"},       std::string_view{"effect"},
+            std::string_view{"association"}, std::string_view{"mechanism"},
+            std::string_view{"inhibit"},     std::string_view{"protein"},
+            std::string_view{"gene"},        std::string_view{"disease"},
+            std::string_view{"treatment"},   std::string_view{"cohort"},
+            std::string_view{"hypothesis"},  std::string_view{"evidence"},
+            std::string_view{"receptor"},    std::string_view{"exposure"},
+            std::string_view{"mutation"},    std::string_view{"clinical"},
+        };
+        int sciHits = 0;
+        for (const auto& tok : tokens) {
+            for (const auto& sci : kScientificTerms) {
+                if (tok == sci) {
+                    ++sciHits;
+                    break;
+                }
+            }
+        }
+        if (sciHits >= 2 && globalState != TuningState::SCIENTIFIC) {
+            return TuningState::SCIENTIFIC;
+        }
+
+        // Media vocabulary: single hit is sufficient — these terms are highly specific.
+        static constexpr std::array kMediaTerms = {
+            std::string_view{"photo"},      std::string_view{"video"},
+            std::string_view{"image"},      std::string_view{"audio"},
+            std::string_view{"screenshot"}, std::string_view{"recording"},
+            std::string_view{"camera"},     std::string_view{"album"},
+            std::string_view{"clip"},       std::string_view{"thumbnail"},
+            std::string_view{"podcast"},    std::string_view{"playlist"},
+        };
+        for (const auto& tok : tokens) {
+            for (const auto& med : kMediaTerms) {
+                if (tok == med) {
+                    return TuningState::MEDIA;
+                }
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
 void applyIntentWeights(SearchEngineConfig& config, QueryIntent intent) {
     if (!config.enableIntentAdaptiveWeighting) {
         return;
@@ -1730,6 +1795,34 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     workingConfig.zoomLevel = effectiveZoomLevel;
     applyNavigationZoomPolicy(workingConfig, effectiveZoomLevel);
     applyIntentWeights(workingConfig, intent);
+
+    // Per-query community override: if the query signals a different domain than the
+    // global corpus profile, apply that community's tuned params on top. This lets a
+    // scientific query in a mixed corpus use SCIENTIFIC params, a code query in a prose
+    // corpus use code params, and a media query use MEDIA params — all without any
+    // offline clustering or additional inference.
+    if (tuner_) {
+        const auto cdStart = std::chrono::steady_clock::now();
+        const auto communityOverride = detectQueryCommunity(query, intent, tuner_->currentState());
+        response.componentTimingMicros["community_detection"] =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                  cdStart)
+                .count();
+
+        if (communityOverride.has_value()) {
+            const std::string overrideState = tuningStateToString(communityOverride.value());
+            response.debugStats["community_override"] = overrideState;
+            spdlog::debug(
+                "[Search] community override: global={} → {} (detection={}μs, query='{}')",
+                tuningStateToString(tuner_->currentState()), overrideState,
+                response.componentTimingMicros.at("community_detection"), query);
+            getTunedParams(communityOverride.value()).applyTo(workingConfig);
+            // Re-apply intent weights on top of the new profile so that the
+            // intent-specific component scaling is preserved.
+            applyIntentWeights(workingConfig, intent);
+        }
+    }
+
     if (params.semanticOnly) {
         workingConfig.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
         workingConfig.similarityThreshold = std::min(workingConfig.similarityThreshold, 0.30f);

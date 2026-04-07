@@ -25,7 +25,8 @@ enum class TuningState {
     SCIENTIFIC,      // Prose with no path/tag structure (benchmark-like corpora)
     MIXED,           // Balanced content types
     MIXED_PRECISION, // MIXED tuned for lexical precision guardrails
-    MINIMAL          // < 100 docs, any type (very small corpus)
+    MINIMAL,         // < 100 docs, any type (very small corpus)
+    MEDIA            // Binary/media-heavy corpus (images, audio, video)
 };
 
 /**
@@ -49,6 +50,8 @@ enum class TuningState {
             return "MIXED_PRECISION";
         case TuningState::MINIMAL:
             return "MINIMAL";
+        case TuningState::MEDIA:
+            return "MEDIA";
     }
     return "UNKNOWN";
 }
@@ -321,6 +324,10 @@ struct TunedParams {
             // returns the entire corpus at low scores (expansion gates never fire).
             params.enableSubPhraseRescoring = true;
             params.subPhraseScoringPenalty = 0.70f;
+            // Require anchored competitors to score >= 70% of rank-1 before allowing
+            // cross-reranker to run. Prevents spurious reranking when a weak multi-source
+            // doc appears in the window (same guard already in SMALL_PROSE).
+            params.rerankAnchoredMinRelativeScore = 0.70f;
             break;
 
         case TuningState::MIXED:
@@ -376,6 +383,20 @@ struct TunedParams {
             params.kgWeight = 0.00f;
             params.tagWeight = 0.03f;
             params.metadataWeight = 0.02f;
+            break;
+
+        case TuningState::MEDIA:
+            // Binary/media-heavy corpus: titles + tags matter; body text and dense
+            // embeddings are less reliable for images/audio/video.
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+            params.rrfK = 20;
+            params.textWeight = 0.25f;   // filename/title only
+            params.vectorWeight = 0.20f; // embeddings unreliable for binary content
+            params.entityVectorWeight = 0.00f;
+            params.pathTreeWeight = 0.15f; // folder organisation still useful
+            params.kgWeight = 0.25f;       // EXIF, user tags, GLiNER annotations
+            params.tagWeight = 0.10f;
+            params.metadataWeight = 0.05f;
             break;
     }
 

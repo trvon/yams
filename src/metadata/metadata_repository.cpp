@@ -3298,12 +3298,13 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             // 1. Basic document metrics: count, total size, avg size, path depth
             {
                 auto stmtResult = db.prepare(R"(
-                    SELECT 
+                    SELECT
                         COUNT(*) as doc_count,
                         COALESCE(SUM(file_size), 0) as total_size,
                         COALESCE(AVG(file_size), 0) as avg_size,
                         COALESCE(AVG(path_depth), 0) as avg_depth,
-                        COALESCE(MAX(path_depth), 0) as max_depth
+                        COALESCE(MAX(path_depth), 0) as max_depth,
+                        COALESCE(AVG(path_depth) - MIN(path_depth), 0) as relative_depth_avg
                     FROM documents
                 )");
                 if (!stmtResult)
@@ -3319,6 +3320,7 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                     stats.avgDocLengthBytes = stmt.getDouble(2);
                     stats.pathDepthAvg = stmt.getDouble(3);
                     stats.pathDepthMax = stmt.getDouble(4);
+                    stats.pathRelativeDepthAvg = stmt.getDouble(5);
                 }
             }
 
@@ -3436,6 +3438,7 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                 }
 
                 if (tableExists) {
+                    // Total count (all extractors) — preserves hasKnowledgeGraph() behaviour.
                     auto stmtResult = db.prepare("SELECT COUNT(*) FROM kg_doc_entities");
                     if (stmtResult) {
                         auto& stmt = stmtResult.value();
@@ -3444,6 +3447,33 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                             stats.symbolCount = stmt.getInt64(0);
                             stats.symbolDensity = static_cast<double>(stats.symbolCount) /
                                                   static_cast<double>(stats.docCount);
+                        }
+                    }
+
+                    // Native code symbols (treesitter).
+                    auto nativeResult = db.prepare("SELECT COUNT(*) FROM kg_doc_entities"
+                                                   " WHERE extractor = 'symbol_extractor_v1'");
+                    if (nativeResult) {
+                        auto& stmt = nativeResult.value();
+                        auto stepResult = stmt.step();
+                        if (stepResult && stepResult.value()) {
+                            stats.nativeSymbolCount = stmt.getInt64(0);
+                            stats.nativeSymbolDensity =
+                                static_cast<double>(stats.nativeSymbolCount) /
+                                static_cast<double>(stats.docCount);
+                        }
+                    }
+
+                    // GLiNER NER annotations.
+                    auto nerResult = db.prepare("SELECT COUNT(*) FROM kg_doc_entities"
+                                                " WHERE extractor LIKE 'gliner%'");
+                    if (nerResult) {
+                        auto& stmt = nerResult.value();
+                        auto stepResult = stmt.step();
+                        if (stepResult && stepResult.value()) {
+                            stats.nerEntityCount = stmt.getInt64(0);
+                            stats.nerEntityDensity = static_cast<double>(stats.nerEntityCount) /
+                                                     static_cast<double>(stats.docCount);
                         }
                     }
                 }

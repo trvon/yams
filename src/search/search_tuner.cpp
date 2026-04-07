@@ -528,9 +528,9 @@ TuningState SearchTuner::computeState(const storage::CorpusStats& stats, std::st
     } else if (isScientific) {
         state = TuningState::SCIENTIFIC;
         reason << "prose_dominant (" << static_cast<int>(stats.proseRatio * 100)
-               << "%), benchmark_like (path_depth=" << stats.pathDepthAvg
+               << "%), benchmark_like (relative_path_depth=" << stats.pathRelativeDepthAvg
                << ", tag_coverage=" << static_cast<int>(stats.tagCoverage * 100)
-               << "%, symbol_density=" << stats.symbolDensity << ")";
+               << "%, native_symbol_density=" << stats.nativeSymbolDensity << ")";
     } else if (isCode && isSmall) {
         state = TuningState::SMALL_CODE;
         reason << "code_dominant (" << static_cast<int>(stats.codeRatio * 100) << "%), small ("
