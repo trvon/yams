@@ -2,7 +2,7 @@
 
 The YAMS MCP server exposes **3 composite tools** — `query`, `execute`, and `session` — that consolidate all operations into a compressed tool surface (~800 tokens vs ~4,000 for individual tools). Agents discover operation schemas on demand via the built-in `describe` operation.
 
-For design rationale and architecture, see [mcp-code-mode.md](../design/mcp-code-mode.md).
+<!-- Design rationale: docs/design/mcp-code-mode.md (internal) -->
 
 ## Overview
 

@@ -103,7 +103,7 @@ This means mobile bindings should be evaluated as a corpus SDK, not as an infere
 
 ## Build & Distribution
 
-- CI packaging and ABI verification live in [mobile-builds.md](/Users/trevon/work/apps/yams-app/yams/docs/developer/mobile-builds.md).
+- CI packaging and ABI verification live in `mobile-builds.md` (in the [yams-app](https://github.com/trvon/yams-app) repository).
 - The current CI artifact is a host-native shared library bundle for validation and downstream
   integration work, not yet a shipped `.xcframework` or `.aar`.
 - The intended layering is:

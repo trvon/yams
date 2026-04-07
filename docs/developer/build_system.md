@@ -1,6 +1,8 @@
 # Build System (Developer Reference)
 
-Compact overview of how to build, test, and extend YAMS. Start with the **Quick Loop**, then dive deeper.
+Detailed reference for the YAMS build infrastructure, test organization, and CI flow.
+
+For step-by-step build instructions, see [Developer Setup](setup.md). For compiler requirements and platform support, see [BUILD.md](../BUILD.md).
 
 ## 1. Stack
 
@@ -9,95 +11,14 @@ Compact overview of how to build, test, and extend YAMS. Start with the **Quick 
 | Build | Meson ≥ 1.2 |
 | Dependencies | Conan 2.x |
 | Generator | Ninja (preferred) |
-| Compilers | Clang ≥14 / GCC ≥11 / MSVC 193+ |
 | Optional | ccache, lld, clang-tidy |
-
-### Compiler Support
-
-| Platform | Compiler | Minimum | Recommended |
-|----------|----------|---------|-------------|
-| Linux/macOS | GCC | 11+ | 13+ |
-| Linux/macOS | Clang | 14+ | 16+ |
-| Windows | MSVC | 193 (VS 2022) | 194+ (VS 2022 17.10+) |
 
 ## 2. Directory Layout
 Out-of-source builds under `builddir/`:
 - Debug: `builddir/` (default with Meson)
 - Release: `build-release/`
 
-## 3. One-Time: Profile
-```bash
-conan profile detect --force
-```
-
-## 4. Quick Loop
-
-### Linux/macOS
-
-**Using setup script (recommended):**
-```bash
-# Debug build (includes tests)
-./setup.sh Debug
-meson compile -C builddir
-
-# Test
-meson test -C builddir
-```
-
-**Manual (Conan + Meson):**
-```bash
-# Debug dependencies
-conan install . -of build/debug -s build_type=Debug -b missing
-
-# Initial configure
-meson setup builddir \
-  --prefix /usr/local \
-  --native-file build/debug/build-debug/conan/conan_meson_native.ini
-
-# Build
-ninja -C builddir
-
-# Test
-meson test -C builddir
-```
-
-### Windows
-
-**Using setup script (recommended):**
-```pwsh
-# Debug build (includes tests)
-./setup.ps1 Debug
-meson compile -C builddir
-
-# Test
-meson test -C builddir
-```
-
-**Manual (Conan + Meson):**
-```pwsh
-# Export local recipes (required once)
-conan export conan/qpdf --name=qpdf --version=11.9.0
-conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
-
-# Debug dependencies
-conan install . -of build\debug `
-  -pr:h conan/profiles/host-windows-msvc -pr:b default `
-  -s build_type=Debug --build=missing
-
-# Initial configure
-meson setup builddir `
-  --native-file build\debug\build-debug\conan\conan_meson_native.ini
-
-# Build
-meson compile -C builddir
-
-# Test
-meson test -C builddir
-```
-
-See the repo `setup.sh` / `setup.ps1` for environment variables and advanced options.
-
-## 5. ONNX / GenAI Paths
+## 3. ONNX / GenAI Paths
 Options (Conan scope):
 - `enable_onnx` (default True) — toggles embedding / GenAI integration
 - `use_conan_onnx` (default False) — when True pull packaged ORT; when False allow system ORT
@@ -106,7 +27,7 @@ Meson options:
 - `enable-onnx` — mirrors `enable_onnx`
 - `onnx-runtime-path` — optional path to system ONNX Runtime
 
-## 6. Configure & Build
+## 4. Configure & Build
 ```bash
 # Using Meson (preferred)
 meson setup builddir
@@ -116,7 +37,7 @@ ninja -C builddir
 sudo meson install -C builddir
 ```
 
-## 7. Tests
+## 5. Tests
 
 ### Meson Test System (Primary)
 
@@ -207,7 +128,7 @@ Examples:
 
 **Note**: Test organization and suite naming are being standardized; treat suite labels as best-effort until this work completes.
 
-## 8. Key Build Options
+## 6. Key Build Options
 
 | Meson Option | Purpose |
 |--------------|---------|
@@ -223,11 +144,11 @@ Configure options:
 meson setup builddir -Denable-onnx=true -Dbuild-cli=true
 ```
 
-## 9. Dependency Management Notes
+## 7. Dependency Management Notes
 
 Edit `conanfile.py` then re-run `conan install` for each configuration. Prefer pinned versions. Use `--build=missing` to compile absent binaries.
 
-## 10. Common Scenarios
+## 8. Common Scenarios
 
 | Scenario | Commands |
 |---------|----------|
@@ -235,7 +156,7 @@ Edit `conanfile.py` then re-run `conan install` for each configuration. Prefer p
 | System-only (no Conan) | Provide all libs, configure manually with flags |
 | Release packaging | Conan install (Release) → meson setup → ninja → package |
 
-## 11. CI Flow
+## 9. CI Flow
 
 ```bash
 conan profile detect --force
@@ -247,7 +168,7 @@ meson test -C build/release
 
 Cache `~/.conan` + optionally `build/`.
 
-## 12. Troubleshooting Quick Table
+## 10. Troubleshooting Quick Table
 
 | Symptom | Fix |
 |---------|-----|
@@ -259,13 +180,13 @@ Cache `~/.conan` + optionally `build/`.
 | qpdf: "recompile with -fPIC" | `conan remove 'qpdf/*' -c` then re-setup |
 | Clang: "cannot find -lstdc++" | Install libstdc++ or use `YAMS_COMPILER=gcc` |
 | Windows: Boost build failures | Install v143 toolset via VS Installer, clean Boost cache |
-| Windows: Missing recipes | Export qpdf and onnxruntime recipes (see Quick Loop) |
+| Windows: Missing recipes | Export qpdf and onnxruntime recipes (see [Developer Setup](setup.md)) |
 
-## 13. Conventions
+## 11. Conventions
 
 Out-of-source only. Keep Release for perf/benchmarks; iterate in Debug. Avoid committing generated build artifacts.
 
-## 14. Test Organization (Active Improvement)
+## 12. Test Organization (Active Improvement)
 
 **Current State**: Test names and suites have some inconsistencies (e.g., `unit_isolated_*` tests in bench suite, PBI numbers in names).
 

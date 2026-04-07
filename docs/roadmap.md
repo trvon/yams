@@ -15,7 +15,7 @@
 
 ---
 
-## Current Release: v0.8.x
+## Current Release: v0.12.x
 
 ### Storage Engine
 - Content-addressed blobs (SHA-256), Rabin chunking, zstd/LZMA compression
@@ -23,14 +23,17 @@
 - Path tree indexing with `path_prefix`, `reverse_path`, `path_hash` indexes
 - Snapshot versioning with automatic git metadata detection (commit, branch, remote)
 - Tree-based diff with Merkle comparison and rename detection (≥99% accuracy)
+- Download manager with stop/start/resume controls via daemon
 
 ### Search
 - **Hybrid search engine**: FTS5 keyword + vector similarity + Knowledge Graph fusion
   - Reciprocal Rank Fusion (RRF) as default fusion strategy
+  - WEIGHTED_MAX fusion strategy for benchmark corpora
   - Configurable weights: keyword, vector, KG, tag, metadata, symbol
+- **TurboQuant vector compression**: End-to-end packed-vector storage, reranking, and direct compressed ANN traversal with persisted per-coordinate calibration
 - **Hierarchical embeddings**: document-level → chunk-level two-stage refinement
   - `twoStageVectorSearch` with configurable `doc_stage_limit`, `chunk_stage_limit`, `hierarchy_boost`
-- **Symbol-aware search**: tree-sitter code analysis (15+ languages including Solidity)
+- **Symbol-aware search**: tree-sitter code analysis (15+ languages including Solidity, Zig)
   - `SymbolEnricher` extracts definitions, references, call graphs from KG
   - Symbol metadata boosts ranking (`symbol_weight` default: 0.15)
 - **Query processing**: literal extraction, qualifier parsing (lines:, pages:, section:, name:, ext:, mime:)
@@ -46,117 +49,101 @@
 
 ### CLI & MCP
 - CLI-first design; MCP server via stdio only (no HTTP/WebSocket in OSS)
+- MCP code mode (composite tools: query, execute, session)
 - `diff`: tree-based comparison with rename detection (default); `--flat-diff` for legacy
 - `session`: pinned paths with `pin`, `unpin`, `list`, `warm` commands
 - `doctor`: dedupe, prune (9 build systems, 10+ languages), embeddings repair, plugin diagnostics
 - `graph`: read-only Knowledge Graph viewer with depth control
 - Streaming IPC with protobuf serialization, multiplexing, and backpressure
+- Consistent `--json` output across all commands
+- Sandbox detection for AI coding environments (Codex, etc.)
+
+### Daemon Architecture
+- **WorkCoordinator**: centralized thread pool with Boost.Asio strands
+  - Hardware-aware sizing (8-32 threads based on CPU cores)
+- **Gradient2 adaptive concurrency limiters** (Netflix-style)
+- **IOCoordinator**: dedicated read/write coordinator for socket server
+- **Tuning profiles**: efficient/balanced/aggressive via `TuningManager`
+- **Connection state machine**: tinyfsm-based `ConnectionFsm` with clean transitions
+- **Async-first**: C++20 coroutines (`asio::awaitable`), `as_tuple` error handling
+- **Streaming**: header-first chunked transfer, persistent sockets, TTFB metrics
+- **Multi-client stability**: tested up to 16 concurrent clients
 
 ### Plugin System (ABI-stable C interface)
 - **ONNX Runtime provider**: all-MiniLM-L6-v2 (default), multi-qa-MiniLM-L6-cos-v1, nomic-embed-text-v1.5
+  - Dynamic tensor padding (~70-85x throughput for short inputs)
+  - Session reuse with 25x warm-cycle latency reduction
+  - Hardware-adaptive pool sizing
+  - GPU acceleration: CoreML (macOS), CUDA (Linux/Windows), DirectML (Windows), MIGraphX (ROCm)
 - **Tree-sitter symbol extractor**: auto-downloads grammars (v13-15), 15+ languages
 - **PDF extractor**: content_extractor_v1 + search_provider_v1 interfaces
 - Plugin discovery: `YAMS_PLUGIN_DIR`, standard directories, trust policies
 - Lifecycle: scan, load, unload; daemon autoload on startup
 
-### Daemon Architecture
-- **WorkCoordinator**: centralized thread pool with Boost.Asio strands
-  - Hardware-aware sizing (8-32 threads based on CPU cores)
-  - Replaced 3 separate pools (IngestService, PostIngestQueue, EmbeddingService)
-- **Tuning profiles**: efficient/balanced/aggressive via `TuningManager`
-- **Connection state machine**: tinyfsm-based `ConnectionFsm` with clean transitions
-- **Async-first**: C++20 coroutines (`asio::awaitable`), `as_tuple` error handling
-- **Streaming**: header-first chunked transfer, persistent sockets, TTFB metrics
-
-### CLI Enhancements (v0.8)
-- **Auto-init mode**: `yams init --auto` for containerized/headless environments
-- **Git-based versioning**: Auto-detects version from semver tags, shows commit hash
-- **Consistent 384-dim models**: Both embedding model options use same dimensions
-
 ### Packaging & Distribution
 - **Build**: Meson + Conan 2.x; Release/Debug/Profiling configurations
-- **Linux**: deb, rpm, AppImage, Docker (amd64/arm64)
-- **macOS**: pkg, zip (Apple Silicon + Intel with `-mcpu=apple-m1` optimizations)
+- **Linux**: deb (APT repo at repo.yamsmemory.ai), rpm (YUM repo), Docker (amd64/arm64)
+- **macOS**: Homebrew tap (`trvon/yams/yams`), pkg, zip (Apple Silicon + Intel)
 - **Windows**: MSI installer (WiX v4), winget manifest
-- **Homebrew**: tap at `yams-sh/homebrew-yams`
+- **Package signing**: signed releases via CI
 
 ---
 
-## Planned: v0.9 → v1.0
+## Planned
 
-Focus: **Stability, polish, and production readiness**
+### Mobile App
+- [ ] Flutter-based mobile app with local corpus access
+- [ ] Memory picker and context injection UX
+- [ ] Conversation artifact write-back to YAMS
+- [ ] Local LLM hosting (Gemma) for on-device inference
 
-### CLI & Developer Experience
-- [x] Path tree repair automation (background daemon task)
-- [x] Improved error messages with actionable hints (centralized error_hints.h, formatErrorWithHint)
-- [x] Consistent `--json` output across all commands (doctor, delete, grep, search, list, status, add)
-- [x] Incremental `yams add` with predictable include/exclude
-- [x] PowerShell shell completion support (bash, zsh, fish, PowerShell)
+### P2P Corpus Sync
+- [ ] Peer-to-peer corpus synchronization protocol
+- [ ] Cross-device corpus replication
+- [ ] Conflict resolution for concurrent edits
+- [ ] Selective sync (collection/tag-based filtering)
 
-### Search Quality
-- [x] FTS5 hygiene: index only queried fields (v18 migration removes content_type column)
-- [x] Optional post-ingest `VACUUM`/`optimize` (via `yams repair --optimize`)
-- [x] Content-type-aware defaults (code vs. prose vs. docs) (`CorpusProfile` enum with auto-detection)
+### Mobile Bindings
+- [ ] Finalize C ABI contract for corpus access (`libyams_mobile`)
+- [ ] Backend parity: embedded and daemon behavior fully aligned
+- [ ] Ship `.xcframework` (iOS) and `.aar` (Android) packages
+- [ ] Flutter plugin consuming native corpus library
 
-### Stability
-- [ ] Thread safety hardening (TSan enabled in Debug CI) (partial: TSan support exists, not in CI)
-- [x] Connection pool reliability fixes (comprehensive ConnectionPool with health checks)
-- [x] Streaming response timeout handling (TTFB metrics, configurable timeouts)
+### Search & Retrieval
+- [ ] Vector search tuning recommendations (documentation)
+- [ ] Custom embedding model support
+
+### Stability & Operations
+- [ ] Thread safety hardening (TSan enabled in CI)
+- [ ] Export/import snapshots preserving tags and edges
+- [ ] Space reclamation and integrity verification CLI
+- [ ] Prometheus metrics endpoint
+- [ ] Structured logging with trace correlation
 
 ### Documentation
 - [ ] Managed hosting early access guide
-- [ ] Vector search tuning recommendations
-
----
-
-## Future: Post-1.0
-
-### Content Lifecycle
-- [ ] Export/import snapshots preserving tags and edges
-- [ ] Space reclamation and integrity verification CLI
+- [ ] P2P sync protocol specification
 
 ### Platform Expansion
-- [ ] Corpus bindings and Flutter memory UX
 - [ ] Cross-repository search federation
-
-### Mobile Memory Work Matrix
-
-| Category | Area | Status | What needs to be done | Notes |
-|---------|------|--------|------------------------|-------|
-| Backend | Corpus binding contract | In progress | Lock the mobile ABI boundary to corpus access only: ingest, list/search/get, metadata, delete/update, and graph where supported. | Docs now reflect that model hosting and generation stay out of `libyams_mobile`. |
-| Backend | Backend parity | In progress | Make embedded and daemon behavior match for `get_document`, search/list payloads, and deletion/update semantics. | `get_document.include_content`, `search_execute`, `list_documents`, `delete_by_name`, `remove_document`, and `update_document` now return stable payload/status behavior in both modes, including real tag-update counters in daemon mode. Remaining parity work is cleanup and optional edge-case expansion rather than a known contract mismatch. |
-| Backend | Graph retrieval | In progress | Keep embedded and daemon graph query behavior aligned for corpus-backed documents, including single-document stores and follow-up parity cases. | Embedded graph query now works for mobile corpus stores; broader parity and cleanup semantics still need review. |
-| Backend | Corpus status cleanup | In progress | Keep `yams_mobile_get_vector_status` as an ABI-stable entrypoint, but shape the payload around corpus/index readiness and treat `warmup` as a deprecated no-op compatibility field. | Mobile status now reports corpus readiness, embedding coverage, and graph/tag/path signals instead of implying app-side model control. |
-| Backend | Retrieval write-back | Open | Ensure the corpus layer cleanly supports app-owned write-back artifacts such as conversation summaries, tags, provenance, and optional embedding metadata. | This is the core integration point for local Gemma sessions. |
-| Build Cleanup | Meson wiring | In progress | Make `enable-mobile-bindings` and `enable-mobile-tests` easy to configure in reproducible, target-specific build directories. | The mobile lane now resolves named targets to separate build directories and Conan host profiles, disables plugin/CLI/MCP targets for mobile library builds, and uses a build-machine `protoc` during cross-builds instead of trying to execute target protobuf binaries. |
-| Build Cleanup | ABI hygiene | In progress | Add or restore symbol-surface checks and document the actual source of truth for ABI compatibility. | CI now checks exported `YAMS_MOBILE_API` symbols against the versioned header and validates the full mobile/host profile set before building host-native artifacts. |
-| Build Cleanup | Wrapper scaffolding | In progress | Add thin platform wrapper stubs or example packaging targets for Swift/Android/Flutter. | The repo now has separate iOS/Android Conan profiles, target-aware build scripts, manual workflow lanes for `.xcframework` and `.aar` packaging, and the host-native ABI lane. The old `fmt/10.2.1` simulator blocker is removed, mobile Conan builds now force header-only `spdlog`, Android cross-builds now reach real C++ compilation with native `protoc`, and current work is proving end-to-end iOS and Android runs against real SDK/NDK-backed toolchains. |
-| Build Cleanup | Test coverage | In progress | Expand smoke tests to cover daemon mode success paths and backend parity cases, not just embedded CRUD and daemon connection failure. | Mobile ABI smoke tests now run on Catch2, the full suite is green again, and coverage includes daemon `get_document.include_content`, corpus status, embedded graph, stable `search_execute`, `list_documents`, and `update_document` payload shapes with real tag counters, plus delete status/payload parity across backends. |
-| Flutter UX | Retrieval UX | Open | Build the memory picker, context injection controls, and provenance display on top of corpus bindings. | This is the app-facing value layer. |
-| Flutter UX | Local LLM hosting | Open | Host Gemma in Flutter/app-native code, including model download, load/unload, prompt formatting, and response streaming. | Not part of YAMS bindings. |
-| Flutter UX | Write-back UX | Open | Persist conversation artifacts back into YAMS with clear tags/metadata and user-visible controls. | Should map cleanly onto corpus CRUD APIs. |
-| Flutter UX | Failure handling | Open | Surface backend state clearly: corpus unavailable, graph unavailable, stale index, missing local model, or failed write-back. | Avoid hiding corpus/backend limitations behind chat UI failures. |
-| Flutter UX | Gemma support | Open | Add `google/gemma-4-E4B-it` or other chosen Gemma runtime support in the app host once retrieval and write-back flows are stable. | Sequence this after corpus contract cleanup, not before. |
-
-### Advanced Features
-- [ ] Custom embedding model support
-- [ ] Prometheus metrics endpoint
-- [ ] Structured logging with trace correlation
 
 ---
 
 ## Release History
 
-| Version | Highlights | Changelog |
-|---------|------------|-----------|
-| **v0.8** | Auto-init for containers, git-based versioning, multi-qa-MiniLM model, consistent 384-dim embeddings | (see repo `CHANGELOG.md`) |
-| **v0.7** | WorkCoordinator thread pool, hierarchical embeddings, KG-boosted search, tree-sitter symbol extraction, grep SIMD optimizations, parallel post-processing | [v0.7](changelogs/v0.7.md) |
-| **v0.6** | Protobuf IPC, connection FSM, tuning profiles, RRF fusion, post-ingest pipeline, plugin system v0.1 | [v0.6](changelogs/v0.6.md) |
-| **v0.5** | Service architecture, HNSW index, daemon pooling, repair coordinator, PDF extraction | [v0.5](changelogs/v0.5.md) |
-| **v0.4** | Daemon architecture, universal content handlers, snapshot versioning, tree diff | [v0.4](changelogs/v0.4.md) |
-| **v0.3** | Hybrid search, vector database (sqlite-vec), MCP server, Apple Silicon optimizations | [v0.3](changelogs/v0.3.md) |
-| **v0.2** | FTS5 search, content chunking, basic CLI | [v0.2](changelogs/v0.2.md) |
-| **v0.1** | Initial storage engine, add/get/delete | [v0.1](changelogs/v0.1.md) |
+| Version | Date | Highlights | Changelog |
+|---------|------|------------|-----------|
+| **v0.12** | 2026-04-02 | TurboQuant vector compression, download controls (stop/start/resume), ONNX ABI hardening, Catch2 migration | (see `CHANGELOG.md`) |
+| **v0.10** | 2026-02-28 | Sandbox detection, MCP refactoring, daemon communication optimizations, package signing, graph improvements | [v0.10](changelogs/v0.10.md) |
+| **v0.9** | 2026-02-24 | Gradient2 concurrency limiters, MCP code mode, IOCoordinator, multi-client stability (16 clients), embedding chunking | [v0.9](changelogs/v0.9.md) |
+| **v0.8** | 2026-01-24 | HNSW rewrite, KG-boosted search, ONNX dynamic padding (70-85x), session reuse, download streaming, Zig support | [v0.8](changelogs/v0.8.md) |
+| **v0.7** | | WorkCoordinator, hierarchical embeddings, tree-sitter symbols, grep SIMD, parallel post-processing | [v0.7](changelogs/v0.7.md) |
+| **v0.6** | | Protobuf IPC, connection FSM, tuning profiles, RRF fusion, post-ingest pipeline, plugin system v0.1 | [v0.6](changelogs/v0.6.md) |
+| **v0.5** | | Service architecture, HNSW index, daemon pooling, repair coordinator, PDF extraction | [v0.5](changelogs/v0.5.md) |
+| **v0.4** | | Daemon architecture, universal content handlers, snapshot versioning, tree diff | [v0.4](changelogs/v0.4.md) |
+| **v0.3** | | Hybrid search, vector database (sqlite-vec), MCP server, Apple Silicon optimizations | [v0.3](changelogs/v0.3.md) |
+| **v0.2** | | FTS5 search, content chunking, basic CLI | [v0.2](changelogs/v0.2.md) |
+| **v0.1** | | Initial storage engine, add/get/delete | [v0.1](changelogs/v0.1.md) |
 
 ---
 

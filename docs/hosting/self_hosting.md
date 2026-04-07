@@ -40,14 +40,7 @@ docker run --rm -it \
 
 ### Native Binary
 
-See [Installation](../user_guide/installation.md) for platform-specific steps.
-
-```bash
-yams init --non-interactive
-echo "hello world" | yams add - --tags example
-yams search "hello"
-yams list --format minimal --limit 1 | xargs yams get
-```
+See [Installation](../user_guide/installation.md) for platform-specific download and setup steps.
 
 ### Docker Compose (Optional)
 
@@ -139,21 +132,7 @@ See [Admin: Operations](../admin/operations.md) for deployment and tuning.
 
 ## Common Tasks
 
-```bash
-# Initialize
-yams init --non-interactive
-
-# Add content
-echo "notes" | yams add - --tags "notes,example"
-yams add ./docs/ --recursive --include="*.md" --tags "docs,import"
-
-# Search
-yams search "vector search" --limit 5
-yams list --format minimal --limit 1 | xargs yams get
-
-# Versioning
-yams add ./CHANGELOG.md --metadata "release=1.0.0" --tags "release,changelog"
-```
+See the [Quick Start](../user_guide/README.md) and [CLI Reference](../user_guide/cli.md) for usage examples.
 
 ## Troubleshooting
 

@@ -12,7 +12,7 @@ Concise instructions to build, test, and develop YAMS locally.
 
 ## Prerequisites
 
-See `../BUILD.md#prerequisites` for compilers, build tools, and system package installs.
+See [BUILD.md](../BUILD.md#prerequisites) for compilers, build tools, and system package installs.
 
 ### Initialize Conan (one-time)
 
@@ -50,11 +50,11 @@ meson compile -C build/release
 meson compile -C builddir
 ```
 
-For manual (Conan + Meson) commands, see `../BUILD.md`.
+For manual (Conan + Meson) commands, see [BUILD.md](../BUILD.md).
 
 ## Build Options
 
-For the full list of build variables and Meson options, see `../BUILD.md#build-options`.
+For the full list of build variables and Meson options, see [BUILD.md](../BUILD.md#build-options).
 
 ### Developer convenience variables
 

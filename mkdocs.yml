@@ -20,51 +20,41 @@ exclude_docs: |
 
 nav:
   - Home: index.md
-  - Newsletter: newsletter.md
   - Get Started:
       - Installation: user_guide/installation.md
-      - CLI: user_guide/cli.md
+      - Quick Start: user_guide/README.md
+      - CLI Reference: user_guide/cli.md
+      - MCP Server: user_guide/mcp.md
+      - Tutorials: user_guide/tutorials/README.md
+  - Guides:
+      - Embeddings & Search: user_guide/embeddings.md
       - Self-hosting: hosting/self_hosting.md
-      - User Guide: user_guide/README.md
-      - Prompts:
-          - CLI usage: PROMPT.md
-          - Engineering: PROMPT-eng.md
-  - Docs:
-      - Guides:
-          - Tutorials: user_guide/tutorials/README.md
-          - Embeddings: user_guide/embeddings.md
-          - MCP: user_guide/mcp.md
-      - API:
-          - Overview: api/README.md
-          - MCP Tools: api/mcp_tools.md
-      - Cloud:
-          - Managed Hosting: hosting/managed.md
-          - Self-hosting: hosting/self_hosting.md
-          - Pricing (Preview): hosting/pricing.md
-          - Services: services/README.md
-          - Support Plans: services/support_plans.md
-          - Contact: services/contact.md
-      - Admin:
-          - Operations: admin/operations.md
+      - Operations: admin/operations.md
+      - Plugins: PLUGINS.md
+      - Prompt Templates: PROMPT.md
+  - API:
+      - Overview: api/README.md
+      - MCP Tools: api/mcp_tools.md
+  - Hosting:
+      - Managed Hosting: hosting/managed.md
+      - Pricing (Preview): hosting/pricing.md
+      - Services: services/README.md
+      - Support Plans: services/support_plans.md
+      - Contact: services/contact.md
+  - Reference:
+      - Architecture:
+          - Daemon & Services: architecture/daemon_architecture.md
+          - Plugins & Extraction: architecture/plugin_architecture.md
       - Benchmarks:
           - Overview: benchmarks/README.md
           - Performance Report: benchmarks/performance_report.md
           - Storage Backends: benchmarks/storage_backends.md
+      - Developer:
+          - Setup: developer/setup.md
+          - Build System: developer/build_system.md
+          - Contributing: developer/contributing.md
+          - Mobile Bindings: developer/mobile-bindings.md
       - Roadmap: roadmap.md
-      - Architecture:
-          - Daemon and Services: architecture/daemon_architecture.md
-          - Plugin and Content Extraction: architecture/plugin_architecture.md
-      - Reference:
-          - Developer:
-              - Setup: developer/setup.md
-              - Build System: developer/build_system.md
-              - Contributing: developer/contributing.md
-              - Architecture Notes: developer/architecture/README.md
-              - Mobile Bindings: developer/mobile-bindings.md
-          - Build: BUILD.md
-          - Plugins: PLUGINS.md
-          - Testing:
-              - Coverage Report: testing/coverage_report.md
 
 theme:
   name: material
