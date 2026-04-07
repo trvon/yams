@@ -401,10 +401,23 @@ package_rpm() {
   rm -rf "${source_dir}"
 
   local rpm_filelist="${rpm_root}/SOURCES/filelist"
+  # System directories owned by the filesystem package — never claim these.
+  local -A system_dirs=(
+    [usr]=1 [usr/bin]=1 [usr/sbin]=1
+    [usr/lib]=1 [usr/lib64]=1
+    [usr/share]=1 [usr/share/doc]=1 [usr/share/man]=1
+    [usr/share/man/man1]=1 [usr/share/man/man5]=1 [usr/share/man/man8]=1
+    [usr/share/bash-completion]=1 [usr/share/bash-completion/completions]=1
+    [usr/share/zsh]=1 [usr/share/zsh/site-functions]=1
+    [usr/share/fish]=1 [usr/share/fish/vendor_completions.d]=1
+    [usr/share/licenses]=1
+    [etc]=1 [var]=1
+  )
   (
     cd "${stage_root}"
     find . -type d -printf "%P\n" | LC_ALL=C sort | while read -r dir; do
       [ -z "${dir}" ] && continue
+      [[ -n "${system_dirs[${dir}]+_}" ]] && continue
       echo "%dir /${dir}"
     done
     find . \( -type f -o -type l \) -printf "%P\n" | LC_ALL=C sort | while read -r file; do
