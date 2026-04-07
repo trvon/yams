@@ -713,8 +713,12 @@ CONAN_BUILD_ENV="${CONAN_TOOLCHAIN_DIR}/conanbuild.sh"
 if [[ -f "${CONAN_BUILD_ENV}" ]]; then
   # Activate Conan's build-machine tools before Meson configure so cross-build
   # generators resolve native utilities like protoc from the Conan graph.
+  # Conan-generated env scripts may reference variables (e.g. ACLOCAL_PATH)
+  # that are unset in minimal environments like Docker; disable nounset temporarily.
   # shellcheck disable=SC1090
+  set +u
   source "${CONAN_BUILD_ENV}"
+  set -u
 fi
 YAMS_PROTOC_PATH="${YAMS_PROTOC_PATH:-$(command -v protoc || true)}"
 

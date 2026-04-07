@@ -81,6 +81,12 @@ public:
     // Validation
     bool isValid() const;
 
+    // CoreML denylist — models that failed CoreML inference fall back to CPU
+    // and are denylisted so future pool instances skip CoreML directly.
+    static bool isCoreMLDenylisted(const std::string& modelName);
+    static void denylistCoreML(const std::string& modelName);
+    static void clearCoreMLDenylist();
+
 private:
     OnnxModelInfo info_;
     OnnxTextConfig config_;

@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <mutex>
 #include <sstream>
+#include <unordered_set>
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
 
@@ -281,6 +282,31 @@ size_t mergeSharedBatchLimit(const std::string& modelName, const std::string& pr
 } // namespace
 
 // ============================================================================
+// Cross-instance CoreML denylist
+// ============================================================================
+// When a model fails CoreML inference (e.g., mask feature partition bug),
+// record it here so other pool instances skip CoreML and go straight to CPU.
+// This avoids wasting ~20s per instance on CoreML compilation + failed retries.
+
+static std::mutex g_coreml_denylist_mu;
+static std::unordered_set<std::string> g_coreml_denylist;
+
+bool OnnxModelSession::isCoreMLDenylisted(const std::string& modelName) {
+    std::lock_guard<std::mutex> lk(g_coreml_denylist_mu);
+    return g_coreml_denylist.count(modelName) > 0;
+}
+
+void OnnxModelSession::denylistCoreML(const std::string& modelName) {
+    std::lock_guard<std::mutex> lk(g_coreml_denylist_mu);
+    g_coreml_denylist.insert(modelName);
+}
+
+void OnnxModelSession::clearCoreMLDenylist() {
+    std::lock_guard<std::mutex> lk(g_coreml_denylist_mu);
+    g_coreml_denylist.clear();
+}
+
+// ============================================================================
 // OnnxModelSession Implementation
 // ============================================================================
 
@@ -434,7 +460,20 @@ public:
         sessionOptions_->EnableCpuMemArena();
 
         if (config.enable_gpu) {
-            appendGpuExecutionProvider();
+            if (OnnxModelSession::isCoreMLDenylisted(modelName)) {
+                // Scale up CPU threads since GPU won't be available
+                const int hwThreads = static_cast<int>(std::thread::hardware_concurrency());
+                const int fallbackIntra =
+                    std::max(configuredIntraThreads_, std::min(hwThreads, 12));
+                sessionOptions_->SetIntraOpNumThreads(fallbackIntra);
+                configuredIntraThreads_ = fallbackIntra;
+                spdlog::info("[ONNX] Skipping CoreML for '{}' (previously failed; "
+                             "CPU with intra_threads={})",
+                             modelName, fallbackIntra);
+                actualExecutionProvider_ = "cpu";
+            } else {
+                appendGpuExecutionProvider();
+            }
         }
     }
 
@@ -932,7 +971,12 @@ public:
             actualExecutionProvider_ = "cpu";
             providerBatchLimit_.store(0, std::memory_order_relaxed);
 
-            sessionOptions_->SetIntraOpNumThreads(configuredIntraThreads_);
+            // Scale up CPU threads when falling back from GPU — the original
+            // configuredIntraThreads_ (default 4) was conservative because GPU
+            // was expected to handle the heavy lifting.
+            const int hwThreads = static_cast<int>(std::thread::hardware_concurrency());
+            const int fallbackIntra = std::max(configuredIntraThreads_, std::min(hwThreads, 12));
+            sessionOptions_->SetIntraOpNumThreads(fallbackIntra);
             sessionOptions_->SetInterOpNumThreads(configuredInterThreads_);
 
             const bool allowSpinning = []() {
@@ -980,8 +1024,10 @@ public:
 #endif
             session_ = std::make_unique<Ort::Session>(
                 *env_, std::filesystem::path(modelPath_).c_str(), options);
-            spdlog::warn("[ONNX] Reinitialized '{}' on CPU after CoreML inference failure",
-                         modelName_);
+            OnnxModelSession::denylistCoreML(modelName_);
+            spdlog::warn("[ONNX] Reinitialized '{}' on CPU after CoreML inference failure "
+                         "(denylisted for future instances, intra_threads={}, hw={})",
+                         modelName_, fallbackIntra, hwThreads);
             return Result<void>();
         } catch (const Ort::Exception& e) {
             return Error{ErrorCode::InternalError,

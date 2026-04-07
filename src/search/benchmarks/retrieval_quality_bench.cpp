@@ -322,6 +322,13 @@ static Result<BEIRDataset> loadBEIRDataset(const std::string& datasetName,
     fs::path qrelsFile = datasetDir / "qrels" / "test.tsv";
 
     if (!fs::exists(corpusFile) || !fs::exists(queriesFile) || !fs::exists(qrelsFile)) {
+        if (datasetName == "longmemeval_s") {
+            return Error{ErrorCode::NotFound,
+                         "LongMemEval_S dataset not found. Convert from HuggingFace:\n"
+                         "  uv pip install datasets\n"
+                         "  python scripts/prepare_longmemeval_s.py\n"
+                         "Expected location: ~/.cache/yams/benchmarks/longmemeval_s/"};
+        }
         std::ostringstream oss;
         oss << datasetName << " dataset not found. Please download manually:\n"
             << "  mkdir -p ~/.cache/yams/benchmarks && cd ~/.cache/yams/benchmarks\n"
@@ -4537,9 +4544,9 @@ struct BenchFixture {
             // Supported BEIR datasets from
             // https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/
             static const std::set<std::string> SUPPORTED_BEIR_DATASETS = {
-                "scifact",        "nfcorpus",    "arguana",    "scidocs", "fiqa",
-                "quora",          "cqadupstack", "hotpotqa",   "fever",   "climate-fever",
-                "dbpedia-entity", "trec-covid",  "touche-2020"};
+                "scifact",        "nfcorpus",    "arguana",     "scidocs",      "fiqa",
+                "quora",          "cqadupstack", "hotpotqa",    "fever",        "climate-fever",
+                "dbpedia-entity", "trec-covid",  "touche-2020", "longmemeval_s"};
             if (SUPPORTED_BEIR_DATASETS.count(requestedDatasetName) > 0) {
                 useBEIR = true;
                 beirDatasetName = requestedDatasetName;

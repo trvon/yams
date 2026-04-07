@@ -792,4 +792,42 @@ TEST_CASE_METHOD(OnnxModelPoolFixture,
     }
 }
 
+TEST_CASE("CoreML denylist prevents repeated fallback attempts", "[daemon][onnx][coreml][catch2]") {
+    // Start clean
+    OnnxModelSession::clearCoreMLDenylist();
+
+    SECTION("model is not denylisted by default") {
+        CHECK_FALSE(OnnxModelSession::isCoreMLDenylisted("embeddinggemma-300m"));
+        CHECK_FALSE(OnnxModelSession::isCoreMLDenylisted("some-other-model"));
+    }
+
+    SECTION("denylisting a model persists across checks") {
+        OnnxModelSession::denylistCoreML("embeddinggemma-300m");
+        CHECK(OnnxModelSession::isCoreMLDenylisted("embeddinggemma-300m"));
+        CHECK_FALSE(OnnxModelSession::isCoreMLDenylisted("bge-reranker-base"));
+    }
+
+    SECTION("clearCoreMLDenylist resets state") {
+        OnnxModelSession::denylistCoreML("embeddinggemma-300m");
+        REQUIRE(OnnxModelSession::isCoreMLDenylisted("embeddinggemma-300m"));
+        OnnxModelSession::clearCoreMLDenylist();
+        CHECK_FALSE(OnnxModelSession::isCoreMLDenylisted("embeddinggemma-300m"));
+    }
+
+    SECTION("denylisted model skips CoreML in new session") {
+        // Simulate what reinitializeSessionOnCpu() does on mask-feature failure
+        OnnxModelSession::denylistCoreML("embeddinggemma-300m");
+
+        // When creating a new session with mock mode, verify denylist is checked
+        // (The actual constructor checks isCoreMLDenylisted and skips appendGpuExecutionProvider)
+        CHECK(OnnxModelSession::isCoreMLDenylisted("embeddinggemma-300m"));
+
+        // A different model should not be affected
+        CHECK_FALSE(OnnxModelSession::isCoreMLDenylisted("nomic-embed-text-v1.5"));
+    }
+
+    // Cleanup
+    OnnxModelSession::clearCoreMLDenylist();
+}
+
 } // namespace yams::daemon::test

@@ -119,6 +119,8 @@ RUN --mount=type=cache,target=/root/.conan2 \
   fi; \
   fi; \
   done; \
+  CONAN_BUILD_ENV="/src/build/release/build-release/conan/conanbuild.sh"; \
+  if [ -f "${CONAN_BUILD_ENV}" ]; then set +u; . "${CONAN_BUILD_ENV}"; set -u; fi && \
   meson compile -C build/release -j${BUILD_JOBS} && \
   meson install -C build/release --destdir /opt/yams && \
   # Ensure Conan-provided runtime libs are present as real files (not only symlinks)

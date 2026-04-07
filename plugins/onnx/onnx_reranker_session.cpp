@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <fmt/ranges.h>
 #include "ort_cxx_api_wrapper.h"
 #include "ort_runtime_loader.h"
 
