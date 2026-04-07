@@ -76,9 +76,13 @@ endif
 # --- ThreadSanitizer for race detection ---
 enable_tsan = get_option('enable-tsan')
 enable_asan = get_option('enable-asan')
+enable_ubsan = get_option('enable-ubsan')
 
 if enable_tsan and enable_asan
   error('TSAN and ASAN cannot be enabled in the same build. Configure separate build directories.')
+endif
+if (enable_tsan and enable_ubsan) or (enable_asan and enable_ubsan)
+  error('UBSan cannot be combined with TSan or ASan. Configure a separate build directory.')
 endif
 
 if enable_tsan
@@ -117,6 +121,25 @@ if enable_asan
     message('AddressSanitizer enabled - memory errors will fail fast')
   else
     error('AddressSanitizer requested but compiler does not support -fsanitize=address')
+  endif
+endif
+
+if enable_ubsan
+  buildtype = get_option('buildtype')
+  # UBSan is most useful in debug builds; warn if enabled in release
+  if buildtype == 'release' or buildtype == 'plain'
+    warning('UndefinedBehaviorSanitizer enabled in non-debug build. This will significantly impact performance.')
+  endif
+
+  # Check if compiler supports UBSan
+  if cpp.has_argument('-fsanitize=undefined')
+    # -fno-sanitize-recover=all: abort on first UB hit (turns UBSan into a hard gate, not just logging)
+    ubsan_extra_flags = ['-fno-omit-frame-pointer', '-fno-sanitize-recover=all']
+    add_project_arguments(ubsan_extra_flags, language: 'cpp')
+    add_project_arguments(ubsan_extra_flags, language: 'c')
+    message('UndefinedBehaviorSanitizer enabled - undefined behavior will abort')
+  else
+    error('UBSan requested but compiler does not support -fsanitize=undefined')
   endif
 endif
 

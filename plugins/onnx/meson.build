@@ -117,19 +117,12 @@ onnx_plugin_deps = [
   json_dep,
   yams_core,
   yams_onnx_resource,
-  dependency('yams_daemon_client'),
   boost_dep,
 ] + win_extra_deps
 
 onnx_compile_dep = onnx_dep.partial_dependency(compile_args: true, includes: true)
 
 onnx_plugin_deps += [onnx_compile_dep]
-
-# In-process daemon fallback paths inside yams_daemon_client reference symbols
-# implemented by yams_daemon (for example StreamingRequestProcessor). Link
-# yams_daemon explicitly on all platforms so unresolved symbols fail at build
-# time instead of at plugin dlopen time.
-onnx_plugin_deps += dependency('yams_daemon')
 
 onnx_plugin_link_args = []
 if host_machine.system() == 'linux'

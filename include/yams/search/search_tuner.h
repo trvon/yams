@@ -112,6 +112,10 @@ struct TunedParams {
     size_t adaptiveVectorSkipMinTextHits = 3;
     float adaptiveVectorSkipMinTopTextScore = 0.30f;
 
+    // Sub-phrase rescoring (always-on score-update pass for prose queries)
+    bool enableSubPhraseRescoring = false;
+    float subPhraseScoringPenalty = 0.70f;
+
     // Graph reranking controls (dynamically adapted by SearchTuner)
     bool enableGraphRerank = false;
     size_t graphRerankTopN = 25;
@@ -165,6 +169,8 @@ struct TunedParams {
         config.adaptiveVectorSkipRequireTextSignal = adaptiveVectorSkipRequireTextSignal;
         config.adaptiveVectorSkipMinTextHits = adaptiveVectorSkipMinTextHits;
         config.adaptiveVectorSkipMinTopTextScore = adaptiveVectorSkipMinTopTextScore;
+        config.enableSubPhraseRescoring = enableSubPhraseRescoring;
+        config.subPhraseScoringPenalty = subPhraseScoringPenalty;
     }
 
     /**
@@ -209,7 +215,9 @@ struct TunedParams {
             {"adaptive_vector_skip_min_tier1_hits", adaptiveVectorSkipMinTier1Hits},
             {"adaptive_vector_skip_require_text_signal", adaptiveVectorSkipRequireTextSignal},
             {"adaptive_vector_skip_min_text_hits", adaptiveVectorSkipMinTextHits},
-            {"adaptive_vector_skip_min_top_text_score", adaptiveVectorSkipMinTopTextScore}};
+            {"adaptive_vector_skip_min_top_text_score", adaptiveVectorSkipMinTopTextScore},
+            {"enable_sub_phrase_rescoring", enableSubPhraseRescoring},
+            {"sub_phrase_scoring_penalty", subPhraseScoringPenalty}};
     }
 };
 
@@ -288,8 +296,16 @@ struct TunedParams {
             params.kgWeight = 0.00f;
             params.tagWeight = 0.00f;
             params.metadataWeight = 0.05f;
-            params.similarityThreshold = 0.55f;
+            // Lower threshold vs default (0.65) to improve recall for claim-style prose
+            // queries where query-document cosine similarity is often in the 0.40-0.54
+            // range rather than the >0.55 range seen for code/technical queries.
+            params.similarityThreshold = 0.40f;
             params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
+            // Sub-phrase rescoring re-scores already-retrieved docs via AND-clause
+            // sub-phrase queries. This is the only mechanism that helps when base FTS5
+            // returns the entire corpus at low scores (expansion gates never fire).
+            params.enableSubPhraseRescoring = true;
+            params.subPhraseScoringPenalty = 0.70f;
             break;
 
         case TuningState::MIXED:

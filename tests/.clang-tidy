@@ -1,0 +1,13 @@
+---
+# Test directory clang-tidy overrides.
+# Inherits all checks from the root .clang-tidy and disables those that produce
+# false positives specific to Catch2 and test-harness patterns.
+#
+# InheritParentConfig merges with the parent instead of replacing it.
+InheritParentConfig: true
+
+Checks: >-
+  -bugprone-chained-comparison,
+  -bugprone-unchecked-optional-access,
+  -bugprone-command-processor,
+  -concurrency-mt-unsafe

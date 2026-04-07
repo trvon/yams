@@ -257,6 +257,14 @@ struct SearchEngineConfig {
     size_t subPhraseExpansionMinHits = 5;    // Trigger when primary FTS hits below this
     float subPhraseExpansionPenalty = 0.70f; // Score penalty for sub-phrase FTS results
 
+    // Sub-phrase rescoring: unlike expansion (which adds new docs when hits are sparse),
+    // this pass fires unconditionally and updates scores of already-retrieved documents
+    // using sub-phrase AND-clause queries. Improves ranking for prose/claim queries where
+    // base BM25 ranks relevant docs low due to vocabulary mismatch — the expansion gates
+    // (baseFtsHitCount < N) never fire when the full corpus is retrieved at low scores.
+    bool enableSubPhraseRescoring = false; // Enable always-on sub-phrase score-update pass
+    float subPhraseScoringPenalty = 0.70f; // Score multiplier applied to sub-phrase match signal
+
     // Graph-expanded retrieval: resolve query concepts/aliases into KG nodes, walk a small
     // neighborhood, and use resulting entity labels as early FTS/vector expansion terms.
     bool enableGraphQueryExpansion = false;   // Enable graph -> FTS/vector expansion pre-fusion

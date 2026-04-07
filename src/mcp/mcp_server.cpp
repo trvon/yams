@@ -4486,6 +4486,17 @@ void MCPServer::initializeToolRegistry() {
                  {"default", false}}}}}},
         "Get daemon status, readiness, and metrics", "Get Status", readOnlyAnnotation);
 
+    toolRegistry_->registerTool<MCPDoctorRequest, MCPDoctorResponse>(
+        "doctor", [this](const MCPDoctorRequest& req) { return handleDoctor(req); },
+        json{{"type", "object"},
+             {"properties",
+              {{"verbose",
+                {{"type", "boolean"},
+                 {"description", "Include detailed subsystem diagnostics"},
+                 {"default", true}}}}}},
+        "Diagnose daemon IPC connectivity, socket path, and readiness", "Doctor",
+        readOnlyAnnotation);
+
     toolRegistry_->registerTool<MCPDeleteByNameRequest, MCPDeleteByNameResponse>(
         "delete_by_name",
         [this](const MCPDeleteByNameRequest& req) { return handleDeleteByName(req); },
@@ -4872,6 +4883,22 @@ void MCPServer::initializeToolRegistry() {
                     },
                     json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
                     "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
+
+                // Re-register doctor (always available in code mode)
+                toolRegistry_->registerRawTool(
+                    "doctor",
+                    [fullReg = fullRegistry.get()](
+                        const json& args) mutable -> boost::asio::awaitable<json> {
+                        co_return co_await fullReg->callTool("doctor", args);
+                    },
+                    json{{"type", "object"},
+                         {"properties",
+                          {{"verbose",
+                            {{"type", "boolean"},
+                             {"description", "Include detailed subsystem diagnostics"},
+                             {"default", true}}}}}},
+                    "Diagnose daemon IPC connectivity, socket path, and readiness", "Doctor",
+                    readOnlyAnnotation);
 
                 // 1. query — read-only pipeline
                 toolRegistry_->registerRawTool(

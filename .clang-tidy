@@ -1,0 +1,53 @@
+---
+# YAMS root clang-tidy configuration.
+# Check selection mirrors scripts/dev/build_test.sh TIDY_ARGS, tuned for a
+# 920K-LOC C++20 codebase with coroutines, templates, and SIMD/low-level paths.
+#
+# Suppression strategy:
+#   - Structural suppressions (whole check categories) live here.
+#   - File-level NOLINTBEGIN/NOLINTEND is for external-integration boundaries.
+#   - Single-line // NOLINT(check) is for intentional unsafe operations only.
+
+Checks: >-
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  performance-*,
+  -performance-avoid-endl,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  cppcoreguidelines-*,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-union-access,
+  readability-*,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -readability-uppercase-literal-suffix,
+  portability-*,
+  clang-analyzer-*,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  concurrency-*
+
+# Treat correctness-critical checks as hard errors.
+WarningsAsErrors: >-
+  bugprone-*,
+  clang-analyzer-*,
+  concurrency-*
+
+# Only report findings in project headers, not third-party includes.
+HeaderFilterRegex: '^(src|include|tests|plugins)/.*'
+
+# Respect .clang-format for auto-fix formatting.
+FormatStyle: file
+
+CheckOptions:
+  # Allow rule-of-five classes that only need a defaulted destructor.
+  - key: cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor
+    value: '1'
+  # Don't require move functions when copy is sufficient (e.g. value types).
+  - key: cppcoreguidelines-special-member-functions.AllowMissingMoveFunctions
+    value: '1'

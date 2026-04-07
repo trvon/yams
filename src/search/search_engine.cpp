@@ -16,6 +16,7 @@
 #include <yams/vector/compressed_ann.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -149,7 +150,7 @@ std::string buildRerankSnippet(const std::string& query, const std::string& cont
     }
 
     if (hits.empty()) {
-        if (content.size() <= maxLen + maxLen / 2) {
+        if (content.size() <= maxLen + (maxLen / 2)) {
             return truncateSnippet(content, maxLen);
         }
         return makeHeadTailSnippet(content, maxLen);
@@ -159,7 +160,7 @@ std::string buildRerankSnippet(const std::string& query, const std::string& cont
     size_t bestHitCount = 0;
     size_t bestCovered = 0;
     for (const auto& hit : hits) {
-        const size_t start = hit.pos > maxLen / 3 ? hit.pos - maxLen / 3 : 0;
+        const size_t start = hit.pos > (maxLen / 3) ? hit.pos - (maxLen / 3) : 0;
         const size_t end = std::min(content.size(), start + maxLen);
 
         size_t hitCount = 0;
@@ -229,7 +230,7 @@ resolveGraphCandidateNodeId(const std::shared_ptr<yams::metadata::KnowledgeGraph
 
     auto directNode = kgStore->getNodeByKey(std::string(candidateId));
     if (directNode && directNode.value().has_value()) {
-        return directNode.value()->id;
+        return directNode.value()->id; // NOLINT(bugprone-unchecked-optional-access) — guarded above
     }
 
     auto docId = resolveGraphCandidateDocumentId(kgStore, candidateId);
@@ -238,19 +239,23 @@ resolveGraphCandidateNodeId(const std::shared_ptr<yams::metadata::KnowledgeGraph
     }
 
     auto docHash = kgStore->getDocumentHashById(*docId);
-    if (!docHash || !docHash.value().has_value() || docHash.value()->empty()) {
+    if (!docHash || !docHash.value().has_value() ||
+        docHash.value()->empty()) { // NOLINT(bugprone-unchecked-optional-access) — short-circuit:
+                                    // .value() only called when docHash is non-empty
         return std::nullopt;
     }
 
-    auto node = kgStore->getNodeByKey("doc:" + *docHash.value());
+    auto node = kgStore->getNodeByKey(
+        "doc:" + *docHash.value()); // NOLINT(bugprone-unchecked-optional-access) — guarded above
     if (!node || !node.value().has_value()) {
         auto fallbackNode = kgStore->getNodeByKey("doc:" + std::string(candidateId));
         if (fallbackNode && fallbackNode.value().has_value()) {
-            return fallbackNode.value()->id;
+            return fallbackNode.value()
+                ->id; // NOLINT(bugprone-unchecked-optional-access) — guarded above
         }
         return std::nullopt;
     }
-    return node.value()->id;
+    return node.value()->id; // NOLINT(bugprone-unchecked-optional-access) — guarded above
 }
 
 std::vector<float> computeReciprocalCommunitySupport(
@@ -480,7 +485,8 @@ struct QueryExpansionStats {
 };
 
 bool envFlagEnabled(const char* name) {
-    if (const char* env = std::getenv(name)) {
+    if (const char* env = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe) — read-only; env
+                                               // vars not modified concurrently
         std::string value(env);
         std::transform(value.begin(), value.end(), value.begin(), [](char c) {
             return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -491,11 +497,14 @@ bool envFlagEnabled(const char* name) {
 }
 
 size_t envSizeTOrDefault(const char* name, size_t defaultValue, size_t minValue, size_t maxValue) {
-    if (const char* env = std::getenv(name); env && *env) {
-        try {
-            const auto parsed = static_cast<size_t>(std::stoull(env));
+    if (const char* env = std::getenv(name);
+        env &&
+        *env) { // NOLINT(concurrency-mt-unsafe) — read-only; env vars not modified concurrently
+        size_t parsed{};
+        const auto* end = env + std::strlen(env);
+        auto [ptr, ec] = std::from_chars(env, end, parsed);
+        if (ec == std::errc{} && ptr == end) {
             return std::clamp(parsed, minValue, maxValue);
-        } catch (...) {
         }
     }
     return std::clamp(defaultValue, minValue, maxValue);
@@ -849,18 +858,43 @@ double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent,
 }
 
 bool hasCamelCase(const std::string& input) {
-    bool hasLower = false;
-    bool hasUpper = false;
+    bool tokenHasAlpha = false;
+    bool tokenHasLower = false;
+    bool tokenHasUpper = false;
+    bool tokenHasInteriorUpper = false;
+
+    const auto flushToken = [&]() {
+        const bool camelToken =
+            tokenHasAlpha && tokenHasLower && tokenHasUpper && tokenHasInteriorUpper;
+        tokenHasAlpha = false;
+        tokenHasLower = false;
+        tokenHasUpper = false;
+        tokenHasInteriorUpper = false;
+        return camelToken;
+    };
+
     for (unsigned char c : input) {
-        if (std::islower(c)) {
-            hasLower = true;
-        } else if (std::isupper(c)) {
-            hasUpper = true;
+        if (std::isalnum(c)) {
+            if (std::isalpha(c)) {
+                if (std::isupper(c) && tokenHasAlpha) {
+                    tokenHasInteriorUpper = true;
+                }
+                tokenHasAlpha = true;
+                tokenHasLower = tokenHasLower || std::islower(c);
+                tokenHasUpper = tokenHasUpper || std::isupper(c);
+            }
+            continue;
         }
-        if (hasLower && hasUpper) {
+
+        if (flushToken()) {
             return true;
         }
     }
+
+    if (flushToken()) {
+        return true;
+    }
+
     return false;
 }
 
@@ -1179,7 +1213,8 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         SearchResult r;
         r.document.sha256Hash = std::move(entry.second.documentHash);
         r.document.filePath = std::move(entry.second.filePath);
-        r.score = static_cast<float>(entry.second.score * entry.second.componentCount);
+        r.score = static_cast<float>(entry.second.score *
+                                     static_cast<double>(entry.second.componentCount));
         if (entry.second.keywordScore > 0.0) {
             r.keywordScore = entry.second.keywordScore;
         }
@@ -1648,6 +1683,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<SearchResult> postGraphSnapshot;
     bool graphRerankApplied = false;
     bool crossRerankApplied = false;
+    double rerankGuardScoreGap = 0.0;
+    bool rerankGuardCompetitiveAnchoredEvidence = false;
+    std::vector<std::string> rerankGuardAnchoredDocIds;
     size_t graphWindowGuardReplacementCount = 0;
     size_t graphWindowCapReplacementCount = 0;
     size_t graphRerankGuardReplacementCount = 0;
@@ -2638,8 +2676,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
 
             for (const auto& term : docSeedGraphTerms) {
-                auto searchResults =
-                    metadataRepo_->search(term.text, workingConfig.textMaxResults, 0);
+                auto searchResults = metadataRepo_->search(
+                    term.text, static_cast<int>(workingConfig.textMaxResults), 0);
                 if (!searchResults) {
                     continue;
                 }
@@ -2988,7 +3026,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     // Opt-in diagnostic: help explain "0 results" situations by showing per-component
     // hit counts (pre-fusion) and whether an embedding was available.
-    if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
+    if (const char* env = std::getenv("YAMS_SEARCH_DIAG");
+        env &&
+        std::string(env) ==
+            "1") { // NOLINT(concurrency-mt-unsafe) — debug env var; not modified concurrently
         const bool embeddingsAvailable = queryEmbedding.has_value();
         spdlog::warn("[search_diag] query='{}' components: contributing={} failed={} timed_out={} "
                      "skipped={} embedding={} pre_fusion_total={} "
@@ -3673,16 +3714,39 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                           std::max<int64_t>(remainingMs, 0));
         }
 
+        const auto preFusionSignalForResult =
+            [&preFusionSignals](const SearchResult& result) -> const PreFusionDocSignal* {
+            const std::string docId =
+                documentIdForTrace(result.document.filePath, result.document.sha256Hash);
+            if (docId.empty()) {
+                return nullptr;
+            }
+            auto it = preFusionSignals.find(docId);
+            return it != preFusionSignals.end() ? &it->second : nullptr;
+        };
+
         bool skipRerank = false;
         if (!rerankerCoolingDown && rerankWindow >= 2 &&
             workingConfig.rerankScoreGapThreshold > 0.0f) {
             double bestRemainingFusedScore = response.results[1].score;
-            for (size_t i = 2; i < rerankWindow; ++i) {
+            bool hasCompetitiveAnchoredEvidence = false;
+            rerankGuardAnchoredDocIds.clear();
+            for (size_t i = 1; i < rerankWindow; ++i) {
                 bestRemainingFusedScore =
                     std::max(bestRemainingFusedScore, response.results[i].score);
+                const auto* signal = preFusionSignalForResult(response.results[i]);
+                if (signal != nullptr && signal->hasAnchoring && signal->sources.size() > 1) {
+                    hasCompetitiveAnchoredEvidence = true;
+                    rerankGuardAnchoredDocIds.push_back(
+                        documentIdForTrace(response.results[i].document.filePath,
+                                           response.results[i].document.sha256Hash));
+                }
             }
             const double scoreGap = response.results[0].score - bestRemainingFusedScore;
-            if (scoreGap >= static_cast<double>(workingConfig.rerankScoreGapThreshold)) {
+            rerankGuardScoreGap = scoreGap;
+            rerankGuardCompetitiveAnchoredEvidence = hasCompetitiveAnchoredEvidence;
+            if (scoreGap >= static_cast<double>(workingConfig.rerankScoreGapThreshold) &&
+                !hasCompetitiveAnchoredEvidence) {
                 spdlog::debug(
                     "[reranker] Skipping rerank (top fused gap {:.4f} >= {:.4f}; window={})",
                     scoreGap, workingConfig.rerankScoreGapThreshold, rerankWindow);
@@ -3782,7 +3846,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 const bool snippetLooksLikePath =
                     !response.results[i].snippet.empty() &&
                     response.results[i].snippet == response.results[i].document.filePath;
-                if (!response.results[i].snippet.empty() && !snippetLooksLikePath) {
+                if (!response.results[i].snippet.empty() &&
+                    !snippetLooksLikePath) { // NOLINT(bugprone-branch-clone) — third branch is a
+                                             // deliberate fallback that accepts path-like snippets
+                                             // when no metadata preview is available
                     text = response.results[i].snippet;
                 } else if (auto it = metadataPreviewByIndex.find(i);
                            it != metadataPreviewByIndex.end()) {
@@ -3834,7 +3901,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                             sumScore += s;
                         spdlog::info("[reranker] Score distribution: n={} min={:.4f} max={:.4f} "
                                      "mean={:.4f}",
-                                     scores.size(), minScore, maxScore, sumScore / scores.size());
+                                     scores.size(), minScore, maxScore,
+                                     sumScore / static_cast<float>(scores.size()));
                     }
 
                     // Apply reranker scores to eligible results.
@@ -4296,7 +4364,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::max({lexical, vector, kg, result.pathScore.value_or(0.0),
                       result.symbolScore.value_or(0.0), result.tagScore.value_or(0.0)});
         const double componentBonus = (lexical > 0.0 && vector > 0.0) ? 0.01 : 0.0;
-        return bestSignal + componentBonus;
+        const double rerankSignal = result.rerankerScore.value_or(0.0);
+        return std::max(bestSignal + componentBonus, rerankSignal);
     };
 
     const double finalEvidenceRescueMinScore =
@@ -4321,6 +4390,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     const auto finalLexicalAwareLess = [&lexicalAnchorScore, &docIdForResult, &workingConfig](
                                            const SearchResult& a, const SearchResult& b) {
+        if (workingConfig.rerankReplaceScores) {
+            const bool rerankCoveredA = a.rerankerScore.has_value();
+            const bool rerankCoveredB = b.rerankerScore.has_value();
+            if (rerankCoveredA != rerankCoveredB) {
+                return rerankCoveredA;
+            }
+            if (rerankCoveredA && rerankCoveredB) {
+                const double rerankA = a.rerankerScore.value_or(0.0);
+                const double rerankB = b.rerankerScore.value_or(0.0);
+                if (rerankA != rerankB) {
+                    return rerankA > rerankB;
+                }
+            }
+        }
+
         const double scoreDiff = static_cast<double>(a.score) - static_cast<double>(b.score);
         const double tieEpsilon =
             std::max(0.0, static_cast<double>(workingConfig.lexicalTieBreakEpsilon));
@@ -4508,6 +4592,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 size_t victimIndex = finalWindow;
                 double victimEvidence = std::numeric_limits<double>::max();
                 for (size_t i = 0; i < finalWindow; ++i) {
+                    if (response.results[i].rerankerScore.has_value()) {
+                        continue;
+                    }
                     const double evidence = evidenceRescueScore(response.results[i]);
                     if (evidence < victimEvidence) {
                         victimEvidence = evidence;
@@ -4895,6 +4982,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["trace_cross_rerank_applied"] = crossRerankApplied ? "1" : "0";
         response.debugStats["trace_turboquant_rerank_applied"] =
             turboQuantRerankApplied ? "1" : "0";
+        response.debugStats["trace_rerank_guard_score_gap"] =
+            fmt::format("{:.6f}", rerankGuardScoreGap);
+        response.debugStats["trace_rerank_guard_has_competitive_anchored_evidence"] =
+            rerankGuardCompetitiveAnchoredEvidence ? "1" : "0";
+        response.debugStats["trace_rerank_guard_anchored_doc_ids"] =
+            joinWithTab(rerankGuardAnchoredDocIds);
 
         response.debugStats["trace_pre_fusion_unique_count"] =
             std::to_string(preFusionDocIds.size());
@@ -4968,7 +5061,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     telemetry.stages.emplace(name, signal);
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch) — best-effort telemetry; skip stage summary
+                        // if trace data is malformed
         }
 
         try {
@@ -4990,7 +5084,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     telemetry.fusionSources.emplace(name, signal);
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch) — best-effort telemetry; skip fusion summary
+                        // if trace data is malformed
         }
 
         tuner_->observe(telemetry);
@@ -5063,8 +5158,10 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
             size_t pos = ci_find(pathView, queryView);
 
             if (pos != std::string_view::npos) {
-                float positionScore = 1.0f - (static_cast<float>(pos) / pathView.length());
-                float lengthScore = static_cast<float>(queryView.length()) / pathView.length();
+                float positionScore =
+                    1.0f - (static_cast<float>(pos) / static_cast<float>(pathView.length()));
+                float lengthScore =
+                    static_cast<float>(queryView.length()) / static_cast<float>(pathView.length());
                 result.score = (positionScore * 0.3f + lengthScore * 0.7f);
             } else {
                 result.score = 0.5f;
@@ -5186,7 +5283,7 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
             }
         };
 
-        auto fts5Results = metadataRepo_->search(query, limit, 0);
+        auto fts5Results = metadataRepo_->search(query, static_cast<int>(limit), 0);
         size_t baseFtsHitCount = 0;
         const bool baseFtsSucceeded = static_cast<bool>(fts5Results);
         if (!baseFtsSucceeded) {
@@ -5230,7 +5327,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
                     expandedQuery += expansionTerms[i];
                 }
 
-                auto expandedResults = metadataRepo_->search(expandedQuery, limit, 0);
+                auto expandedResults =
+                    metadataRepo_->search(expandedQuery, static_cast<int>(limit), 0);
                 if (expandedResults) {
                     const float penalty =
                         std::clamp(config.lexicalExpansionScorePenalty, 0.1f, 1.0f);
@@ -5287,7 +5385,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
                     expandedQuery += clauses[i];
                 }
 
-                auto expandedResults = metadataRepo_->search(expandedQuery, limit, 0);
+                auto expandedResults =
+                    metadataRepo_->search(expandedQuery, static_cast<int>(limit), 0);
                 if (expandedResults) {
                     if (expansionStats != nullptr) {
                         expansionStats->subPhraseFtsHitCount =
@@ -5307,6 +5406,60 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
             }
         }
 
+        // Sub-phrase rescoring: unconditionally re-score already-retrieved documents
+        // via AND-clause sub-phrase queries. Unlike expansion (which adds new docs),
+        // this pass updates scores in-place, so it helps even when base FTS returns the
+        // entire corpus at low scores and the expansion gates (baseFtsHitCount < N)
+        // never fire. Controlled by enableSubPhraseRescoring in tuner profiles.
+        if (config.enableSubPhraseRescoring && !results.empty()) {
+            std::unordered_map<std::string, size_t> rescoreIndex;
+            rescoreIndex.reserve(results.size());
+            for (size_t i = 0; i < results.size(); ++i) {
+                rescoreIndex.emplace(results[i].documentHash, i);
+            }
+
+            const size_t maxPhrases = std::max<size_t>(config.multiVectorMaxPhrases, 4);
+            auto subPhrases = generateQuerySubPhrases(query, maxPhrases);
+            const float rescorePenalty = std::clamp(config.subPhraseScoringPenalty, 0.1f, 1.0f);
+
+            for (const auto& phrase : subPhrases) {
+                auto phraseTokens = tokenizeQueryTokens(phrase);
+                if (phraseTokens.size() < 2) {
+                    continue;
+                }
+
+                std::string clause = "(";
+                for (size_t i = 0; i < phraseTokens.size(); ++i) {
+                    if (i > 0) {
+                        clause += " AND ";
+                    }
+                    clause += phraseTokens[i].normalized;
+                }
+                clause += ")";
+
+                auto phraseResults = metadataRepo_->search(clause, static_cast<int>(limit), 0);
+                if (!phraseResults || phraseResults.value().results.empty()) {
+                    continue;
+                }
+
+                // BM25 min/max for normalization within this sub-phrase result set.
+                // Results are returned sorted descending, so front=max, back=min.
+                const double phMax = phraseResults.value().results.front().score;
+                const double phMin = phraseResults.value().results.back().score;
+
+                for (const auto& pr : phraseResults.value().results) {
+                    auto it = rescoreIndex.find(pr.document.sha256Hash);
+                    if (it == rescoreIndex.end()) {
+                        continue;
+                    }
+                    float phraseNorm = normalizedBm25Score(static_cast<float>(pr.score),
+                                                           config.bm25NormDivisor, phMin, phMax);
+                    float boost = std::clamp(phraseNorm * rescorePenalty, 0.0f, 1.0f);
+                    results[it->second].score = std::max(results[it->second].score, boost);
+                }
+            }
+        }
+
         if ((!baseFtsSucceeded || baseFtsHitCount == 0 || results.size() < 3) && metadataRepo_) {
             const size_t maxAggressiveClauses =
                 (!baseFtsSucceeded || baseFtsHitCount == 0) ? 10 : 6;
@@ -5319,7 +5472,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
             size_t totalAggressiveHits = 0;
             const size_t beforeAggressive = results.size();
             for (const auto& clause : aggressiveClauses) {
-                auto clauseResults = metadataRepo_->search(clause.query, limit, 0);
+                auto clauseResults =
+                    metadataRepo_->search(clause.query, static_cast<int>(limit), 0);
                 if (!clauseResults) {
                     continue;
                 }
@@ -5364,7 +5518,7 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
             size_t totalGraphHits = 0;
             const size_t beforeGraph = results.size();
             for (const auto& term : graphTerms) {
-                auto graphResults = metadataRepo_->search(term.text, limit, 0);
+                auto graphResults = metadataRepo_->search(term.text, static_cast<int>(limit), 0);
                 if (!graphResults) {
                     continue;
                 }
@@ -5398,7 +5552,10 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
         spdlog::debug("queryFullText: {} results for query '{}' (limit={})", results.size(),
                       query.substr(0, 50), limit);
 
-        if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
+        if (const char* env = std::getenv("YAMS_SEARCH_DIAG");
+            env &&
+            std::string(env) ==
+                "1") { // NOLINT(concurrency-mt-unsafe) — debug env var; not modified concurrently
             spdlog::warn("[search_diag] text_hits={} limit={} query='{}'", results.size(), limit,
                          query);
         }
@@ -5585,7 +5742,7 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit,
         // Single FTS5 query instead of N queries
         // Request more results since we're batching multiple terms
         const size_t batchLimit = std::min(limit * 3, static_cast<size_t>(200));
-        auto docResults = metadataRepo_->search(batchQuery, batchLimit, 0);
+        auto docResults = metadataRepo_->search(batchQuery, static_cast<int>(batchLimit), 0);
         if (!docResults) {
             spdlog::debug("KG batch FTS5 search failed: {}", docResults.error().message);
             return results;
@@ -5614,13 +5771,10 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit,
                     continue;
 
                 // Check if this term appears in snippet or path (heuristic for match attribution)
-                bool likelyMatch = false;
-                if (!searchResult.snippet.empty() &&
-                    ci_find(searchResult.snippet, term) != std::string::npos) {
-                    likelyMatch = true;
-                } else if (ci_find(searchResult.document.filePath, term) != std::string::npos) {
-                    likelyMatch = true;
-                }
+                const bool likelyMatch =
+                    (!searchResult.snippet.empty() &&
+                     ci_find(searchResult.snippet, term) != std::string::npos) ||
+                    ci_find(searchResult.document.filePath, term) != std::string::npos;
 
                 if (likelyMatch || bestScore == 0.0f) {
                     // Use the highest-scoring alias for this term

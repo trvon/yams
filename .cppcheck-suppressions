@@ -76,6 +76,8 @@ syntaxError:*mcp_server.cpp
 
 # nlohmann::json-heavy test inputs with "$prev" expressions trip cppcheck's parser.
 syntaxError:*mcp_code_mode_catch2_test.cpp
+# __has_feature() is a Clang compiler built-in; cppcheck cannot evaluate it
+syntaxError:*onnx_plugin_harness_test.cpp
 
 # Coroutine missingReturn false positives - awaitable<void> functions don't need
 # explicit co_return at end of function

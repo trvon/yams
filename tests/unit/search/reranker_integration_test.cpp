@@ -15,10 +15,12 @@
 #include <yams/search/internal_benchmark.h>
 #include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine.h>
+#include <yams/search/search_tuner.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -60,7 +62,7 @@ public:
         std::vector<float> scores;
         scores.reserve(documents.size());
         for (size_t i = 0; i < documents.size(); ++i) {
-            scores.push_back(1.0f - static_cast<float>(i) / static_cast<float>(documents.size()));
+            scores.push_back(1.0f - (static_cast<float>(i) / static_cast<float>(documents.size())));
         }
         return scores;
     }
@@ -130,7 +132,7 @@ public:
         std::vector<std::vector<float>> results;
         results.reserve(texts.size());
         for (size_t i = 0; i < texts.size(); ++i) {
-            results.push_back(std::vector<float>(384, 0.0f));
+            results.emplace_back(384, 0.0f);
         }
         return results;
     }
@@ -143,7 +145,7 @@ public:
         std::vector<std::vector<float>> results;
         results.reserve(texts.size());
         for (size_t i = 0; i < texts.size(); ++i) {
-            results.push_back(std::vector<float>(384, 0.0f));
+            results.emplace_back(384, 0.0f);
         }
         return results;
     }
@@ -513,6 +515,31 @@ private:
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;
 };
 
+class EnvGuard {
+public:
+    EnvGuard(const std::string& key, const std::string& value) : key_(key) {
+        const char* existing = std::getenv(key_.c_str());
+        if (existing) {
+            oldValue_ = existing;
+            hadValue_ = true;
+        }
+        setenv(key_.c_str(), value.c_str(), 1);
+    }
+
+    ~EnvGuard() {
+        if (hadValue_) {
+            setenv(key_.c_str(), oldValue_.c_str(), 1);
+        } else {
+            unsetenv(key_.c_str());
+        }
+    }
+
+private:
+    std::string key_;
+    std::string oldValue_;
+    bool hadValue_{false};
+};
+
 } // namespace
 
 TEST_CASE("SearchEngine: reranker not-implemented errors enter cooldown",
@@ -705,6 +732,273 @@ TEST_CASE("SearchEngine: score gap guard still reranks when another strong fused
                     "reranker") == response.value().skippedComponents.end());
     CHECK(std::any_of(response.value().results.begin(), response.value().results.end(),
                       [](const auto& result) { return result.rerankerScore.has_value(); }));
+}
+
+TEST_CASE("SearchEngine: score gap guard yields to corroborated anchored evidence deeper in window",
+          "[search][reranker][score-gap]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string pathTop = "/tmp/reranker_gap_anchor_top.md";
+    const std::string pathMid = "/tmp/reranker_gap_anchor_mid.md";
+    const std::string pathDeep = "/tmp/reranker_gap_anchor_deep.md";
+    const std::string hashTop = "HASH_RERANK_GAP_ANCHOR_TOP";
+    const std::string hashMid = "HASH_RERANK_GAP_ANCHOR_MID";
+    const std::string hashDeep = "HASH_RERANK_GAP_ANCHOR_DEEP";
+
+    fixture.addIndexedDocument(pathTop, hashTop, "alpha top", "alpha top alpha top");
+    fixture.addIndexedDocument(pathMid, hashMid, "alpha middle", "alpha middle");
+    fixture.addIndexedDocument(pathDeep, hashDeep, "alpha deep target",
+                               "alpha deep target alpha deep target alpha deep target");
+    fixture.addDocEntityByHash(hashDeep, "alpha");
+
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 1.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableGraphRerank = false;
+    config.enableReranking = true;
+    config.rerankTopK = 3;
+    config.rerankScoreGapThreshold = 0.05f;
+    config.rerankReplaceScores = true;
+    config.includeDebugInfo = true;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    auto reranker = std::make_shared<MockReranker>();
+    reranker->setScores({0.1f, 0.2f, 0.9f});
+    engine->setReranker(reranker);
+
+    auto response = engine->searchWithResponse("alpha", {});
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() >= 3);
+
+    CHECK(reranker->getCallCount() == 1);
+    CHECK(std::find(response.value().skippedComponents.begin(),
+                    response.value().skippedComponents.end(),
+                    "reranker") == response.value().skippedComponents.end());
+    CHECK(std::any_of(
+        response.value().results.begin(), response.value().results.end(), [&](const auto& result) {
+            return result.document.sha256Hash == hashDeep && result.rerankerScore.has_value();
+        }));
+}
+
+TEST_CASE("SearchEngine: score gap guard yields to corroborated anchored evidence in second slot",
+          "[search][reranker][score-gap]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string pathTop = "/tmp/reranker_gap_anchor2_top.md";
+    const std::string pathSecond = "/tmp/reranker_gap_anchor2_second.md";
+    const std::string pathThird = "/tmp/reranker_gap_anchor2_third.md";
+    const std::string hashTop = "HASH_RERANK_GAP_ANCHOR2_TOP";
+    const std::string hashSecond = "HASH_RERANK_GAP_ANCHOR2_SECOND";
+    const std::string hashThird = "HASH_RERANK_GAP_ANCHOR2_THIRD";
+
+    fixture.addIndexedDocument(pathTop, hashTop, "alpha top", "alpha top alpha top alpha top");
+    fixture.addIndexedDocument(pathSecond, hashSecond, "alpha corroborated",
+                               "alpha corroborated alpha corroborated");
+    fixture.addIndexedDocument(pathThird, hashThird, "alpha third", "alpha third");
+    fixture.addDocEntityByHash(hashSecond, "alpha");
+
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 1.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableGraphRerank = false;
+    config.enableReranking = true;
+    config.rerankTopK = 3;
+    config.rerankScoreGapThreshold = 0.05f;
+    config.rerankReplaceScores = true;
+    config.includeDebugInfo = true;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    auto reranker = std::make_shared<MockReranker>();
+    reranker->setScores({0.1f, 0.95f, 0.2f});
+    engine->setReranker(reranker);
+
+    auto response = engine->searchWithResponse("alpha", {});
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() >= 3);
+
+    CHECK(reranker->getCallCount() == 1);
+    CHECK(std::find(response.value().skippedComponents.begin(),
+                    response.value().skippedComponents.end(),
+                    "reranker") == response.value().skippedComponents.end());
+    CHECK(std::any_of(
+        response.value().results.begin(), response.value().results.end(), [&](const auto& result) {
+            return result.document.sha256Hash == hashSecond && result.rerankerScore.has_value();
+        }));
+}
+
+TEST_CASE("SearchEngine: evidence rescue keeps strongest reranked winner in top slot",
+          "[search][reranker][evidence-rescue]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string pathTop = "/tmp/reranker_evidence_top.md";
+    const std::string pathMid = "/tmp/reranker_evidence_mid.md";
+    const std::string pathTail = "/tmp/reranker_evidence_tail.md";
+    const std::string hashTop = "HASH_RERANK_EVIDENCE_TOP";
+    const std::string hashMid = "HASH_RERANK_EVIDENCE_MID";
+    const std::string hashTail = "HASH_RERANK_EVIDENCE_TAIL";
+
+    fixture.addIndexedDocument(pathTop, hashTop, "alpha top", "alpha top alpha top");
+    fixture.addIndexedDocument(pathMid, hashMid, "alpha mid", "alpha mid alpha mid");
+    fixture.addIndexedDocument(pathTail, hashTail, "alpha tail target",
+                               "alpha tail target alpha tail target alpha tail target");
+    fixture.addDocEntityByHash(hashMid, "alpha");
+    fixture.addDocEntityByHash(hashTail, "alpha");
+
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 1.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableGraphRerank = false;
+    config.enableReranking = true;
+    config.rerankTopK = 5;
+    config.rerankScoreGapThreshold = 0.05f;
+    config.rerankReplaceScores = true;
+    config.fusionEvidenceRescueSlots = 1;
+    config.fusionEvidenceRescueMinScore = 0.01f;
+    config.maxResults = 1;
+    config.includeDebugInfo = true;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    auto reranker = std::make_shared<MockReranker>();
+    reranker->setScores({0.01f, 0.02f, 0.9f});
+    engine->setReranker(reranker);
+
+    SearchParams params;
+    params.limit = 1;
+    auto response = engine->searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() == 1);
+
+    CHECK(reranker->getCallCount() == 1);
+    CHECK(response.value().results[0].document.sha256Hash == hashTail);
+    CHECK(response.value().results[0].rerankerScore.has_value());
+    CHECK(response.value().results[0].rerankerScore.value() == Catch::Approx(0.9f));
+    CHECK(response.value().debugStats.at("evidence_rescue_displaced_doc_ids").find(hashTail) ==
+          std::string::npos);
+}
+
+TEST_CASE("SearchEngine: prose sentences are not misclassified as code intent",
+          "[search][intent]") {
+    EnvGuard traceGuard("YAMS_SEARCH_STAGE_TRACE", "1");
+
+    SearchEngineRerankerFixture fixture;
+    fixture.addIndexedDocument(
+        "/tmp/intent_prose_doc.md", "HASH_INTENT_PROSE", "Prose doc",
+        "The genomic aberrations found in metastases are similar to those in the primary tumor.");
+
+    SearchEngineConfig config;
+    config.enableParallelExecution = false;
+    config.enableIntentAdaptiveWeighting = true;
+    config.includeDebugInfo = true;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    auto response = engine->searchWithResponse("The genomic aberrations found in matasteses are "
+                                               "very similar to those found in the primary tumor.",
+                                               {});
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().debugStats.contains("trace_query_intent"));
+    CHECK(response.value().debugStats.at("trace_query_intent") == "prose");
+}
+
+TEST_CASE("SearchEngine: camelCase identifiers remain code intent", "[search][intent]") {
+    EnvGuard traceGuard("YAMS_SEARCH_STAGE_TRACE", "1");
+
+    SearchEngineRerankerFixture fixture;
+    fixture.addIndexedDocument("/tmp/intent_code_doc.md", "HASH_INTENT_CODE", "Code doc",
+                               "Search for renderGraphNode and related helpers.");
+
+    SearchEngineConfig config;
+    config.enableParallelExecution = false;
+    config.enableIntentAdaptiveWeighting = true;
+    config.includeDebugInfo = true;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    auto response = engine->searchWithResponse("renderGraphNode", {});
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().debugStats.contains("trace_query_intent"));
+    CHECK(response.value().debugStats.at("trace_query_intent") == "code");
+}
+
+TEST_CASE("SearchEngine: rerank replacement keeps reranked docs ahead of untouched fused docs",
+          "[search][reranker][replace-order]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string pathTop = "/tmp/rerank_replace_top.md";
+    const std::string pathSecond = "/tmp/rerank_replace_second.md";
+    const std::string pathTail = "/tmp/rerank_replace_tail.md";
+    const std::string hashTop = "HASH_RERANK_REPLACE_TOP";
+    const std::string hashSecond = "HASH_RERANK_REPLACE_SECOND";
+    const std::string hashTail = "HASH_RERANK_REPLACE_TAIL";
+
+    fixture.addIndexedDocument(pathTop, hashTop, "alpha top", "alpha top alpha top");
+    fixture.addIndexedDocument(pathSecond, hashSecond, "alpha second", "alpha second alpha second");
+    fixture.addIndexedDocument(pathTail, hashTail, "alpha tail", "alpha tail alpha tail");
+
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 0.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableGraphRerank = false;
+    config.enableReranking = true;
+    config.rerankTopK = 2;
+    config.rerankScoreGapThreshold = 0.0f;
+    config.rerankReplaceScores = true;
+    config.fusionEvidenceRescueSlots = 0;
+    config.includeDebugInfo = true;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    auto reranker = std::make_shared<MockReranker>();
+    reranker->setScores({0.8f, 0.7f});
+    engine->setReranker(reranker);
+
+    SearchParams params;
+    params.limit = 1;
+    auto response = engine->searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() == 1);
+
+    CHECK(reranker->getCallCount() == 1);
+    CHECK(response.value().results[0].document.sha256Hash == hashTop);
+    CHECK(response.value().results[0].rerankerScore.has_value());
+    CHECK(response.value().results[0].rerankerScore.value() == Catch::Approx(0.8f));
 }
 
 TEST_CASE("SearchEngine: graph rerank emits reciprocal community telemetry",
@@ -906,6 +1200,71 @@ TEST_CASE("InternalBenchmark: reciprocal community signal improves rank when ena
     CHECK(std::stod(communityResponse.value().debugStats.at("graph_community_signal_mass")) > 0.0);
     REQUIRE_FALSE(communityResponse.value().results.empty());
     CHECK(communityResponse.value().results.front().document.sha256Hash == hashTarget);
+}
+
+TEST_CASE(
+    "SearchTuner: SCIENTIFIC profile applies lower similarity threshold and sub-phrase rescoring",
+    "[search][tuner][rescoring]") {
+    auto params = getTunedParams(TuningState::SCIENTIFIC);
+    CHECK(params.similarityThreshold == Approx(0.40f));
+    CHECK(params.enableSubPhraseRescoring == true);
+    CHECK(params.subPhraseScoringPenalty == Approx(0.70f));
+
+    // Verify applyTo() propagates them to SearchEngineConfig.
+    SearchEngineConfig config;
+    params.applyTo(config);
+    CHECK(config.similarityThreshold == Approx(0.40f));
+    CHECK(config.enableSubPhraseRescoring == true);
+    CHECK(config.subPhraseScoringPenalty == Approx(0.70f));
+}
+
+TEST_CASE("SearchEngine: sub-phrase rescoring does not discard already-retrieved documents",
+          "[search][expansion][rescoring]") {
+    SearchEngineRerankerFixture fixture;
+
+    // Multiple docs all containing some query keywords (simulating the "entire corpus
+    // retrieved at low BM25 scores" pattern seen with long prose queries in SciFact).
+    fixture.addIndexedDocument("/tmp/rescore_alpha.md", "HASH_RESCORE_ALPHA", "Alpha doc",
+                               "chronic disease effects research study treatment");
+    fixture.addIndexedDocument("/tmp/rescore_beta.md", "HASH_RESCORE_BETA", "Beta doc",
+                               "chronic disease treatment management effects care");
+    fixture.addIndexedDocument("/tmp/rescore_gamma.md", "HASH_RESCORE_GAMMA", "Gamma doc",
+                               "effects treatment chronic disease analysis report");
+
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.vectorWeight = 0.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableGraphRerank = false;
+    config.enableReranking = false;
+    config.enableSubPhraseRescoring = true;
+    config.subPhraseScoringPenalty = 0.70f;
+    config.maxResults = 10;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    SearchParams params;
+    params.limit = 10;
+    auto response = engine->searchWithResponse("chronic disease treatment effects", params);
+    REQUIRE(response.has_value());
+    REQUIRE_FALSE(response.value().results.empty());
+
+    // All three docs should still be retrievable — rescoring must not silently drop docs.
+    std::unordered_set<std::string> returned;
+    for (const auto& r : response.value().results) {
+        returned.insert(r.document.sha256Hash);
+    }
+    CHECK(returned.contains("HASH_RESCORE_ALPHA"));
+    CHECK(returned.contains("HASH_RESCORE_BETA"));
+    CHECK(returned.contains("HASH_RESCORE_GAMMA"));
 }
 
 } // namespace yams::search

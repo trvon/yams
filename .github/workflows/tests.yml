@@ -20,6 +20,63 @@ jobs:
       build_type: Debug
       enable_onnx: false
 
+  quality:
+    name: Static Analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Initialize required submodules
+        shell: bash
+        run: |
+          git submodule update --init --depth 1 third_party/sqlite-vec-cpp || true
+          git submodule update --init --depth 1 third_party/symspell || true
+
+      - name: Install static analysis tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cppcheck clang-tidy
+
+      - name: Run cppcheck (CI profile, all source)
+        shell: bash
+        run: scripts/check-quality.sh --profile ci --format human --parallel
+
+      - name: Run clang-tidy on changed files (PR only)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true  # Non-blocking until .clang-tidy baseline is proven on full codebase
+        shell: bash
+        run: |
+          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+            | grep -E '\.(cpp|h|hpp|cc|cxx)$' \
+            | grep -v -E '(third_party|external|subprojects|\.pb\.(h|cc))' \
+            || true)
+          if [ -z "$CHANGED" ]; then
+            echo "No C++ files changed in this PR."
+            exit 0
+          fi
+          echo "Running clang-tidy on: $CHANGED"
+          clang-tidy \
+            --warnings-as-errors='bugprone-*,clang-analyzer-*,concurrency-*' \
+            $CHANGED \
+            2>&1 | tee clang-tidy-pr.txt || true
+
+      - name: Upload clang-tidy results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clang-tidy-pr-${{ github.run_number }}
+          path: clang-tidy-pr.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
   tests:
     needs: warm
     if: ${{ success() }}
@@ -62,6 +119,25 @@ jobs:
             build_type: Debug
             coverage: false
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+          - suffix: linux-x86_64-asan
+            runs_on: ubuntu-24.04
+            conan_host_profile: ./conan/profiles/host-linux-clang
+            conan_arch: x86_64
+            needs_rosetta: false
+            build_type: Debug
+            coverage: false
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-asan=true -Db_sanitize=address -Db_lundef=false"
+          - suffix: linux-x86_64-ubsan
+            runs_on: ubuntu-24.04
+            conan_host_profile: ./conan/profiles/host-linux-clang
+            conan_arch: x86_64
+            needs_rosetta: false
+            build_type: Debug
+            coverage: false
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-ubsan=true -Db_sanitize=undefined -Db_lundef=false"
+          # TSAN intentionally excluded from CI: boost::asio strand destruction triggers
+          # a heap-use-after-free that TSAN detects but cannot be suppressed via tsan.suppressions.
+          # Run TSAN locally with: meson setup builddir-tsan -Denable-tsan=true -Db_sanitize=thread
     runs-on: ${{ matrix.runs_on }}
     # Allow extra time for safety across runners.
     timeout-minutes: 100
