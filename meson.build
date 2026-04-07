@@ -608,7 +608,6 @@ else
     subdir('src/plugins')
   endif
   subdir('src/indexing')
-  subdir('src/genai')
   subdir('src/daemon/client')
   subdir('src/vector')
 

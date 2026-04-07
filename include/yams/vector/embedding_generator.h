@@ -40,8 +40,6 @@ struct EmbeddingConfig {
     bool enable_gpu = false;
     int num_threads = -1;      // -1 for auto-detect
     int inter_op_threads = -1; // -1 for auto-detect
-    // Optional: prefer ONNX GenAI pipeline when available (gated behind ONNX support)
-    bool use_genai = true; // default prefer GenAI; env YAMS_ONNX_USE_GENAI=0 disables
 
     // Daemon backend settings
     std::string daemon_socket; // Empty = auto-resolve based on runtime environment

@@ -18,44 +18,6 @@ endif
 
 onnx_opt = get_option('enable-onnx')
 onnx_feature_requested = not onnx_opt.disabled()
-onnx_genai_headers_present = false
-onnx_include_dirs = []
-
-if onnx_dep.found()
-  prefix = onnx_dep.get_variable(pkgconfig: 'prefix', default_value: '')
-  if prefix != ''
-    foreach key : ['includedir', 'includedir1', 'includedir2']
-      dirval = onnx_dep.get_variable(pkgconfig: key, default_value: '')
-      if dirval != ''
-        dirval = dirval.replace('${prefix}', prefix)
-        onnx_include_dirs += dirval
-      endif
-    endforeach
-  endif
-
-  genai_header_candidates = [
-    'ort_genai.h',
-    'onnxruntime/genai/ort_genai.h',
-    'onnxruntime/genai/embedding.h',
-    'onnxruntime/genai/genai_api.h',
-    'onnxruntime/genai/pipeline.h',
-  ]
-
-  foreach incdir : onnx_include_dirs
-    if incdir == ''
-      continue
-    endif
-    foreach hdr : genai_header_candidates
-      if fs.exists(join_paths(incdir, hdr))
-        onnx_genai_headers_present = true
-        break
-      endif
-    endforeach
-    if onnx_genai_headers_present
-      break
-    endif
-  endforeach
-endif
 
 if not get_option('plugin-onnx')
   subdir_done()
@@ -81,14 +43,9 @@ yams_onnx_plugin_srcs = [
   'onnx_reranker_session.cpp',
   'onnx_colbert_session.cpp',
   '../../src/vector/tokenizer.cpp',
-  '../../src/genai/onnx_genai_adapter.cpp',
 ]
 
-# GenAI adapter disabled - not used
 plugin_cppargs = []
-if onnx_genai_headers_present
-  plugin_cppargs += ['-DYAMS_GENAI_RUNTIME_PRESENT']
-endif
 
 # GPU provider defines - these MUST be passed to the plugin for GPU acceleration to work.
 # Conan sets these in pkg-config Cflags, but CMake method may not propagate them.

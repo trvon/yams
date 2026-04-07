@@ -28,7 +28,6 @@ struct OnnxTextConfig {
     bool enable_gpu = false;
     int num_threads = -1;
     int inter_op_threads = -1;
-    bool use_genai = true;
 };
 
 class OnnxTextPreprocessor {

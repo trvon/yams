@@ -255,7 +255,6 @@ unit_vector = []
 if get_option('enable-vector-tests')
   unit_vector += files(
     # 'vector/document_chunker_test.cpp',
-    # 'vector/embedding_genai_selection_test.cpp',
     # 'vector/sqlite_vec_c_api_smoke_test.cpp',
     # 'vector/vector_dimension_validation_test.cpp',
   )

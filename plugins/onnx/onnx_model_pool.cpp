@@ -1,6 +1,5 @@
 #include <yams/common/test_utils.h>
 #include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/daemon/resource/onnx_genai_adapter.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 #include <yams/vector/tokenizer.h>
 
@@ -128,6 +127,23 @@ int envIntOr(const char* name, int fallback) {
     return fallback;
 }
 
+// Resolve path for caching ONNX Runtime optimized graphs on disk.
+// Precedence: YAMS_DATA_DIR > XDG_DATA_HOME > ~/.local/share > model directory.
+fs::path resolveOptimizedModelPath(const std::string& modelPath, GraphOptimizationLevel optLevel) {
+    std::string filename = fs::path(modelPath).stem().string() + "." +
+                           std::to_string(static_cast<int>(optLevel)) + ".ort";
+    if (const char* dir = std::getenv("YAMS_DATA_DIR"); dir && *dir) {
+        return fs::path(dir) / "cache" / "onnx-opt" / filename;
+    }
+    if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && *xdg) {
+        return fs::path(xdg) / "yams" / "cache" / "onnx-opt" / filename;
+    }
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return fs::path(home) / ".local" / "share" / "yams" / "cache" / "onnx-opt" / filename;
+    }
+    return fs::path(modelPath).parent_path() / filename;
+}
+
 bool gpuProcessLockEnabled() {
     if (const char* v = std::getenv("YAMS_GPU_PROCESS_LOCK")) {
         return envTruthy(v);
@@ -240,6 +256,19 @@ size_t& gpuProcessLockDepth() {
     return depth;
 }
 
+// Thread-local reusable buffers for ONNX tensor inputs.
+// Avoids per-inference heap allocation for tokens, masks, and token_type_ids.
+struct TensorBufferPool {
+    std::vector<int64_t> tokens;
+    std::vector<int64_t> masks;
+    std::vector<int64_t> token_type_ids;
+};
+
+TensorBufferPool& getThreadLocalBuffers() {
+    static thread_local TensorBufferPool pool;
+    return pool;
+}
+
 std::string providerBatchLimitKey(const std::string& modelName, const std::string& provider) {
     std::string providerLower = provider;
     std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
@@ -347,17 +376,6 @@ public:
                                          : runtimeInfo.errorMessage);
         }
 
-        // Optional: initialize GenAI adapter when enabled at build + requested at runtime
-#ifdef YAMS_ENABLE_ONNX_GENAI
-        // Always attempt to allocate GenAI adapter (unified policy: ONNX present => try GenAI)
-        try {
-            genai_ = std::make_unique<OnnxGenAIAdapter>();
-            spdlog::info("[GenAI] (plugin) attempting adapter init for '{}'", modelName);
-        } catch (...) {
-            genai_.reset();
-        }
-#endif
-
         // Initialize ONNX Runtime environment
         // Use a single global Ort::Env per process (best practice)
         // The global env is protected by g_onnx_init_mutex during initialization.
@@ -438,21 +456,38 @@ public:
         spdlog::info("[ONNX] Windows: using sequential execution mode");
 #endif
 
-        // Graph optimization level: BASIC for fast startup, ALL for production
-        // ORT_ENABLE_ALL performs expensive graph transformations (minutes for large models)
-        // ORT_ENABLE_BASIC is much faster and sufficient for most embeddings models
-        GraphOptimizationLevel optLevel = GraphOptimizationLevel::ORT_ENABLE_BASIC;
+        // Graph optimization level: EXTENDED enables operator fusion (MatMul+Add, GELU, etc.)
+        // which significantly benefits transformer embedding models.
+        // ORT_ENABLE_ALL performs additional expensive transformations (minutes for large models).
+        // Override with YAMS_ONNX_OPT_LEVEL=basic|extended|all
+        GraphOptimizationLevel optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
         if (const char* opt = std::getenv("YAMS_ONNX_OPT_LEVEL")) {
             std::string level(opt);
             std::transform(level.begin(), level.end(), level.begin(), ::tolower);
-            if (level == "all" || level == "extended") {
+            if (level == "all") {
                 optLevel = GraphOptimizationLevel::ORT_ENABLE_ALL;
                 spdlog::info("[ONNX] Using ORT_ENABLE_ALL optimization (slow first load)");
             } else if (level == "extended") {
                 optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
+            } else if (level == "basic") {
+                optLevel = GraphOptimizationLevel::ORT_ENABLE_BASIC;
             }
         }
         sessionOptions_->SetGraphOptimizationLevel(optLevel);
+
+        // Cache the optimized graph to disk so subsequent loads skip optimization passes.
+        if (detect_bool("YAMS_ONNX_GRAPH_CACHE", false)) {
+            auto optPath = resolveOptimizedModelPath(modelPath, optLevel);
+            std::error_code ec;
+            fs::create_directories(optPath.parent_path(), ec);
+            if (!ec) {
+                sessionOptions_->SetOptimizedModelFilePath(optPath.c_str());
+                spdlog::info("[ONNX] Optimized graph cache: {}", optPath.string());
+            } else {
+                spdlog::warn("[ONNX] Could not create graph cache dir {}: {}",
+                             optPath.parent_path().string(), ec.message());
+            }
+        }
 
         // Enable memory pattern optimization for faster inference
         sessionOptions_->EnableMemPattern();
@@ -583,24 +618,6 @@ public:
         }
 
         try {
-#ifdef YAMS_ENABLE_ONNX_GENAI
-            if (genai_) {
-                OnnxGenAIAdapter::Options o;
-                o.intra_op_threads = config_.num_threads > 0 ? config_.num_threads : 4;
-                o.normalize = config_.normalize_embeddings;
-                const std::string id_or_path = (!modelPath_.empty() ? modelPath_ : modelName_);
-                if (genai_->init(id_or_path, o)) {
-                    auto d = genai_->embedding_dim();
-                    if (d > 0)
-                        embeddingDim_ = d;
-                    spdlog::info("[ONNX] Using GenAI adapter for '{}'", modelName_);
-                    isLoaded_ = true;
-                    return Result<void>();
-                } else {
-                    spdlog::warn("[ONNX] GenAI init failed; falling back to raw ORT");
-                }
-            }
-#endif
             spdlog::debug("[ONNX] Creating Ort::Session for model '{}' at {}", modelName_.c_str(),
                           modelPath_.c_str());
 
@@ -753,6 +770,7 @@ public:
             }
 
             isLoaded_ = true;
+            initIoBinding();
             spdlog::info(
                 "[ONNX] Session ready for '{}' (inputs={}, outputs={}, dim={}, max_seq_len={})",
                 modelName_.c_str(), numInputs, numOutputs, embeddingDim_, maxSequenceLength_);
@@ -1003,7 +1021,7 @@ public:
             sessionOptions_->SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
 #endif
 
-            GraphOptimizationLevel optLevel = GraphOptimizationLevel::ORT_ENABLE_BASIC;
+            GraphOptimizationLevel optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
             if (const char* opt = std::getenv("YAMS_ONNX_OPT_LEVEL")) {
                 std::string level(opt);
                 std::transform(level.begin(), level.end(), level.begin(), ::tolower);
@@ -1011,9 +1029,21 @@ public:
                     optLevel = GraphOptimizationLevel::ORT_ENABLE_ALL;
                 } else if (level == "extended") {
                     optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
+                } else if (level == "basic") {
+                    optLevel = GraphOptimizationLevel::ORT_ENABLE_BASIC;
                 }
             }
             sessionOptions_->SetGraphOptimizationLevel(optLevel);
+
+            if (envTruthy(std::getenv("YAMS_ONNX_GRAPH_CACHE"))) {
+                auto optPath = resolveOptimizedModelPath(modelPath_, optLevel);
+                std::error_code ec;
+                fs::create_directories(optPath.parent_path(), ec);
+                if (!ec) {
+                    sessionOptions_->SetOptimizedModelFilePath(optPath.c_str());
+                }
+            }
+
             sessionOptions_->EnableMemPattern();
             sessionOptions_->EnableCpuMemArena();
 
@@ -1024,6 +1054,7 @@ public:
 #endif
             session_ = std::make_unique<Ort::Session>(
                 *env_, std::filesystem::path(modelPath_).c_str(), options);
+            initIoBinding();
             OnnxModelSession::denylistCoreML(modelName_);
             spdlog::warn("[ONNX] Reinitialized '{}' on CPU after CoreML inference failure "
                          "(denylisted for future instances, intra_threads={}, hw={})",
@@ -1187,13 +1218,46 @@ private:
         return guard;
     }
 
-    // GenAI adapter (optional)
-#ifdef YAMS_ENABLE_ONNX_GENAI
-    std::unique_ptr<OnnxGenAIAdapter> genai_;
-#endif
     // Align a sequence length up to a SIMD-friendly multiple (AVX: 8 x int32, NEON: 4).
     static size_t alignSeqLen(size_t len, size_t alignment = 8) {
         return ((len + alignment - 1) / alignment) * alignment;
+    }
+
+    void initIoBinding() {
+        if (!session_)
+            return;
+        try {
+            ioBinding_ = std::make_unique<Ort::IoBinding>(*session_);
+            useIoBinding_ = true;
+            spdlog::debug("[ONNX] IoBinding created for '{}'", modelName_);
+        } catch (const std::exception& e) {
+            spdlog::warn("[ONNX] IoBinding creation failed for '{}': {}; using Run()", modelName_,
+                         e.what());
+            useIoBinding_ = false;
+        }
+    }
+
+    // Run inference using IoBinding if available, otherwise fall back to Session::Run().
+    std::vector<Ort::Value> runSession(std::vector<Ort::Value>& inputs) {
+        if (useIoBinding_ && ioBinding_) {
+            ioBinding_->ClearBoundInputs();
+            ioBinding_->ClearBoundOutputs();
+            for (size_t i = 0; i < inputs.size() && i < inputNames_.size(); ++i) {
+                ioBinding_->BindInput(inputNames_[i].c_str(), inputs[i]);
+            }
+            for (const auto& name : resolveOutputNames()) {
+                ioBinding_->BindOutput(name, memoryInfo_);
+            }
+            session_->Run(Ort::RunOptions{nullptr}, *ioBinding_);
+            return ioBinding_->GetOutputValues();
+        }
+        // Fallback: direct Run with name arrays
+        std::vector<const char*> in_names;
+        for (auto& n : inputNames_)
+            in_names.push_back(n.c_str());
+        auto out_names = resolveOutputNames();
+        return session_->Run(Ort::RunOptions{nullptr}, in_names.data(), inputs.data(),
+                             inputs.size(), out_names.data(), out_names.size());
     }
 
     Result<std::vector<float>> runOnnx(const std::string& t) {
@@ -1221,46 +1285,45 @@ private:
 
         std::vector<int64_t> input_shape = {1, static_cast<int64_t>(effective_seq_len)};
         const size_t input_tensor_size = effective_seq_len;
-        auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-        std::vector<int64_t> tokens_i64;
-        tokens_i64.reserve(effective_seq_len);
+        // Reuse thread-local buffers to avoid per-call heap allocations.
+        auto& bufs = getThreadLocalBuffers();
+        bufs.tokens.resize(effective_seq_len);
+        bufs.masks.resize(effective_seq_len);
+
         if (tokenizer_.isLoaded()) {
-            // Real tokenizer produces valid ids — no clamping needed
-            for (auto v : tokens) {
-                tokens_i64.push_back(static_cast<int64_t>(v));
-            }
+            for (size_t i = 0; i < effective_seq_len && i < tokens.size(); ++i)
+                bufs.tokens[i] = static_cast<int64_t>(tokens[i]);
+            for (size_t i = tokens.size(); i < effective_seq_len; ++i)
+                bufs.tokens[i] = 0;
         } else {
-            // Fallback: cap token ids to model vocab; Nomic uses 30528, MiniLM/mpnet ~30522
             const int64_t MAX_TOKEN_ID = 30527;
             const int64_t UNK_TOKEN_ID = 100;
-            for (auto v : tokens) {
-                tokens_i64.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID
-                                                                 : static_cast<int64_t>(v));
+            for (size_t i = 0; i < effective_seq_len && i < tokens.size(); ++i) {
+                auto v = tokens[i];
+                bufs.tokens[i] =
+                    (v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID : static_cast<int64_t>(v);
             }
+            for (size_t i = tokens.size(); i < effective_seq_len; ++i)
+                bufs.tokens[i] = UNK_TOKEN_ID;
         }
-        std::vector<int64_t> mask_i64(attention_mask.begin(), attention_mask.end());
+        for (size_t i = 0; i < effective_seq_len && i < attention_mask.size(); ++i)
+            bufs.masks[i] = static_cast<int64_t>(attention_mask[i]);
+        for (size_t i = attention_mask.size(); i < effective_seq_len; ++i)
+            bufs.masks[i] = 0;
 
         std::vector<Ort::Value> input_tensors;
         input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-            memory_info, tokens_i64.data(), input_tensor_size, input_shape.data(), 2));
+            memoryInfo_, bufs.tokens.data(), input_tensor_size, input_shape.data(), 2));
         input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-            memory_info, mask_i64.data(), input_tensor_size, input_shape.data(), 2));
-        std::vector<int64_t> token_type_ids;
+            memoryInfo_, bufs.masks.data(), input_tensor_size, input_shape.data(), 2));
         if (inputNames_.size() >= 3) {
-            token_type_ids.resize(effective_seq_len, 0);
+            bufs.token_type_ids.assign(effective_seq_len, 0);
             input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-                memory_info, token_type_ids.data(), input_tensor_size, input_shape.data(), 2));
+                memoryInfo_, bufs.token_type_ids.data(), input_tensor_size, input_shape.data(), 2));
         }
 
-        std::vector<const char*> input_names_c;
-        for (auto& n : inputNames_)
-            input_names_c.push_back(n.c_str());
-        auto output_names_c = resolveOutputNames();
-
-        auto outputs =
-            session_->Run(Ort::RunOptions{nullptr}, input_names_c.data(), input_tensors.data(),
-                          input_tensors.size(), output_names_c.data(), output_names_c.size());
+        auto outputs = runSession(input_tensors);
         if (outputs.empty()) {
             return Error{ErrorCode::InternalError, "ONNX session returned no outputs"};
         }
@@ -1435,53 +1498,47 @@ private:
         std::vector<int64_t> input_shape = {static_cast<int64_t>(B),
                                             static_cast<int64_t>(effective_seq_len)};
         const size_t tensor_size = B * effective_seq_len;
-        auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-        std::vector<int64_t> tokens_batched;
-        tokens_batched.reserve(tensor_size);
-        std::vector<int64_t> masks_batched;
-        masks_batched.reserve(tensor_size);
+        // Reuse thread-local buffers to avoid per-call heap allocations.
+        auto& bufs = getThreadLocalBuffers();
+        bufs.tokens.resize(tensor_size);
+        bufs.masks.resize(tensor_size);
 
-        // When real tokenizer is loaded, ids are valid — no clamping needed.
-        // Fallback path clamps to avoid out-of-range embedding lookups.
         const bool useRealTokenizer = tokenizer_.isLoaded();
         const int64_t MAX_TOKEN_ID = 30527;
         const int64_t UNK_TOKEN_ID = 100;
 
+        size_t offset = 0;
         for (size_t i = 0; i < B; ++i) {
             const auto& toks = token_seqs[i];
             const auto& m = masks[i];
             for (size_t j = 0; j < effective_seq_len && j < toks.size(); ++j) {
                 int64_t v = toks[j];
                 if (useRealTokenizer) {
-                    tokens_batched.push_back(v);
+                    bufs.tokens[offset] = v;
                 } else {
-                    tokens_batched.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID : v);
+                    bufs.tokens[offset] = (v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID : v;
                 }
-                masks_batched.push_back(static_cast<int64_t>(m[j]));
+                bufs.masks[offset] = static_cast<int64_t>(m[j]);
+                ++offset;
             }
             for (size_t j = toks.size(); j < effective_seq_len; ++j) {
-                tokens_batched.push_back(useRealTokenizer ? 0 : UNK_TOKEN_ID);
-                masks_batched.push_back(0);
+                bufs.tokens[offset] = useRealTokenizer ? 0 : UNK_TOKEN_ID;
+                bufs.masks[offset] = 0;
+                ++offset;
             }
         }
 
         std::vector<Ort::Value> inputs;
-        inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-            memory_info, tokens_batched.data(), tokens_batched.size(), input_shape.data(), 2));
-        inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-            memory_info, masks_batched.data(), masks_batched.size(), input_shape.data(), 2));
-        std::vector<int64_t> token_type_ids;
+        inputs.push_back(Ort::Value::CreateTensor<int64_t>(memoryInfo_, bufs.tokens.data(),
+                                                           tensor_size, input_shape.data(), 2));
+        inputs.push_back(Ort::Value::CreateTensor<int64_t>(memoryInfo_, bufs.masks.data(),
+                                                           tensor_size, input_shape.data(), 2));
         if (inputNames_.size() >= 3) {
-            token_type_ids.assign(tensor_size, 0);
+            bufs.token_type_ids.assign(tensor_size, 0);
             inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-                memory_info, token_type_ids.data(), token_type_ids.size(), input_shape.data(), 2));
+                memoryInfo_, bufs.token_type_ids.data(), tensor_size, input_shape.data(), 2));
         }
-
-        std::vector<const char*> in_names;
-        for (auto& n : inputNames_)
-            in_names.push_back(n.c_str());
-        auto out_names = resolveOutputNames();
 
         // Wrap ONNX Run in try/catch to prevent exceptions from bubbling through ABI boundary
         // On Windows, ORT can throw std::system_error("resource deadlock would occur") when
@@ -1490,8 +1547,7 @@ private:
         int retries = 3;
         while (retries-- > 0) {
             try {
-                outputs = session_->Run(Ort::RunOptions{nullptr}, in_names.data(), inputs.data(),
-                                        inputs.size(), out_names.data(), out_names.size());
+                outputs = runSession(inputs);
                 break; // synchronous success
             } catch (const Ort::Exception& e) {
                 if (retries == 0) {
@@ -1822,6 +1878,14 @@ private:
     enum class Pooling { MEAN, CLS, MAX };
     Pooling pooling_mode_ = Pooling::MEAN;
     bool normalize_ = true;
+
+    // Cached MemoryInfo to avoid re-creating per inference call.
+    Ort::MemoryInfo memoryInfo_{Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)};
+
+    // I/O Binding for optimized inference dispatch (pre-resolved name lookups,
+    // better GPU memory placement). Falls back to Session::Run() if unavailable.
+    std::unique_ptr<Ort::IoBinding> ioBinding_;
+    bool useIoBinding_ = false;
 
     void parseModelConfigHints() {
         try {

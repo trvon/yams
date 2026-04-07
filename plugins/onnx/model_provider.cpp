@@ -5,10 +5,13 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <optional>
 #include <thread>
 #include "ort_runtime_loader.h"
@@ -119,6 +122,159 @@ static std::chrono::milliseconds modelAcquireTimeout(bool batchCall) {
 static yams_status_t onnx_set_threading(void* /*self*/, const char* /*model_id*/, int /*intra*/,
                                         int /*inter*/);
 
+// ---------------------------------------------------------------------------
+// BatchCoalescer — accumulates concurrent embedding requests into larger
+// batches before running inference.  Opt-in via YAMS_ONNX_BATCH_COALESCE=1.
+// ---------------------------------------------------------------------------
+class BatchCoalescer {
+public:
+    struct Config {
+        bool enabled = false;
+        int windowMs = 5;
+        size_t maxBatch = 64;
+    };
+
+    explicit BatchCoalescer(Config cfg) : cfg_(cfg) {}
+
+    bool isEnabled() const { return cfg_.enabled; }
+
+    using InferFn = std::function<yams::Result<std::vector<std::vector<float>>>(
+        const std::string& /*modelId*/, const std::vector<std::string>& /*texts*/)>;
+
+    // Submit texts for embedding.  Blocks until the coalesced batch completes
+    // and returns only this caller's slice of the result.
+    yams::Result<std::vector<std::vector<float>>>
+    submit(const std::string& modelId, std::vector<std::string> texts, InferFn inferFn) {
+        if (!cfg_.enabled || texts.empty()) {
+            return inferFn(modelId, texts);
+        }
+
+        std::unique_lock<std::mutex> lk(mu_);
+
+        auto& batch = pending_[modelId];
+        if (!batch) {
+            batch = std::make_unique<PendingBatch>();
+            batch->modelId = modelId;
+            batch->deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(cfg_.windowMs);
+        }
+
+        // Record this request's slice within the coalesced batch.
+        const size_t startIdx = batch->allTexts.size();
+        const size_t count = texts.size();
+        for (auto& t : texts)
+            batch->allTexts.push_back(std::move(t));
+
+        auto future = batch->addRequest(startIdx, count);
+
+        // Should we dispatch now?
+        const bool sizeTriggered = batch->allTexts.size() >= cfg_.maxBatch;
+        const bool timeTriggered = std::chrono::steady_clock::now() >= batch->deadline;
+
+        if (sizeTriggered || timeTriggered) {
+            // This thread becomes the dispatcher.
+            auto owned = std::move(batch);
+            pending_.erase(modelId);
+            lk.unlock();
+            dispatch(std::move(owned), inferFn);
+        } else {
+            // Wait for either the deadline or the dispatcher to signal.
+            cv_.wait_until(lk, batch->deadline, [&] {
+                // If our batch was consumed (pending_ no longer holds it), we're done.
+                auto it = pending_.find(modelId);
+                return it == pending_.end() || it->second.get() != batch.get();
+            });
+
+            // If we woke up because of timeout and the batch is still ours, dispatch it.
+            auto it = pending_.find(modelId);
+            if (it != pending_.end() && it->second.get() == batch.get()) {
+                auto owned = std::move(it->second);
+                pending_.erase(it);
+                lk.unlock();
+                dispatch(std::move(owned), inferFn);
+            } else {
+                lk.unlock();
+            }
+        }
+
+        return future.get();
+    }
+
+    // Drain all pending batches with errors (call on shutdown).
+    void drain() {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto& [id, batch] : pending_) {
+            if (batch) {
+                batch->failAll(yams::Error{yams::ErrorCode::InternalError, "plugin shutting down"});
+            }
+        }
+        pending_.clear();
+        cv_.notify_all();
+    }
+
+private:
+    struct PendingBatch {
+        struct Request {
+            size_t startIdx;
+            size_t count;
+            std::promise<yams::Result<std::vector<std::vector<float>>>> promise;
+        };
+
+        std::string modelId;
+        std::vector<std::string> allTexts;
+        std::vector<Request> requests;
+        std::chrono::steady_clock::time_point deadline;
+
+        std::future<yams::Result<std::vector<std::vector<float>>>> addRequest(size_t startIdx,
+                                                                              size_t count) {
+            requests.emplace_back();
+            auto& req = requests.back();
+            req.startIdx = startIdx;
+            req.count = count;
+            return req.promise.get_future();
+        }
+
+        void failAll(const yams::Error& err) {
+            for (auto& req : requests) {
+                try {
+                    req.promise.set_value(yams::Result<std::vector<std::vector<float>>>(err));
+                } catch (...) {
+                }
+            }
+        }
+    };
+
+    void dispatch(std::unique_ptr<PendingBatch> batch, InferFn& inferFn) {
+        auto result = inferFn(batch->modelId, batch->allTexts);
+        for (auto& req : batch->requests) {
+            try {
+                if (!result) {
+                    req.promise.set_value(
+                        yams::Result<std::vector<std::vector<float>>>(result.error()));
+                } else {
+                    auto& mat = result.value();
+                    if (req.startIdx + req.count <= mat.size()) {
+                        std::vector<std::vector<float>> slice(
+                            mat.begin() + static_cast<ptrdiff_t>(req.startIdx),
+                            mat.begin() + static_cast<ptrdiff_t>(req.startIdx + req.count));
+                        req.promise.set_value(std::move(slice));
+                    } else {
+                        req.promise.set_value(yams::Error{yams::ErrorCode::InternalError,
+                                                          "batch coalescer: output size mismatch"});
+                    }
+                }
+            } catch (...) {
+            }
+        }
+        cv_.notify_all();
+    }
+
+    Config cfg_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::unordered_map<std::string, std::unique_ptr<PendingBatch>> pending_;
+};
+
 struct ProviderCtx {
     enum class State : uint8_t { Unloaded, Loading, Ready, Failed };
 
@@ -151,6 +307,7 @@ struct ProviderCtx {
     std::size_t configuredMaxLoadedModels = 0;
     std::size_t configuredHotPoolSize = 0;
     yams::onnx_util::OrtRuntimeInfo runtimeInfo;
+    std::unique_ptr<BatchCoalescer> coalescer;
 
     // Check if model is in cooldown period after failures
     bool isInCooldown(const std::string& modelId) const {
@@ -640,6 +797,29 @@ struct ProviderCtx {
             colbert = std::make_unique<yams::daemon::OnnxColbertSession>(
                 colbertModelPath, colbertModelName, colbertCfg);
         }
+        // Initialize batch coalescer (opt-in via YAMS_ONNX_BATCH_COALESCE=1)
+        {
+            BatchCoalescer::Config coalesceCfg;
+            coalesceCfg.enabled = envTruthy(std::getenv("YAMS_ONNX_BATCH_COALESCE"));
+            if (const char* w = std::getenv("YAMS_ONNX_COALESCE_WINDOW_MS")) {
+                try {
+                    coalesceCfg.windowMs = std::stoi(w);
+                } catch (...) {
+                }
+            }
+            if (const char* m = std::getenv("YAMS_ONNX_COALESCE_MAX_BATCH")) {
+                try {
+                    coalesceCfg.maxBatch = static_cast<size_t>(std::stoull(m));
+                } catch (...) {
+                }
+            }
+            coalescer = std::make_unique<BatchCoalescer>(coalesceCfg);
+            if (coalesceCfg.enabled) {
+                spdlog::info("[ONNX-Plugin] Batch coalescing enabled: window={}ms max_batch={}",
+                             coalesceCfg.windowMs, coalesceCfg.maxBatch);
+            }
+        }
+
         spdlog::info("[ONNX-Plugin] ProviderCtx init complete: ready={} pool={}", ready,
                      pool ? "valid" : "null");
     }
@@ -750,6 +930,11 @@ struct ProviderSingleton {
 
         ctx.shutdownRequested.store(true, std::memory_order_release);
         ctx.ready = false;
+
+        // Drain any pending coalesced batches so waiting threads don't hang.
+        if (ctx.coalescer) {
+            ctx.coalescer->drain();
+        }
 
         // If this is called from destructor during static destruction (not explicit),
         // skip cleanup to avoid crashes from corrupted global state.
@@ -1234,6 +1419,49 @@ struct ProviderSingleton {
                     texts.reserve(batch_size);
                     for (size_t i = 0; i < batch_size; ++i) {
                         texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
+                    }
+
+                    // Batch coalescing: route non-ColBERT requests through the
+                    // coalescer to accumulate concurrent small batches.
+                    if (!isColbert && c->coalescer && c->coalescer->isEnabled()) {
+                        auto inferFn = [c](const std::string& mid,
+                                           const std::vector<std::string>& batch)
+                            -> yams::Result<std::vector<std::vector<float>>> {
+                            auto h2 = c->pool->acquireModel(mid.c_str(), modelAcquireTimeout(true));
+                            if (!h2)
+                                return h2.error();
+                            return const_cast<yams::daemon::OnnxModelSession&>(*h2.value())
+                                .generateBatchEmbeddings(batch);
+                        };
+                        auto r = c->coalescer->submit(modelIdStr, std::move(texts), inferFn);
+                        if (!r) {
+                            spdlog::error(
+                                "[ONNX Plugin] coalesced generateBatchEmbeddings failed: {}",
+                                r.error().message);
+                            *out_vecs = nullptr;
+                            *out_batch = 0;
+                            *out_dim = 0;
+                            return YAMS_ERR_INTERNAL;
+                        }
+                        auto& mat = r.value();
+                        if (mat.empty()) {
+                            *out_vecs = nullptr;
+                            *out_batch = 0;
+                            *out_dim = 0;
+                            return YAMS_OK;
+                        }
+                        const size_t b = mat.size();
+                        const size_t d = mat[0].size();
+                        float* buf = static_cast<float*>(std::malloc(sizeof(float) * b * d));
+                        if (!buf)
+                            return YAMS_ERR_INTERNAL;
+                        for (size_t i = 0; i < b; ++i) {
+                            std::memcpy(buf + i * d, mat[i].data(), sizeof(float) * d);
+                        }
+                        *out_vecs = buf;
+                        *out_batch = b;
+                        *out_dim = d;
+                        return YAMS_OK;
                     }
 
                     spdlog::debug("[ONNX Plugin] acquiring model '{}'...", model_id);

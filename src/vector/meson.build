@@ -14,46 +14,8 @@ onnx_dep = onnxruntime_resolved_dep
 
 onnx_feature_requested = not onnx_opt.disabled()
 onnx_runtime_link = false
-onnx_genai_headers_present = false
-onnx_include_dirs = []
-if onnx_dep.found()
-  prefix = onnx_dep.get_variable(pkgconfig: 'prefix', default_value: '')
-  if prefix != ''
-    foreach key : ['includedir', 'includedir1', 'includedir2']
-      dirval = onnx_dep.get_variable(pkgconfig: key, default_value: '')
-      if dirval != ''
-        dirval = dirval.replace('${prefix}', prefix)
-        onnx_include_dirs += dirval
-      endif
-    endforeach
-  endif
-endif
-
 if onnx_feature_requested and onnx_dep.found()
   onnx_runtime_link = true
-
-  genai_header_candidates = [
-    'ort_genai.h',
-    'onnxruntime/genai/ort_genai.h',
-    'onnxruntime/genai/embedding.h',
-    'onnxruntime/genai/genai_api.h',
-    'onnxruntime/genai/pipeline.h',
-  ]
-
-  foreach incdir : onnx_include_dirs
-    if incdir == ''
-      continue
-    endif
-    foreach hdr : genai_header_candidates
-      if fs.exists(join_paths(incdir, hdr))
-        onnx_genai_headers_present = true
-        break
-      endif
-    endforeach
-    if onnx_genai_headers_present
-      break
-    endif
-  endforeach
 endif
 
 # Optional include dirs for third-party headers
@@ -114,13 +76,6 @@ if fmt_dep.found()
   vector_cppargs += ['-DYAMS_STD_FORMAT_AVAILABLE=0']
 endif
 
-if onnx_feature_requested
-  vector_cppargs += ['-DYAMS_USE_ONNX_GENAI_HEADER_PRESENT']
-  if onnx_genai_headers_present
-    vector_cppargs += ['-DYAMS_GENAI_RUNTIME_PRESENT']
-  endif
-endif
-
 srcs = [
   'vector_database.cpp',
   'embedding_generator.cpp',
@@ -139,7 +94,6 @@ srcs = [
   'tokenizer.cpp',
   'turboquant.cpp',
   'compressed_ann.cpp',
-  '../genai/onnx_genai_adapter.cpp',
 ] + sqlite_vec_cpp_src
 
 # Define SQLITE_VEC_STATIC based on whether we have sqlite-vec-cpp sources
