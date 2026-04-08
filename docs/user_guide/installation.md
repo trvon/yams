@@ -6,6 +6,23 @@ YAMS provides multiple installation methods to suit different users and environm
 
 ## Package Manager Installation
 
+### APT (Debian / Ubuntu)
+
+```bash
+curl -fsSL https://repo.yamsmemory.ai/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/yams.gpg
+
+echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" \
+  | sudo tee /etc/apt/sources.list.d/yams.list
+
+sudo apt-get update
+sudo apt-get install yams
+
+# Optional: start the packaged daemon service
+sudo systemctl enable --now yams-daemon
+yams daemon status
+```
+
 ### Homebrew (macOS/Linux)
 
 ```bash

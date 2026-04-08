@@ -63,4 +63,31 @@ inline std::string sanitizeUtf8(std::string_view input) {
     return out;
 }
 
+// Validate UTF-8 and return a view to the original data if valid.
+// If invalid, sanitize into `storage` and return a view to it.
+// Callers can hoist `storage` outside loops for capacity reuse.
+inline std::string_view ensureValidUtf8(std::string_view input, std::string& storage) {
+    const unsigned char* d = reinterpret_cast<const unsigned char*>(input.data());
+    size_t i = 0;
+    const size_t n = input.size();
+    while (i < n) {
+        unsigned char c = d[i];
+        if (c < 0x80) {
+            ++i;
+        } else if (c >= 0xC2 && c <= 0xDF && i + 1 < n && (d[i + 1] & 0xC0) == 0x80) {
+            i += 2;
+        } else if (c >= 0xE0 && c <= 0xEF && i + 2 < n && (d[i + 1] & 0xC0) == 0x80 &&
+                   (d[i + 2] & 0xC0) == 0x80) {
+            i += 3;
+        } else if (c >= 0xF0 && c <= 0xF4 && i + 3 < n && (d[i + 1] & 0xC0) == 0x80 &&
+                   (d[i + 2] & 0xC0) == 0x80 && (d[i + 3] & 0xC0) == 0x80) {
+            i += 4;
+        } else {
+            storage = sanitizeUtf8(input);
+            return storage;
+        }
+    }
+    return input;
+}
+
 } // namespace yams::common

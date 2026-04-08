@@ -87,13 +87,8 @@ bool is_control_request(const Request& request) {
 
 } // namespace
 
-boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(const Request& req) {
-    Request copy = req;
-    co_return co_await send_request(std::move(copy));
-}
-
-boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(Request&& req) {
-    Request ownedReq = std::move(req);
+boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(Request request) {
+    Request ownedReq = std::move(request);
 
     if (!host_) {
         co_return Error{ErrorCode::NotInitialized, "Embedded service host unavailable"};
@@ -135,7 +130,7 @@ boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(Reques
 }
 
 boost::asio::awaitable<Result<void>>
-InProcessTransport::send_request_streaming(const Request& req, HeaderCallback onHeader,
+InProcessTransport::send_request_streaming(Request request, HeaderCallback onHeader,
                                            ChunkCallback onChunk, ErrorCallback onError,
                                            CompleteCallback onComplete) {
     if (!host_) {
@@ -150,7 +145,6 @@ InProcessTransport::send_request_streaming(const Request& req, HeaderCallback on
     auto promise = std::make_shared<std::promise<Result<void>>>();
     auto future = promise->get_future();
 
-    Request request = req;
     boost::asio::co_spawn(
         host_->getExecutor(),
         [dispatcher, request = std::move(request), onHeader = std::move(onHeader),

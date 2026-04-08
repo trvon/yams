@@ -218,7 +218,7 @@ AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::sock
         co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
     }
 
-    std::vector<uint8_t> buffer(size);
+    auto buffer = std::make_shared<std::vector<uint8_t>>(size);
     auto executor = co_await this_coro::executor;
 
     // Race read against timeout using async_initiate (no experimental APIs)
@@ -227,7 +227,7 @@ AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::sock
 
     auto read_result = co_await boost::asio::async_initiate<decltype(use_awaitable),
                                                             void(std::exception_ptr, RaceResult)>(
-        [&socket, &buffer, executor, timeout](auto handler) mutable {
+        [&socket, buffer, executor, timeout](auto handler) mutable {
             auto completed = std::make_shared<std::atomic<bool>>(false);
             auto timer = std::make_shared<boost::asio::steady_timer>(executor);
             timer->expires_after(timeout);
@@ -249,9 +249,9 @@ AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::sock
             });
 
             boost::asio::async_read(
-                socket, boost::asio::buffer(buffer),
-                [timer, completed, handlerPtr, completion_exec](const boost::system::error_code& ec,
-                                                                std::size_t bytes) mutable {
+                socket, boost::asio::buffer(*buffer),
+                [timer, completed, handlerPtr, completion_exec,
+                 buffer](const boost::system::error_code& ec, std::size_t bytes) mutable {
                     if (!completed->exchange(true, std::memory_order_acq_rel)) {
                         timer->cancel();
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec,
@@ -273,7 +273,7 @@ AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::sock
         co_return Error{ErrorCode::NetworkError, yams::format("Read failed: {}", ec.message())};
     }
 
-    co_return buffer;
+    co_return std::move(*buffer);
 }
 
 awaitable<Result<void>>
@@ -294,7 +294,8 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
 
     auto write_result = co_await boost::asio::async_initiate<decltype(use_awaitable),
                                                              void(std::exception_ptr, RaceResult)>(
-        [&socket, &data, executor, timeout](auto handler) mutable {
+        [&socket, data = std::make_shared<std::vector<uint8_t>>(data), executor,
+         timeout](auto handler) mutable {
             auto completed = std::make_shared<std::atomic<bool>>(false);
             auto timer = std::make_shared<boost::asio::steady_timer>(executor);
             timer->expires_after(timeout);
@@ -316,9 +317,9 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
             });
 
             boost::asio::async_write(
-                socket, boost::asio::buffer(data),
-                [timer, completed, handlerPtr, completion_exec](const boost::system::error_code& ec,
-                                                                std::size_t bytes) mutable {
+                socket, boost::asio::buffer(*data),
+                [timer, completed, handlerPtr, completion_exec,
+                 data](const boost::system::error_code& ec, std::size_t bytes) mutable {
                     if (!completed->exchange(true, std::memory_order_acq_rel)) {
                         timer->cancel();
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec,
@@ -359,12 +360,7 @@ uint64_t next_request_id() {
 }
 } // namespace
 
-boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(const Request& req) {
-    Request copy = req;
-    co_return co_await send_request(std::move(copy));
-}
-
-boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Request&& req) {
+boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Request req) {
     Request ownedReq = std::move(req);
 
     // Check cancellation before proceeding
@@ -528,10 +524,10 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
 }
 
 boost::asio::awaitable<Result<void>>
-AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback onHeader,
+AsioTransportAdapter::send_request_streaming(Request req, HeaderCallback onHeader,
                                              ChunkCallback onChunk, ErrorCallback onError,
                                              CompleteCallback onComplete) {
-    Request ownedReq = req;
+    Request ownedReq = std::move(req);
 
     // Check cancellation before proceeding
     auto cs = co_await this_coro::cancellation_state;

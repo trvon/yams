@@ -96,6 +96,7 @@ struct AsioConnection {
     std::atomic<bool> alive{false};
     std::atomic<bool> streaming_started{false};
     std::atomic<bool> in_use{false};
+    std::atomic<int64_t> last_health_check_ns{0}; // steady_clock ns; reset on release
     std::future<void> read_loop_future;
     std::unordered_set<uint64_t> timed_out_requests;
 

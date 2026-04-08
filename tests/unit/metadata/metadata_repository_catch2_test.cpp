@@ -1371,3 +1371,177 @@ TEST_CASE("MetadataRepository: remove path tree recalculates centroid",
     CHECK(afterRemove.value()->docCount == 1);
     CHECK(afterRemove.value()->centroidWeight == 1);
 }
+
+// --- batchInsertContentAndIndex counter accuracy tests ---
+
+TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and indexed counters",
+          "[unit][metadata-repo][batch-content][counters]") {
+    MetadataRepositoryFixture fix;
+    fix.repository_->initializeCounters();
+
+    // Insert 3 fresh documents (not yet extracted/indexed)
+    std::vector<int64_t> docIds;
+    for (int i = 0; i < 3; ++i) {
+        DocumentInfo doc;
+        doc.sha256Hash = "counter_hash_fresh_" + std::to_string(i);
+        doc.fileName = "counter_fresh_" + std::to_string(i) + ".txt";
+        doc.fileSize = 100;
+        doc.mimeType = "text/plain";
+        doc.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        doc.modifiedTime = doc.createdTime;
+        // Leave contentExtracted=false, extractionStatus=Pending (defaults)
+        doc.contentExtracted = false;
+        doc.extractionStatus = ExtractionStatus::Pending;
+        auto result = fix.repository_->insertDocument(doc);
+        REQUIRE(result.has_value());
+        docIds.push_back(result.value());
+    }
+
+    auto extractedBefore = fix.repository_->getCachedExtractedCount();
+    auto indexedBefore = fix.repository_->getCachedIndexedCount();
+
+    // Batch insert content for all 3
+    std::vector<BatchContentEntry> entries;
+    for (int i = 0; i < 3; ++i) {
+        entries.push_back({docIds[static_cast<size_t>(i)], "Title " + std::to_string(i),
+                           "Content text " + std::to_string(i), "text/plain", "test", "en"});
+    }
+    auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
+    REQUIRE(batchResult.has_value());
+
+    CHECK(fix.repository_->getCachedExtractedCount() == extractedBefore + 3);
+    CHECK(fix.repository_->getCachedIndexedCount() == indexedBefore + 3);
+}
+
+TEST_CASE("batchInsertContentAndIndex: already-extracted documents don't double-count",
+          "[unit][metadata-repo][batch-content][counters]") {
+    MetadataRepositoryFixture fix;
+    fix.repository_->initializeCounters();
+
+    DocumentInfo doc;
+    doc.sha256Hash = "counter_hash_already";
+    doc.fileName = "counter_already.txt";
+    doc.fileSize = 100;
+    doc.mimeType = "text/plain";
+    doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = doc.createdTime;
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE(insertResult.has_value());
+    auto docId = insertResult.value();
+
+    // First batch insert — transitions to extracted+indexed
+    std::vector<BatchContentEntry> entries = {
+        {docId, "Title", "Content", "text/plain", "test", "en"}};
+    auto batch1 = fix.repository_->batchInsertContentAndIndex(entries);
+    REQUIRE(batch1.has_value());
+
+    auto extractedAfterFirst = fix.repository_->getCachedExtractedCount();
+    auto indexedAfterFirst = fix.repository_->getCachedIndexedCount();
+
+    // Re-insert same document — counters should not change
+    auto batch2 = fix.repository_->batchInsertContentAndIndex(entries);
+    REQUIRE(batch2.has_value());
+
+    CHECK(fix.repository_->getCachedExtractedCount() == extractedAfterFirst);
+    CHECK(fix.repository_->getCachedIndexedCount() == indexedAfterFirst);
+}
+
+TEST_CASE("batchInsertContentAndIndex: mixed fresh and already-extracted batch",
+          "[unit][metadata-repo][batch-content][counters]") {
+    MetadataRepositoryFixture fix;
+    fix.repository_->initializeCounters();
+
+    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+
+    // Insert 2 documents
+    DocumentInfo doc1;
+    doc1.sha256Hash = "counter_mixed_1";
+    doc1.fileName = "mixed_1.txt";
+    doc1.fileSize = 100;
+    doc1.mimeType = "text/plain";
+    doc1.createdTime = now;
+    doc1.modifiedTime = now;
+    auto id1 = fix.repository_->insertDocument(doc1);
+    REQUIRE(id1.has_value());
+
+    DocumentInfo doc2;
+    doc2.sha256Hash = "counter_mixed_2";
+    doc2.fileName = "mixed_2.txt";
+    doc2.fileSize = 200;
+    doc2.mimeType = "text/plain";
+    doc2.createdTime = now;
+    doc2.modifiedTime = now;
+    auto id2 = fix.repository_->insertDocument(doc2);
+    REQUIRE(id2.has_value());
+
+    // Pre-extract doc1 via batchInsertContentAndIndex so it has extraction_status='Success'
+    std::vector<BatchContentEntry> preEntries = {
+        {id1.value(), "Title 1", "Content 1", "text/plain", "test", "en"}};
+    auto preResult = fix.repository_->batchInsertContentAndIndex(preEntries);
+    REQUIRE(preResult.has_value());
+
+    auto extractedBefore = fix.repository_->getCachedExtractedCount();
+    auto indexedBefore = fix.repository_->getCachedIndexedCount();
+
+    // Now batch both: doc1 (already extracted) + doc2 (fresh)
+    std::vector<BatchContentEntry> entries = {
+        {id1.value(), "Title 1 updated", "Content 1 updated", "text/plain", "test", "en"},
+        {id2.value(), "Title 2", "Content 2", "text/plain", "test", "en"}};
+    auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
+    REQUIRE(batchResult.has_value());
+
+    // Only doc2 (fresh) should increment counters
+    CHECK(fix.repository_->getCachedExtractedCount() == extractedBefore + 1);
+    CHECK(fix.repository_->getCachedIndexedCount() == indexedBefore + 1);
+}
+
+TEST_CASE("batchInsertContentAndIndex: clears extraction_error",
+          "[unit][metadata-repo][batch-content][counters]") {
+    MetadataRepositoryFixture fix;
+    fix.repository_->initializeCounters();
+
+    // Insert a document with extraction_status=Success but an error set
+    DocumentInfo doc;
+    doc.sha256Hash = "counter_hash_error_clear";
+    doc.fileName = "error_clear.txt";
+    doc.fileSize = 100;
+    doc.mimeType = "text/plain";
+    doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = doc.createdTime;
+    doc.contentExtracted = true;
+    doc.extractionStatus = ExtractionStatus::Success;
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE(insertResult.has_value());
+    auto docId = insertResult.value();
+
+    // Manually set an extraction error via raw SQL
+    fix.pool_->withConnection([&](Database& db) -> Result<void> {
+        auto stmtResult =
+            db.prepare("UPDATE documents SET extraction_error = 'stale error' WHERE id = ?");
+        REQUIRE(stmtResult.has_value());
+        auto& stmt = stmtResult.value();
+        REQUIRE(stmt.bind(1, docId).has_value());
+        REQUIRE(stmt.execute().has_value());
+        return {};
+    });
+
+    // Batch insert should clear the error
+    std::vector<BatchContentEntry> entries = {
+        {docId, "Title", "Content", "text/plain", "test", "en"}};
+    auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
+    REQUIRE(batchResult.has_value());
+
+    // Verify error is cleared
+    fix.pool_->withConnection([&](Database& db) -> Result<void> {
+        auto stmtResult = db.prepare("SELECT extraction_error FROM documents WHERE id = ?");
+        REQUIRE(stmtResult.has_value());
+        auto& stmt = stmtResult.value();
+        REQUIRE(stmt.bind(1, docId).has_value());
+        auto hasRow = stmt.step();
+        REQUIRE(hasRow.has_value());
+        REQUIRE(hasRow.value());
+        CHECK(stmt.isNull(0));
+        return {};
+    });
+}

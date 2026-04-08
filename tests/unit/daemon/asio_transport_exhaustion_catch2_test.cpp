@@ -107,22 +107,22 @@ TEST_CASE("AsioTransportAdapter returns ResourceExhausted when maxInflight excee
     AsioTransportAdapter adapter(opts);
 
     // Launch two requests that will occupy the in-flight slots (server never responds).
-    const Request req{StatusRequest{}};
-    auto fut1 = boost::asio::co_spawn(GlobalIOContext::global_executor(), adapter.send_request(req),
-                                      boost::asio::use_future);
+    auto makeReq = []() -> Request { return Request{StatusRequest{}}; };
+    auto fut1 = boost::asio::co_spawn(GlobalIOContext::global_executor(),
+                                      adapter.send_request(makeReq()), boost::asio::use_future);
 
     REQUIRE(acceptedFuture.wait_for(2s) == std::future_status::ready);
     REQUIRE_NOTHROW(acceptedFuture.get());
 
     // Give request #1 time to connect + write and release the connection for reuse.
     std::this_thread::sleep_for(50ms);
-    auto fut2 = boost::asio::co_spawn(GlobalIOContext::global_executor(), adapter.send_request(req),
-                                      boost::asio::use_future);
+    auto fut2 = boost::asio::co_spawn(GlobalIOContext::global_executor(),
+                                      adapter.send_request(makeReq()), boost::asio::use_future);
     std::this_thread::sleep_for(50ms);
 
     // Third request should fail immediately with ResourceExhausted due to maxInflight.
-    auto fut3 = boost::asio::co_spawn(GlobalIOContext::global_executor(), adapter.send_request(req),
-                                      boost::asio::use_future);
+    auto fut3 = boost::asio::co_spawn(GlobalIOContext::global_executor(),
+                                      adapter.send_request(makeReq()), boost::asio::use_future);
     REQUIRE(fut3.wait_for(1s) == std::future_status::ready);
     auto r3 = fut3.get();
     REQUIRE_FALSE(r3.has_value());

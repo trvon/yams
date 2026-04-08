@@ -19,17 +19,18 @@ namespace fs = std::filesystem;
 namespace {
 
 yams::Result<void> run_streaming(yams::daemon::InProcessTransport& transport,
-                                 const yams::daemon::Request& request,
+                                 yams::daemon::Request request,
                                  yams::daemon::IClientTransport::HeaderCallback onHeader,
                                  yams::daemon::IClientTransport::ChunkCallback onChunk,
                                  yams::daemon::IClientTransport::ErrorCallback onError,
                                  yams::daemon::IClientTransport::CompleteCallback onComplete) {
     boost::asio::io_context io;
-    auto fut = boost::asio::co_spawn(
-        io,
-        transport.send_request_streaming(request, std::move(onHeader), std::move(onChunk),
-                                         std::move(onError), std::move(onComplete)),
-        boost::asio::use_future);
+    auto fut =
+        boost::asio::co_spawn(io,
+                              transport.send_request_streaming(
+                                  std::move(request), std::move(onHeader), std::move(onChunk),
+                                  std::move(onError), std::move(onComplete)),
+                              boost::asio::use_future);
     io.run();
     return fut.get();
 }

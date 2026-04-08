@@ -11,7 +11,6 @@ namespace yamsfmt = fmt;
 #endif
 #include <array>
 #include <fstream>
-#include <mutex>
 
 namespace yams::crypto {
 
@@ -31,8 +30,8 @@ std::string bytesToHex(const unsigned char* data, unsigned int size) {
 
 } // namespace
 
+// SHA256Hasher instances are NOT thread-safe. Create one per thread.
 struct SHA256Hasher::Impl {
-    std::mutex mtx;
     EVP_MD_CTX* ctx = nullptr;
     ProgressCallback progressCallback;
 
@@ -68,7 +67,6 @@ struct SHA256Hasher::Impl {
 };
 
 SHA256Hasher::SHA256Hasher() : pImpl(std::make_unique<Impl>()) {
-    std::lock_guard<std::mutex> lock(pImpl->mtx);
     if (EVP_DigestInit_ex(pImpl->ctx, EVP_sha256(), nullptr) != 1) {
         throw std::runtime_error("Failed to initialize SHA256");
     }
@@ -80,21 +78,18 @@ SHA256Hasher::SHA256Hasher(SHA256Hasher&&) noexcept = default;
 SHA256Hasher& SHA256Hasher::operator=(SHA256Hasher&&) noexcept = default;
 
 void SHA256Hasher::init() {
-    std::lock_guard<std::mutex> lock(pImpl->mtx);
     if (EVP_DigestInit_ex(pImpl->ctx, EVP_sha256(), nullptr) != 1) {
         throw std::runtime_error("Failed to initialize SHA256");
     }
 }
 
 void SHA256Hasher::update(std::span<const std::byte> data) {
-    std::lock_guard<std::mutex> lock(pImpl->mtx);
     if (EVP_DigestUpdate(pImpl->ctx, data.data(), data.size()) != 1) {
         throw std::runtime_error("Failed to update SHA256");
     }
 }
 
 std::string SHA256Hasher::finalize() {
-    std::lock_guard<std::mutex> lock(pImpl->mtx);
     std::array<unsigned char, EVP_MAX_MD_SIZE> hash{};
     unsigned int hashLen = 0;
 
@@ -113,7 +108,6 @@ std::string SHA256Hasher::finalize() {
 }
 
 std::string SHA256Hasher::hashFile(const std::filesystem::path& path) {
-    std::lock_guard<std::mutex> lock(pImpl->mtx);
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         throw std::runtime_error(yamsfmt::format("Failed to open file: {}", path.string()));
@@ -166,7 +160,6 @@ std::future<Result<std::string>> SHA256Hasher::hashFileAsync(const std::filesyst
 }
 
 void SHA256Hasher::setProgressCallback(ProgressCallback callback) {
-    std::lock_guard<std::mutex> lock(pImpl->mtx);
     pImpl->progressCallback = std::move(callback);
 }
 

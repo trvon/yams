@@ -27,8 +27,7 @@ public:
 
     explicit AsioTransportAdapter(const Options& opts);
 
-    boost::asio::awaitable<Result<Response>> send_request(const Request& req) override;
-    boost::asio::awaitable<Result<Response>> send_request(Request&& req) override;
+    boost::asio::awaitable<Result<Response>> send_request(Request req) override;
 
     using HeaderCallback = IClientTransport::HeaderCallback;
     using ChunkCallback = IClientTransport::ChunkCallback;
@@ -36,7 +35,7 @@ public:
     using CompleteCallback = IClientTransport::CompleteCallback;
 
     boost::asio::awaitable<Result<void>>
-    send_request_streaming(const Request& req, HeaderCallback onHeader, ChunkCallback onChunk,
+    send_request_streaming(Request req, HeaderCallback onHeader, ChunkCallback onChunk,
                            ErrorCallback onError, CompleteCallback onComplete) override;
 
 public:

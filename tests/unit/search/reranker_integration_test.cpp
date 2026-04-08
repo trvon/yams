@@ -609,6 +609,9 @@ TEST_CASE("SearchEngine: reranker falls back to metadata content preview",
     config.rerankTopK = 5;
     config.rerankScoreGapThreshold = 0.0f;
     config.rerankSnippetMaxChars = 48;
+    // Use Map zoom to prevent zoom calibration from overriding rerankSnippetMaxChars upward
+    // (Neighborhood/Street use std::max which bumps small test values to 256/384)
+    config.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
 
     auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, nullptr, config);
     REQUIRE(engine != nullptr);
@@ -657,6 +660,7 @@ TEST_CASE("SearchEngine: reranker preview preserves tail evidence for long metad
     config.rerankTopK = 5;
     config.rerankScoreGapThreshold = 0.0f;
     config.rerankSnippetMaxChars = 96;
+    config.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
 
     auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, nullptr, config);
     REQUIRE(engine != nullptr);

@@ -18,11 +18,10 @@ public:
 
     virtual ~IClientTransport() = default;
 
-    virtual boost::asio::awaitable<Result<Response>> send_request(const Request& req) = 0;
-    virtual boost::asio::awaitable<Result<Response>> send_request(Request&& req) = 0;
+    virtual boost::asio::awaitable<Result<Response>> send_request(Request req) = 0;
 
     virtual boost::asio::awaitable<Result<void>>
-    send_request_streaming(const Request& req, HeaderCallback onHeader, ChunkCallback onChunk,
+    send_request_streaming(Request req, HeaderCallback onHeader, ChunkCallback onChunk,
                            ErrorCallback onError, CompleteCallback onComplete) = 0;
 };
 

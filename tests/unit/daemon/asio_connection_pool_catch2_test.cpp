@@ -614,3 +614,151 @@ TEST_CASE("AsioConnectionPool shutdown short-circuits in one-shot CLI mode",
     fs::remove(socketPath, ec);
     AsioConnectionPool::shutdown_all(100ms);
 }
+
+// --- Health check TTL tests ---
+
+TEST_CASE("AsioConnectionPool reuses connection on rapid re-acquire",
+          "[daemon][connection-pool][health-ttl]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    // Validate that acquire → release → immediate re-acquire returns the same connection
+    // (the health check cache should allow reuse without a syscall).
+    auto runtimeDir = makeTempRuntimeDir("health-ttl-reuse-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context server_io;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        server_io, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::atomic<bool> stop{false};
+    std::thread server_thread([&] {
+        boost::system::error_code bec;
+        boost::asio::local::stream_protocol::socket sock(server_io);
+        acceptor.accept(sock);
+        while (!stop.load()) {
+            std::this_thread::sleep_for(10ms);
+        }
+        sock.close(bec);
+    });
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 500ms;
+    opts.poolEnabled = true;
+
+    auto pool = AsioConnectionPool::get_or_create(opts);
+
+    // First acquire
+    auto fut1 = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                      boost::asio::use_future);
+    REQUIRE(fut1.wait_for(1s) == std::future_status::ready);
+    auto conn1_res = fut1.get();
+    REQUIRE(conn1_res);
+    auto conn1 = conn1_res.value();
+    REQUIRE(conn1);
+    auto conn1_ptr = conn1.get();
+    pool->release(conn1);
+
+    // Immediate re-acquire — should get same connection back
+    auto fut2 = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                      boost::asio::use_future);
+    REQUIRE(fut2.wait_for(1s) == std::future_status::ready);
+    auto conn2_res = fut2.get();
+    REQUIRE(conn2_res);
+    auto conn2 = conn2_res.value();
+    REQUIRE(conn2);
+    CHECK(conn2.get() == conn1_ptr);
+    pool->release(conn2);
+
+    stop.store(true);
+    server_thread.join();
+    boost::system::error_code bec;
+    acceptor.close(bec);
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+}
+
+TEST_CASE("AsioConnectionPool detects dead socket after release",
+          "[daemon][connection-pool][health-ttl]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    // Validate: acquire → release → server closes → re-acquire detects the dead socket.
+    // The TTL is reset on release(), so the next acquire forces a fresh health check.
+    auto runtimeDir = makeTempRuntimeDir("health-ttl-dead-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context server_io;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        server_io, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::promise<void> accepted1;
+    std::promise<void> accepted2;
+    std::promise<void> close1;
+    std::atomic<bool> stop{false};
+
+    std::thread server_thread([&] {
+        boost::system::error_code bec;
+        // Accept first connection
+        boost::asio::local::stream_protocol::socket sock1(server_io);
+        acceptor.accept(sock1);
+        accepted1.set_value();
+        close1.get_future().wait();
+        sock1.close(bec);
+
+        // Accept second connection (after first is closed)
+        boost::asio::local::stream_protocol::socket sock2(server_io);
+        acceptor.accept(sock2);
+        accepted2.set_value();
+        while (!stop.load()) {
+            std::this_thread::sleep_for(10ms);
+        }
+        sock2.close(bec);
+    });
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 500ms;
+    opts.poolEnabled = true;
+
+    auto pool = AsioConnectionPool::get_or_create(opts);
+
+    // Acquire and release
+    auto fut1 = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                      boost::asio::use_future);
+    REQUIRE(fut1.wait_for(1s) == std::future_status::ready);
+    auto conn1_res = fut1.get();
+    REQUIRE(conn1_res);
+    auto conn1 = conn1_res.value();
+    REQUIRE(accepted1.get_future().wait_for(1s) == std::future_status::ready);
+    pool->release(conn1);
+
+    // Server closes the connection
+    close1.set_value();
+    std::this_thread::sleep_for(50ms); // Let the close propagate
+
+    // Re-acquire — should detect dead socket and create a new connection
+    auto fut2 = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                      boost::asio::use_future);
+    REQUIRE(fut2.wait_for(1s) == std::future_status::ready);
+    auto conn2_res = fut2.get();
+    REQUIRE(conn2_res);
+    auto conn2 = conn2_res.value();
+    REQUIRE(accepted2.get_future().wait_for(1s) == std::future_status::ready);
+    CHECK(conn1.get() != conn2.get()); // Must be a different connection
+    pool->release(conn2);
+
+    stop.store(true);
+    server_thread.join();
+    boost::system::error_code bec;
+    acceptor.close(bec);
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+}

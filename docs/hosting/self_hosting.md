@@ -77,9 +77,9 @@ See [Admin: Operations](../admin/operations.md) for configuration details.
 ## Backups
 
 ```bash
-systemctl stop yams || true
+systemctl stop yams-daemon || true
 rsync -a --delete /var/lib/yams/ /backups/yams/$(date +%F)/
-systemctl start yams || true
+systemctl start yams-daemon || true
 ```
 
 **Best practices:**

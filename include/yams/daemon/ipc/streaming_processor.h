@@ -18,7 +18,7 @@ class StreamingRequestProcessor : public RequestProcessor {
 public:
     StreamingRequestProcessor(std::shared_ptr<RequestProcessor> delegate,
                               RequestHandler::Config cfg)
-        : delegate_(std::move(delegate)), cfg_(cfg) {}
+        : delegate_(std::move(delegate)), cfg_(std::move(cfg)) {}
 
     [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request) override;
 

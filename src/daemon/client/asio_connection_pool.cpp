@@ -235,7 +235,7 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
         co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
     }
 
-    std::vector<uint8_t> buffer(size);
+    auto buffer = std::make_shared<std::vector<uint8_t>>(size);
     auto executor = co_await this_coro::executor;
 
     // Race read against timeout using async_initiate (no experimental APIs)
@@ -245,7 +245,7 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
     const auto read_start = std::chrono::steady_clock::now();
     auto read_result = co_await boost::asio::async_initiate<decltype(use_awaitable),
                                                             void(std::exception_ptr, RaceResult)>(
-        [&socket, &buffer, executor, timeout](auto handler) mutable {
+        [&socket, buffer, executor, timeout](auto handler) mutable {
             auto completed = std::make_shared<std::atomic<bool>>(false);
             auto timer = std::make_shared<boost::asio::steady_timer>(executor);
             timer->expires_after(timeout);
@@ -267,9 +267,9 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
             });
 
             boost::asio::async_read(
-                socket, boost::asio::buffer(buffer),
-                [timer, completed, handlerPtr, completion_exec](const boost::system::error_code& ec,
-                                                                std::size_t bytes) mutable {
+                socket, boost::asio::buffer(*buffer),
+                [timer, completed, handlerPtr, completion_exec,
+                 buffer](const boost::system::error_code& ec, std::size_t bytes) mutable {
                     if (!completed->exchange(true, std::memory_order_acq_rel)) {
                         timer->cancel();
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr), ec,
@@ -335,7 +335,7 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
         }
     }
 
-    co_return buffer;
+    co_return std::move(*buffer);
 }
 
 bool socket_looks_healthy(AsioConnection::socket_t& socket) {
@@ -369,6 +369,23 @@ bool socket_looks_healthy(AsioConnection::socket_t& socket) {
         }
     }
 #endif
+    return true;
+}
+
+bool socket_looks_healthy_cached(AsioConnection& conn, std::chrono::steady_clock::time_point now) {
+    constexpr int64_t kTTLns = 100'000'000; // 100ms
+    auto last = conn.last_health_check_ns.load(std::memory_order_relaxed);
+    auto now_ns = now.time_since_epoch().count();
+    if ((now_ns - last) < kTTLns) {
+        return true;
+    }
+    if (!conn.socket || !conn.socket->is_open()) {
+        return false;
+    }
+    if (!socket_looks_healthy(*conn.socket)) {
+        return false;
+    }
+    conn.last_health_check_ns.store(now_ns, std::memory_order_relaxed);
     return true;
 }
 
@@ -521,8 +538,7 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::acquire()
                         conn->in_use.store(false, std::memory_order_release);
                         continue;
                     }
-                    if (conn->socket && conn->socket->is_open() &&
-                        socket_looks_healthy(*conn->socket)) {
+                    if (socket_looks_healthy_cached(*conn, acquire_start)) {
                         if (ipc_wait_trace_enabled()) {
                             const auto elapsed_ms =
                                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -560,6 +576,7 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::acquire()
 void AsioConnectionPool::release(const std::shared_ptr<AsioConnection>& conn) {
     YAMS_ZONE_SCOPED_N("ConnectionPool::release");
     if (conn) {
+        conn->last_health_check_ns.store(0, std::memory_order_relaxed);
         conn->in_use.store(false, std::memory_order_release);
     }
 }

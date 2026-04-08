@@ -257,8 +257,9 @@ TEST_CASE("SearchTuner: SMALL_PROSE state", "[unit][search_tuner][fsm]") {
     stats.codeRatio = 0.1f;
     stats.proseRatio = 0.85f; // > 0.7 (prose dominant)
     stats.binaryRatio = 0.05f;
-    stats.pathDepthAvg = 3.0f; // Not flat
-    stats.tagCoverage = 0.3f;  // Has tags (avoid SCIENTIFIC)
+    stats.pathDepthAvg = 3.0f;
+    stats.pathRelativeDepthAvg = 3.0; // Not flat (>= 1.5 avoids SCIENTIFIC)
+    stats.tagCoverage = 0.3f;         // Has tags (avoid SCIENTIFIC)
 
     auto state = SearchTuner::computeState(stats);
     CHECK(state == TuningState::SMALL_PROSE);
@@ -270,8 +271,9 @@ TEST_CASE("SearchTuner: LARGE_PROSE state", "[unit][search_tuner][fsm]") {
     stats.codeRatio = 0.1f;
     stats.proseRatio = 0.85f; // > 0.7 (prose dominant)
     stats.binaryRatio = 0.05f;
-    stats.pathDepthAvg = 3.0f; // Not flat
-    stats.tagCoverage = 0.3f;  // Has tags
+    stats.pathDepthAvg = 3.0f;
+    stats.pathRelativeDepthAvg = 3.0; // Not flat (>= 1.5 avoids SCIENTIFIC)
+    stats.tagCoverage = 0.3f;         // Has tags
 
     auto state = SearchTuner::computeState(stats);
     CHECK(state == TuningState::LARGE_PROSE);
@@ -382,6 +384,7 @@ TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][sea
     stats.docCount = 500;
     stats.proseRatio = 0.85f;
     stats.pathDepthAvg = 3.0f;
+    stats.pathRelativeDepthAvg = 3.0; // Not flat (>= 1.5 avoids SCIENTIFIC)
     stats.tagCoverage = 0.3f;
 
     SearchTuner tuner(stats);
@@ -520,8 +523,9 @@ TEST_CASE("SearchTuner: SCIENTIFIC falls back to prose when structured",
     stats.codeRatio = 0.05f;
     stats.proseRatio = 0.90f;
     stats.binaryRatio = 0.05f;
-    stats.pathDepthAvg = 6.0f; // Deep paths
-    stats.tagCoverage = 0.25f; // Structured corpus
+    stats.pathDepthAvg = 6.0f;        // Deep paths
+    stats.pathRelativeDepthAvg = 4.0; // Not flat (>= 1.5 avoids SCIENTIFIC)
+    stats.tagCoverage = 0.25f;        // Structured corpus
     stats.symbolDensity = 0.2f;
 
     auto state = SearchTuner::computeState(stats);

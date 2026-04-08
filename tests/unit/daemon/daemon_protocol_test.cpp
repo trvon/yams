@@ -52,6 +52,32 @@ void checkSanitizedField(std::string_view fieldName, const std::string& actual,
     INFO(fieldName);
     CHECK(actual == yams::common::sanitizeUtf8(original));
 }
+
+uint32_t crc32Reference(const std::vector<uint8_t>& data) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (auto byte : data) {
+        crc ^= byte;
+        for (int j = 0; j < 8; ++j) {
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
+        }
+    }
+    return ~crc;
+}
+
+std::vector<uint8_t> makeRawFrame(const std::vector<uint8_t>& payload, uint32_t flags = 0) {
+    MessageFramer::FrameHeader header;
+    header.payload_size = static_cast<uint32_t>(payload.size());
+    header.checksum = crc32Reference(payload);
+    header.flags = flags;
+    header.to_network();
+
+    std::vector<uint8_t> frame(sizeof(header) + payload.size());
+    std::memcpy(frame.data(), &header, sizeof(header));
+    if (!payload.empty()) {
+        std::memcpy(frame.data() + sizeof(header), payload.data(), payload.size());
+    }
+    return frame;
+}
 } // namespace
 
 // =============================================================================
@@ -326,6 +352,21 @@ TEST_CASE("MessageFramer: Header validation", "[daemon][protocol][framing][valid
             REQUIRE_FALSE(result);
         }
     }
+}
+
+TEST_CASE("MessageFramer: valid frame rejects malformed protobuf envelope",
+          "[daemon][protocol][framing][validation]") {
+    MessageFramer framer;
+
+    // 0x80 is a truncated protobuf varint: framing and CRC can be valid while
+    // Envelope parsing still fails.
+    const std::vector<uint8_t> malformed_payload = {0x80};
+    auto frame = makeRawFrame(malformed_payload);
+
+    auto result = framer.parse_frame(frame);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code == ErrorCode::SerializationError);
+    CHECK(result.error().message.find("Failed to parse protobuf Envelope") != std::string::npos);
 }
 
 TEST_CASE("MessageFramer: Concurrency and thread safety",

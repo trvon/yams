@@ -54,7 +54,10 @@ See the [MCP guide](user_guide/mcp.md) for full setup and usage.
 ### Debian / Ubuntu (APT)
 
 ```bash
-echo "deb [arch=amd64,arm64 trusted=yes] https://repo.yamsmemory.ai/aptrepo stable main" \
+curl -fsSL https://repo.yamsmemory.ai/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/yams.gpg
+
+echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" \
   | sudo tee /etc/apt/sources.list.d/yams.list
 sudo apt-get update && sudo apt-get install yams
 ```

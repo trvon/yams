@@ -32,25 +32,26 @@ yams add /srv/docs --recursive --include="*.md" --tags "docs,import"
 
 ### Systemd Service
 
-```ini
-[Unit]
-Description=YAMS Service
-After=network-online.target
+Linux packages install a packaged daemon service:
 
-[Service]
-User=yams
-Group=yams
-Environment="YAMS_STORAGE=/var/lib/yams"
-WorkingDirectory=/var/lib/yams
-ExecStart=/usr/local/bin/yams serve
-Restart=on-failure
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=true
-LimitNOFILE=16384
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now yams-daemon
+yams daemon status
+```
 
-[Install]
-WantedBy=multi-user.target
+Service defaults:
+- Data directory: `/var/lib/yams`
+- Socket: `/run/yams/yams-daemon.sock`
+- Logs: `/var/log/yams/daemon.log`
+
+The CLI auto-discovers the packaged daemon socket, so regular `yams` commands work without
+manually exporting `YAMS_DAEMON_SOCKET`.
+
+Customize with `/etc/yams/config.toml` or a systemd drop-in:
+
+```bash
+sudo systemctl edit yams-daemon
 ```
 
 ### Containers

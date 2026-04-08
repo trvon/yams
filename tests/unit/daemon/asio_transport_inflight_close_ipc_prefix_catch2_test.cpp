@@ -106,14 +106,13 @@ TEST_CASE("AsioTransportAdapter preserves [ipc:*] prefix when server closes with
 
     AsioTransportAdapter adapter(opts);
 
-    const Request req{StatusRequest{}};
     constexpr int kNumInflight = 4;
     std::vector<std::future<yams::Result<Response>>> futures;
     futures.reserve(kNumInflight);
 
     for (int i = 0; i < kNumInflight; ++i) {
         futures.push_back(boost::asio::co_spawn(GlobalIOContext::global_executor(),
-                                                adapter.send_request(req),
+                                                adapter.send_request(Request{StatusRequest{}}),
                                                 boost::asio::use_future));
         if (i == 0) {
             REQUIRE(acceptedFuture.wait_for(2s) == std::future_status::ready);

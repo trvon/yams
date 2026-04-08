@@ -14,6 +14,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/daemon.h>
 #include <yams/version.hpp>
 
@@ -662,21 +663,6 @@ private:
         return output;
     }
 
-    static std::optional<std::string>
-    extractSocketPathFromProcessDescription(const std::string& desc) {
-        if (desc.empty()) {
-            return std::nullopt;
-        }
-
-        static const std::regex socketRegex(R"((?:^|\s)--socket(?:=|\s+)("?)([^\s"]+)\1)");
-        std::smatch match;
-        if (std::regex_search(desc, match, socketRegex) && match.size() >= 3) {
-            return match[2].str();
-        }
-
-        return std::nullopt;
-    }
-
     static std::vector<pid_t> collectDaemonPidsForPattern(const std::string& pattern) {
         std::vector<pid_t> pids;
         std::set<pid_t> seen;
@@ -758,54 +744,14 @@ private:
     std::string resolveSocketPathForLiveDaemon(const std::string& preferredSocket,
                                                const std::string& pidFilePath,
                                                bool allowAnyDaemonFallback = true) {
-        std::vector<pid_t> candidatePids;
-        std::set<pid_t> seen;
-
-        const pid_t pidFromFile = readPidFromFile(pidFilePath);
-        if (pidFromFile > 0 && kill(pidFromFile, 0) == 0) {
-            candidatePids.push_back(pidFromFile);
-            seen.insert(pidFromFile);
-        } else if (pidFromFile > 0) {
-            spdlog::debug("Ignoring stale daemon PID {} from {}", pidFromFile, pidFilePath);
-        }
-
-        if (!preferredSocket.empty()) {
-            for (auto pid : collectDaemonPidsForPattern(std::string("yams-daemon.*") +
-                                                        escapeRegexLiteral(preferredSocket))) {
-                if (seen.insert(pid).second) {
-                    candidatePids.push_back(pid);
-                }
+        if (auto discovered = yams::daemon::client::discoverLiveDaemonSocket(
+                preferredSocket, pidFilePath, allowAnyDaemonFallback);
+            discovered && !discovered->empty()) {
+            if (discovered->string() != preferredSocket) {
+                spdlog::info("Using live daemon socket '{}' instead of configured '{}'",
+                             discovered->string(), preferredSocket);
             }
-        }
-
-        if (allowAnyDaemonFallback) {
-            for (auto pid : collectDaemonPidsForPattern("yams-daemon")) {
-                if (seen.insert(pid).second) {
-                    candidatePids.push_back(pid);
-                }
-            }
-        }
-
-        std::optional<std::string> fallbackSocket;
-        pid_t fallbackPid = -1;
-        for (auto pid : candidatePids) {
-            const auto desc = describeProcess(pid);
-            if (auto parsed = extractSocketPathFromProcessDescription(desc);
-                parsed && !parsed->empty()) {
-                if (*parsed == preferredSocket) {
-                    return *parsed;
-                }
-                if (!fallbackSocket) {
-                    fallbackSocket = *parsed;
-                    fallbackPid = pid;
-                }
-            }
-        }
-
-        if (fallbackSocket) {
-            spdlog::info("Using live daemon socket '{}' from PID {} instead of configured '{}'",
-                         *fallbackSocket, fallbackPid, preferredSocket);
-            return *fallbackSocket;
+            return discovered->string();
         }
 
         return preferredSocket;
@@ -1488,7 +1434,10 @@ private:
 
     void doctorDaemon() {
         namespace fs = std::filesystem;
-        std::string effectiveSocket = resolveConfiguredSocketPath();
+        pidFile_ = resolveConfiguredPidFilePath();
+        const std::string configuredSocket = resolveConfiguredSocketPath();
+        std::string effectiveSocket =
+            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
         // Title - more compact
         std::cout << "\n=== YAMS Daemon Doctor ===\n\n";
 
@@ -1496,7 +1445,9 @@ private:
         std::cout << "IPC & Files:\n";
         std::cout << "  Socket:    "
                   << (effectiveSocket.empty() ? "<resolve failed>" : effectiveSocket) << "\n";
-        pidFile_ = resolveConfiguredPidFilePath();
+        if (effectiveSocket != configuredSocket && !configuredSocket.empty()) {
+            std::cout << "  Configured Socket: " << configuredSocket << "\n";
+        }
         std::cout << "  PID File:  " << pidFile_ << "\n";
         // Helper: interactive confirm when on a TTY
         auto confirm = [](const std::string& q) -> bool {
@@ -1535,7 +1486,8 @@ private:
         }
 #endif
         // Parent directory writable
-        if (!effectiveSocket.empty()) {
+        bool socket_exists = !effectiveSocket.empty() && safe_exists(effectiveSocket);
+        if (!effectiveSocket.empty() && !socket_exists) {
             fs::path parent = fs::path(effectiveSocket).parent_path();
             std::error_code ec;
             if (parent.empty())
@@ -1559,7 +1511,6 @@ private:
             }
         }
         // Check for stale socket (and show readiness summary if daemon responds)
-        bool socket_exists = !effectiveSocket.empty() && safe_exists(effectiveSocket);
         if (socket_exists) {
             std::cout << "\nDaemon Probe:\n";
             setenv("YAMS_CLIENT_DEBUG", "1", 1);

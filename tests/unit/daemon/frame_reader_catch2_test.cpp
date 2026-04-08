@@ -228,3 +228,27 @@ TEST_CASE("FrameReader: partial header then rest", "[daemon][framing][frame-read
     REQUIRE(frameResult);
     REQUIRE(frameResult.value() == frame);
 }
+
+TEST_CASE("FrameReader: assembled frame surfaces malformed protobuf payload",
+          "[daemon][framing][frame-reader][validation]") {
+    FrameReader reader;
+    MessageFramer framer;
+
+    // Truncated protobuf varint that passes transport-level checks once wrapped
+    // in a valid frame header with a matching CRC.
+    const std::vector<uint8_t> malformed_payload = {0x80};
+    auto frame = make_raw_frame(malformed_payload);
+
+    auto feed_result = reader.feed(frame.data(), frame.size());
+    REQUIRE(feed_result.status == FrameReader::FrameStatus::FrameComplete);
+    REQUIRE(reader.has_frame());
+
+    auto frame_result = reader.get_frame();
+    REQUIRE(frame_result);
+
+    auto parse_result = framer.parse_frame(frame_result.value());
+    REQUIRE_FALSE(parse_result);
+    REQUIRE(parse_result.error().code == yams::ErrorCode::SerializationError);
+    CHECK(parse_result.error().message.find("Failed to parse protobuf Envelope") !=
+          std::string::npos);
+}

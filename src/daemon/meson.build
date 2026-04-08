@@ -280,6 +280,12 @@ yams_daemon_exe = executable('yams-daemon',
   install_rpath: daemon_install_rpath,
 )
 
+if host_machine.system() == 'linux'
+  install_data('../../packaging/systemd/yams-daemon.service',
+    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'system'),
+  )
+endif
+
 # --- Windows: Copy runtime DLLs next to the daemon executable ---
 # Use install: true so DLLs are included in meson install output for MSI packaging
 if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0

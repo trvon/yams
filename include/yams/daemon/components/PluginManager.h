@@ -167,7 +167,8 @@ public:
      * @param executor Executor for async operations
      * @return Number of plugins loaded
      */
-    boost::asio::awaitable<Result<size_t>> autoloadPlugins(boost::asio::any_io_executor executor);
+    boost::asio::awaitable<Result<size_t>>
+    autoloadPlugins(const boost::asio::any_io_executor& executor);
 
     /**
      * @brief Adopt model provider from loaded plugins.

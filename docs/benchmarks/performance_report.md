@@ -1,10 +1,10 @@
 # YAMS Performance Benchmark Report
 
 **Generated**: 2026-02-12
-**Last Updated**: 2026-03-08
-**YAMS Version**: 0.9.0-dev (`11ba59f4`)
-**Test Environment**: macOS 26.2 (Apple Silicon M3 Max, 16 cores, 48GB RAM)
-**Build Configuration**: Release build
+**Last Updated**: 2026-04-08
+**YAMS Version**: 0.12.0-dev
+**Test Environment**: macOS 26.4 (Apple Silicon M4 Max, 16 cores, 128GB RAM)
+**Build Configuration**: Debug (no TSAN) and Release
 
 > Note: This page is the canonical place for benchmark results. Keep the latest numbers inlined here (avoid relying on generated `bench_results/*` artifacts).
 
@@ -13,7 +13,9 @@
 - [Executive Summary](#executive-summary)
 - [Test Environment Specifications](#test-environment-specifications)
 - [Performance Benchmarks](#performance-benchmarks)
-  - [Latest Release Runs](#latest-release-runs-2026-02-12)
+  - [Latest Debug Runs (M4 Max)](#latest-debug-runs-m4-max-2026-04-08)
+  - [Multi-Client Benchmarks (M4 Max)](#multi-client-benchmarks-m4-max-2026-04-08)
+  - [Previous Release Runs (M3 Max)](#previous-release-runs-m3-max-2026-02-12)
   - [Storage Backend Benchmarks](#storage-backend-benchmarks-local-vs-r2)
   - [Cryptographic Operations (SHA-256)](#1-cryptographic-operations-sha-256)
   - [Content Chunking (Rabin Fingerprinting)](#2-content-chunking-rabin-fingerprinting)
@@ -26,7 +28,27 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 
 > Note: For benchmarks that report percentiles, the “Throughput” values in the tables are the p50 numbers.
 
-**Current Baseline (Release, 2026-02-12)**:
+**Current Baseline (Debug no-TSAN, M4 Max, 2026-04-08)**:
+
+| Benchmark | Throughput | Δ vs Apr 7 | Notes |
+|-----------|------------|------------|-------|
+| `Ingestion_SmallDocument` | 3,378 ops/s | **+15.7%** | 1 KB document |
+| `Ingestion_MediumDocument` | 106 ops/s | **+8.2%** | 100 KB document |
+| `Metadata_SingleUpdate` | 12,038 ops/s | **+26.4%** | 1,000 docs |
+| `Metadata_BulkUpdate(500)` | 150,875 ops/s | **+8.7%** | 500 updates/batch |
+| `IPC StreamingFramer_32x10` | 4,680 ops/s | **+4.9%** | 256 B chunks |
+| `IPC UnaryFramer_8KB` | 13,158 ops/s | **+9.5%** | 8 KB payload |
+
+**Multi-Client Baseline (Debug no-TSAN, M4 Max, 2026-04-08)**:
+
+| Benchmark | Throughput | Latency (p50) | Latency (p95) | Notes |
+|-----------|------------|---------------|---------------|-------|
+| Single client ingest | 83.2 docs/s | 11.2 ms | 11.3 ms | 100 docs, 2 KB (**+38.4%**) |
+| 4-client concurrent ingest | 244.0 docs/s | 11.2 ms | 11.3 ms | 400 total docs |
+| Mixed read/write (4 clients) | — | — | — | SIGSEGV (pre-existing) |
+| Connection contention (16 burst) | 1,368 ops/s | 11.2 ms | 12.0 ms | 0 failures (**+17.1%**) |
+
+**Previous Baseline (Release, M3 Max, 2026-02-12)**:
 
 | Benchmark | Throughput | Notes |
 |-----------|------------|-------|
@@ -37,31 +59,35 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 | `IPC StreamingFramer_32x10` | 16,579 ops/s | 256 B chunks |
 | `IPC UnaryFramer_8KB` | 50,000 ops/s | 8 KB payload |
 
-**Previous Baseline (Release, 2026-01-26)**:
+> **Note**: The M3 Max numbers above are from Release builds. The M4 Max numbers are from Debug (no-TSAN) builds for safe comparison — Debug adds ~2-4x overhead for ingestion and IPC. Release M4 Max numbers will be higher.
 
-| Benchmark | Throughput | Notes |
-|-----------|------------|-------|
-| `Ingestion_SmallDocument` | 4,078 ops/s | 1 KB document |
-| `Ingestion_MediumDocument` | 300 ops/s | 100 KB document |
-| `Metadata_SingleUpdate` | 25,510 ops/s | 1,000 docs |
-| `Metadata_BulkUpdate(500)` | 119,002 ops/s | 500 updates/batch |
-| `IPC StreamingFramer_32x10` | 16,548 ops/s | 256 B chunks |
-| `IPC UnaryFramer_8KB` | 50,000 ops/s | 8 KB payload |
+**Historical Debug Baseline (M3 Max, Jan 2026 vs Oct 2025)**:
 
-**Historical Debug Baseline (Jan 2026 vs Oct 2025)**:
+| Benchmark | Oct 2025 | Jan 2026 | Apr 7 (M4) | Apr 8 (M4, optimized) | Δ Apr 7→8 |
+|-----------|----------|----------|------------|----------------------|-----------|
+| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | 2,921 ops/s | 3,378 ops/s | **+15.7%** |
+| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | 98 ops/s | 106 ops/s | **+8.2%** |
+| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | 9,520 ops/s | 12,038 ops/s | **+26.4%** |
+| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | 138,835 ops/s | 150,875 ops/s | **+8.7%** |
+| `IPC StreamingFramer_32x10` | - | 3,732 ops/s | 4,460 ops/s | 4,680 ops/s | **+4.9%** |
+| `IPC UnaryFramer_8KB` | - | 10,088 ops/s | 12,012 ops/s | 13,158 ops/s | **+9.5%** |
 
-| Benchmark | Oct 2025 | Jan 2026 | Change |
-|-----------|----------|----------|--------|
-| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | ~same |
-| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | ~same |
-| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | **+33%** |
-| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | **+6.5x** |
-| `IPC StreamingFramer_32x10` | - | 3,732 ops/s | new |
-| `IPC UnaryFramer_8KB` | - | 10,088 ops/s | new |
-
-> **Note**: Debug builds with ThreadSanitizer (TSAN) add ~2-6x overhead. The historical numbers above are from Debug builds **without** TSAN for fair comparison with the October 2025 baseline.
+> Apr 8 optimizations: CRC32 slicing-by-8, FrameReader memcpy, Rabin lazy chunking, lock-free stats, proto serializer, IngestService futures reuse.
 
 ## Test Environment Specifications
+
+### Current (M4 Max)
+
+- **Platform**: macOS 26.4 (Build 25E246)
+- **Hardware**: MacBook Pro (Apple M4 Max)
+- **CPU**: Apple M4 Max, 16 cores
+- **Memory**: 128 GB unified memory
+- **Compiler**: Apple Clang 21.0.0 (clang-2100.0.123.102) with C++23 standard
+- **Build Type**: Debug (no-TSAN) for safe baseline; Release for production numbers
+- **Package Management**: Conan 2.0
+- **Build System**: Meson
+
+### Previous (M3 Max)
 
 - **Platform**: macOS 26.2 (Build 25C56)
 - **Hardware**: MacBook Pro (Mac15,9)
@@ -91,28 +117,73 @@ Located in `build/release/tests/benchmarks/` (when the Release build is configur
 
 ## Performance Benchmarks
 
-### Latest Release Runs (2026-02-12)
+### Latest Debug Runs (M4 Max, 2026-04-08)
 
 #### Quick Links
-- [API Benchmarks](#api-benchmarks)
-- [IPC Streaming Benchmarks](#ipc-streaming-benchmarks)
-- [Retrieval Quality Benchmark](#retrieval-quality-benchmark)
+- [API Benchmarks](#api-benchmarks-m4)
+- [IPC Streaming Benchmarks](#ipc-streaming-benchmarks-m4)
+- [Multi-Client Benchmarks](#multi-client-benchmarks)
 - [Storage Backends Benchmark (Local vs S3-compatible)](storage_backends.md)
 
 #### Run Commands
 ```bash
-cd build/release
+# Debug build (no TSAN) for benchmarks
+./setup.sh Debug --no-tsan --with-tests
+meson compile -C builddir
 
 # API
-./tests/benchmarks/yams_api_benchmarks --iterations 5 --quiet
+./builddir/tests/benchmarks/yams_api_benchmarks --iterations 5 --quiet
 
 # IPC streaming
-./tests/benchmarks/ipc_stream_bench --iterations 8 --quiet
+./builddir/tests/benchmarks/ipc_stream_bench --iterations 8 --quiet
+
+# Multi-client
+./builddir/tests/benchmarks/multi_client_ingestion_bench “[!benchmark][multi-client]” --durations yes
 ```
 
-#### API Benchmarks
+#### API Benchmarks (M4)
 
-(From `build/release/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`)
+(From `builddir/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`, Debug no-TSAN)
+
+| Benchmark | Throughput | Δ vs Apr 7 | Notes |
+|-----------|------------|------------|-------|
+| Ingestion_SmallDocument | 3,378 ops/sec | **+15.7%** | 1 KB document |
+| Ingestion_MediumDocument | 106 ops/sec | **+8.2%** | 100 KB document |
+| Metadata_SingleUpdate | 12,038 ops/sec | **+26.4%** | 1,000 docs |
+| Metadata_BulkUpdate | 150,875 ops/sec | **+8.7%** | 500 updates/batch |
+
+#### IPC Streaming Benchmarks (M4)
+
+(From `builddir/tests/benchmarks/ipc_stream_bench`, `--iterations 8`, Debug no-TSAN)
+
+| Benchmark | Throughput | Δ vs Apr 7 |
+|-----------|------------|------------|
+| StreamingFramer_32x10_256B | 4,680 ops/sec | **+4.9%** |
+| StreamingFramer_64x6_512B | 1,780 ops/sec | **+5.6%** |
+| UnaryFramer_Success_8KB | 13,158 ops/sec | **+9.5%** |
+
+#### Multi-Client Benchmarks (M4)
+
+(From `builddir/tests/benchmarks/multi_client_ingestion_bench`, Debug no-TSAN, 2 KB docs)
+
+| Test | Clients | Throughput | Add p50 | Add p95 | Δ vs Apr 7 |
+|------|---------|------------|---------|---------|------------|
+| Baseline single client | 1 | 83.2 docs/s | 11.2 ms | 11.3 ms | **+38.4%** |
+| Concurrent pure ingest | 4 | 244.0 docs/s | 11.2 ms | 11.3 ms | ~flat |
+| Mixed read/write | 4 | — | — | — | SIGSEGV (pre-existing) |
+| Connection contention | 16 | 1,368 ops/s | 11.2 ms | 12.0 ms | **+17.1%** |
+
+#### Search Benchmarks
+
+Search benchmarks are intentionally not included in the “improvements” summary because the reported numbers can be misleading (different datasets, caching, and internal operation definitions). If you need them for profiling, run the benchmark binary and inspect its output locally:
+
+```bash
+./builddir/tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
+```
+
+### Previous Release Runs (M3 Max, 2026-02-12)
+
+#### API Benchmarks (M3, Release)
 
 | Benchmark | Latency | Throughput |
 |-----------|---------|------------|
@@ -121,17 +192,7 @@ cd build/release
 | Metadata_SingleUpdate | 6.57 ms | 15,232 ops/sec |
 | Metadata_BulkUpdate | 2.75 ms | 181,818 ops/sec |
 
-#### Search Benchmarks
-
-Search benchmarks are intentionally not included in the “improvements” summary because the reported numbers can be misleading (different datasets, caching, and internal operation definitions). If you need them for profiling, run the benchmark binary and inspect its output locally:
-
-```bash
-./tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
-```
-
-#### IPC Streaming Benchmarks
-
-(From `build/release/tests/benchmarks/ipc_stream_bench`, `--iterations 8`)
+#### IPC Streaming Benchmarks (M3, Release)
 
 | Benchmark | Latency | Throughput |
 |-----------|---------|------------|

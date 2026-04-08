@@ -7,6 +7,7 @@
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/in_process_transport.h>
 #include <yams/daemon/client/ipc_failure.h>
+#include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/client/sandbox_detection.h>
 #include <yams/daemon/client/streaming_handlers.h>
 #include <yams/daemon/embedded_service_host.h>
@@ -510,6 +511,16 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
             // IMPORTANT: do not select the proxy based on filesystem existence alone; stale socket
             // files are common when the daemon crashes.
             auto daemonSock = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
+
+            if (!socketForcedByEnv && !pingDaemonSync(daemonSock)) {
+                if (auto liveSocket = client::discoverLiveDaemonSocket(daemonSock);
+                    liveSocket && !liveSocket->empty() && pingDaemonSync(*liveSocket)) {
+                    spdlog::info(
+                        "DaemonClient: falling back to live daemon socket '{}' instead of '{}'",
+                        liveSocket->string(), daemonSock.string());
+                    daemonSock = *liveSocket;
+                }
+            }
 
             if (socketForcedByEnv) {
                 pImpl->config_.socketPath = daemonSock;
@@ -1721,8 +1732,8 @@ DaemonClient::sendRequestStreaming(const Request& req,
             impl->embeddedHost_ = host.value();
         }
         InProcessTransport transport(impl->embeddedHost_);
-        auto res = co_await transport.send_request_streaming(ownedReq, onHeader, onChunk, onError,
-                                                             onComplete);
+        auto res = co_await transport.send_request_streaming(std::move(ownedReq), onHeader, onChunk,
+                                                             onError, onComplete);
         if (impl->isShuttingDown()) {
             co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
         }
@@ -1742,8 +1753,8 @@ DaemonClient::sendRequestStreaming(const Request& req,
         opts.poolEnabled = false;
     }
     AsioTransportAdapter adapter(opts);
-    auto res =
-        co_await adapter.send_request_streaming(ownedReq, onHeader, onChunk, onError, onComplete);
+    auto res = co_await adapter.send_request_streaming(std::move(ownedReq), onHeader, onChunk,
+                                                       onError, onComplete);
 
     if (!res && isProxySocketPath(opts.socketPath) && shouldRetryViaMainSocket(res.error())) {
         const auto fallbackSocket = deriveMainSocketFromProxy(opts.socketPath);
@@ -1755,7 +1766,7 @@ DaemonClient::sendRequestStreaming(const Request& req,
                           fallbackSocket.string());
             AsioTransportAdapter retryAdapter(retryOpts);
             auto retryRes = co_await retryAdapter.send_request_streaming(
-                retryReq, onHeader, onChunk, onError, onComplete);
+                std::move(retryReq), onHeader, onChunk, onError, onComplete);
             if (retryRes) {
                 impl->config_.socketPath = fallbackSocket;
                 impl->refresh_transport();
@@ -2341,7 +2352,18 @@ std::filesystem::path DaemonClient::resolveSocketPathConfigFirst() {
 bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
     auto path = socketPath.empty() ? resolveSocketPathConfigFirst() : socketPath;
     // Lightweight readiness probe using real Ping via Asio transport
-    return pingDaemonSync(path);
+    if (pingDaemonSync(path)) {
+        return true;
+    }
+
+    if (socketPath.empty()) {
+        if (auto liveSocket = client::discoverLiveDaemonSocket(path);
+            liveSocket && !liveSocket->empty() && *liveSocket != path) {
+            return pingDaemonSync(*liveSocket);
+        }
+    }
+
+    return false;
 }
 
 Result<void> DaemonClient::startDaemon(const ClientConfig& config) {

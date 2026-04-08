@@ -1833,7 +1833,7 @@ jobs:
           tree "$REPO_ROOT" || find "$REPO_ROOT" -maxdepth 4 -type f -print
           printf '%s\n' \
             'Add this APT repo (signed):' \
-            '  curl -fsSL https://repo.yamsmemory.ai/gpg.key -o /usr/share/keyrings/yams.gpg' \
+            '  curl -fsSL https://repo.yamsmemory.ai/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/yams.gpg' \
             '  echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
             '  sudo apt-get update && sudo apt-get install yams' \
             '' \

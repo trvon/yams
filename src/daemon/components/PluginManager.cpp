@@ -305,7 +305,7 @@ Result<void> PluginManager::trustRemove(const std::filesystem::path& path) {
 }
 
 boost::asio::awaitable<Result<size_t>>
-PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
+PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
     size_t loadedCount = 0;
 
     try {

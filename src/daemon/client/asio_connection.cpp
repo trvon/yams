@@ -32,8 +32,7 @@ bool isExpectedDisconnectError(const boost::system::error_code& ec) {
     const auto msg = ec.message();
     return msg.find("Broken pipe") != std::string::npos ||
            msg.find("Connection reset") != std::string::npos ||
-           msg.find("End of file") != std::string::npos ||
-           msg.find("EPIPE") != std::string::npos ||
+           msg.find("End of file") != std::string::npos || msg.find("EPIPE") != std::string::npos ||
            msg.find("ECONNRESET") != std::string::npos;
 }
 } // namespace
@@ -73,17 +72,17 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
         auto cap = batch_cap.load(std::memory_order_relaxed);
         std::size_t batched = 0;
         std::size_t frames = 0;
-        std::vector<std::vector<uint8_t>> frames_batch;
-        std::vector<boost::asio::const_buffer> buffers;
-        frames_batch.reserve(write_queue.size());
-        buffers.reserve(write_queue.size());
+        auto frames_batch = std::make_shared<std::vector<std::vector<uint8_t>>>();
+        auto buffers = std::make_shared<std::vector<boost::asio::const_buffer>>();
+        frames_batch->reserve(write_queue.size());
+        buffers->reserve(write_queue.size());
         while (!write_queue.empty() && (batched < cap || frames == 0)) {
             auto frame_data = std::move(write_queue.front());
             write_queue.pop_front();
             batched += frame_data.size();
-            frames_batch.emplace_back(std::move(frame_data));
-            auto& stored = frames_batch.back();
-            buffers.emplace_back(boost::asio::buffer(stored));
+            frames_batch->emplace_back(std::move(frame_data));
+            auto& stored = frames_batch->back();
+            buffers->emplace_back(boost::asio::buffer(stored));
             frames++;
         }
         total_bytes_written.fetch_add(batched, std::memory_order_relaxed);
@@ -118,7 +117,7 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
 
         auto write_result = co_await boost::asio::async_initiate<
             decltype(use_awaitable), void(std::exception_ptr, RaceResult)>(
-            [this, &buffers, executor, timeout](auto handler) mutable {
+            [this, buffers, frames_batch, executor, timeout](auto handler) mutable {
                 auto completed = std::make_shared<std::atomic<bool>>(false);
                 auto timer = std::make_shared<boost::asio::steady_timer>(executor);
                 timer->expires_after(timeout);
@@ -142,9 +141,9 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
 
                 // Write handler
                 boost::asio::async_write(
-                    *socket, buffers,
-                    [timer, completed, handlerPtr, completion_exec](
-                        const boost::system::error_code& ec, std::size_t bytes) mutable {
+                    *socket, *buffers,
+                    [timer, completed, handlerPtr, completion_exec, buffers,
+                     frames_batch](const boost::system::error_code& ec, std::size_t bytes) mutable {
                         if (!completed->exchange(true, std::memory_order_acq_rel)) {
                             timer->cancel();
                             boost::asio::post(completion_exec,
@@ -166,15 +165,16 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             writing = false;
             alive = false;
             boost::system::error_code close_ec;
-            socket->close(close_ec);
+            (void)socket->close(close_ec);
             co_return Error{ErrorCode::Timeout, "Write timeout"};
         }
 
         auto& [write_ec, result] = std::get<0>(write_result);
         if (write_ec) {
             if (isExpectedDisconnectError(write_ec)) {
-                spdlog::debug("AsioConnection::async_write_frame: peer disconnected during write: {}",
-                              write_ec.message());
+                spdlog::debug(
+                    "AsioConnection::async_write_frame: peer disconnected during write: {}",
+                    write_ec.message());
             } else {
                 spdlog::error("AsioConnection::async_write_frame: write error: {}",
                               write_ec.message());
