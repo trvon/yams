@@ -41,7 +41,7 @@ struct MetadataResponse {
  * @brief Response for create metadata operation
  */
 struct CreateMetadataResponse : public MetadataResponse {
-    DocumentId documentId;
+    DocumentId documentId{0};
     metadata::DocumentMetadata createdMetadata;
     bool wasIndexed = false;
 };
@@ -54,7 +54,7 @@ struct GetMetadataResponse : public MetadataResponse {
     std::vector<metadata::DocumentMetadata> relatedDocuments;
 
     struct VersionInfo {
-        int version;
+        int version{0};
         std::chrono::system_clock::time_point timestamp;
         std::string author;
         std::string comment;
@@ -87,8 +87,8 @@ struct DeleteMetadataResponse : public MetadataResponse {
  */
 struct BulkCreateResponse : public MetadataResponse {
     struct CreateResult {
-        bool success;
-        DocumentId documentId;
+        bool success{false};
+        DocumentId documentId{0};
         std::string path;
         std::string error;
     };
@@ -104,10 +104,10 @@ struct BulkCreateResponse : public MetadataResponse {
  */
 struct BulkUpdateResponse : public MetadataResponse {
     struct UpdateResult {
-        bool success;
-        DocumentId documentId;
+        bool success{false};
+        DocumentId documentId{0};
         std::string error;
-        int newVersion;
+        int newVersion{0};
     };
 
     std::vector<UpdateResult> results;
@@ -121,8 +121,8 @@ struct BulkUpdateResponse : public MetadataResponse {
  */
 struct BulkDeleteResponse : public MetadataResponse {
     struct DeleteResult {
-        bool success;
-        DocumentId documentId;
+        bool success{false};
+        DocumentId documentId{0};
         std::string error;
     };
 
@@ -264,10 +264,10 @@ struct ValidateMetadataResponse : public MetadataResponse {
  * @brief Response for get history operation
  */
 struct GetHistoryResponse : public MetadataResponse {
-    DocumentId documentId;
+    DocumentId documentId{0};
 
     struct HistoryEntry {
-        int version;
+        int version{0};
         std::chrono::system_clock::time_point timestamp;
         std::string author;
         std::string operation; // create, update, delete

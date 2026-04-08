@@ -797,7 +797,10 @@ struct ProviderCtx {
             colbert = std::make_unique<yams::daemon::OnnxColbertSession>(
                 colbertModelPath, colbertModelName, colbertCfg);
         }
-        // Initialize batch coalescer (opt-in via YAMS_ONNX_BATCH_COALESCE=1)
+        // Initialize batch coalescer (off by default; enable with YAMS_ONNX_BATCH_COALESCE=1).
+        // Only useful for workloads with many concurrent small requests (1-4 texts).
+        // Callers that already send well-sized batches should NOT enable this — it
+        // adds latency (coalesce window) and serializes concurrent inferences.
         {
             BatchCoalescer::Config coalesceCfg;
             coalesceCfg.enabled = envTruthy(std::getenv("YAMS_ONNX_BATCH_COALESCE"));
@@ -1421,9 +1424,14 @@ struct ProviderSingleton {
                         texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
                     }
 
-                    // Batch coalescing: route non-ColBERT requests through the
-                    // coalescer to accumulate concurrent small batches.
-                    if (!isColbert && c->coalescer && c->coalescer->isEnabled()) {
+                    // Batch coalescing: route small non-ColBERT requests through
+                    // the coalescer to accumulate concurrent small batches.
+                    // Only coalesce small requests (<=4 texts); callers that
+                    // already send well-sized batches skip this to avoid
+                    // serialization overhead and the coalesce window delay.
+                    constexpr size_t kCoalesceMaxInputBatch = 4;
+                    if (!isColbert && c->coalescer && c->coalescer->isEnabled() &&
+                        batch_size <= kCoalesceMaxInputBatch) {
                         auto inferFn = [c](const std::string& mid,
                                            const std::vector<std::string>& batch)
                             -> yams::Result<std::vector<std::vector<float>>> {

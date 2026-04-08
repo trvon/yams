@@ -411,7 +411,7 @@ private:
         if (!docResult || !docResult.value().has_value()) {
             return;
         }
-        auto docInfo = docResult.value().value();
+        const auto& docInfo = docResult.value().value();
         auto indexResult = metadataRepo_->indexDocumentContent(
             docInfo.id, title, content, docInfo.mimeType.empty() ? "text/plain" : docInfo.mimeType);
         if (!indexResult) {
@@ -665,7 +665,7 @@ std::unique_ptr<SearchEngine> makeSmallProseEngine(std::shared_ptr<MetadataRepos
     config.metadataWeight = 0.0f;
     config.enableParallelExecution = false;
 
-    auto engine = createSearchEngine(repo, nullptr, nullptr, nullptr, config);
+    auto engine = createSearchEngine(std::move(repo), nullptr, nullptr, nullptr, config);
 
     CorpusStats tunerStats;
     tunerStats.docCount = 500;

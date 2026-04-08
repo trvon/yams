@@ -104,9 +104,7 @@ public:
         return it->second;
     }
 
-    Result<std::vector<ModelInfo>> getModelsByDimension(size_t dimension) const {
-        std::shared_lock lock(mutex_);
-
+    Result<std::vector<ModelInfo>> getModelsByDimensionLocked(size_t dimension) const {
         auto it = dimension_index_.find(dimension);
         if (it == dimension_index_.end()) {
             return std::vector<ModelInfo>{};
@@ -121,6 +119,11 @@ public:
         }
 
         return result;
+    }
+
+    Result<std::vector<ModelInfo>> getModelsByDimension(size_t dimension) const {
+        std::shared_lock lock(mutex_);
+        return getModelsByDimensionLocked(dimension);
     }
 
     Result<ModelInfo> getDefaultModel(size_t dimension) const {
@@ -174,7 +177,7 @@ public:
                     const std::map<std::string, std::string>& requirements) const {
         std::shared_lock lock(mutex_);
 
-        auto candidates_result = getModelsByDimension(required_dimension);
+        auto candidates_result = getModelsByDimensionLocked(required_dimension);
         if (!candidates_result.has_value()) {
             return candidates_result.error();
         }

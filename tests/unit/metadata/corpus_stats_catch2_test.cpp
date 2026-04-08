@@ -61,11 +61,11 @@ DocumentInfo makeDocument(const std::string& path, const std::string& hash, int6
     info.modifiedTime = info.createdTime;
     info.indexedTime = info.createdTime;
     auto derived = computePathDerivedValues(path);
-    info.filePath = derived.normalizedPath;
-    info.pathPrefix = derived.pathPrefix;
-    info.reversePath = derived.reversePath;
-    info.pathHash = derived.pathHash;
-    info.parentHash = derived.parentHash;
+    info.filePath = std::move(derived.normalizedPath);
+    info.pathPrefix = std::move(derived.pathPrefix);
+    info.reversePath = std::move(derived.reversePath);
+    info.pathHash = std::move(derived.pathHash);
+    info.parentHash = std::move(derived.parentHash);
     info.pathDepth = derived.pathDepth;
     info.contentExtracted = true;
     info.extractionStatus = ExtractionStatus::Success;

@@ -1619,7 +1619,7 @@ Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t doc
             MetadataValue value;
             value.value = entry->value;
             value.type = MetadataValueTypeUtils::fromString(entry->valueType);
-            return std::optional<MetadataValue>{value};
+            return std::optional<MetadataValue>{std::move(value)};
         });
 }
 
@@ -5110,16 +5110,16 @@ MetadataRepository::findDocumentsByPathTreePrefix(std::string_view pathPrefix,
 Result<void> MetadataRepository::upsertTreeSnapshot(const TreeSnapshotRecord& record) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
         // Extract metadata fields from record.metadata map
-        std::string directoryPath =
-            record.metadata.count("directory_path") ? record.metadata.at("directory_path") : "";
-        std::string snapshotLabel =
-            record.metadata.count("snapshot_label") ? record.metadata.at("snapshot_label") : "";
-        std::string gitCommit =
-            record.metadata.count("git_commit") ? record.metadata.at("git_commit") : "";
-        std::string gitBranch =
-            record.metadata.count("git_branch") ? record.metadata.at("git_branch") : "";
-        std::string gitRemote =
-            record.metadata.count("git_remote") ? record.metadata.at("git_remote") : "";
+        static const std::string kEmpty;
+        auto field = [&](const char* key) -> const std::string& {
+            auto it = record.metadata.find(key);
+            return it != record.metadata.end() ? it->second : kEmpty;
+        };
+        const auto& directoryPath = field("directory_path");
+        const auto& snapshotLabel = field("snapshot_label");
+        const auto& gitCommit = field("git_commit");
+        const auto& gitBranch = field("git_branch");
+        const auto& gitRemote = field("git_remote");
 
         auto stmtResult = db.prepare(R"(
             INSERT INTO tree_snapshots (

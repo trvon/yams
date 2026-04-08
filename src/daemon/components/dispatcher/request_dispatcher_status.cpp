@@ -730,7 +730,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 if (state_) {
                     const bool repairRunning =
                         state_->stats.repairRunning.load(std::memory_order_relaxed) ||
-                        (serviceManager_ && serviceManager_->getRepairService() != nullptr);
+                        (serviceManager_ && serviceManager_->getRepairServiceShared() != nullptr);
                     res.requestCounts[std::string(metrics::kRepairQueueDepth)] =
                         state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
                     res.requestCounts[std::string(metrics::kRepairBatchesAttempted)] =

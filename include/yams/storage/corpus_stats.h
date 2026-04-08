@@ -139,7 +139,7 @@ struct CorpusStats {
                 break;
             extJson[ext] = cnt;
         }
-        j["top_extensions"] = extJson;
+        j["top_extensions"] = std::move(extJson);
 
         // Classification summary
         j["classification"] = nlohmann::json::object();

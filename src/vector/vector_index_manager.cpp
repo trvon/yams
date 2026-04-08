@@ -397,10 +397,14 @@ public:
         return Result<void>();
     }
 
-    bool needsOptimization() const override {
-        std::shared_lock lock(mutex_);
+    bool needsOptimizationLocked() const {
         // Optimize if more than 10% of vectors are deleted
         return deleted_indices_.size() > vectors_.size() * 0.1;
+    }
+
+    bool needsOptimization() const override {
+        std::shared_lock lock(mutex_);
+        return needsOptimizationLocked();
     }
 
     size_t size() const override {
@@ -424,7 +428,7 @@ public:
         stats_.index_size_bytes = stats_.memory_usage_bytes;
         stats_.fragmentation_ratio =
             static_cast<double>(deleted_indices_.size()) / std::max(size_t(1), vectors_.size());
-        stats_.needs_optimization = needsOptimization();
+        stats_.needs_optimization = needsOptimizationLocked();
         return stats_;
     }
 

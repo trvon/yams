@@ -309,7 +309,7 @@ Result<void> YamsDaemon::start() {
                                                              serviceManager_->getWorkCoordinator());
             tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
                 try {
-                    if (auto* rs = serviceManager_->getRepairService()) {
+                    if (auto rs = serviceManager_->getRepairServiceShared()) {
                         rs->setMaintenanceTokens(tokens);
                         rs->setMaxBatch(batch);
                     }
@@ -1120,14 +1120,14 @@ Result<void> YamsDaemon::stop() {
 // run() method removed; loop is inlined in start()
 
 void YamsDaemon::onDocumentAdded(const std::string& hash, const std::string& path) {
-    if (auto* rs = serviceManager_->getRepairService()) {
+    if (auto rs = serviceManager_->getRepairServiceShared()) {
         RepairService::DocumentAddedEvent event{hash, path};
         rs->onDocumentAdded(event);
     }
 }
 
 void YamsDaemon::onDocumentRemoved(const std::string& hash) {
-    if (auto* rs = serviceManager_->getRepairService()) {
+    if (auto rs = serviceManager_->getRepairServiceShared()) {
         RepairService::DocumentRemovedEvent event{hash};
         rs->onDocumentRemoved(event);
     }

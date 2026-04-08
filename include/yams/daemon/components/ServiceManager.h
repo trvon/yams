@@ -354,7 +354,6 @@ public:
     std::shared_ptr<RepairService> getRepairServiceShared() const {
         return std::atomic_load_explicit(&repairService_, std::memory_order_acquire);
     }
-    RepairService* getRepairService() const { return getRepairServiceShared().get(); }
     void startRepairService(std::function<size_t()> activeConnFn);
     void stopRepairService();
 

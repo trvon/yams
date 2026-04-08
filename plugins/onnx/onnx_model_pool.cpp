@@ -770,7 +770,12 @@ public:
             }
 
             isLoaded_ = true;
-            initIoBinding();
+            // IoBinding benefits real GPU providers (pre-resolved memory placement);
+            // on CPU/CoreML-to-CPU it adds overhead vs direct Session::Run().
+            if (actualExecutionProvider_ == "cuda" || actualExecutionProvider_ == "migraphx" ||
+                actualExecutionProvider_ == "directml") {
+                initIoBinding();
+            }
             spdlog::info(
                 "[ONNX] Session ready for '{}' (inputs={}, outputs={}, dim={}, max_seq_len={})",
                 modelName_.c_str(), numInputs, numOutputs, embeddingDim_, maxSequenceLength_);
@@ -1035,7 +1040,9 @@ public:
             }
             sessionOptions_->SetGraphOptimizationLevel(optLevel);
 
-            if (envTruthy(std::getenv("YAMS_ONNX_GRAPH_CACHE"))) {
+            // Graph cache is on by default; disable with YAMS_ONNX_GRAPH_CACHE=0
+            if (!std::getenv("YAMS_ONNX_GRAPH_CACHE") ||
+                envTruthy(std::getenv("YAMS_ONNX_GRAPH_CACHE"))) {
                 auto optPath = resolveOptimizedModelPath(modelPath_, optLevel);
                 std::error_code ec;
                 fs::create_directories(optPath.parent_path(), ec);
@@ -1054,7 +1061,9 @@ public:
 #endif
             session_ = std::make_unique<Ort::Session>(
                 *env_, std::filesystem::path(modelPath_).c_str(), options);
-            initIoBinding();
+            // CPU fallback — no IoBinding (adds overhead on CPU)
+            useIoBinding_ = false;
+            ioBinding_.reset();
             OnnxModelSession::denylistCoreML(modelName_);
             spdlog::warn("[ONNX] Reinitialized '{}' on CPU after CoreML inference failure "
                          "(denylisted for future instances, intra_threads={}, hw={})",
