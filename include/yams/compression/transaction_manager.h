@@ -333,7 +333,7 @@ public:
 
 private:
     TransactionManager& manager_;
-    TransactionId txId_;
+    TransactionId txId_{0};
     bool valid_ = false;
     bool committed_ = false;
     bool shouldRollback_ = false;

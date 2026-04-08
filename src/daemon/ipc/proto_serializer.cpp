@@ -3364,11 +3364,28 @@ Result<void> ProtoSerializer::encode_payload_into(const Message& msg,
 }
 
 Result<std::vector<uint8_t>> ProtoSerializer::encode_payload(const Message& msg) {
-    std::vector<uint8_t> out;
-    auto res = encode_payload_into(msg, out);
-    if (!res)
-        return res.error();
-    return out;
+    auto env_result = build_envelope(msg);
+    if (!env_result)
+        return env_result.error();
+
+    Envelope env = std::move(env_result.value());
+    const auto size = env.ByteSizeLong();
+    if (size > MAX_MESSAGE_SIZE) {
+        return Error{ErrorCode::InvalidData, "Serialized payload exceeds MAX_MESSAGE_SIZE"};
+    }
+
+    // Serialize to string: protobuf manages its own buffer allocation and writes
+    // directly without zero-filling, avoiding the resize+overwrite penalty.
+    std::string serialized;
+    serialized.reserve(static_cast<std::size_t>(size));
+    if (!env.SerializeToString(&serialized)) {
+        return Error{ErrorCode::SerializationError, "Failed to serialize protobuf Envelope"};
+    }
+
+    // Move bytes into vector via iterator construction (single allocation, no zero-fill)
+    return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(serialized.data()),
+                                reinterpret_cast<const uint8_t*>(serialized.data()) +
+                                    serialized.size());
 }
 
 Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) {

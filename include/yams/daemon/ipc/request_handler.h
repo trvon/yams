@@ -255,39 +255,40 @@ private:
 
     [[nodiscard]] Stats get_stats() const {
         Stats copy;
-        copy.requests_processed = stats_.requests_processed.load();
-        copy.requests_failed = stats_.requests_failed.load();
-        copy.bytes_received = stats_.bytes_received.load();
-        copy.bytes_sent = stats_.bytes_sent.load();
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            copy.total_processing_time = stats_.total_processing_time;
-            copy.min_latency = stats_.min_latency;
-            copy.max_latency = stats_.max_latency;
-        }
+        copy.requests_processed = stats_.requests_processed.load(std::memory_order_relaxed);
+        copy.requests_failed = stats_.requests_failed.load(std::memory_order_relaxed);
+        copy.bytes_received = stats_.bytes_received.load(std::memory_order_relaxed);
+        copy.bytes_sent = stats_.bytes_sent.load(std::memory_order_relaxed);
+        copy.total_processing_time = std::chrono::nanoseconds{
+            stats_.total_processing_time_ns.load(std::memory_order_relaxed)};
+        copy.min_latency =
+            std::chrono::nanoseconds{stats_.min_latency_ns.load(std::memory_order_relaxed)};
+        copy.max_latency =
+            std::chrono::nanoseconds{stats_.max_latency_ns.load(std::memory_order_relaxed)};
         return copy;
     }
     void reset_stats() {
-        stats_.requests_processed = 0;
-        stats_.requests_failed = 0;
-        stats_.bytes_received = 0;
-        stats_.bytes_sent = 0;
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.total_processing_time = std::chrono::nanoseconds{0};
-        stats_.min_latency = std::chrono::nanoseconds::max();
-        stats_.max_latency = std::chrono::nanoseconds{0};
+        stats_.requests_processed.store(0, std::memory_order_relaxed);
+        stats_.requests_failed.store(0, std::memory_order_relaxed);
+        stats_.bytes_received.store(0, std::memory_order_relaxed);
+        stats_.bytes_sent.store(0, std::memory_order_relaxed);
+        stats_.total_processing_time_ns.store(0, std::memory_order_relaxed);
+        stats_.min_latency_ns.store(std::chrono::nanoseconds::max().count(),
+                                    std::memory_order_relaxed);
+        stats_.max_latency_ns.store(0, std::memory_order_relaxed);
     }
 
 private:
-    // Internal stats with atomics
+    // Internal stats — fully lock-free using atomics.
+    // Nanosecond durations stored as raw int64_t counts for atomic operations.
     struct InternalStats {
         std::atomic<size_t> requests_processed{0};
         std::atomic<size_t> requests_failed{0};
         std::atomic<size_t> bytes_received{0};
         std::atomic<size_t> bytes_sent{0};
-        std::chrono::nanoseconds total_processing_time{0};
-        std::chrono::nanoseconds min_latency{std::chrono::nanoseconds::max()};
-        std::chrono::nanoseconds max_latency{0};
+        std::atomic<int64_t> total_processing_time_ns{0};
+        std::atomic<int64_t> min_latency_ns{std::chrono::nanoseconds::max().count()};
+        std::atomic<int64_t> max_latency_ns{0};
     };
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     write_message(boost::asio::local::stream_protocol::socket& socket, const Message& message);
@@ -322,7 +323,6 @@ private:
     MessageFramer framer_;
     Config config_;
     mutable InternalStats stats_;
-    mutable std::mutex stats_mutex_;
 
     // Per-connection write serialization when multiplexing is enabled is handled by
     // the write strand executor below. Do not add an extra write mutex here; the strand

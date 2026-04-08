@@ -538,3 +538,63 @@ TEST_CASE("StreamingChunker - Stream fragmentation", "[chunking][streaming][robu
         REQUIRE(refs[0].size == LEN);
     }
 }
+
+// =============================================================================
+// Lazy-data chunking tests
+// =============================================================================
+
+TEST_CASE("RabinChunker - chunkDataLazy produces correct offsets with empty data",
+          "[chunking][rabin][lazy-chunk]") {
+    const auto pattern = makePatternData(256 * 1024 + 777);
+    std::vector<std::byte> data(pattern.size());
+    std::memcpy(data.data(), pattern.data(), pattern.size());
+
+    ChunkingConfig cfg;
+    cfg.minChunkSize = 2 * 1024;
+    cfg.targetChunkSize = 8 * 1024;
+    cfg.maxChunkSize = 16 * 1024;
+
+    RabinChunker chunker(cfg);
+    const auto chunks = chunker.chunkDataLazy(data);
+
+    REQUIRE_FALSE(chunks.empty());
+
+    const auto source = std::span<const std::byte>(data.data(), data.size());
+    uint64_t expectedOffset = 0;
+    for (const auto& chunk : chunks) {
+        REQUIRE(chunk.offset == expectedOffset);
+        REQUIRE(chunk.size > 0);
+        // Lazy mode: data vector should be empty
+        REQUIRE(chunk.data.empty());
+        // Hash should still be correct
+        auto sourceSlice = source.subspan(chunk.offset, chunk.size);
+        auto expectedHash = hashWithStreamingHasher(sourceSlice);
+        REQUIRE(chunk.hash == expectedHash);
+        expectedOffset += chunk.size;
+    }
+    REQUIRE(expectedOffset == data.size());
+}
+
+TEST_CASE("RabinChunker - chunkDataLazy boundaries match chunkData",
+          "[chunking][rabin][lazy-chunk]") {
+    const auto pattern = makePatternData(128 * 1024);
+    std::vector<std::byte> data(pattern.size());
+    std::memcpy(data.data(), pattern.data(), pattern.size());
+
+    ChunkingConfig cfg;
+    cfg.minChunkSize = 2 * 1024;
+    cfg.targetChunkSize = 8 * 1024;
+    cfg.maxChunkSize = 16 * 1024;
+
+    RabinChunker chunker(cfg);
+    const auto full = chunker.chunkData(data);
+    const auto lazy = chunker.chunkDataLazy(data);
+
+    REQUIRE(full.size() == lazy.size());
+    for (size_t i = 0; i < full.size(); ++i) {
+        REQUIRE(full[i].offset == lazy[i].offset);
+        REQUIRE(full[i].size == lazy[i].size);
+        REQUIRE(full[i].hash == lazy[i].hash);
+        REQUIRE(lazy[i].data.empty()); // lazy data is empty
+    }
+}

@@ -75,6 +75,13 @@ public:
     // Chunk data in memory
     virtual std::vector<Chunk> chunkData(yams::span<const std::byte> data) = 0;
 
+    // Lightweight variant: produces chunks with offset/size/hash but empty data vectors.
+    // Caller must use the source span to access chunk bytes.
+    // Default implementation falls back to chunkData().
+    virtual std::vector<Chunk> chunkDataLazy(yams::span<const std::byte> data) {
+        return chunkData(data);
+    }
+
     // Async file chunking
     virtual std::future<Result<std::vector<Chunk>>>
     chunkFileAsync(const std::filesystem::path& path) = 0;
@@ -100,6 +107,11 @@ public:
 
     std::vector<Chunk> chunkFile(const std::filesystem::path& path) override;
     std::vector<Chunk> chunkData(yams::span<const std::byte> data) override;
+
+    // Lightweight variant: produces chunks with offset/size/hash but empty data vectors.
+    // Caller must use the source span to access chunk bytes: data.subspan(chunk.offset,
+    // chunk.size). Avoids per-chunk heap allocation when the source buffer outlives the chunks.
+    std::vector<Chunk> chunkDataLazy(yams::span<const std::byte> data) override;
 
     std::future<Result<std::vector<Chunk>>>
     chunkFileAsync(const std::filesystem::path& path) override;
@@ -144,6 +156,9 @@ private:
     struct Impl;
     std::unique_ptr<Impl> pImpl;
     ChunkingConfig config_;
+
+    // Shared implementation for chunkData/chunkDataLazy
+    std::vector<Chunk> chunkDataImpl(yams::span<const std::byte> data, bool lazy);
 
     // Find next chunk boundary
     std::pair<size_t, bool> findChunkBoundary(yams::span<const std::byte> data, size_t start,

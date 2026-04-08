@@ -247,11 +247,14 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
         if (!batch.empty()) {
             const std::size_t parallelism = resolveIngestParallelism(coordinator_, underPressure);
 
+            // Reuse futures vector across waves to avoid per-wave allocation
+            std::vector<std::future<PendingPostIngestByMime>> futures;
+            futures.reserve(parallelism);
+
             for (std::size_t offset = 0; offset < batch.size();) {
                 const std::size_t waveSize =
                     std::min<std::size_t>(parallelism, batch.size() - offset);
-                std::vector<std::future<PendingPostIngestByMime>> futures;
-                futures.reserve(waveSize);
+                futures.clear();
 
                 for (std::size_t i = 0; i < waveSize; ++i) {
                     auto taskCopy = std::move(batch[offset + i]);

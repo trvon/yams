@@ -147,6 +147,14 @@ std::pair<size_t, bool> RabinChunker::findChunkBoundary(std::span<const std::byt
 }
 
 std::vector<Chunk> RabinChunker::chunkData(std::span<const std::byte> data) {
+    return chunkDataImpl(data, /*lazy=*/false);
+}
+
+std::vector<Chunk> RabinChunker::chunkDataLazy(std::span<const std::byte> data) {
+    return chunkDataImpl(data, /*lazy=*/true);
+}
+
+std::vector<Chunk> RabinChunker::chunkDataImpl(std::span<const std::byte> data, bool lazy) {
     std::vector<Chunk> chunks;
     if (config_.targetChunkSize > 0) {
         chunks.reserve((data.size() / config_.targetChunkSize) + 1);
@@ -165,7 +173,9 @@ std::vector<Chunk> RabinChunker::chunkData(std::span<const std::byte> data) {
         chunk.size = chunkSize;
         auto chunkSpan = data.subspan(pos, chunkSize);
         chunk.hash = crypto::SHA256Hasher::hash(chunkSpan);
-        chunk.data.assign(chunkSpan.begin(), chunkSpan.end());
+        if (!lazy) {
+            chunk.data.assign(chunkSpan.begin(), chunkSpan.end());
+        }
         pos = chunkEnd;
 
         // Report progress if callback is set

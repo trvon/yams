@@ -1152,14 +1152,17 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                 auto duration = std::chrono::steady_clock::now() - start_time;
                 stats_.requests_processed++;
                 {
-                    std::lock_guard<std::mutex> lock(stats_mutex_);
-                    stats_.total_processing_time += duration;
-
-                    if (duration < stats_.min_latency) {
-                        stats_.min_latency = duration;
+                    auto ns = duration.count();
+                    stats_.total_processing_time_ns.fetch_add(ns, std::memory_order_relaxed);
+                    // CAS loop for min
+                    auto prev_min = stats_.min_latency_ns.load(std::memory_order_relaxed);
+                    while (ns < prev_min && !stats_.min_latency_ns.compare_exchange_weak(
+                                                prev_min, ns, std::memory_order_relaxed)) {
                     }
-                    if (duration > stats_.max_latency) {
-                        stats_.max_latency = duration;
+                    // CAS loop for max
+                    auto prev_max = stats_.max_latency_ns.load(std::memory_order_relaxed);
+                    while (ns > prev_max && !stats_.max_latency_ns.compare_exchange_weak(
+                                                prev_max, ns, std::memory_order_relaxed)) {
                     }
                 }
 
@@ -1170,14 +1173,15 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             auto duration = std::chrono::steady_clock::now() - start_time;
             stats_.requests_processed++;
             {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
-                stats_.total_processing_time += duration;
-
-                if (duration < stats_.min_latency) {
-                    stats_.min_latency = duration;
+                auto ns = duration.count();
+                stats_.total_processing_time_ns.fetch_add(ns, std::memory_order_relaxed);
+                auto prev_min = stats_.min_latency_ns.load(std::memory_order_relaxed);
+                while (ns < prev_min && !stats_.min_latency_ns.compare_exchange_weak(
+                                            prev_min, ns, std::memory_order_relaxed)) {
                 }
-                if (duration > stats_.max_latency) {
-                    stats_.max_latency = duration;
+                auto prev_max = stats_.max_latency_ns.load(std::memory_order_relaxed);
+                while (ns > prev_max && !stats_.max_latency_ns.compare_exchange_weak(
+                                            prev_max, ns, std::memory_order_relaxed)) {
                 }
             }
 
@@ -1371,14 +1375,15 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         auto duration = std::chrono::steady_clock::now() - start_time;
         stats_.requests_processed++;
         {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.total_processing_time += duration;
-
-            if (duration < stats_.min_latency) {
-                stats_.min_latency = duration;
+            auto ns = duration.count();
+            stats_.total_processing_time_ns.fetch_add(ns, std::memory_order_relaxed);
+            auto prev_min = stats_.min_latency_ns.load(std::memory_order_relaxed);
+            while (ns < prev_min && !stats_.min_latency_ns.compare_exchange_weak(
+                                        prev_min, ns, std::memory_order_relaxed)) {
             }
-            if (duration > stats_.max_latency) {
-                stats_.max_latency = duration;
+            auto prev_max = stats_.max_latency_ns.load(std::memory_order_relaxed);
+            while (ns > prev_max && !stats_.max_latency_ns.compare_exchange_weak(
+                                        prev_max, ns, std::memory_order_relaxed)) {
             }
         }
 

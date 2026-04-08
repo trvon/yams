@@ -455,7 +455,7 @@ TEST_CASE("ResourcePool: Concurrency", "[daemon][components][pool][concurrent]")
         for (int i = 0; i < 20; ++i) {
             threads.emplace_back([&pool, &successCount]() {
                 auto handleResult = pool->acquire();
-                if (handleResult.has_value()) {
+                if (handleResult.has_value() && handleResult.value().isValid()) {
                     auto& handle = handleResult.value();
                     handle->doWork();
                     successCount++;

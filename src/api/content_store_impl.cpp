@@ -359,8 +359,10 @@ public:
                                .duration = duration};
         }
 
-        // For larger data, use in-memory chunking directly (avoid temp file I/O)
-        auto chunks = chunker_->chunkData(data);
+        // For larger data, use in-memory chunking directly (avoid temp file I/O).
+        // chunkDataLazy produces chunks with offset/size/hash but no data copy —
+        // we reference the source buffer directly for storage.
+        auto chunks = chunker_->chunkDataLazy(data);
         spdlog::debug("Data chunked into {} chunks (in-memory)", chunks.size());
 
         // Store chunks and track deduplication
@@ -393,9 +395,9 @@ public:
                     return Result<StoreResult>(incResult.error());
                 }
             } else {
-                // Store new chunk
-                auto storeResult = storage_->store(
-                    chunk.hash, std::span<const std::byte>(chunk.data.data(), chunk.data.size()));
+                // Store new chunk — use source buffer subspan (lazy chunks have no data copy)
+                auto storeResult =
+                    storage_->store(chunk.hash, data.subspan(chunk.offset, chunk.size));
                 if (!storeResult) {
                     transaction->rollback();
                     return Result<StoreResult>(storeResult.error());

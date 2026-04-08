@@ -13,34 +13,71 @@
 namespace yams::daemon {
 
 // ============================================================================
-// CRC32 Calculation with Constexpr Table (PBI-058 Task 058-15)
+// CRC32 Calculation — Slicing-by-8 (PBI-058 Task 058-15)
 // ============================================================================
+//
+// Processes 8 bytes per loop iteration using 8 precomputed 256-entry tables.
+// Same ISO 3309 polynomial (0xEDB88320) as before — wire-compatible.
+// ~4-6x faster than byte-at-a-time for payloads > 64 bytes.
 
 namespace {
 
-// Generate CRC32 lookup table at compile-time
-// Uses the CRC-32 polynomial 0xEDB88320 (reversed 0x04C11DB7)
-constexpr std::array<uint32_t, 256> generate_crc32_table() noexcept {
-    std::array<uint32_t, 256> table{};
+// Generate 8 CRC32 lookup tables at compile-time for slicing-by-8.
+// Table[0] is the standard byte-at-a-time table.
+// Table[k] enables processing byte k of an 8-byte chunk in parallel.
+struct Crc32Tables {
+    std::array<std::array<uint32_t, 256>, 8> t{};
+};
+
+constexpr Crc32Tables generate_crc32_tables() noexcept {
+    Crc32Tables tables{};
+    // Table 0: standard CRC32 table
     for (uint32_t i = 0; i < 256; ++i) {
         uint32_t crc = i;
         for (int j = 0; j < 8; ++j) {
-            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
         }
-        table[i] = crc;
+        tables.t[0][i] = crc;
     }
-    return table;
+    // Tables 1-7: derived from table 0
+    for (uint32_t i = 0; i < 256; ++i) {
+        uint32_t crc = tables.t[0][i];
+        for (int k = 1; k < 8; ++k) {
+            crc = tables.t[0][crc & 0xFF] ^ (crc >> 8);
+            tables.t[k][i] = crc;
+        }
+    }
+    return tables;
 }
 
-// Compile-time generated CRC32 table
-constexpr auto CRC32_TABLE = generate_crc32_table();
+constexpr auto CRC32_TABLES = generate_crc32_tables();
 
-// Runtime CRC32 calculation using constexpr table
 uint32_t calculate_crc32_impl(const uint8_t* data, size_t size) noexcept {
     uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < size; ++i) {
-        crc = CRC32_TABLE[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    const auto& t = CRC32_TABLES.t;
+
+    // Slicing-by-8: process 8 bytes per iteration
+    while (size >= 8) {
+        // Read 8 bytes. XOR first 4 with current CRC (little-endian assumed).
+        uint32_t lo;
+        uint32_t hi;
+        std::memcpy(&lo, data, 4);
+        std::memcpy(&hi, data + 4, 4);
+        lo ^= crc;
+
+        crc = t[7][(lo >> 0) & 0xFF] ^ t[6][(lo >> 8) & 0xFF] ^ t[5][(lo >> 16) & 0xFF] ^
+              t[4][(lo >> 24) & 0xFF] ^ t[3][(hi >> 0) & 0xFF] ^ t[2][(hi >> 8) & 0xFF] ^
+              t[1][(hi >> 16) & 0xFF] ^ t[0][(hi >> 24) & 0xFF];
+
+        data += 8;
+        size -= 8;
     }
+
+    // Remaining bytes: standard byte-at-a-time
+    while (size-- > 0) {
+        crc = t[0][(crc ^ *data++) & 0xFF] ^ (crc >> 8);
+    }
+
     return ~crc;
 }
 
@@ -226,6 +263,8 @@ Result<Message> MessageFramer::deserialize_message(std::span<const uint8_t> data
 
 void FrameReader::reset() {
     buffer_.clear();
+    // Pre-allocate for the next header to avoid incremental growth on first feed
+    buffer_.reserve(sizeof(MessageFramer::FrameHeader));
     state_ = State::WaitingForHeader;
     expected_size_ = sizeof(MessageFramer::FrameHeader);
     processing_chunked_ = false;
@@ -267,7 +306,9 @@ FrameReader::FeedResult FrameReader::feed(const uint8_t* data, size_t size) {
 
     while (consumed < size && state_ != State::FrameReady) {
         size_t to_copy = std::min(size - consumed, expected_size_ - buffer_.size());
-        buffer_.insert(buffer_.end(), data + consumed, data + consumed + to_copy);
+        size_t pos = buffer_.size();
+        buffer_.resize(pos + to_copy);
+        std::memcpy(buffer_.data() + pos, data + consumed, to_copy);
         consumed += to_copy;
 
         if (buffer_.size() == expected_size_) {

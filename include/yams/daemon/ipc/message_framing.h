@@ -17,6 +17,7 @@
 #include <concepts>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <span>
 #include <vector>
 
@@ -292,7 +293,9 @@ public:
 
     // Add data to buffer
     void append(std::span<const uint8_t> data) {
-        buffer_.insert(buffer_.end(), data.begin(), data.end());
+        size_t pos = buffer_.size();
+        buffer_.resize(pos + data.size());
+        std::memcpy(buffer_.data() + pos, data.data(), data.size());
     }
 
     // Try to extract a complete frame

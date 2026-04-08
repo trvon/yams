@@ -694,6 +694,7 @@ if catch2_dep.found()
   catch2_daemon_protocol_exe = executable('catch2_daemon_protocol',
     files(
       'unit/daemon/daemon_protocol_test.cpp',
+      'unit/daemon/frame_reader_catch2_test.cpp',
       'unit/daemon/dispatch_response_mapper_catch2_test.cpp',
       'unit/daemon/request_handler_admission_reuse_catch2_test.cpp',
       'unit/daemon/request_handler_status_unary_catch2_test.cpp',
