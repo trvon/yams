@@ -23,6 +23,12 @@ sudo systemctl enable --now yams-daemon
 yams daemon status
 ```
 
+Current tested Linux package path:
+- x86_64 `.deb` install in a clean Debian trixie systemd container
+- x86_64 `.rpm` install in a clean Fedora 42 systemd container
+- packaged `yams-daemon.service` enabled and started successfully in both lanes
+- non-root CLI validation with `yams daemon status`, `yams add`, and `yams search`
+
 ### Homebrew (macOS/Linux)
 
 ```bash

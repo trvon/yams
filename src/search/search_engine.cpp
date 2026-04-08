@@ -1183,21 +1183,10 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
     accumMap.reserve(results.size());
 
     const float k = config_.rrfK;
-    const auto dedupKeyForComponent = [this](const ComponentResult& comp) {
-        if (config_.enablePathDedupInFusion && !comp.filePath.empty()) {
-            return std::string("path:") + comp.filePath;
-        }
-        if (!comp.documentHash.empty()) {
-            return std::string("hash:") + comp.documentHash;
-        }
-        if (!comp.filePath.empty()) {
-            return std::string("path:") + comp.filePath;
-        }
-        return std::string("unknown:");
-    };
 
     for (const auto& comp : results) {
-        const std::string dedupKey = dedupKeyForComponent(comp);
+        const std::string dedupKey =
+            detail::makeFusionDedupKey(comp, config_.enablePathDedupInFusion);
         auto& acc = accumMap[dedupKey];
 
         if (acc.componentCount == 0) {
@@ -1379,22 +1368,10 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         }
     }
 
-    const auto dedupKeyForSearchResult = [this](const SearchResult& r) {
-        if (config_.enablePathDedupInFusion && !r.document.filePath.empty()) {
-            return std::string("path:") + r.document.filePath;
-        }
-        if (!r.document.sha256Hash.empty()) {
-            return std::string("hash:") + r.document.sha256Hash;
-        }
-        if (!r.document.filePath.empty()) {
-            return std::string("path:") + r.document.filePath;
-        }
-        return std::string("unknown:");
-    };
-
+    const bool pathDedup = config_.enablePathDedupInFusion;
     const auto rawVectorScoreForResult = [&rawVectorScoreByDedupKey,
-                                          &dedupKeyForSearchResult](const SearchResult& r) {
-        if (auto it = rawVectorScoreByDedupKey.find(dedupKeyForSearchResult(r));
+                                          pathDedup](const SearchResult& r) {
+        if (auto it = rawVectorScoreByDedupKey.find(detail::makeFusionDedupKey(r, pathDedup));
             it != rawVectorScoreByDedupKey.end()) {
             return it->second;
         }
@@ -2131,14 +2108,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         GraphExpansionConfig{.maxTerms = workingConfig.graphExpansionMaxTerms,
                                              .maxSeeds = workingConfig.graphExpansionMaxSeeds,
                                              .maxNeighbors = workingConfig.graphMaxNeighbors});
+                    std::unordered_map<std::string, size_t> termIndex;
+                    termIndex.reserve(graphExpansionTerms.size());
+                    for (size_t i = 0; i < graphExpansionTerms.size(); ++i) {
+                        termIndex[graphExpansionTerms[i].text] = i;
+                    }
                     for (const auto& term : neighborTerms) {
-                        auto it = std::find_if(
-                            graphExpansionTerms.begin(), graphExpansionTerms.end(),
-                            [&](const auto& existing) { return existing.text == term.text; });
-                        if (it == graphExpansionTerms.end()) {
-                            graphExpansionTerms.push_back(term);
+                        if (auto it = termIndex.find(term.text); it != termIndex.end()) {
+                            graphExpansionTerms[it->second].score =
+                                std::max(graphExpansionTerms[it->second].score, term.score);
                         } else {
-                            it->score = std::max(it->score, term.score);
+                            termIndex[term.text] = graphExpansionTerms.size();
+                            graphExpansionTerms.push_back(term);
                         }
                     }
                     std::stable_sort(
@@ -3897,45 +3878,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         hashes.push_back(hash);
                     }
 
-                    auto docMapResult = metadataRepo_->batchGetDocumentsByHash(hashes);
-                    if (docMapResult) {
-                        const size_t previewLimit = std::max<size_t>(
-                            workingConfig.rerankSnippetMaxChars + 64,
-                            std::max<size_t>(workingConfig.rerankSnippetMaxChars * 4, 1024));
-                        std::vector<int64_t> docIds;
-                        std::unordered_map<int64_t, std::vector<size_t>> docIdToIndices;
-                        docIds.reserve(docMapResult.value().size());
-                        docIdToIndices.reserve(docMapResult.value().size());
+                    const size_t previewLimit = std::max<size_t>(
+                        workingConfig.rerankSnippetMaxChars + 64,
+                        std::max<size_t>(workingConfig.rerankSnippetMaxChars * 4, 1024));
 
-                        for (const auto& [hash, docInfo] : docMapResult.value()) {
-                            if (docInfo.id <= 0) {
+                    auto combinedResult = metadataRepo_->batchGetDocumentsWithContentPreview(
+                        hashes, static_cast<int>(previewLimit));
+                    if (combinedResult) {
+                        metadataPreviewByIndex.reserve(rerankWindow);
+                        for (const auto& [hash, docAndPreview] : combinedResult.value()) {
+                            const auto& [docInfo, preview] = docAndPreview;
+                            if (preview.empty()) {
                                 continue;
                             }
                             auto it = hashToIndices.find(hash);
                             if (it == hashToIndices.end()) {
                                 continue;
                             }
-                            docIds.push_back(docInfo.id);
-                            docIdToIndices.emplace(docInfo.id, it->second);
-                        }
-
-                        if (!docIds.empty()) {
-                            auto previewResult = metadataRepo_->batchGetContentPreview(
-                                docIds, static_cast<int>(previewLimit), 0);
-                            if (previewResult) {
-                                metadataPreviewByIndex.reserve(rerankWindow);
-                                for (const auto& [docId, preview] : previewResult.value()) {
-                                    if (preview.empty()) {
-                                        continue;
-                                    }
-                                    auto indicesIt = docIdToIndices.find(docId);
-                                    if (indicesIt == docIdToIndices.end()) {
-                                        continue;
-                                    }
-                                    for (size_t idx : indicesIt->second) {
-                                        metadataPreviewByIndex[idx] = preview;
-                                    }
-                                }
+                            for (size_t idx : it->second) {
+                                metadataPreviewByIndex[idx] = preview;
                             }
                         }
                     }

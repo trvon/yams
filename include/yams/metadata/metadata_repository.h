@@ -741,6 +741,12 @@ public:
     Result<std::unordered_map<int64_t, std::string>>
     batchGetContentPreview(const std::vector<int64_t>& documentIds, int maxChars, int maxDocs = 0);
 
+    /// Batch fetch documents with content previews in a single JOIN query.
+    /// Combines batchGetDocumentsByHash + batchGetContentPreview into one DB round-trip.
+    Result<std::unordered_map<std::string, std::pair<DocumentInfo, std::string>>>
+    batchGetDocumentsWithContentPreview(const std::vector<std::string>& hashes,
+                                        int maxPreviewChars);
+
     // Embedding status operations
     Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                const std::string& modelId = "") override;

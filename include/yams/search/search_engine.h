@@ -643,6 +643,37 @@ struct SearchResponse {
     }
 };
 
+namespace detail {
+
+/// Unified dedup key for fusion stages. Works with both ComponentResult
+/// (has .documentHash/.filePath) and SearchResult (has .document.sha256Hash/.document.filePath).
+template <typename T> std::string makeFusionDedupKey(const T& item, bool enablePathDedup) {
+    const auto& filePath = [&]() -> const std::string& {
+        if constexpr (requires { item.filePath; })
+            return item.filePath;
+        else
+            return item.document.filePath;
+    }();
+    const auto& hash = [&]() -> const std::string& {
+        if constexpr (requires { item.documentHash; })
+            return item.documentHash;
+        else
+            return item.document.sha256Hash;
+    }();
+    if (enablePathDedup && !filePath.empty()) {
+        return "path:" + filePath;
+    }
+    if (!hash.empty()) {
+        return "hash:" + hash;
+    }
+    if (!filePath.empty()) {
+        return "path:" + filePath;
+    }
+    return "unknown:";
+}
+
+} // namespace detail
+
 /**
  * @brief Result fusion and ranking engine
  *
@@ -886,22 +917,10 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
     std::unordered_map<std::string, size_t> bestVectorRank;
     bestVectorRank.reserve(results.size());
 
-    const auto dedupKeyForComponent = [this](const ComponentResult& comp) {
-        if (config_.enablePathDedupInFusion && !comp.filePath.empty()) {
-            return std::string("path:") + comp.filePath;
-        }
-        if (!comp.documentHash.empty()) {
-            return std::string("hash:") + comp.documentHash;
-        }
-        if (!comp.filePath.empty()) {
-            return std::string("path:") + comp.filePath;
-        }
-        return std::string("unknown:");
-    };
-
     // Single pass: accumulate scores directly
     for (const auto& comp : results) {
-        const std::string dedupKey = dedupKeyForComponent(comp);
+        const std::string dedupKey =
+            detail::makeFusionDedupKey(comp, config_.enablePathDedupInFusion);
         auto& r = resultMap[dedupKey];
         if (r.document.sha256Hash.empty()) {
             // First time seeing this document - initialize

@@ -354,15 +354,48 @@ __DEB_CONTROL__
   mapfile -d '' binaries < <(find "${work_dir}" -type f \( -perm -111 -o -name '*.so*' \) -print0) || true
   local depends_fallback="libc6 (>= 2.31), libstdc++6 (>= 12)"
   if command -v dpkg-shlibdeps >/dev/null 2>&1 && ((${#binaries[@]} > 0)); then
+    local shlibdeps_root="${build_dir}/deb-shlibdeps"
+    rm -rf "${shlibdeps_root}"
+    mkdir -p "${shlibdeps_root}/debian"
+    ln -s "${work_dir}" "${shlibdeps_root}/debian/yams"
+    cat > "${shlibdeps_root}/debian/control" <<'__DEBIAN_CONTROL__'
+Source: yams
+Section: utils
+Priority: optional
+Maintainer: YAMS Contributors <git@trevon.dev>
+Standards-Version: 4.7.0
+
+Package: yams
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Yet Another Memory System - persistent memory for LLMs
+ YAMS provides content-addressed storage, deduplication, and search for long-term LLM memory.
+__DEBIAN_CONTROL__
+    : > "${shlibdeps_root}/debian/substvars"
+    local -a relative_binaries=()
+    for bin in "${binaries[@]}"; do
+      relative_binaries+=("debian/yams/${bin#"${work_dir}/"}")
+    done
+    local had_xtrace=0
+    case "$-" in
+      *x*)
+        had_xtrace=1
+        set +x
+        ;;
+    esac
     set +e
     local shlib_output
-    shlib_output="$(dpkg-shlibdeps -O "${binaries[@]}" 2>&1)"
+    shlib_output="$(cd "${shlibdeps_root}" && dpkg-shlibdeps -O -Tdebian/substvars -Sdebian/yams -ldebian/yams/usr/lib -ldebian/yams/usr/lib/yams/plugins "${relative_binaries[@]}" 2>&1)"
     local shlib_status=$?
     set -e
     if [ "${shlib_status}" -eq 0 ] && [[ "${shlib_output}" =~ shlibs:Depends=(.*) ]]; then
       depends_fallback="${BASH_REMATCH[1]}"
     else
       echo "${shlib_output}" >&2
+    fi
+    rm -rf "${shlibdeps_root}"
+    if [ "${had_xtrace}" -eq 1 ]; then
+      set -x
     fi
   fi
   sed -i "s|@DEPENDENCIES@|${depends_fallback}|" "${control}"

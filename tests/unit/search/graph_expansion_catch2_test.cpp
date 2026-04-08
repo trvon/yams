@@ -1,5 +1,7 @@
 #include <chrono>
 #include <filesystem>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -107,4 +109,82 @@ TEST_CASE("Graph expansion suppresses low-signal alias sources", "[search][graph
     }
     CHECK(sawSurface);
     CHECK_FALSE(sawTypeQualified);
+}
+
+// --- Graph expansion term dedup tests ---
+
+TEST_CASE("Graph expansion term merge: max-score-wins for overlapping terms",
+          "[search][graph-expansion][dedup]") {
+    // Simulate the merge logic from search_engine.cpp
+    std::vector<GraphExpansionTerm> existing = {
+        {.text = "cancer", .score = 0.8f},
+        {.text = "treatment", .score = 0.5f},
+        {.text = "unique_a", .score = 0.3f},
+    };
+
+    std::vector<GraphExpansionTerm> incoming = {
+        {.text = "cancer", .score = 0.6f},    // overlap, lower score
+        {.text = "treatment", .score = 0.9f}, // overlap, higher score
+        {.text = "unique_b", .score = 0.4f},  // new term
+    };
+
+    // O(n) merge using unordered_map (the optimized approach)
+    std::unordered_map<std::string, size_t> termIndex;
+    termIndex.reserve(existing.size());
+    for (size_t i = 0; i < existing.size(); ++i) {
+        termIndex[existing[i].text] = i;
+    }
+    for (const auto& term : incoming) {
+        if (auto it = termIndex.find(term.text); it != termIndex.end()) {
+            existing[it->second].score = std::max(existing[it->second].score, term.score);
+        } else {
+            termIndex[term.text] = existing.size();
+            existing.push_back(term);
+        }
+    }
+
+    // Verify max-score-wins
+    std::unordered_map<std::string, float> scoreMap;
+    for (const auto& t : existing) {
+        scoreMap[t.text] = t.score;
+    }
+    CHECK(scoreMap.at("cancer") == 0.8f);    // kept higher existing score
+    CHECK(scoreMap.at("treatment") == 0.9f); // took higher incoming score
+    CHECK(scoreMap.at("unique_a") == 0.3f);  // preserved
+    CHECK(scoreMap.at("unique_b") == 0.4f);  // added
+}
+
+TEST_CASE("Graph expansion term merge: no duplicates in result",
+          "[search][graph-expansion][dedup]") {
+    std::vector<GraphExpansionTerm> existing = {
+        {.text = "alpha", .score = 1.0f},
+        {.text = "beta", .score = 0.8f},
+    };
+
+    std::vector<GraphExpansionTerm> incoming = {
+        {.text = "alpha", .score = 0.5f},
+        {.text = "beta", .score = 0.3f},
+        {.text = "gamma", .score = 0.7f},
+    };
+
+    std::unordered_map<std::string, size_t> termIndex;
+    termIndex.reserve(existing.size());
+    for (size_t i = 0; i < existing.size(); ++i) {
+        termIndex[existing[i].text] = i;
+    }
+    for (const auto& term : incoming) {
+        if (auto it = termIndex.find(term.text); it != termIndex.end()) {
+            existing[it->second].score = std::max(existing[it->second].score, term.score);
+        } else {
+            termIndex[term.text] = existing.size();
+            existing.push_back(term);
+        }
+    }
+
+    // No duplicates
+    std::unordered_set<std::string> seen;
+    for (const auto& t : existing) {
+        CHECK(seen.insert(t.text).second); // insert returns false if already present
+    }
+    CHECK(existing.size() == 3); // alpha, beta, gamma
 }

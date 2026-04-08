@@ -1545,3 +1545,130 @@ TEST_CASE("batchInsertContentAndIndex: clears extraction_error",
         return {};
     });
 }
+
+// --- batchGetDocumentsWithContentPreview tests ---
+
+TEST_CASE("batchGetDocumentsWithContentPreview: documents with content",
+          "[metadata-repo][batch-docs-preview]") {
+    MetadataRepositoryFixture fix;
+
+    // Insert 3 documents with content
+    std::vector<int64_t> docIds;
+    for (int i = 0; i < 3; ++i) {
+        DocumentInfo doc = makeDocumentWithPath("/test/preview_doc_" + std::to_string(i) + ".txt",
+                                                "preview_hash_" + std::to_string(i));
+        auto result = fix.repository_->insertDocument(doc);
+        REQUIRE(result.has_value());
+        docIds.push_back(result.value());
+    }
+
+    // Insert content for each document
+    std::vector<BatchContentEntry> entries;
+    for (int i = 0; i < 3; ++i) {
+        entries.push_back({docIds[static_cast<size_t>(i)], "Title " + std::to_string(i),
+                           "Content text for document " + std::to_string(i), "text/plain", "test",
+                           "en"});
+    }
+    auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
+    REQUIRE(batchResult.has_value());
+
+    // Fetch with combined method
+    std::vector<std::string> hashes = {"preview_hash_0", "preview_hash_1", "preview_hash_2"};
+    auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 500);
+    REQUIRE(result.has_value());
+
+    auto& map = result.value();
+    CHECK(map.size() == 3);
+
+    for (int i = 0; i < 3; ++i) {
+        std::string hash = "preview_hash_" + std::to_string(i);
+        REQUIRE(map.count(hash) == 1);
+        auto& [info, preview] = map.at(hash);
+        CHECK(info.id == docIds[static_cast<size_t>(i)]);
+        CHECK(info.sha256Hash == hash);
+        CHECK_FALSE(preview.empty());
+        CHECK(preview.find("Content text for document " + std::to_string(i)) != std::string::npos);
+    }
+}
+
+TEST_CASE("batchGetDocumentsWithContentPreview: documents without content",
+          "[metadata-repo][batch-docs-preview]") {
+    MetadataRepositoryFixture fix;
+
+    DocumentInfo doc = makeDocumentWithPath("/test/no_content_doc.txt", "no_content_hash");
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE(insertResult.has_value());
+
+    std::vector<std::string> hashes = {"no_content_hash"};
+    auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 500);
+    REQUIRE(result.has_value());
+
+    auto& map = result.value();
+    REQUIRE(map.size() == 1);
+    auto& [info, preview] = map.at("no_content_hash");
+    CHECK(info.id == insertResult.value());
+    CHECK(preview.empty());
+}
+
+TEST_CASE("batchGetDocumentsWithContentPreview: mixed with and without content",
+          "[metadata-repo][batch-docs-preview]") {
+    MetadataRepositoryFixture fix;
+
+    // Doc with content
+    DocumentInfo doc1 = makeDocumentWithPath("/test/mixed_with.txt", "mixed_hash_with");
+    auto id1 = fix.repository_->insertDocument(doc1);
+    REQUIRE(id1.has_value());
+
+    std::vector<BatchContentEntry> entries = {
+        {id1.value(), "Title", "Has content", "text/plain", "test", "en"}};
+    auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
+    REQUIRE(batchResult.has_value());
+
+    // Doc without content
+    DocumentInfo doc2 = makeDocumentWithPath("/test/mixed_without.txt", "mixed_hash_without");
+    auto id2 = fix.repository_->insertDocument(doc2);
+    REQUIRE(id2.has_value());
+
+    std::vector<std::string> hashes = {"mixed_hash_with", "mixed_hash_without"};
+    auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 500);
+    REQUIRE(result.has_value());
+
+    auto& map = result.value();
+    CHECK(map.size() == 2);
+    CHECK_FALSE(map.at("mixed_hash_with").second.empty());
+    CHECK(map.at("mixed_hash_without").second.empty());
+}
+
+TEST_CASE("batchGetDocumentsWithContentPreview: empty hash list",
+          "[metadata-repo][batch-docs-preview]") {
+    MetadataRepositoryFixture fix;
+
+    std::vector<std::string> hashes;
+    auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 500);
+    REQUIRE(result.has_value());
+    CHECK(result.value().empty());
+}
+
+TEST_CASE("batchGetDocumentsWithContentPreview: preview truncation",
+          "[metadata-repo][batch-docs-preview]") {
+    MetadataRepositoryFixture fix;
+
+    DocumentInfo doc = makeDocumentWithPath("/test/truncate_doc.txt", "truncate_hash");
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE(insertResult.has_value());
+
+    // Insert large content (10KB)
+    std::string largeContent(10000, 'x');
+    std::vector<BatchContentEntry> entries = {
+        {insertResult.value(), "Title", largeContent, "text/plain", "test", "en"}};
+    auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
+    REQUIRE(batchResult.has_value());
+
+    std::vector<std::string> hashes = {"truncate_hash"};
+    auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 200);
+    REQUIRE(result.has_value());
+
+    auto& [info, preview] = result.value().at("truncate_hash");
+    CHECK(preview.size() <= 200);
+    CHECK_FALSE(preview.empty());
+}

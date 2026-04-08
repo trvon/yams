@@ -60,12 +60,16 @@ curl -fsSL https://repo.yamsmemory.ai/gpg.key \
 echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" \
   | sudo tee /etc/apt/sources.list.d/yams.list
 sudo apt-get update && sudo apt-get install yams
+
+# Optional: start the packaged daemon service
+sudo systemctl enable --now yams-daemon
+yams daemon status
 ```
 
 ### Fedora / RHEL (YUM / DNF)
 
-!!! note "Untested"
-    YUM/DNF packages are published but not yet validated in CI.
+!!! note "Repo path caveat"
+    The hosted YUM repository is documented here, but the current automated validation installs the published `.rpm` artifact directly rather than pulling it through the repo metadata.
 
 ```bash
 sudo tee /etc/yum.repos.d/yams.repo <<'REPO'

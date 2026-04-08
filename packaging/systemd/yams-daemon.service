@@ -1,0 +1,30 @@
+[Unit]
+Description=YAMS background daemon
+Documentation=https://github.com/trvon/yams
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+PermissionsStartOnly=yes
+StateDirectory=yams
+RuntimeDirectory=yams
+LogsDirectory=yams
+WorkingDirectory=/var/lib/yams
+Environment=HOME=/var/lib/yams
+ExecStart=/usr/bin/yams-daemon --foreground --config /etc/yams/config.toml --data-dir /var/lib/yams --socket /run/yams/yams-daemon.sock --pid-file /run/yams/yams-daemon.pid --log-file /var/log/yams/daemon.log
+ExecStartPost=/bin/sh -ec 'for attempt in $(seq 1 40); do if [ -S /run/yams/yams-daemon.sock ]; then chmod 0666 /run/yams/yams-daemon.sock; exit 0; fi; sleep 0.25; done; echo "yams-daemon socket was not created in time" >&2; exit 1'
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=16384
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
