@@ -139,6 +139,18 @@ install_conan() {
   fi
 }
 
+export_custom_conan_recipes() {
+  cd "${REPO_ROOT}"
+  local recipe_dir="conan/onnxruntime"
+  if [ ! -f "${recipe_dir}/conanfile.py" ]; then
+    echo "Missing required Conan recipe at ${REPO_ROOT}/${recipe_dir}" >&2
+    exit 1
+  fi
+
+  echo "Exporting custom Conan recipe from ${recipe_dir}" >&2
+  conan export "${recipe_dir}"
+}
+
 compute_version() {
   cd "${REPO_ROOT}"
   local raw_tag
@@ -161,6 +173,7 @@ configure_conan_profile() {
 
 run_conan_install() {
   cd "${REPO_ROOT}"
+  rm -rf "${BUILD_DIR}"
   conan install . \
     -of "${BUILD_DIR}" \
     -pr:h=./conan/profiles/host-linux-gcc \
@@ -538,6 +551,7 @@ main() {
   ensure_base_packages
   persist_env_defaults
   install_conan
+  export_custom_conan_recipes
   compute_version
   configure_conan_profile
   run_conan_install

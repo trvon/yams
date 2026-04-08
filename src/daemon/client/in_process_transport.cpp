@@ -1,13 +1,13 @@
 #include <yams/daemon/client/in_process_transport.h>
 
-#include <chrono>
-#include <future>
 #include <memory>
 #include <optional>
 #include <utility>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -99,34 +99,32 @@ boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(Reques
         co_return Error{ErrorCode::NotInitialized, "Embedded request dispatcher unavailable"};
     }
 
-    auto promise = std::make_shared<std::promise<Result<Response>>>();
-    auto future = promise->get_future();
+    auto callerExec = co_await boost::asio::this_coro::executor;
+    auto result = std::make_shared<Result<Response>>();
+    auto timer = std::make_shared<boost::asio::steady_timer>(
+        callerExec, boost::asio::steady_timer::time_point::max());
 
     boost::asio::co_spawn(
         host_->getExecutor(),
-        [dispatcher, request = std::move(ownedReq),
-         promise]() mutable -> boost::asio::awaitable<void> {
+        [dispatcher, request = std::move(ownedReq), result, timer,
+         callerExec]() mutable -> boost::asio::awaitable<void> {
             try {
                 auto response = co_await dispatcher->dispatch(request);
-                promise->set_value(std::move(response));
+                *result = std::move(response);
             } catch (const std::exception& e) {
-                promise->set_value(Error{ErrorCode::InternalError, e.what()});
+                *result = Error{ErrorCode::InternalError, e.what()};
             } catch (...) {
-                promise->set_value(
-                    Error{ErrorCode::InternalError, "In-process request dispatch failed"});
+                *result = Error{ErrorCode::InternalError, "In-process request dispatch failed"};
             }
+            boost::asio::post(callerExec, [timer] { timer->cancel(); });
             co_return;
         },
         boost::asio::detached);
 
-    using namespace std::chrono_literals;
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-    while (future.wait_for(0ms) != std::future_status::ready) {
-        timer.expires_after(5ms);
-        co_await timer.async_wait(boost::asio::use_awaitable);
-    }
+    boost::system::error_code ec;
+    co_await timer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
 
-    co_return future.get();
+    co_return std::move(*result);
 }
 
 boost::asio::awaitable<Result<void>>
@@ -142,14 +140,17 @@ InProcessTransport::send_request_streaming(Request request, HeaderCallback onHea
         co_return Error{ErrorCode::NotInitialized, "Embedded request dispatcher unavailable"};
     }
 
-    auto promise = std::make_shared<std::promise<Result<void>>>();
-    auto future = promise->get_future();
+    auto callerExec = co_await boost::asio::this_coro::executor;
+    auto result = std::make_shared<Result<void>>();
+    auto timer = std::make_shared<boost::asio::steady_timer>(
+        callerExec, boost::asio::steady_timer::time_point::max());
 
     boost::asio::co_spawn(
         host_->getExecutor(),
         [dispatcher, request = std::move(request), onHeader = std::move(onHeader),
          onChunk = std::move(onChunk), onError = std::move(onError),
-         onComplete = std::move(onComplete), promise]() mutable -> boost::asio::awaitable<void> {
+         onComplete = std::move(onComplete), result, timer,
+         callerExec]() mutable -> boost::asio::awaitable<void> {
             try {
                 auto adapter = std::make_shared<DispatcherAdapter>(dispatcher);
                 RequestHandler::Config cfg;
@@ -166,7 +167,8 @@ InProcessTransport::send_request_streaming(Request request, HeaderCallback onHea
                     if (onComplete) {
                         onComplete();
                     }
-                    promise->set_value(Result<void>());
+                    *result = Result<void>();
+                    boost::asio::post(callerExec, [timer] { timer->cancel(); });
                     co_return;
                 }
 
@@ -191,36 +193,31 @@ InProcessTransport::send_request_streaming(Request request, HeaderCallback onHea
                 if (onComplete) {
                     onComplete();
                 }
-                promise->set_value(Result<void>());
+                *result = Result<void>();
             } catch (const std::exception& e) {
                 Error err{ErrorCode::InternalError, e.what()};
                 if (onError) {
                     onError(err);
                 }
-                promise->set_value(err);
+                *result = err;
             } catch (...) {
                 Error err{ErrorCode::InternalError, "In-process streaming dispatch failed"};
                 if (onError) {
                     onError(err);
                 }
-                promise->set_value(err);
+                *result = err;
             }
+            boost::asio::post(callerExec, [timer] { timer->cancel(); });
             co_return;
         },
         boost::asio::detached);
 
-    using namespace std::chrono_literals;
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-    while (future.wait_for(0ms) != std::future_status::ready) {
-        timer.expires_after(5ms);
-        co_await timer.async_wait(boost::asio::use_awaitable);
-    }
+    boost::system::error_code ec;
+    co_await timer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
 
-    auto result = future.get();
-    if (!result) {
-        co_return result.error();
+    if (!*result) {
+        co_return result->error();
     }
-
     co_return Result<void>();
 }
 

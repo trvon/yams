@@ -715,6 +715,12 @@ if [[ -f "${CONAN_BUILD_ENV}" ]]; then
   # generators resolve native utilities like protoc from the Conan graph.
   # Conan-generated env scripts may reference variables (e.g. ACLOCAL_PATH)
   # that are unset in minimal environments like Docker; disable nounset temporarily.
+  for maybe_unset_var in ACLOCAL_PATH PKG_CONFIG_PATH LD_LIBRARY_PATH DYLD_LIBRARY_PATH \
+      DYLD_FALLBACK_LIBRARY_PATH LIBRARY_PATH CMAKE_PREFIX_PATH MANPATH; do
+    if [[ -z "${!maybe_unset_var+x}" ]]; then
+      export "${maybe_unset_var}="
+    fi
+  done
   # shellcheck disable=SC1090
   set +u
   source "${CONAN_BUILD_ENV}"

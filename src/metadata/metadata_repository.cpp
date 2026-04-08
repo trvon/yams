@@ -1307,53 +1307,44 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             ftsStmtOpt = std::move(ftsStmtResult.value());
         }
 
-        // Two conditional updates so we can maintain cachedExtractedCount_/cachedIndexedCount_
-        // without per-row SELECTs.
-        auto extractedStmtResult = db.prepareCached(R"(
-            UPDATE documents
-            SET content_extracted = 1
-            WHERE id = ? AND COALESCE(content_extracted, 0) != 1
+        // Pre-check statement to determine counter increments before the combined UPDATE.
+        auto checkStmtResult = db.prepareCached(R"(
+            SELECT COALESCE(content_extracted, 0), extraction_status
+            FROM documents WHERE id = ?
         )");
-        if (!extractedStmtResult) {
+        if (!checkStmtResult) {
             db.execute("ROLLBACK");
-            return extractedStmtResult.error();
+            return checkStmtResult.error();
         }
-        auto& extractedStmt = *extractedStmtResult.value();
+        auto& checkStmt = *checkStmtResult.value();
 
-        // Keep cachedIndexedCount_ correct:
-        // - Only increment when extraction_status transitions to Success.
-        // - Still clear stale extraction_error even if status already Success.
-        auto indexedStmtResult = db.prepareCached(R"(
+        // Combined UPDATE: sets all extraction fields in a single statement
+        // (replaces 3 separate conditional UPDATEs per document).
+        auto combinedStmtResult = db.prepareCached(R"(
             UPDATE documents
-            SET extraction_status = 'Success', extraction_error = NULL
-            WHERE id = ? AND extraction_status != 'Success'
+            SET content_extracted = 1,
+                extraction_status = 'Success',
+                extraction_error = NULL
+            WHERE id = ?
         )");
-        if (!indexedStmtResult) {
+        if (!combinedStmtResult) {
             db.execute("ROLLBACK");
-            return indexedStmtResult.error();
+            return combinedStmtResult.error();
         }
-        auto& indexedStmt = *indexedStmtResult.value();
-
-        auto clearIndexedErrorStmtResult = db.prepareCached(R"(
-            UPDATE documents
-            SET extraction_error = NULL
-            WHERE id = ? AND extraction_status = 'Success' AND extraction_error IS NOT NULL
-        )");
-        if (!clearIndexedErrorStmtResult) {
-            db.execute("ROLLBACK");
-            return clearIndexedErrorStmtResult.error();
-        }
-        auto& clearIndexedErrorStmt = *clearIndexedErrorStmtResult.value();
+        auto& combinedStmt = *combinedStmtResult.value();
 
         // Process each entry
         constexpr size_t kMaxTextBytes = size_t{16} * 1024 * 1024; // 16 MiB
+        std::string contentStorage, titleStorage;
         for (const auto& entry : entries) {
             std::string_view contentView = entry.contentText;
             if (contentView.size() > kMaxTextBytes) {
                 contentView = contentView.substr(0, kMaxTextBytes);
             }
-            const std::string sanitizedContent = common::sanitizeUtf8(contentView);
-            const std::string sanitizedTitle = common::sanitizeUtf8(entry.title);
+            contentStorage.clear();
+            titleStorage.clear();
+            const auto sanitizedContent = common::ensureValidUtf8(contentView, contentStorage);
+            const auto sanitizedTitle = common::ensureValidUtf8(entry.title, titleStorage);
 
             // 1. Insert content
             if (auto r = contentStmt.reset(); !r) {
@@ -1400,71 +1391,53 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 }
             }
 
-            // 3. Update extracted/indexed flags.
-            // Note: cachedIndexedCount_ tracks extraction_status='Success' ("search-ready")
-            // rather than embedding status.
-            if (auto r = extractedStmt.reset(); !r) {
+            // 3. Update extracted/indexed flags with a single combined UPDATE.
+            // Pre-check current state to determine counter increments.
+            if (auto r = checkStmt.reset(); !r) {
                 db.execute("ROLLBACK");
                 return r.error();
             }
-            if (auto r = extractedStmt.clearBindings(); !r) {
+            if (auto r = checkStmt.clearBindings(); !r) {
                 db.execute("ROLLBACK");
                 return r.error();
             }
-            auto extBind = extractedStmt.bind(1, entry.documentId);
-            if (!extBind) {
+            if (auto r = checkStmt.bind(1, entry.documentId); !r) {
                 db.execute("ROLLBACK");
-                return extBind.error();
+                return r.error();
             }
-            auto extExec = extractedStmt.execute();
-            if (!extExec) {
+            auto checkStep = checkStmt.step();
+            if (!checkStep) {
                 db.execute("ROLLBACK");
-                return extExec.error();
+                return checkStep.error();
             }
-            if (db.changes() > 0) {
-                newlyExtracted++;
+            bool wasExtracted = checkStep.value() && checkStmt.getInt(0) == 1;
+            std::string priorStatus;
+            if (checkStep.value()) {
+                priorStatus = checkStmt.getString(1);
             }
 
-            if (auto r = indexedStmt.reset(); !r) {
+            if (auto r = combinedStmt.reset(); !r) {
                 db.execute("ROLLBACK");
                 return r.error();
             }
-            if (auto r = indexedStmt.clearBindings(); !r) {
+            if (auto r = combinedStmt.clearBindings(); !r) {
                 db.execute("ROLLBACK");
                 return r.error();
             }
-            auto idxBind = indexedStmt.bind(1, entry.documentId);
-            if (!idxBind) {
+            if (auto r = combinedStmt.bind(1, entry.documentId); !r) {
                 db.execute("ROLLBACK");
-                return idxBind.error();
+                return r.error();
             }
-            auto idxExec = indexedStmt.execute();
-            if (!idxExec) {
+            auto combExec = combinedStmt.execute();
+            if (!combExec) {
                 db.execute("ROLLBACK");
-                return idxExec.error();
+                return combExec.error();
             }
-            if (db.changes() > 0) {
+            if (!wasExtracted) {
+                newlyExtracted++;
+            }
+            if (priorStatus != "Success") {
                 newlyIndexed++;
-            } else {
-                // extraction_status was already Success; still clear any stale error.
-                if (auto r = clearIndexedErrorStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = clearIndexedErrorStmt.clearBindings(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                auto errBind = clearIndexedErrorStmt.bind(1, entry.documentId);
-                if (!errBind) {
-                    db.execute("ROLLBACK");
-                    return errBind.error();
-                }
-                auto errExec = clearIndexedErrorStmt.execute();
-                if (!errExec) {
-                    db.execute("ROLLBACK");
-                    return errExec.error();
-                }
             }
         }
 
@@ -2391,8 +2364,9 @@ Result<void> indexDocumentContentImpl(Database& db, int64_t documentId, const st
         }
     }
 
-    const std::string sanitizedContent = common::sanitizeUtf8(content);
-    const std::string sanitizedTitle = common::sanitizeUtf8(title);
+    std::string contentStorage, titleStorage;
+    const auto sanitizedContent = common::ensureValidUtf8(content, contentStorage);
+    const auto sanitizedTitle = common::ensureValidUtf8(title, titleStorage);
 
     // Use INSERT OR REPLACE for atomic upsert (avoids race condition in delete-then-insert)
     // Note: content_type removed from FTS5 in migration v18 - never used in MATCH queries
