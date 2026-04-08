@@ -18,11 +18,11 @@ namespace {
 
 void populateDerivedPathFields(metadata::DocumentInfo& info) {
     auto derived = metadata::computePathDerivedValues(info.filePath);
-    info.filePath = derived.normalizedPath;
-    info.pathPrefix = derived.pathPrefix;
-    info.reversePath = derived.reversePath;
-    info.pathHash = derived.pathHash;
-    info.parentHash = derived.parentHash;
+    info.filePath = std::move(derived.normalizedPath);
+    info.pathPrefix = std::move(derived.pathPrefix);
+    info.reversePath = std::move(derived.reversePath);
+    info.pathHash = std::move(derived.pathHash);
+    info.parentHash = std::move(derived.parentHash);
     info.pathDepth = derived.pathDepth;
 }
 
@@ -147,8 +147,8 @@ GetMetadataResponse MetadataApi::getMetadata(const GetMetadataRequest& request) 
 
         // Convert DocumentInfo to DocumentMetadata
         metadata::DocumentMetadata docMetadata;
-        docMetadata.info = *documentInfo;
-        response.metadata = docMetadata;
+        docMetadata.info = std::move(*documentInfo);
+        response.metadata = std::move(docMetadata);
 
         // Get related documents if requested
         if (request.includeRelated) {
@@ -258,7 +258,7 @@ DeleteMetadataResponse MetadataApi::deleteMetadata(const DeleteMetadataRequest& 
         // Convert DocumentInfo to DocumentMetadata for response
         metadata::DocumentMetadata deletedMetadata;
         deletedMetadata.info = existing.value().value();
-        response.deletedMetadata = deletedMetadata;
+        response.deletedMetadata = std::move(deletedMetadata);
 
         // Perform deletion
         Result<void> deleteResult;
@@ -350,7 +350,7 @@ BulkCreateResponse MetadataApi::bulkCreate(const BulkCreateRequest& request) {
                 response.successCount++;
             } else {
                 result.documentId = 0; // Invalid/unset document ID for failed operations
-                result.error = createResp.message;
+                result.error = std::move(createResp.message);
                 response.failureCount++;
 
                 if (!request.continueOnError) {
@@ -1047,7 +1047,7 @@ BulkUpdateResponse MetadataApi::bulkUpdate(const BulkUpdateRequest& request) {
                 response.successCount++;
             } else {
                 result.newVersion = -1; // Invalid version for failed operations
-                result.error = updateResp.message;
+                result.error = std::move(updateResp.message);
                 response.failureCount++;
 
                 if (!request.continueOnError) {
@@ -1099,7 +1099,7 @@ BulkDeleteResponse MetadataApi::bulkDelete(const BulkDeleteRequest& request) {
             if (deleteResp.success) {
                 response.successCount++;
             } else {
-                result.error = deleteResp.message;
+                result.error = std::move(deleteResp.message);
                 response.failureCount++;
 
                 if (!request.continueOnError) {

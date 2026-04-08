@@ -36,11 +36,11 @@ inline int64_t toEpochSeconds(const std::chrono::system_clock::time_point& tp) {
 
 inline void populatePathDerivedFields(metadata::DocumentInfo& info) {
     auto derived = metadata::computePathDerivedValues(info.filePath);
-    info.filePath = derived.normalizedPath;
-    info.pathPrefix = derived.pathPrefix;
-    info.reversePath = derived.reversePath;
-    info.pathHash = derived.pathHash;
-    info.parentHash = derived.parentHash;
+    info.filePath = std::move(derived.normalizedPath);
+    info.pathPrefix = std::move(derived.pathPrefix);
+    info.reversePath = std::move(derived.reversePath);
+    info.pathHash = std::move(derived.pathHash);
+    info.parentHash = std::move(derived.parentHash);
     info.pathDepth = derived.pathDepth;
 }
 

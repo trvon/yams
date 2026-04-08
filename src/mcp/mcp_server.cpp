@@ -251,7 +251,8 @@ buildTraversalRelationHints(const yams::daemon::GraphQueryResponse& resp) {
     };
 
     for (const auto& edge : resp.edges) {
-        const std::string relationLabel = edge.relation.empty() ? "edge" : edge.relation;
+        static const std::string kDefaultEdge = "edge";
+        const std::string& relationLabel = edge.relation.empty() ? kDefaultEdge : edge.relation;
         accumulate(edge.srcNodeId, edge.dstNodeId, relationLabel);
         accumulate(edge.dstNodeId, edge.srcNodeId, relationLabel);
     }
@@ -495,7 +496,7 @@ boost::asio::awaitable<void> MCPServer::outboundDrainAsync() {
 // MCPServer implementation
 MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown,
                      std::filesystem::path overrideSocket,
-                     std::optional<boost::asio::any_io_executor> executor)
+                     const std::optional<boost::asio::any_io_executor>& executor)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown), exitRequested_{false},
       shutdownRequested_{false}, strictProtocol_(false), limitToolResultDup_(true),
       daemonSocketOverride_(std::move(overrideSocket)) {
@@ -507,10 +508,10 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     // should not mutate the global logger from arbitrary worker threads.
     if (dynamic_cast<StdioTransport*>(transport_.get()) != nullptr) {
         if (auto existing = spdlog::get("yams-mcp")) {
-            spdlog::set_default_logger(existing);
+            spdlog::set_default_logger(std::move(existing));
         } else {
             auto logger = spdlog::stderr_color_mt("yams-mcp");
-            spdlog::set_default_logger(logger);
+            spdlog::set_default_logger(std::move(logger));
         }
     }
     // Set external shutdown flag on StdioTransport if applicable
@@ -617,14 +618,14 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
             }
             if (!base.empty()) {
                 auto p = base / "yams" / "prompts";
-                promptsDir_ = p;
+                promptsDir_ = std::move(p);
             }
         }
         // Last: local docs/prompts (useful for dev runs from the repo root)
         if (!std::filesystem::exists(promptsDir_)) {
             auto localDocs = std::filesystem::current_path() / "docs" / "prompts";
             if (std::filesystem::exists(localDocs)) {
-                promptsDir_ = localDocs;
+                promptsDir_ = std::move(localDocs);
             }
         }
         if (!promptsDir_.empty()) {
@@ -721,7 +722,7 @@ void MCPServer::start() {
             }
 
             // Process valid message (object or array batch)
-            auto message = messageResult.value();
+            auto message = std::move(messageResult).value();
             auto processRequest = [this](const json& request) {
                 if (!request.is_object()) {
                     spdlog::warn("MCP server received non-object entry in JSON-RPC batch");
@@ -805,11 +806,11 @@ void MCPServer::start() {
                         [self, toolName, toolArgs, id_copy,
                          progressToken]() -> boost::asio::awaitable<void> {
                             if (progressToken)
-                                MCPServer::tlsProgressToken_ = *progressToken;
+                                MCPServer::tlsProgressToken_ = std::move(*progressToken);
                             try {
                                 json raw = co_await self->callToolAsync(toolName, toolArgs);
                                 if (raw.is_object() && raw.contains("error")) {
-                                    json err = raw["error"];
+                                    const auto& err = raw["error"];
                                     self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
                                                         {"error", err},
                                                         {"id", id_copy}});
@@ -989,7 +990,7 @@ boost::asio::awaitable<MessageResult> MCPServer::handleRequestAsync(const json& 
 
             json raw = co_await callToolAsync(toolName, toolArgs);
             if (raw.is_object() && raw.contains("error")) {
-                json err = raw["error"];
+                const auto& err = raw["error"];
                 sendProgress("tool", 100.0, std::string("completed ") + toolName);
                 co_return json{{"jsonrpc", protocol::JSONRPC_VERSION}, {"error", err}, {"id", id}};
             }
@@ -1252,11 +1253,11 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         if (!tagListSnapshot.has_value()) {
             return true;
         }
-        std::string hash = item.metadata.count("hash") ? item.metadata.at("hash") : std::string{};
-        std::string path =
-            !item.path.empty()
-                ? item.path
-                : (item.metadata.count("path") ? item.metadata.at("path") : std::string{});
+        static const std::string kEmpty;
+        const std::string& hash = item.metadata.count("hash") ? item.metadata.at("hash") : kEmpty;
+        const std::string& path =
+            !item.path.empty() ? item.path
+                               : (item.metadata.count("path") ? item.metadata.at("path") : kEmpty);
         for (const auto& it : tagListSnapshot->items) {
             if (!hash.empty() && it.hash == hash) {
                 return true;
@@ -3096,11 +3097,11 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     (void)req;
     // Resolve socket and probe connectivity first so we can return structured info even if daemon
     // is unreachable.
-    std::filesystem::path sock = daemon_client_config_.socketPath;
+    const auto& sock = daemon_client_config_.socketPath;
     if (sock.empty()) {
         try {
-            sock = yams::daemon::socket_utils::resolve_socket_path_config_first();
-            daemon_client_config_.socketPath = sock;
+            daemon_client_config_.socketPath =
+                yams::daemon::socket_utils::resolve_socket_path_config_first();
         } catch (...) {
         }
     }
@@ -3126,7 +3127,7 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     if (auto ensure = ensureDaemonClient(); ensure) {
         auto sres = co_await daemon_client_->status();
         if (sres) {
-            s = sres.value();
+            s = std::move(sres).value();
             haveStatus = true;
         }
     }
@@ -3134,9 +3135,9 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     MCPDoctorResponse out;
     std::vector<std::string> issues;
     json details;
-    details["overallStatus"] = haveStatus ? s.overallStatus : std::string("unknown");
-    details["lifecycleState"] = haveStatus ? s.lifecycleState : std::string("unknown");
-    details["lastError"] = haveStatus ? s.lastError : std::string("unreachable");
+    details["overallStatus"] = haveStatus ? std::move(s.overallStatus) : std::string("unknown");
+    details["lifecycleState"] = haveStatus ? std::move(s.lifecycleState) : std::string("unknown");
+    details["lastError"] = haveStatus ? std::move(s.lastError) : std::string("unreachable");
     if (haveStatus)
         details["readiness"] = s.readinessStates;
     if (haveStatus)
@@ -3199,7 +3200,7 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
         summary = std::to_string(issues.size()) + " issue(s) detected.";
     }
     details["suggestions"] = suggestions;
-    out.summary = summary;
+    out.summary = std::move(summary);
     out.issues = std::move(issues);
     out.details = std::move(details);
     co_return out;
@@ -3747,11 +3748,11 @@ MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
     } else {
         root = findGitRoot(cwd);
         if (root.empty())
-            root = cwd;
+            root = std::move(cwd);
     }
     auto absRoot = std::filesystem::absolute(root, ec);
     if (!ec)
-        root = absRoot;
+        root = std::move(absRoot);
     const std::string rootStr = root.string();
 
     std::string targetSession;
@@ -4051,7 +4052,8 @@ void MCPServer::initializeToolRegistry() {
                 }
 
                 co_return yams::mcp::wrapToolResultStructured(
-                    json::array({content::text(std::string("echo: ") + text)}), structured,
+                    json::array({content::text(std::string("echo: ") + text)}),
+                    std::move(structured),
                     /*is_error=*/false);
             } catch (const json::exception& e) {
                 co_return yams::mcp::wrapToolResultStructured(
@@ -4125,7 +4127,7 @@ void MCPServer::initializeToolRegistry() {
                     structured = json{{"type", "tool_result"}, {"data", out.toJson()}};
                 }
                 co_return yams::mcp::wrapToolResultStructured(
-                    json::array({content::text(summary.str())}), structured,
+                    json::array({content::text(summary.str())}), std::move(structured),
                     /*is_error=*/false);
             } catch (const json::exception& e) {
                 co_return yams::mcp::wrapToolResultStructured(
@@ -4200,7 +4202,7 @@ void MCPServer::initializeToolRegistry() {
                     structured = json{{"type", "tool_result"}, {"data", out.toJson()}};
                 }
                 co_return yams::mcp::wrapToolResultStructured(
-                    json::array({content::text(summary.str())}), structured,
+                    json::array({content::text(summary.str())}), std::move(structured),
                     /*is_error=*/false);
             } catch (const json::exception& e) {
                 co_return yams::mcp::wrapToolResultStructured(
@@ -4434,7 +4436,7 @@ void MCPServer::initializeToolRegistry() {
                     structured = json{{"type", "tool_result"}, {"data", out.toJson()}};
                 }
                 co_return yams::mcp::wrapToolResultStructured(
-                    json::array({content::text(summary.str())}), structured,
+                    json::array({content::text(summary.str())}), std::move(structured),
                     /*is_error=*/false);
             } catch (const json::exception& e) {
                 co_return yams::mcp::wrapToolResultStructured(
@@ -5098,17 +5100,17 @@ void MCPServer::initializeToolRegistry() {
                         auto grres = retrieval_svc_->get(greq, ropts);
                         if (!grres)
                             co_return grres.error();
-                        auto gr = grres.value();
+                        auto gr = std::move(grres).value();
                         MCPGetByNameResponse out;
                         out.size = gr.size;
-                        out.hash = gr.hash;
-                        out.name = gr.name;
-                        out.path = gr.path;
-                        out.mimeType = gr.mimeType;
+                        out.hash = std::move(gr.hash);
+                        out.name = std::move(gr.name);
+                        out.path = std::move(gr.path);
+                        out.mimeType = std::move(gr.mimeType);
                         if (!gr.content.empty()) {
                             constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
                             out.content = gr.content.size() <= MAX_BYTES
-                                              ? gr.content
+                                              ? std::move(gr.content)
                                               : gr.content.substr(0, MAX_BYTES);
                         }
                         co_return out;
@@ -5131,17 +5133,17 @@ void MCPServer::initializeToolRegistry() {
                     auto grres = retrieval_svc_->get(greq, ropts);
                     if (!grres)
                         co_return grres.error();
-                    auto gr = grres.value();
+                    auto gr = std::move(grres).value();
                     MCPGetByNameResponse out;
                     out.size = gr.size;
-                    out.hash = gr.hash;
-                    out.name = gr.name;
-                    out.path = gr.path;
-                    out.mimeType = gr.mimeType;
+                    out.hash = std::move(gr.hash);
+                    out.name = std::move(gr.name);
+                    out.path = std::move(gr.path);
+                    out.mimeType = std::move(gr.mimeType);
                     if (!gr.content.empty()) {
                         constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
                         out.content = gr.content.size() <= MAX_BYTES
-                                          ? gr.content
+                                          ? std::move(gr.content)
                                           : gr.content.substr(0, MAX_BYTES);
                     }
                     co_return out;
@@ -5177,7 +5179,7 @@ void MCPServer::initializeToolRegistry() {
 
             yams::daemon::GetResponse gr;
             if (r) {
-                gr = r.value();
+                gr = std::move(r).value();
             } else {
                 // Fallback path: search by base filename using list + simple fuzzy
                 auto tryList =
@@ -5266,19 +5268,19 @@ void MCPServer::initializeToolRegistry() {
                 auto grres = rsvc.get(greq, ropts);
                 if (!grres)
                     co_return grres.error();
-                gr = grres.value();
+                gr = std::move(grres).value();
             }
 
             MCPGetByNameResponse out;
             out.size = gr.size;
-            out.hash = gr.hash;
-            out.name = gr.name;
-            out.path = gr.path;
-            out.mimeType = gr.mimeType;
+            out.hash = std::move(gr.hash);
+            out.name = std::move(gr.name);
+            out.path = std::move(gr.path);
+            out.mimeType = std::move(gr.mimeType);
             if (!gr.content.empty()) {
                 constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
-                out.content =
-                    gr.content.size() <= MAX_BYTES ? gr.content : gr.content.substr(0, MAX_BYTES);
+                out.content = gr.content.size() <= MAX_BYTES ? std::move(gr.content)
+                                                             : gr.content.substr(0, MAX_BYTES);
             }
             co_return out;
         }

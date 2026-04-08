@@ -448,6 +448,11 @@ jobs:
 
           chmod +x setup.sh
           $ARCH_PREFIX ./setup.sh Debug
+          # Source Conan build env so meson compile uses the same meson version
+          # that setup.sh used for meson setup (Conan provides meson 1.10.x which
+          # creates build.dat incompatible with older system meson).
+          CONAN_BUILD_ENV="builddir/build-debug/conan/conanbuild.sh"
+          if [ -f "${CONAN_BUILD_ENV}" ]; then set +u; source "${CONAN_BUILD_ENV}"; set -u; fi
           $ARCH_PREFIX meson compile -C builddir
 
       - name: Configure and Build with Meson (Windows)

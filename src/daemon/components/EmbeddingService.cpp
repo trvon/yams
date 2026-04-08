@@ -712,8 +712,9 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                     boost::asio::post(coordinator_->getExecutor(), [this, job = std::move(dispatch),
                                                                     poolDebug]() mutable {
                         const std::size_t jobSize = job.hashes.size();
-                        const std::string jobModel =
-                            job.modelName.empty() ? std::string{"<default>"} : job.modelName;
+                        const std::string jobModel = job.modelName.empty()
+                                                         ? std::string{"<default>"}
+                                                         : std::move(job.modelName);
                         const auto started = std::chrono::steady_clock::now();
 
                         struct ScopeGuard {
@@ -1404,8 +1405,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             std::string chunkId =
                 c.chunk_id.empty() ? yams::vector::utils::generateChunkId(doc.hash, i) : c.chunk_id;
             result.chunkChars += static_cast<uint64_t>(c.content.size());
-            result.chunks.push_back(
-                {docIdx, chunkId, std::move(c.content), c.start_offset, c.end_offset, false});
+            result.chunks.push_back({docIdx, std::move(chunkId), std::move(c.content),
+                                     c.start_offset, c.end_offset, false});
         }
     };
 

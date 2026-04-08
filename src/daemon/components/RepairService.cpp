@@ -1095,7 +1095,7 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
             ev.succeeded = result.succeeded;
             ev.failed = result.failed;
             ev.skipped = result.skipped;
-            ev.message = result.message;
+            ev.message = std::move(result.message);
             progress(ev);
         }
         if (isCanceled()) {
@@ -1567,9 +1567,9 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         auto dotPos = filename.rfind('.');
         if (dotPos != std::string::npos)
             ext = filename.substr(dotPos);
-        doc.filePath = filename;
         doc.fileName = filename;
-        doc.fileExtension = ext;
+        doc.filePath = std::move(filename);
+        doc.fileExtension = std::move(ext);
 
         if (auto up = meta->updateDocument(doc); up) {
             result.succeeded++;

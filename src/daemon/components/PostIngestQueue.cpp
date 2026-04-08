@@ -1206,7 +1206,7 @@ void PostIngestQueue::processSymbolExtractionBatch(
             GraphComponent::EntityExtractionJob extractJob;
             extractJob.documentHash = hash;
             extractJob.filePath = j.filePath;
-            extractJob.language = j.language;
+            extractJob.language = std::move(j.language);
             extractJob.contentUtf8 =
                 std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 
@@ -1395,7 +1395,7 @@ void PostIngestQueue::processEntityExtractionStage(
         // Load content from store
         std::vector<std::byte> content;
         if (contentBytes) {
-            content = *contentBytes;
+            content = std::move(*contentBytes);
         } else if (store_) {
             auto contentResult = store_->retrieveBytes(hash);
             if (contentResult) {

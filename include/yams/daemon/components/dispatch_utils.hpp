@@ -241,7 +241,7 @@ inline VectorDiag collect_vector_diag(ServiceManager* sm) {
         try {
             // Get build reason from FSM snapshot instead of lastSearchBuildReason_
             auto fsmSnapshot = sm->getSearchEngineFsmSnapshot();
-            d.buildReason = fsmSnapshot.buildReason;
+            d.buildReason = std::move(fsmSnapshot.buildReason);
         } catch (...) {
         }
     } catch (...) {

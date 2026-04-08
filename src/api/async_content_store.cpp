@@ -77,17 +77,19 @@ AsyncContentStore& AsyncContentStore::operator=(AsyncContentStore&&) noexcept = 
 std::future<Result<StoreResult>> AsyncContentStore::storeAsync(const std::filesystem::path& path,
                                                                const ContentMetadata& metadata,
                                                                ProgressCallback progress) {
-    return pImpl->runAsync([store = pImpl->store, path, metadata, progress]() {
-        return store->store(path, metadata, progress);
-    });
+    return pImpl->runAsync(
+        [store = pImpl->store, path, metadata, progress = std::move(progress)]() {
+            return store->store(path, metadata, progress);
+        });
 }
 
 std::future<Result<RetrieveResult>>
 AsyncContentStore::retrieveAsync(const std::string& hash, const std::filesystem::path& outputPath,
                                  ProgressCallback progress) {
-    return pImpl->runAsync([store = pImpl->store, hash, outputPath, progress]() {
-        return store->retrieve(hash, outputPath, progress);
-    });
+    return pImpl->runAsync(
+        [store = pImpl->store, hash, outputPath, progress = std::move(progress)]() {
+            return store->retrieve(hash, outputPath, progress);
+        });
 }
 
 std::future<Result<StoreResult>>
@@ -95,15 +97,16 @@ AsyncContentStore::storeStreamAsync(std::istream& stream, const ContentMetadata&
                                     ProgressCallback progress) {
     // Note: Stream reference capture requires careful handling
     // In production, would need to ensure stream lifetime
-    return pImpl->runAsync([store = pImpl->store, &stream, metadata, progress]() {
-        return store->storeStream(stream, metadata, progress);
-    });
+    return pImpl->runAsync(
+        [store = pImpl->store, &stream, metadata, progress = std::move(progress)]() {
+            return store->storeStream(stream, metadata, progress);
+        });
 }
 
 std::future<Result<RetrieveResult>>
 AsyncContentStore::retrieveStreamAsync(const std::string& hash, std::ostream& output,
                                        ProgressCallback progress) {
-    return pImpl->runAsync([store = pImpl->store, hash, &output, progress]() {
+    return pImpl->runAsync([store = pImpl->store, hash, &output, progress = std::move(progress)]() {
         return store->retrieveStream(hash, output, progress);
     });
 }
@@ -129,7 +132,7 @@ std::future<Result<void>> AsyncContentStore::updateMetadataAsync(const std::stri
 // Callback-based async operations
 void AsyncContentStore::storeAsync(const std::filesystem::path& path, StoreCallback callback,
                                    const ContentMetadata& metadata, ProgressCallback progress) {
-    auto future = storeAsync(path, metadata, progress);
+    auto future = storeAsync(path, metadata, std::move(progress));
 
     // Launch a task to wait for result and invoke callback
     std::thread([future = std::move(future), callback = std::move(callback)]() mutable {
@@ -145,7 +148,7 @@ void AsyncContentStore::storeAsync(const std::filesystem::path& path, StoreCallb
 void AsyncContentStore::retrieveAsync(const std::string& hash,
                                       const std::filesystem::path& outputPath,
                                       RetrieveCallback callback, ProgressCallback progress) {
-    auto future = retrieveAsync(hash, outputPath, progress);
+    auto future = retrieveAsync(hash, outputPath, std::move(progress));
 
     std::thread([future = std::move(future), callback = std::move(callback)]() mutable {
         try {
@@ -226,16 +229,21 @@ AsyncContentStore::removeBatchAsync(const std::vector<std::string>& hashes) {
 
 // Maintenance operations
 std::future<Result<void>> AsyncContentStore::verifyAsync(ProgressCallback progress) {
-    return pImpl->runAsync([store = pImpl->store, progress]() { return store->verify(progress); });
+    return pImpl->runAsync([store = pImpl->store, progress = std::move(progress)]() {
+        return store->verify(progress);
+    });
 }
 
 std::future<Result<void>> AsyncContentStore::compactAsync(ProgressCallback progress) {
-    return pImpl->runAsync([store = pImpl->store, progress]() { return store->compact(progress); });
+    return pImpl->runAsync([store = pImpl->store, progress = std::move(progress)]() {
+        return store->compact(progress);
+    });
 }
 
 std::future<Result<void>> AsyncContentStore::garbageCollectAsync(ProgressCallback progress) {
-    return pImpl->runAsync(
-        [store = pImpl->store, progress]() { return store->garbageCollect(progress); });
+    return pImpl->runAsync([store = pImpl->store, progress = std::move(progress)]() {
+        return store->garbageCollect(progress);
+    });
 }
 
 // Concurrency control

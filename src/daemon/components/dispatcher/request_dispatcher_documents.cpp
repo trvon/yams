@@ -650,7 +650,7 @@ int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDe
         expDelay = std::min(maxDelayMs, baseDelayMs << shift);
     }
 
-    const std::string key = req.name.empty() ? req.path : req.name;
+    const std::string& key = req.name.empty() ? req.path : req.name;
     const std::size_t seed = std::hash<std::string>{}(key);
     const int jitterCap = std::max(1, expDelay / 2);
     const int jitter = static_cast<int>(seed % static_cast<std::size_t>(jitterCap));
@@ -1175,9 +1175,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleCatRequest(const CatRe
             }
 
             CatResponse out;
-            out.hash = doc.hash;
-            out.name = doc.name;
-            out.content = doc.content.value();
+            out.hash = std::move(doc.hash);
+            out.name = std::move(doc.name);
+            out.content = std::move(doc.content.value());
             out.size = doc.size;
             co_return out;
         });
@@ -1678,14 +1678,14 @@ RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
                 }
 
                 app::services::DownloadServiceRequest sreq;
-                sreq.url = requestUrl;
+                sreq.url = std::move(requestUrl);
                 sreq.followRedirects = true;
                 sreq.storeOnly = policy.storeOnly;
                 sreq.concurrency = 4;
                 sreq.chunkSizeBytes = 8388608;
                 sreq.timeout = policy.timeout;
                 sreq.resume = true;
-                sreq.checksum = checksumOpt;
+                sreq.checksum = std::move(checksumOpt);
                 sreq.shouldCancel = [cancelFlag]() {
                     return cancelFlag && cancelFlag->load(std::memory_order_acquire);
                 };
@@ -1704,10 +1704,10 @@ RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
             });
 
             DownloadResponse response;
-            response.url = job.url;
+            response.url = std::move(job.url);
             response.success = false;
-            response.jobId = job.jobId;
-            response.state = job.state;
+            response.jobId = std::move(job.jobId);
+            response.state = std::move(job.state);
             response.createdAtMs = job.createdAtMs;
             response.updatedAtMs = job.updatedAtMs;
             response.error = "";

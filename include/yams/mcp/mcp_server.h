@@ -134,7 +134,7 @@ class MCPServer : public std::enable_shared_from_this<MCPServer> {
 public:
     MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown = nullptr,
               std::filesystem::path overrideSocket = {},
-              std::optional<boost::asio::any_io_executor> executor = std::nullopt);
+              const std::optional<boost::asio::any_io_executor>& executor = std::nullopt);
     ~MCPServer();
 
     void start();

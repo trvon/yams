@@ -520,7 +520,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
             // Trust from config
             if (!config_.pluginDir.empty()) {
-                std::filesystem::path pconf = config_.pluginDir;
+                const auto& pconf = config_.pluginDir;
                 if (auto tr = abiHost_->trustAdd(pconf); !tr) {
                     spdlog::warn("Failed to trust configured pluginDir {}: {}", pconf.string(),
                                  tr.error().message);
@@ -699,7 +699,7 @@ yams::Result<void> ServiceManager::initialize() {
     fs::remove(probe, ec);
 
     // Persist resolved dataDir for downstream components/telemetry
-    resolvedDataDir_ = dataDir;
+    resolvedDataDir_ = std::move(dataDir);
 
     // Initialize WALManager (after dataDir is resolved)
     if (walManager_) {
@@ -3231,7 +3231,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
             prog = 100;
 
         ctx.searchRepairInProgress = degraded;
-        ctx.searchRepairDetails = details;
+        ctx.searchRepairDetails = std::move(details);
         ctx.searchRepairProgress = prog;
     } catch (...) {
         // best-effort only

@@ -316,16 +316,16 @@ bool looksLikeHashQuery(const std::string& raw) {
     };
 
     if (auto v = stripPrefix("hash:"); !v.empty()) {
-        return looksLikeHash(trimCopy(v));
+        return looksLikeHash(trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("sha1:"); !v.empty()) {
-        return looksLikeHash(trimCopy(v));
+        return looksLikeHash(trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("sha256:"); !v.empty()) {
-        return looksLikeHash(trimCopy(v));
+        return looksLikeHash(trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("md5:"); !v.empty()) {
-        return looksLikeHash(trimCopy(v));
+        return looksLikeHash(trimCopy(std::move(v)));
     }
 
     if (!looksLikeHash(trimmed))
@@ -732,7 +732,7 @@ public:
         YAMS_ZONE_SCOPED_N("search_service::parse_and_plan");
         auto parsed = yams::search::parseQueryQualifiers(req.query);
         SearchRequest normalizedReq = req;
-        normalizedReq.query = parsed.normalizedQuery;
+        normalizedReq.query = std::move(parsed.normalizedQuery);
         if (normalizedReq.type == "keyword") {
             auto structured = extractStructuredMetadataQuery(normalizedReq.query);
             if (!structured.filters.empty()) {
@@ -816,9 +816,8 @@ public:
         const std::string type = resolveSearchType(req, &forcedHybridFallback);
 
         if (forcedHybridFallback) {
-            const std::string requestedType = req.type.empty() ? "hybrid" : req.type;
-            const std::string detail =
-                repairDetails_.empty() ? "hybrid engine disabled" : repairDetails_;
+            const auto& requestedType = req.type.empty() ? "hybrid" : req.type;
+            const auto& detail = repairDetails_.empty() ? "hybrid engine disabled" : repairDetails_;
             spdlog::warn("SearchService: routing {} search request to keyword path because {}",
                          requestedType, detail);
         }
@@ -947,7 +946,7 @@ public:
             auto resp = std::move(result).value();
             const bool metadataOnlyResult = resp.type == "metadata";
             if (forcedHybridFallback) {
-                const std::string fallbackReason =
+                const auto& fallbackReason =
                     repairDetails_.empty() ? "hybrid_disabled" : repairDetails_;
                 resp.searchStats["hybrid_fallback"] = fallbackReason;
                 resp.searchStats["effective_type"] = type;
@@ -1137,7 +1136,7 @@ private:
         if (forcedHybridFallback)
             *forcedHybridFallback = false;
 
-        const std::string requested = req.type.empty() ? "hybrid" : req.type;
+        const auto& requested = req.type.empty() ? "hybrid" : req.type;
         const bool wantsHybrid = (requested == "hybrid" || requested == "semantic");
         const bool searchDisabled = degraded_ || !ctx_.searchEngine;
 
