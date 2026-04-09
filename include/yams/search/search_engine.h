@@ -221,6 +221,15 @@ struct SearchEngineConfig {
         COMB_MNZ                                 // CombMNZ: score * num_components (recall-focused)
     } fusionStrategy = FusionStrategy::COMB_MNZ; // Default: recall-focused
 
+    // Chunk-to-document aggregation strategy for vector search results.
+    // Controls how multiple chunk-level vector hits from the same document are combined.
+    enum class ChunkAggregation {
+        MAX,      // Keep only the highest-scoring chunk per document (default)
+        SUM,      // Sum chunk scores per document (capped at 1.0)
+        TOP_K_AVG // Average of top-K chunk scores per document (K=3)
+    } chunkAggregation = ChunkAggregation::MAX;
+    size_t chunkAggregationTopK = 3; // K for TOP_K_AVG strategy
+
     // Hybrid behavior flags for experimentation and tuning
     bool enableIntentAdaptiveWeighting = true; // Apply query-intent scaling at runtime
     bool enableFieldAwareWeightedRrf = true;   // Use source-specific scaling in WEIGHTED_RECIPROCAL

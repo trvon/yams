@@ -125,6 +125,10 @@ struct TunedParams {
     // anchored evidence" and override the score-gap guard. 0.0 = any doc counts (default).
     float rerankAnchoredMinRelativeScore = 0.0f;
 
+    // Chunk-to-document vector aggregation
+    SearchEngineConfig::ChunkAggregation chunkAggregation =
+        SearchEngineConfig::ChunkAggregation::MAX;
+
     // Graph reranking controls (dynamically adapted by SearchTuner)
     bool enableGraphRerank = false;
     size_t graphRerankTopN = 25;
@@ -182,6 +186,7 @@ struct TunedParams {
         config.subPhraseScoringPenalty = subPhraseScoringPenalty;
         config.rerankTopK = rerankTopK;
         config.rerankAnchoredMinRelativeScore = rerankAnchoredMinRelativeScore;
+        config.chunkAggregation = chunkAggregation;
     }
 
     /**
@@ -300,15 +305,12 @@ struct TunedParams {
 
         case TuningState::SCIENTIFIC:
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
-            // For scientific/benchmark corpora: balanced text + vector fusion
-            // Text-dominant because lexical precision is usually stronger than dense-only
-            // semantics on benchmark-style scientific corpora.
+            // For scientific/benchmark corpora: balanced text + vector fusion.
             // WEIGHTED_RECIPROCAL avoids COMB_MNZ's mnzBoost penalty which demotes
-            // documents found by only one component (common when vector search doesn't
-            // understand scientific terminology)
+            // documents found by only one component.
             params.rrfK = 12;            // Low k for better top-rank discrimination
-            params.textWeight = 0.70f;   // Text as primary signal
-            params.vectorWeight = 0.25f; // Vector as semantic assist
+            params.textWeight = 0.60f;   // Text as primary signal
+            params.vectorWeight = 0.35f; // Vector as strong semantic complement
             params.entityVectorWeight = 0.00f;
             params.pathTreeWeight = 0.00f;
             params.kgWeight = 0.00f;
@@ -324,10 +326,18 @@ struct TunedParams {
             // returns the entire corpus at low scores (expansion gates never fire).
             params.enableSubPhraseRescoring = true;
             params.subPhraseScoringPenalty = 0.70f;
-            // Require anchored competitors to score >= 70% of rank-1 before allowing
-            // cross-reranker to run. Prevents spurious reranking when a weak multi-source
-            // doc appears in the window (same guard already in SMALL_PROSE).
+            // Rescue high-confidence vector matches that fall below the fusion cutoff.
+            // Critical for multi-session conversational data where semantic similarity
+            // captures relevance that keyword matching misses.
+            params.semanticRescueSlots = 2;
+            params.semanticRescueMinVectorScore = 0.65f;
+            // Widen rerank window to give cross-encoder more candidates to reorder.
+            params.rerankTopK = 12;
             params.rerankAnchoredMinRelativeScore = 0.70f;
+            // Use SUM aggregation for chunk-level vector scores. Multi-chunk documents
+            // (e.g., multi-turn chat sessions) benefit from accumulating semantic signal
+            // across chunks rather than taking only the single best chunk.
+            params.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
             break;
 
         case TuningState::MIXED:

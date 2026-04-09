@@ -497,9 +497,8 @@ bool envFlagEnabled(const char* name) {
 }
 
 size_t envSizeTOrDefault(const char* name, size_t defaultValue, size_t minValue, size_t maxValue) {
-    if (const char* env = std::getenv(name);
-        env &&
-        *env) { // NOLINT(concurrency-mt-unsafe) — read-only; env vars not modified concurrently
+    // NOLINTNEXTLINE(concurrency-mt-unsafe) — read-only; env vars not modified concurrently
+    if (const char* env = std::getenv(name); env && *env) {
         size_t parsed{};
         const auto* end = env + std::strlen(env);
         auto [ptr, ec] = std::from_chars(env, end, parsed);
@@ -1134,7 +1133,7 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
                     scoreScale = 0.65;
                     break;
                 case ComponentResult::Source::Vector:
-                    scoreScale = 0.45;
+                    scoreScale = 0.75;
                     break;
                 case ComponentResult::Source::CompressedANN:
                     scoreScale = 0.25;
@@ -1752,6 +1751,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     size_t graphVectorBlockedUncorroboratedCount = 0;
     size_t graphVectorBlockedMissingTextAnchorCount = 0;
     size_t graphVectorBlockedMissingBaselineTextAnchorCount = 0;
+    bool relaxedVectorRetryEnabled = false;
+    std::atomic<bool> relaxedVectorRetryApplied{false};
+    std::atomic<bool> relaxedVectorRetryAttempted{false};
+    std::atomic<int> relaxedVectorPrimaryHitCount{0};
+    std::atomic<int> relaxedVectorRetryThresholdMilli{0};
     bool weakQueryFanoutBoostApplied = false;
     size_t effectiveVectorMaxResults = 0;
     size_t effectiveEntityVectorMaxResults = 0;
@@ -1762,6 +1766,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     const QueryIntent intent = detectQueryIntent(query);
+    const size_t queryTokenCount = tokenizeQueryTokens(query).size();
     const auto configuredZoomLevel = workingConfig.zoomLevel;
     const auto effectiveZoomLevel =
         configuredZoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto
@@ -1815,6 +1820,55 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig.vectorOnlyPenalty = 1.0f;
         workingConfig.vectorOnlyNearMissPenalty = 1.0f;
     }
+
+    // Long prose queries can miss the semantic tier entirely when the default threshold
+    // is tuned for code/navigation queries. Retry only after a zero-hit semantic search.
+    relaxedVectorRetryEnabled = intent == QueryIntent::Prose && queryTokenCount >= 6 &&
+                                workingConfig.similarityThreshold > 0.40f;
+
+    const auto queryVectorWithRelaxedRetry =
+        [this, &workingConfig, relaxedVectorRetryEnabled, &relaxedVectorRetryApplied,
+         &relaxedVectorRetryAttempted, &relaxedVectorPrimaryHitCount,
+         &relaxedVectorRetryThresholdMilli](const std::vector<float>& embedding, size_t limit,
+                                            const std::unordered_set<std::string>* candidates =
+                                                nullptr) -> Result<std::vector<ComponentResult>> {
+        const auto runVectorQuery = [&](const SearchEngineConfig& config) {
+            return candidates != nullptr ? queryVectorIndex(embedding, config, limit, *candidates)
+                                         : queryVectorIndex(embedding, config, limit);
+        };
+
+        auto primary = runVectorQuery(workingConfig);
+        if (primary) {
+            relaxedVectorPrimaryHitCount.store(static_cast<int>(primary.value().size()),
+                                               std::memory_order_relaxed);
+        }
+        if (!relaxedVectorRetryEnabled || !primary || !primary.value().empty()) {
+            return primary;
+        }
+
+        SearchEngineConfig relaxedConfig = workingConfig;
+        const float relaxedThreshold = std::min(workingConfig.similarityThreshold, 0.40f);
+        if (!(relaxedThreshold + 1e-6f < workingConfig.similarityThreshold)) {
+            return primary;
+        }
+
+        relaxedVectorRetryAttempted.store(true, std::memory_order_relaxed);
+        relaxedConfig.similarityThreshold = relaxedThreshold;
+        auto retried = runVectorQuery(relaxedConfig);
+        if (retried && !retried.value().empty()) {
+            relaxedVectorRetryApplied.store(true, std::memory_order_relaxed);
+            relaxedVectorRetryThresholdMilli.store(
+                static_cast<int>(std::lround(static_cast<double>(relaxedThreshold) * 1000.0)),
+                std::memory_order_relaxed);
+            spdlog::debug(
+                "Vector search retry: relaxed threshold {:.3f} -> {:.3f} yielded {} results",
+                workingConfig.similarityThreshold, relaxedThreshold, retried.value().size());
+            return retried;
+        }
+
+        return primary;
+    };
+
     spdlog::debug("Query intent: {}, zoom={} ({})", queryIntentToString(intent),
                   SearchEngineConfig::navigationZoomLevelToString(effectiveZoomLevel),
                   zoomLevelInferredFromIntent ? "intent_auto" : "configured");
@@ -2413,21 +2467,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_ &&
                 !hasVectorTierDimMismatch()) {
-                vectorFuture = schedule(
-                    "vector", workingConfig.vectorWeight, stats_.vectorQueries,
-                    stats_.avgVectorTimeMicros,
-                    [this, &queryEmbedding, &tier1Candidates, &workingConfig, shouldNarrow,
-                     effectiveVectorMaxResults]() {
-                        YAMS_ZONE_SCOPED_N("component::vector");
-                        if (shouldNarrow) {
-                            return queryVectorIndex(queryEmbedding.value(), workingConfig,
-                                                    effectiveVectorMaxResults,
-                                                    tier1Candidates); // Narrowed search
-                        } else {
-                            return queryVectorIndex(queryEmbedding.value(), workingConfig,
-                                                    effectiveVectorMaxResults); // Full search
-                        }
-                    });
+                vectorFuture =
+                    schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
+                             stats_.avgVectorTimeMicros,
+                             [&queryEmbedding, &tier1Candidates, shouldNarrow,
+                              effectiveVectorMaxResults, &queryVectorWithRelaxedRetry]() {
+                                 YAMS_ZONE_SCOPED_N("component::vector");
+                                 if (shouldNarrow) {
+                                     return queryVectorWithRelaxedRetry(queryEmbedding.value(),
+                                                                        effectiveVectorMaxResults,
+                                                                        &tier1Candidates);
+                                 } else {
+                                     return queryVectorWithRelaxedRetry(queryEmbedding.value(),
+                                                                        effectiveVectorMaxResults);
+                                 }
+                             });
 
                 entityVectorFuture = schedule(
                     "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
@@ -2523,12 +2577,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // Await embedding (ran in parallel with text/kg/path above) then schedule vector
             awaitEmbedding();
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
+                effectiveVectorMaxResults = workingConfig.vectorMaxResults;
+                effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
                 vectorFuture =
                     schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
-                             stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
+                             stats_.avgVectorTimeMicros,
+                             [&queryEmbedding, &workingConfig, &queryVectorWithRelaxedRetry]() {
                                  YAMS_ZONE_SCOPED_N("component::vector");
-                                 return queryVectorIndex(queryEmbedding.value(), workingConfig,
-                                                         workingConfig.vectorMaxResults);
+                                 return queryVectorWithRelaxedRetry(queryEmbedding.value(),
+                                                                    workingConfig.vectorMaxResults);
                              });
 
                 entityVectorFuture = schedule(
@@ -2624,10 +2681,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         // Await embedding (ran in parallel with sequential components above)
         awaitEmbedding();
         if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
+            effectiveVectorMaxResults = workingConfig.vectorMaxResults;
+            effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
             runSequential(
                 [&]() {
-                    return queryVectorIndex(queryEmbedding.value(), workingConfig,
-                                            workingConfig.vectorMaxResults);
+                    return queryVectorWithRelaxedRetry(queryEmbedding.value(),
+                                                       workingConfig.vectorMaxResults);
                 },
                 "vector", workingConfig.vectorWeight, stats_.vectorQueries,
                 stats_.avgVectorTimeMicros);
@@ -3100,10 +3159,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     // Opt-in diagnostic: help explain "0 results" situations by showing per-component
     // hit counts (pre-fusion) and whether an embedding was available.
-    if (const char* env = std::getenv("YAMS_SEARCH_DIAG");
-        env &&
-        std::string(env) ==
-            "1") { // NOLINT(concurrency-mt-unsafe) — debug env var; not modified concurrently
+    // NOLINTNEXTLINE(concurrency-mt-unsafe) — debug env var; not modified concurrently
+    if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
         const bool embeddingsAvailable = queryEmbedding.has_value();
         spdlog::warn("[search_diag] query='{}' components: contributing={} failed={} timed_out={} "
                      "skipped={} embedding={} pre_fusion_total={} "
@@ -4800,6 +4857,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(workingConfig.strongVectorOnlyTopRank);
     response.debugStats["strong_vector_only_penalty"] =
         fmt::format("{:.3f}", workingConfig.strongVectorOnlyPenalty);
+    response.debugStats["relaxed_vector_retry_enabled"] = relaxedVectorRetryEnabled ? "1" : "0";
+    response.debugStats["relaxed_vector_retry_attempted"] =
+        relaxedVectorRetryAttempted.load(std::memory_order_relaxed) ? "1" : "0";
+    response.debugStats["relaxed_vector_retry_applied"] =
+        relaxedVectorRetryApplied.load(std::memory_order_relaxed) ? "1" : "0";
+    response.debugStats["relaxed_vector_primary_hit_count"] =
+        std::to_string(relaxedVectorPrimaryHitCount.load(std::memory_order_relaxed));
+    response.debugStats["relaxed_vector_retry_threshold"] = fmt::format(
+        "{:.3f}",
+        static_cast<double>(relaxedVectorRetryThresholdMilli.load(std::memory_order_relaxed)) /
+            1000.0);
     response.debugStats["graph_query_concept_count"] = std::to_string(graphQueryConceptCount);
     response.debugStats["graph_query_neighbor_seed_docs"] =
         std::to_string(graphQueryNeighborSeedDocCount);
@@ -5614,10 +5682,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
         spdlog::debug("queryFullText: {} results for query '{}' (limit={})", results.size(),
                       query.substr(0, 50), limit);
 
-        if (const char* env = std::getenv("YAMS_SEARCH_DIAG");
-            env &&
-            std::string(env) ==
-                "1") { // NOLINT(concurrency-mt-unsafe) — debug env var; not modified concurrently
+        // NOLINTNEXTLINE(concurrency-mt-unsafe) — debug env var; not modified concurrently
+        if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
             spdlog::warn("[search_diag] text_hits={} limit={} query='{}'", results.size(), limit,
                          query);
         }
@@ -5899,6 +5965,67 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit,
     return results;
 }
 
+namespace {
+
+/// Aggregate chunk-level vector scores to document-level scores.
+/// Multiple chunks from the same document are combined according to the
+/// configured ChunkAggregation strategy (MAX, SUM, or TOP_K_AVG).
+std::vector<vector::VectorRecord>
+aggregateChunkVectorScores(const std::vector<vector::VectorRecord>& vectorRecords,
+                           const SearchEngineConfig& config, size_t limit) {
+    using Agg = SearchEngineConfig::ChunkAggregation;
+    const auto aggStrategy = config.chunkAggregation;
+
+    // Group chunks by document hash, keeping best record per hash
+    std::unordered_map<std::string, std::vector<float>> scoresByHash;
+    std::unordered_map<std::string, vector::VectorRecord> bestByHash;
+
+    for (const auto& vr : vectorRecords) {
+        if (vr.document_hash.empty()) {
+            continue;
+        }
+        scoresByHash[vr.document_hash].push_back(vr.relevance_score);
+        auto it = bestByHash.find(vr.document_hash);
+        if (it == bestByHash.end()) {
+            bestByHash[vr.document_hash] = vr;
+        } else if (vr.relevance_score > it->second.relevance_score) {
+            it->second = vr;
+        }
+    }
+
+    std::vector<vector::VectorRecord> deduped;
+    deduped.reserve(bestByHash.size());
+
+    for (auto& [hash, record] : bestByHash) {
+        if (aggStrategy != Agg::MAX) {
+            auto& scores = scoresByHash[hash];
+            if (aggStrategy == Agg::SUM) {
+                double sum = 0.0;
+                for (float s : scores)
+                    sum += s;
+                record.relevance_score = static_cast<float>(std::min(sum, 1.0));
+            } else if (aggStrategy == Agg::TOP_K_AVG) {
+                std::sort(scores.begin(), scores.end(), std::greater<>());
+                size_t k = std::min(scores.size(), config.chunkAggregationTopK);
+                double sum = 0.0;
+                for (size_t i = 0; i < k; ++i)
+                    sum += scores[i];
+                record.relevance_score = static_cast<float>(sum / static_cast<double>(k));
+            }
+        }
+        deduped.push_back(std::move(record));
+    }
+
+    std::sort(deduped.begin(), deduped.end(),
+              [](const auto& a, const auto& b) { return a.relevance_score > b.relevance_score; });
+    if (deduped.size() > limit) {
+        deduped.resize(limit);
+    }
+    return deduped;
+}
+
+} // namespace
+
 Result<std::vector<ComponentResult>>
 SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding,
                                      const SearchEngineConfig& config, size_t limit) {
@@ -5920,35 +6047,10 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding,
 
         auto vectorRecords = vectorDb_->search(embedding, params);
 
-        // Keep only the best semantic hit per document to avoid dense/chunked documents
-        // accumulating disproportionate score during fusion.
+        // Aggregate chunk-level vector hits to document-level scores.
+        // Strategy is controlled by config.chunkAggregation.
         if (!vectorRecords.empty()) {
-            std::unordered_map<std::string, size_t> bestByHash;
-            bestByHash.reserve(vectorRecords.size());
-
-            std::vector<vector::VectorRecord> deduped;
-            deduped.reserve(vectorRecords.size());
-
-            for (const auto& vr : vectorRecords) {
-                if (vr.document_hash.empty()) {
-                    continue;
-                }
-                auto it = bestByHash.find(vr.document_hash);
-                if (it == bestByHash.end()) {
-                    bestByHash[vr.document_hash] = deduped.size();
-                    deduped.push_back(vr);
-                } else if (vr.relevance_score > deduped[it->second].relevance_score) {
-                    deduped[it->second] = vr;
-                }
-            }
-
-            std::sort(deduped.begin(), deduped.end(), [](const auto& a, const auto& b) {
-                return a.relevance_score > b.relevance_score;
-            });
-            if (deduped.size() > limit) {
-                deduped.resize(limit);
-            }
-            vectorRecords = std::move(deduped);
+            vectorRecords = aggregateChunkVectorScores(vectorRecords, config, limit);
         }
 
         if (vectorRecords.empty()) {
@@ -6022,35 +6124,9 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding,
 
         auto vectorRecords = vectorDb_->search(embedding, params);
 
-        // Keep only the best semantic hit per document to avoid dense/chunked documents
-        // accumulating disproportionate score during fusion.
+        // Aggregate chunk-level vector hits to document-level scores.
         if (!vectorRecords.empty()) {
-            std::unordered_map<std::string, size_t> bestByHash;
-            bestByHash.reserve(vectorRecords.size());
-
-            std::vector<vector::VectorRecord> deduped;
-            deduped.reserve(vectorRecords.size());
-
-            for (const auto& vr : vectorRecords) {
-                if (vr.document_hash.empty()) {
-                    continue;
-                }
-                auto it = bestByHash.find(vr.document_hash);
-                if (it == bestByHash.end()) {
-                    bestByHash[vr.document_hash] = deduped.size();
-                    deduped.push_back(vr);
-                } else if (vr.relevance_score > deduped[it->second].relevance_score) {
-                    deduped[it->second] = vr;
-                }
-            }
-
-            std::sort(deduped.begin(), deduped.end(), [](const auto& a, const auto& b) {
-                return a.relevance_score > b.relevance_score;
-            });
-            if (deduped.size() > limit) {
-                deduped.resize(limit);
-            }
-            vectorRecords = std::move(deduped);
+            vectorRecords = aggregateChunkVectorScores(vectorRecords, config, limit);
         }
 
         if (vectorRecords.empty()) {

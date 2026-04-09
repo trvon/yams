@@ -108,8 +108,8 @@ TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") 
 
     CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Map);
     CHECK(params.rrfK == 12);
-    CHECK(params.textWeight == Approx(0.70f));
-    CHECK(params.vectorWeight == Approx(0.25f));
+    CHECK(params.textWeight == Approx(0.60f));
+    CHECK(params.vectorWeight == Approx(0.35f));
     CHECK(params.entityVectorWeight == Approx(0.00f));
     CHECK(params.pathTreeWeight == Approx(0.00f));
     CHECK(params.kgWeight == Approx(0.00f));

@@ -370,6 +370,18 @@ public:
         return std::vector<std::string>{};
     }
 
+    Result<void> setMetadataBatch(
+        const std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>>&) override {
+        return Result<void>();
+    }
+
+    Result<void> batchUpdateDocumentRepairStatuses(const std::vector<std::string>&,
+                                                   metadata::RepairStatus) override {
+        return Result<void>();
+    }
+
+    void signalCorpusStatsStale() override { /* no-op for mock */ }
+
     Result<void>
     batchInsertContentAndIndex(const std::vector<metadata::BatchContentEntry>& entries) override {
         std::lock_guard<std::mutex> lk(mu_);

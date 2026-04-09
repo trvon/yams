@@ -3763,6 +3763,16 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     out << j.dump() << "\n";
 }
 
+static std::chrono::milliseconds defaultBenchQueryTimeout(const std::string& searchType) {
+    if (searchType == "hybrid") {
+        // Hybrid benchmark runs exercise graph rerank, ONNX reranking, and stage tracing.
+        // The default 20s request timeout is too short for cold-ish benchmark slices and
+        // causes partial JSONL output because timed-out queries are skipped entirely.
+        return std::chrono::milliseconds{120000};
+    }
+    return std::chrono::milliseconds{20000};
+}
+
 double computeDCG(const std::vector<int>& grades, int k) {
     double dcg = 0.0;
     for (int i = 0; i < std::min(k, (int)grades.size()); ++i) {
@@ -3797,7 +3807,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         opts.query = tq.query;
         opts.searchType = searchType;
         opts.limit = static_cast<std::size_t>(k);
-        std::chrono::milliseconds queryTimeout{20000};
+        std::chrono::milliseconds queryTimeout = defaultBenchQueryTimeout(searchType);
         if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
             queryTimeout = std::chrono::milliseconds{
                 static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
@@ -3837,6 +3847,33 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             waitBudget);
         if (!run) {
             spdlog::warn("Search failed for query '{}': {}", tq.query, run.error().message);
+            DebugLogEntry failedEntry;
+            failedEntry.query = tq.query;
+            failedEntry.queryIndex = static_cast<int>(queryIndex);
+            failedEntry.searchType = searchType;
+            failedEntry.attempts = 0;
+            failedEntry.usedStreaming = false;
+            failedEntry.usedFuzzyFlag = false;
+            failedEntry.usedLiteralFlag = false;
+            failedEntry.usedFuzzyRetry = false;
+            failedEntry.usedLiteralTextRetry = false;
+            failedEntry.relevantDocIds.assign(tq.relevantDocIds.begin(), tq.relevantDocIds.end());
+            failedEntry.relevantFiles.assign(tq.relevantFiles.begin(), tq.relevantFiles.end());
+            failedEntry.diagnostics.push_back("search_error=" + run.error().message);
+            failedEntry.diagnostics.push_back("searchType=" + opts.searchType);
+            failedEntry.diagnostics.push_back("limit=" + std::to_string(opts.limit));
+            failedEntry.diagnostics.push_back(
+                "timeout_ms=" +
+                std::to_string(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(opts.timeout).count()));
+            const json relevantDecisionTrace = buildRelevantDecisionTrace(
+                failedEntry.relevantDocIds, failedEntry.returnedDocIds, failedEntry.searchStats);
+            failedEntry.extraFields["relevant_decision_trace"] = relevantDecisionTrace;
+            debugLogWriteJsonLine(failedEntry);
+            if (diagnostics) {
+                ingestQueryDiagnostics(*diagnostics, failedEntry.searchStats, relevantDecisionTrace,
+                                       true, false, false, -1);
+            }
             continue;
         }
 
@@ -4912,16 +4949,27 @@ struct BenchFixture {
                 if (auto preferredPluginDir = choosePreferredPluginDir();
                     preferredPluginDir.has_value()) {
                     harnessOptions.pluginDir = *preferredPluginDir;
-                } else if (fs::exists(installedOnnxPlugin)) {
+                } else if (fs::exists(installedOnnxPlugin) &&
+                           (!needsGlintPlugin || fs::exists(installedGlintPlugin))) {
                     const fs::path stagedPluginDir =
                         fs::temp_directory_path() / "yams_retrieval_bench_plugins";
                     const fs::path stagedOnnxPlugin =
                         stagedPluginDir / installedOnnxPlugin.filename();
+                    const fs::path stagedGlintPlugin =
+                        stagedPluginDir / installedGlintPlugin.filename();
                     std::error_code ec;
                     fs::path installedOnnxSource = fs::weakly_canonical(installedOnnxPlugin, ec);
                     if (ec || installedOnnxSource.empty()) {
                         ec.clear();
                         installedOnnxSource = installedOnnxPlugin;
+                    }
+                    fs::path installedGlintSource = installedGlintPlugin;
+                    if (needsGlintPlugin) {
+                        installedGlintSource = fs::weakly_canonical(installedGlintPlugin, ec);
+                        if (ec || installedGlintSource.empty()) {
+                            ec.clear();
+                            installedGlintSource = installedGlintPlugin;
+                        }
                     }
                     yams::common::ensureDirectories(stagedPluginDir);
                     if (ec) {
@@ -4938,12 +4986,32 @@ struct BenchFixture {
                                          installedOnnxSource.string(), stagedOnnxPlugin.string(),
                                          ec.message());
                             harnessOptions.pluginDir = installedPluginDir;
+                        } else if (needsGlintPlugin) {
+                            fs::remove(stagedGlintPlugin, ec);
+                            ec.clear();
+                            fs::copy_file(installedGlintSource, stagedGlintPlugin,
+                                          fs::copy_options::overwrite_existing, ec);
+                            if (ec) {
+                                throw std::runtime_error("Failed to stage installed Glint plugin " +
+                                                         installedGlintSource.string() + " -> " +
+                                                         stagedGlintPlugin.string() + ": " +
+                                                         ec.message());
+                            }
+                            harnessOptions.pluginDir = stagedPluginDir;
+                            spdlog::info("Using isolated installed ONNX+Glint plugin dir: {}",
+                                         stagedPluginDir.string());
                         } else {
                             harnessOptions.pluginDir = stagedPluginDir;
                             spdlog::info("Using isolated installed ONNX plugin dir: {}",
                                          stagedPluginDir.string());
                         }
                     }
+                } else if (needsGlintPlugin) {
+                    throw std::runtime_error(
+                        "Glint plugin required for benchmark entity extraction but no plugin root "
+                        "contains both ONNX and Glint plugins. Build with -Dplugin-glint=true or "
+                        "set YAMS_PLUGIN_DIR to a directory containing libyams_onnx_plugin.dylib "
+                        "and yams_glint.dylib.");
                 } else if (fs::exists(localPluginDir)) {
                     harnessOptions.pluginDir = localPluginDir;
                 } else if (fs::exists(nosanPluginDir)) {

@@ -300,6 +300,36 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         }
     }
 
+    // Allow semantic rescue, rerank, and chunk aggregation overrides
+    if (allowEnvOverrides) {
+        if (auto slots = getEnvInt("YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS")) {
+            cfg.semanticRescueSlots = static_cast<size_t>(std::max(0, *slots));
+            spdlog::info("SearchEngine semanticRescueSlots overridden to {} via env",
+                         cfg.semanticRescueSlots);
+        }
+        if (auto minScore = getEnvFloat("YAMS_SEARCH_SEMANTIC_RESCUE_MIN_SCORE")) {
+            cfg.semanticRescueMinVectorScore = std::clamp(*minScore, 0.0f, 1.0f);
+            spdlog::info("SearchEngine semanticRescueMinVectorScore overridden to {:.3f} via env",
+                         cfg.semanticRescueMinVectorScore);
+        }
+        if (auto topK = getEnvInt("YAMS_SEARCH_RERANK_TOP_K")) {
+            cfg.rerankTopK = static_cast<size_t>(std::max(1, *topK));
+            spdlog::info("SearchEngine rerankTopK overridden to {} via env", cfg.rerankTopK);
+        }
+        if (auto aggEnv = getEnvString("YAMS_SEARCH_CHUNK_AGGREGATION")) {
+            if (*aggEnv == "MAX" || *aggEnv == "max") {
+                cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::MAX;
+            } else if (*aggEnv == "SUM" || *aggEnv == "sum") {
+                cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
+            } else if (*aggEnv == "TOP_K_AVG" || *aggEnv == "top_k_avg") {
+                cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::TOP_K_AVG;
+            } else {
+                spdlog::warn("Unknown YAMS_SEARCH_CHUNK_AGGREGATION value '{}', ignoring", *aggEnv);
+            }
+            spdlog::info("SearchEngine chunkAggregation overridden via env");
+        }
+    }
+
     // Allow candidate limit overrides for recall benchmarking
     // YAMS_CANDIDATE_MULTIPLIER scales all maxResults values (e.g., 2.0 = 2x candidates)
     if (allowEnvOverrides) {

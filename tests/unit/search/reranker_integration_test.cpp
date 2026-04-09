@@ -16,15 +16,19 @@
 #include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_tuner.h>
+#include <yams/vector/vector_database.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace yams::search {
@@ -177,6 +181,58 @@ public:
 private:
     bool available_ = true;
     std::vector<float> scores_;
+};
+
+class StaticEmbeddingBackend : public vector::IEmbeddingBackend {
+public:
+    explicit StaticEmbeddingBackend(size_t dim) : dim_(dim) {}
+
+    void setEmbedding(const std::string& text, std::vector<float> embedding) {
+        embeddings_[text] = std::move(embedding);
+    }
+
+    bool initialize() override {
+        initialized_ = true;
+        return true;
+    }
+
+    bool isInitialized() const override { return initialized_; }
+
+    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        auto it = embeddings_.find(text);
+        if (it != embeddings_.end()) {
+            return it->second;
+        }
+        return std::vector<float>(dim_, 0.0f);
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateEmbeddings(std::span<const std::string> texts) override {
+        std::vector<std::vector<float>> results;
+        results.reserve(texts.size());
+        for (const auto& text : texts) {
+            auto embedding = generateEmbedding(text);
+            if (!embedding) {
+                return embedding.error();
+            }
+            results.push_back(std::move(embedding.value()));
+        }
+        return results;
+    }
+
+    size_t getEmbeddingDimension() const override { return dim_; }
+    size_t getMaxSequenceLength() const override { return 128; }
+    std::string getBackendName() const override { return "static-test"; }
+    bool isAvailable() const override { return true; }
+    vector::GenerationStats getStats() const override { return stats_; }
+    void resetStats() override { stats_ = vector::GenerationStats{}; }
+    void shutdown() override { initialized_ = false; }
+
+private:
+    size_t dim_;
+    bool initialized_{false};
+    mutable vector::GenerationStats stats_;
+    std::unordered_map<std::string, std::vector<float>> embeddings_;
 };
 
 } // namespace
@@ -951,6 +1007,107 @@ TEST_CASE("SearchEngine: camelCase identifiers remain code intent", "[search][in
     REQUIRE(response.has_value());
     REQUIRE(response.value().debugStats.contains("trace_query_intent"));
     CHECK(response.value().debugStats.at("trace_query_intent") == "code");
+}
+
+TEST_CASE("SearchEngine: long prose queries retry semantic search with relaxed threshold",
+          "[search][vector][prose-retry]") {
+    EnvGuard traceGuard("YAMS_SEARCH_STAGE_TRACE", "1");
+
+    SearchEngineRerankerFixture fixture;
+    const std::string pathTop = "/tmp/vector_retry_top.md";
+    const std::string pathRelevant = "/tmp/vector_retry_relevant.md";
+    const std::string hashTop = "HASH_VECTOR_RETRY_TOP";
+    const std::string hashRelevant = "HASH_VECTOR_RETRY_RELEVANT";
+    const std::string query = "inflammatory monocytes disease response treatment benefit";
+
+    fixture.addIndexedDocument(pathTop, hashTop, "Top lexical doc",
+                               "inflammatory monocytes disease response treatment benefit "
+                               "inflammatory monocytes disease response treatment benefit");
+    fixture.addIndexedDocument(pathRelevant, hashRelevant, "Relevant semantic doc",
+                               "inflammatory monocytes disease response treatment benefit");
+
+    vector::VectorDatabaseConfig vectorConfig;
+    vectorConfig.database_path = ":memory:";
+    vectorConfig.embedding_dim = 4;
+    vectorConfig.create_if_missing = true;
+    vectorConfig.use_in_memory = true;
+
+    auto vectorDb = std::make_shared<vector::VectorDatabase>(vectorConfig);
+    REQUIRE(vectorDb->initialize());
+
+    vector::VectorRecord relevantVector;
+    relevantVector.chunk_id = "chunk-vector-retry-relevant";
+    relevantVector.document_hash = hashRelevant;
+    relevantVector.embedding = {0.5f, 0.8660254f, 0.0f, 0.0f};
+    relevantVector.content = "semantic match for inflammatory monocytes";
+    relevantVector.start_offset = 0;
+    relevantVector.end_offset = relevantVector.content.size();
+    REQUIRE(vectorDb->insertVector(relevantVector));
+
+    vector::VectorSearchParams strictParams;
+    strictParams.k = 5;
+    strictParams.similarity_threshold = 0.65f;
+    CHECK(vectorDb->search({1.0f, 0.0f, 0.0f, 0.0f}, strictParams).empty());
+
+    strictParams.similarity_threshold = 0.40f;
+    auto relaxedVectorHits = vectorDb->search({1.0f, 0.0f, 0.0f, 0.0f}, strictParams);
+    REQUIRE(relaxedVectorHits.size() == 1);
+    CHECK(relaxedVectorHits[0].document_hash == hashRelevant);
+
+    auto backend = std::make_unique<StaticEmbeddingBackend>(4);
+    REQUIRE(backend->initialize());
+    backend->setEmbedding(query, {1.0f, 0.0f, 0.0f, 0.0f});
+
+    vector::EmbeddingConfig embeddingConfig;
+    embeddingConfig.embedding_dim = 4;
+    auto embeddingGen =
+        std::make_shared<vector::EmbeddingGenerator>(std::move(backend), embeddingConfig);
+    REQUIRE(embeddingGen->initialize());
+    auto queryEmbedding = embeddingGen->generateEmbedding(query);
+    REQUIRE(queryEmbedding.size() == 4);
+    CHECK(queryEmbedding[0] == Approx(1.0f));
+    CHECK(queryEmbedding[1] == Approx(0.0f));
+
+    SearchEngineConfig config;
+    config.textWeight = 0.20f;
+    config.vectorWeight = 0.80f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableReranking = false;
+    config.similarityThreshold = 0.65f;
+    config.includeDebugInfo = true;
+
+    auto engine =
+        createSearchEngine(fixture.repo(), vectorDb, embeddingGen, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+
+    SearchParams params;
+    params.limit = 1;
+    auto response = engine->searchWithResponse(query, params);
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() == 1);
+
+    INFO("embedding_status=" << response.value().debugStats.at("embedding_status"));
+    INFO("query_embedding_dim=" << response.value().debugStats.at("query_embedding_dim"));
+    INFO("vector_tier_skip_reason=" << response.value().debugStats.at("vector_tier_skip_reason"));
+    INFO("relaxed_vector_retry_primary_hit_count="
+         << response.value().debugStats.at("relaxed_vector_primary_hit_count"));
+    INFO("relaxed_vector_retry_attempted="
+         << response.value().debugStats.at("relaxed_vector_retry_attempted"));
+    INFO("component_hits=" << response.value().debugStats.at("trace_component_hits_json"));
+    INFO("fusion_top=" << response.value().debugStats.at("trace_fusion_top_json"));
+
+    CHECK(response.value().results[0].document.sha256Hash == hashRelevant);
+    CHECK(response.value().results[0].vectorScore.value_or(0.0) > 0.0);
+    CHECK(response.value().debugStats.at("relaxed_vector_retry_enabled") == "1");
+    CHECK(response.value().debugStats.at("relaxed_vector_retry_applied") == "1");
+    CHECK(response.value().debugStats.at("relaxed_vector_retry_threshold") == "0.400");
 }
 
 TEST_CASE("SearchEngine: rerank replacement keeps reranked docs ahead of untouched fused docs",

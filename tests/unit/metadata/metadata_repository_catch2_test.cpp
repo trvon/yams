@@ -1552,14 +1552,24 @@ TEST_CASE("batchGetDocumentsWithContentPreview: documents with content",
           "[metadata-repo][batch-docs-preview]") {
     MetadataRepositoryFixture fix;
 
+    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+
     // Insert 3 documents with content
     std::vector<int64_t> docIds;
+    std::vector<std::string> hashes;
     for (int i = 0; i < 3; ++i) {
-        DocumentInfo doc = makeDocumentWithPath("/test/preview_doc_" + std::to_string(i) + ".txt",
-                                                "preview_hash_" + std::to_string(i));
+        DocumentInfo doc;
+        doc.sha256Hash = "preview_hash_" + std::to_string(i);
+        doc.fileName = "preview_doc_" + std::to_string(i) + ".txt";
+        doc.filePath = "/test/preview_doc_" + std::to_string(i) + ".txt";
+        doc.fileSize = 100;
+        doc.mimeType = "text/plain";
+        doc.createdTime = now;
+        doc.modifiedTime = now;
         auto result = fix.repository_->insertDocument(doc);
         REQUIRE(result.has_value());
         docIds.push_back(result.value());
+        hashes.push_back(doc.sha256Hash);
     }
 
     // Insert content for each document
@@ -1573,7 +1583,6 @@ TEST_CASE("batchGetDocumentsWithContentPreview: documents with content",
     REQUIRE(batchResult.has_value());
 
     // Fetch with combined method
-    std::vector<std::string> hashes = {"preview_hash_0", "preview_hash_1", "preview_hash_2"};
     auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 500);
     REQUIRE(result.has_value());
 
@@ -1595,7 +1604,15 @@ TEST_CASE("batchGetDocumentsWithContentPreview: documents without content",
           "[metadata-repo][batch-docs-preview]") {
     MetadataRepositoryFixture fix;
 
-    DocumentInfo doc = makeDocumentWithPath("/test/no_content_doc.txt", "no_content_hash");
+    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    DocumentInfo doc;
+    doc.sha256Hash = "no_content_hash";
+    doc.fileName = "no_content_doc.txt";
+    doc.filePath = "/test/no_content_doc.txt";
+    doc.fileSize = 100;
+    doc.mimeType = "text/plain";
+    doc.createdTime = now;
+    doc.modifiedTime = now;
     auto insertResult = fix.repository_->insertDocument(doc);
     REQUIRE(insertResult.has_value());
 
@@ -1614,8 +1631,17 @@ TEST_CASE("batchGetDocumentsWithContentPreview: mixed with and without content",
           "[metadata-repo][batch-docs-preview]") {
     MetadataRepositoryFixture fix;
 
+    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+
     // Doc with content
-    DocumentInfo doc1 = makeDocumentWithPath("/test/mixed_with.txt", "mixed_hash_with");
+    DocumentInfo doc1;
+    doc1.sha256Hash = "mixed_hash_with";
+    doc1.fileName = "mixed_with.txt";
+    doc1.filePath = "/test/mixed_with.txt";
+    doc1.fileSize = 100;
+    doc1.mimeType = "text/plain";
+    doc1.createdTime = now;
+    doc1.modifiedTime = now;
     auto id1 = fix.repository_->insertDocument(doc1);
     REQUIRE(id1.has_value());
 
@@ -1625,7 +1651,14 @@ TEST_CASE("batchGetDocumentsWithContentPreview: mixed with and without content",
     REQUIRE(batchResult.has_value());
 
     // Doc without content
-    DocumentInfo doc2 = makeDocumentWithPath("/test/mixed_without.txt", "mixed_hash_without");
+    DocumentInfo doc2;
+    doc2.sha256Hash = "mixed_hash_without";
+    doc2.fileName = "mixed_without.txt";
+    doc2.filePath = "/test/mixed_without.txt";
+    doc2.fileSize = 100;
+    doc2.mimeType = "text/plain";
+    doc2.createdTime = now;
+    doc2.modifiedTime = now;
     auto id2 = fix.repository_->insertDocument(doc2);
     REQUIRE(id2.has_value());
 
@@ -1653,7 +1686,15 @@ TEST_CASE("batchGetDocumentsWithContentPreview: preview truncation",
           "[metadata-repo][batch-docs-preview]") {
     MetadataRepositoryFixture fix;
 
-    DocumentInfo doc = makeDocumentWithPath("/test/truncate_doc.txt", "truncate_hash");
+    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    DocumentInfo doc;
+    doc.sha256Hash = "truncate_hash";
+    doc.fileName = "truncate_doc.txt";
+    doc.filePath = "/test/truncate_doc.txt";
+    doc.fileSize = 100;
+    doc.mimeType = "text/plain";
+    doc.createdTime = now;
+    doc.modifiedTime = now;
     auto insertResult = fix.repository_->insertDocument(doc);
     REQUIRE(insertResult.has_value());
 
