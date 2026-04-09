@@ -17,6 +17,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/core/types.h>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -398,13 +399,13 @@ template <typename Fn> boost::asio::awaitable<Response> guard_await(const char* 
             spdlog::warn("[Dispatch] {}: exception: {}", tag, e.what());
         } catch (...) {
         }
-        co_return ErrorResponse{ErrorCode::InternalError, e.what()};
+        co_return makeErrorResponse(ErrorCode::InternalError, e.what());
     } catch (...) {
         try {
             spdlog::warn("[Dispatch] {}: unknown exception", tag);
         } catch (...) {
         }
-        co_return ErrorResponse{ErrorCode::InternalError, "unknown exception"};
+        co_return makeErrorResponse(ErrorCode::InternalError, "unknown exception");
     }
 }
 

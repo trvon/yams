@@ -1,6 +1,7 @@
 // Split from RequestDispatcher.cpp: model-related handlers
 #include <spdlog/spdlog.h>
 #include <cstdlib>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/daemon_lifecycle.h>
@@ -61,7 +62,7 @@ static inline std::string sanitizeUtf8(const std::string& s) {
     return out;
 }
 static inline ErrorResponse makeError(ErrorCode code, const std::string& msg) {
-    return ErrorResponse{code, sanitizeUtf8(msg)};
+    return yams::daemon::dispatch::makeErrorResponse(code, sanitizeUtf8(msg));
 }
 
 boost::asio::awaitable<Response>
@@ -170,14 +171,17 @@ RequestDispatcher::handleUnloadModelRequest(const UnloadModelRequest& req) {
         "unload_model", [this, req]() -> boost::asio::awaitable<Response> {
             auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
             if (!provRes)
-                co_return ErrorResponse{provRes.error().code, provRes.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(provRes.error().code,
+                                                                    provRes.error().message);
             const auto& provider = provRes.value();
             if (req.modelName.empty()) {
-                co_return ErrorResponse{ErrorCode::InvalidData, "modelName is required"};
+                co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::InvalidData,
+                                                                    "modelName is required");
             }
             auto r = provider->unloadModel(req.modelName);
             if (!r) {
-                co_return ErrorResponse{r.error().code, r.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(r.error().code,
+                                                                    r.error().message);
             }
             SuccessResponse resp{"Model unloaded"};
             co_return resp;

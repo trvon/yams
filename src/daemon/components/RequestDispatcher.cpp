@@ -36,6 +36,7 @@
 #include <yams/common/name_resolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -152,6 +153,79 @@ ServiceManager* RequestDispatcher::getServiceManager() const {
     return serviceManager_;
 }
 
+void RequestDispatcher::SearchAdmissionGuard::release() {
+    if (serviceManager_ == nullptr) {
+        return;
+    }
+    if (started_) {
+        serviceManager_->onSearchRequestFinished();
+    } else {
+        serviceManager_->onSearchRequestRejected();
+    }
+    serviceManager_ = nullptr;
+    started_ = false;
+}
+
+RequestDispatcher::SearchAdmissionGuard::~SearchAdmissionGuard() {
+    release();
+}
+
+boost::asio::awaitable<RequestDispatcher::AdmissionGuard>
+RequestDispatcher::acquireBoundedAdmission(std::atomic<uint64_t>& activeCounter,
+                                           std::atomic<uint64_t>& rejectedCounter, uint32_t limit,
+                                           uint32_t maxWaitMs,
+                                           std::atomic<uint64_t>* testOverride) {
+    if (limit == 0) {
+        co_return AdmissionGuard{};
+    }
+
+    if (testOverride != nullptr && testOverride->load(std::memory_order_acquire) >= limit) {
+        rejectedCounter.fetch_add(1, std::memory_order_acq_rel);
+        co_return AdmissionGuard{};
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(std::max<uint32_t>(1, maxWaitMs));
+    auto executor = co_await boost::asio::this_coro::executor;
+    boost::asio::steady_timer timer(executor);
+
+    while (true) {
+        auto current = activeCounter.load(std::memory_order_acquire);
+        while (current < limit) {
+            if (activeCounter.compare_exchange_weak(current, current + 1, std::memory_order_acq_rel,
+                                                    std::memory_order_acquire)) {
+                co_return AdmissionGuard{&activeCounter};
+            }
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            rejectedCounter.fetch_add(1, std::memory_order_acq_rel);
+            co_return AdmissionGuard{};
+        }
+
+        timer.expires_after(std::chrono::milliseconds(5));
+        co_await timer.async_wait(boost::asio::use_awaitable);
+    }
+}
+
+void RequestDispatcher::recordRejected(std::atomic<uint64_t>& counter) {
+    counter.fetch_add(1, std::memory_order_acq_rel);
+}
+
+RequestDispatcher::SearchAdmissionGuard
+RequestDispatcher::acquireSearchAdmission(uint32_t concurrencyCap) {
+    if (serviceManager_ == nullptr) {
+        return SearchAdmissionGuard{};
+    }
+
+    serviceManager_->onSearchRequestQueued();
+    if (!serviceManager_->tryStartSearchRequest(concurrencyCap)) {
+        recordRejected(state_->stats.searchRequestsRejected);
+        return SearchAdmissionGuard{serviceManager_, false};
+    }
+    return SearchAdmissionGuard{serviceManager_, true};
+}
+
 boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req) {
     YAMS_ZONE_SCOPED_N("RequestDispatcher::dispatch");
     // Immediately handle status and ping requests for responsiveness, bypassing other checks.
@@ -204,8 +278,9 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
             if (isAddDocumentRequest && contentStoreReady) {
                 spdlog::debug("Proceeding with AddDocument while metadata repository initializes");
             } else {
-                co_return ErrorResponse{ErrorCode::InvalidState,
-                                        "Metadata repository not ready. Please try again shortly."};
+                co_return dispatch::makeErrorResponse(
+                    ErrorCode::InvalidState,
+                    "Metadata repository not ready. Please try again shortly.");
             }
         }
         if (!contentStoreReady) {
@@ -216,7 +291,7 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
                     error_detail += " Details: " + cs_error;
                 }
             }
-            co_return ErrorResponse{ErrorCode::InvalidState, error_detail};
+            co_return dispatch::makeErrorResponse(ErrorCode::InvalidState, error_detail);
         }
     }
 
@@ -225,11 +300,12 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
         if (req.valueless_by_exception()) {
             spdlog::warn(
                 "RequestDispatcher: received valueless request variant; replying with error");
-            co_return ErrorResponse{ErrorCode::InvalidData,
-                                    "Malformed request (variant is valueless)"};
+            co_return dispatch::makeErrorResponse(ErrorCode::InvalidData,
+                                                  "Malformed request (variant is valueless)");
         }
     } catch (...) {
-        co_return ErrorResponse{ErrorCode::InvalidData, "Malformed request (variant check failed)"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InvalidData,
+                                              "Malformed request (variant check failed)");
     }
     try {
         out = co_await std::visit(
@@ -243,12 +319,12 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
             req);
     } catch (const std::exception& e) {
         spdlog::error("RequestDispatcher::dispatch exception: {}", e.what());
-        co_return ErrorResponse{ErrorCode::InternalError,
-                                std::string("Failed to process request: ") + e.what()};
+        co_return dispatch::makeErrorResponse(
+            ErrorCode::InternalError, std::string("Failed to process request: ") + e.what());
     } catch (...) {
         spdlog::error("RequestDispatcher::dispatch unknown exception");
-        co_return ErrorResponse{ErrorCode::InternalError,
-                                "Failed to process request: unknown error"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Failed to process request: unknown error");
     }
 
     try {

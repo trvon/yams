@@ -13,16 +13,22 @@
 
 namespace yams::daemon::dispatch {
 
-template <typename ResultType> inline ErrorResponse makeErrorResponse(const ResultType& result) {
-    return ErrorResponse{result.error().code, result.error().message};
+inline ErrorResponse
+makeErrorResponse(ErrorCode code, std::string message,
+                  std::optional<ErrorResponse::RetryInfo> retry = std::nullopt) {
+    ErrorResponse response;
+    response.code = code;
+    response.message = std::move(message);
+    response.retry = std::move(retry);
+    return response;
 }
 
-inline ErrorResponse makeErrorResponse(ErrorCode code, std::string message) {
-    return ErrorResponse{code, std::move(message)};
+template <typename ResultType> inline ErrorResponse makeErrorResponse(const ResultType& result) {
+    return makeErrorResponse(result.error().code, result.error().message);
 }
 
 inline ErrorResponse makeErrorResponse(const Error& err) {
-    return ErrorResponse{err.code, err.message};
+    return makeErrorResponse(err.code, err.message);
 }
 
 struct ListEntryMapper {

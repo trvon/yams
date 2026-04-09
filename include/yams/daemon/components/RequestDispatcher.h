@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
@@ -29,6 +30,69 @@ template <typename T> struct RequestHandlerTraits;
 
 class RequestDispatcher {
 public:
+    class AdmissionGuard {
+    public:
+        AdmissionGuard() = default;
+        explicit AdmissionGuard(std::atomic<uint64_t>* counter) : counter_(counter) {}
+        ~AdmissionGuard() { release(); }
+        AdmissionGuard(const AdmissionGuard&) = delete;
+        AdmissionGuard& operator=(const AdmissionGuard&) = delete;
+        AdmissionGuard(AdmissionGuard&& other) noexcept { move_from(std::move(other)); }
+        AdmissionGuard& operator=(AdmissionGuard&& other) noexcept {
+            if (this != &other) {
+                release();
+                move_from(std::move(other));
+            }
+            return *this;
+        }
+        explicit operator bool() const { return counter_ != nullptr; }
+
+    private:
+        void release() {
+            if (counter_ != nullptr) {
+                counter_->fetch_sub(1, std::memory_order_acq_rel);
+                counter_ = nullptr;
+            }
+        }
+        void move_from(AdmissionGuard&& other) noexcept {
+            counter_ = other.counter_;
+            other.counter_ = nullptr;
+        }
+
+        std::atomic<uint64_t>* counter_{nullptr};
+    };
+
+    class SearchAdmissionGuard {
+    public:
+        SearchAdmissionGuard() = default;
+        SearchAdmissionGuard(ServiceManager* serviceManager, bool started)
+            : serviceManager_(serviceManager), started_(started) {}
+        ~SearchAdmissionGuard();
+        SearchAdmissionGuard(const SearchAdmissionGuard&) = delete;
+        SearchAdmissionGuard& operator=(const SearchAdmissionGuard&) = delete;
+        SearchAdmissionGuard(SearchAdmissionGuard&& other) noexcept { move_from(std::move(other)); }
+        SearchAdmissionGuard& operator=(SearchAdmissionGuard&& other) noexcept {
+            if (this != &other) {
+                release();
+                move_from(std::move(other));
+            }
+            return *this;
+        }
+        explicit operator bool() const { return started_; }
+
+    private:
+        void release();
+        void move_from(SearchAdmissionGuard&& other) noexcept {
+            serviceManager_ = other.serviceManager_;
+            started_ = other.started_;
+            other.serviceManager_ = nullptr;
+            other.started_ = false;
+        }
+
+        ServiceManager* serviceManager_{nullptr};
+        bool started_{false};
+    };
+
     RequestDispatcher(IDaemonLifecycle* lifecycle, ServiceManager* serviceManager,
                       StateComponent* state);
     // Overload with metrics component for centralized status rendering
@@ -191,6 +255,13 @@ private:
     boost::asio::awaitable<Response> handleRepairRequest(const RepairRequest& req);
 
     // Legacy helper declarations removed after dispatcher split
+
+    boost::asio::awaitable<AdmissionGuard>
+    acquireBoundedAdmission(std::atomic<uint64_t>& activeCounter,
+                            std::atomic<uint64_t>& rejectedCounter, uint32_t limit,
+                            uint32_t maxWaitMs, std::atomic<uint64_t>* testOverride = nullptr);
+    SearchAdmissionGuard acquireSearchAdmission(uint32_t concurrencyCap);
+    void recordRejected(std::atomic<uint64_t>& counter);
 
     IDaemonLifecycle* lifecycle_;
     ServiceManager* serviceManager_;

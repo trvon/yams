@@ -9,6 +9,7 @@
 #include <fmt/ranges.h>
 #include <yams/app/services/services.hpp>
 #include <yams/core/uuid.h>
+#include <yams/daemon/components/admission_control.h>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -24,30 +25,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
     try {
         const auto requestStart = std::chrono::steady_clock::now();
         const std::string traceId = yams::core::generateUUID();
-        if (serviceManager_) {
-            serviceManager_->onSearchRequestQueued();
-        }
-
-        struct SearchRequestLifecycle {
-            ServiceManager* sm{nullptr};
-            bool started{false};
-            ~SearchRequestLifecycle() {
-                if (!sm)
-                    return;
-                if (started) {
-                    sm->onSearchRequestFinished();
-                } else {
-                    sm->onSearchRequestRejected();
-                }
-            }
-        } lifecycle{serviceManager_, false};
-
         const uint32_t searchCap = ResourceGovernor::instance().maxSearchConcurrency();
-        if (serviceManager_ && !serviceManager_->tryStartSearchRequest(searchCap)) {
-            co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                    "Search concurrency limit reached; retry shortly"};
+        auto searchGuard = acquireSearchAdmission(searchCap);
+        if (serviceManager_ != nullptr && !searchGuard) {
+            co_return admission::makeBusyError("Search concurrency limit reached",
+                                               admission::captureSnapshot(serviceManager_, state_));
         }
-        lifecycle.started = true;
 
         spdlog::debug("[RequestDispatcher] Received SearchRequest with {} pathPatterns: {}",
                       req.pathPatterns.size(), req.pathPatterns.size());
@@ -110,7 +93,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
                                    std::chrono::steady_clock::now() - serviceStart)
                                    .count();
         if (!result) {
-            co_return ErrorResponse{result.error().code, result.error().message};
+            co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                result.error().message);
         }
         const auto& serviceResp = result.value();
 
@@ -226,8 +210,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         response.searchStats["phase_dispatch_total_us"] = std::to_string(totalUs);
         co_return response;
     } catch (const std::exception& e) {
-        co_return ErrorResponse{ErrorCode::InternalError,
-                                std::string("Search failed: ") + e.what()};
+        co_return yams::daemon::dispatch::makeErrorResponse(
+            ErrorCode::InternalError, std::string("Search failed: ") + e.what());
     }
 }
 

@@ -156,14 +156,22 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.maxResults = options.config.maxResults;
             cfg.enableParallelExecution = options.config.enableParallelExecution;
             cfg.includeDebugInfo = options.config.includeDebugInfo;
-            spdlog::info(
-                "SearchEngine auto-tuned to state={} (zoom={}, k={}, text={:.2f}, vector={:.2f}, "
-                "fusion={}, semantic_rescue={}@{:.4f})",
-                tuningStateToString(runtimeTuner->currentState()),
-                SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
-                runtimeTuner->getRrfK(), cfg.textWeight, cfg.vectorWeight,
-                SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
-                cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore);
+            {
+                const auto& tp = runtimeTuner->getParams();
+                spdlog::info("SearchEngine auto-tuned to state={} (zoom={}, k={}, "
+                             "text={:.2f}[{}], vector={:.2f}[{}], kg={:.2f}[{}], "
+                             "fusion={}, semantic_rescue={}[{}]@{:.4f})",
+                             tuningStateToString(runtimeTuner->currentState()),
+                             SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
+                             runtimeTuner->getRrfK(), tp.weights.text.value,
+                             tuningLayerToString(tp.weights.text.source), tp.weights.vector.value,
+                             tuningLayerToString(tp.weights.vector.source), tp.weights.kg.value,
+                             tuningLayerToString(tp.weights.kg.source),
+                             SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                             tp.semanticRescueSlots.value,
+                             tuningLayerToString(tp.semanticRescueSlots.source),
+                             cfg.semanticRescueMinVectorScore);
+            }
         } else {
             spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
                          statsResult.error().message);
@@ -171,11 +179,18 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     }
 
     // Allow environment variable overrides for individual weights (for benchmarking)
-    // These take precedence over tuning state weights
+    // These take precedence over tuning state weights and are pinned so that
+    // downstream layers (zoom, intent, community) cannot override them.
+    bool envTextPinned = false;
+    bool envVectorPinned = false;
+    bool envKgPinned = false;
+    bool envSimilarityThresholdPinned = false;
     if (allowEnvOverrides) {
         if (auto textWeight = getEnvFloat("YAMS_SEARCH_TEXT_WEIGHT")) {
             cfg.textWeight = *textWeight;
-            spdlog::info("SearchEngine textWeight overridden to {:.2f} via env", cfg.textWeight);
+            envTextPinned = true;
+            spdlog::info("SearchEngine textWeight overridden to {:.2f} via env (pinned)",
+                         cfg.textWeight);
         }
         if (auto graphTextWeight = getEnvFloat("YAMS_SEARCH_GRAPH_TEXT_WEIGHT")) {
             cfg.graphTextWeight = *graphTextWeight;
@@ -184,17 +199,21 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         }
         if (auto vectorWeight = getEnvFloat("YAMS_SEARCH_VECTOR_WEIGHT")) {
             cfg.vectorWeight = *vectorWeight;
-            spdlog::info("SearchEngine vectorWeight overridden to {:.2f} via env",
+            envVectorPinned = true;
+            spdlog::info("SearchEngine vectorWeight overridden to {:.2f} via env (pinned)",
                          cfg.vectorWeight);
         }
         if (auto similarityThreshold = getEnvFloat("YAMS_SEARCH_SIMILARITY_THRESHOLD")) {
             cfg.similarityThreshold = std::clamp(*similarityThreshold, 0.0f, 1.0f);
-            spdlog::info("SearchEngine similarityThreshold overridden to {:.3f} via env",
+            envSimilarityThresholdPinned = true;
+            spdlog::info("SearchEngine similarityThreshold overridden to {:.3f} via env (pinned)",
                          cfg.similarityThreshold);
         }
         if (auto kgWeight = getEnvFloat("YAMS_SEARCH_KG_WEIGHT")) {
             cfg.kgWeight = *kgWeight;
-            spdlog::info("SearchEngine kgWeight overridden to {:.2f} via env", cfg.kgWeight);
+            envKgPinned = true;
+            spdlog::info("SearchEngine kgWeight overridden to {:.2f} via env (pinned)",
+                         cfg.kgWeight);
         }
         if (auto graphVectorWeight = getEnvFloat("YAMS_SEARCH_GRAPH_VECTOR_WEIGHT")) {
             cfg.graphVectorWeight = *graphVectorWeight;
@@ -865,6 +884,10 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
 
     if (runtimeTuner) {
         runtimeTuner->seedRuntimeConfig(cfg);
+        if (envTextPinned || envVectorPinned || envKgPinned || envSimilarityThresholdPinned) {
+            runtimeTuner->pinEnvOverrides(envTextPinned, envVectorPinned, envKgPinned,
+                                          envSimilarityThresholdPinned);
+        }
     }
 
     // Create the SearchEngine using the factory function

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <filesystem>
 #include <system_error>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -18,8 +19,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     // Get metadata repository for querying candidates
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Metadata repository unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
     }
 
     // Build config from request

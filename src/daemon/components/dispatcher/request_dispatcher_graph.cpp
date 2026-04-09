@@ -76,8 +76,8 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
 
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Metadata repository unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
     }
 
     // Access KnowledgeGraphStore
@@ -120,16 +120,16 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
     if (originNodeId < 0 && !req.nodeKey.empty()) {
         auto nodeResult = kgStore->getNodeByKey(req.nodeKey);
         if (!nodeResult || !nodeResult.value()) {
-            co_return ErrorResponse{.code = ErrorCode::NotFound,
-                                    .message = "Node not found: " + req.nodeKey};
+            co_return dispatch::makeErrorResponse(ErrorCode::NotFound,
+                                                  "Node not found: " + req.nodeKey);
         }
         originNodeId = nodeResult.value()->id;
     }
 
     auto graphService = makeGraphQueryService(kgStore, metaRepo);
     if (!graphService) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Failed to create graph query service"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Failed to create graph query service");
     }
 
     app::services::GraphQueryRequest svcReq;
@@ -151,7 +151,7 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
 
     auto result = graphService->query(svcReq);
     if (!result) {
-        co_return ErrorResponse{.code = result.error().code, .message = result.error().message};
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
     }
 
     const auto& svcResp = result.value();
@@ -178,23 +178,22 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
                   req.offset);
 
     if (req.nodeType.empty()) {
-        co_return ErrorResponse{.code = ErrorCode::InvalidArgument,
-                                .message = "nodeType is required for listByType mode"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InvalidArgument,
+                                              "nodeType is required for listByType mode");
     }
 
     // Query nodes by type with pagination
     auto nodesResult = kgStore->findNodesByType(req.nodeType, req.limit, req.offset);
     if (!nodesResult) {
-        co_return ErrorResponse{.code = nodesResult.error().code,
-                                .message = nodesResult.error().message};
+        co_return dispatch::makeErrorResponse(nodesResult.error().code,
+                                              nodesResult.error().message);
     }
 
     GraphQueryResponse resp;
     resp.kgAvailable = true;
     auto totalCount = kgStore->countNodesByType(req.nodeType);
     if (!totalCount) {
-        co_return ErrorResponse{.code = totalCount.error().code,
-                                .message = totalCount.error().message};
+        co_return dispatch::makeErrorResponse(totalCount.error().code, totalCount.error().message);
     }
     resp.totalNodesFound = static_cast<uint64_t>(totalCount.value());
     resp.truncated = (nodesResult.value().size() >= req.limit);
@@ -224,8 +223,8 @@ RequestDispatcher::handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
     // Use the optimized single-query method
     auto nodesResult = kgStore->findIsolatedNodes(nodeType, relation, req.limit);
     if (!nodesResult) {
-        co_return ErrorResponse{.code = nodesResult.error().code,
-                                .message = nodesResult.error().message};
+        co_return dispatch::makeErrorResponse(nodesResult.error().code,
+                                              nodesResult.error().message);
     }
 
     GraphQueryResponse resp;
@@ -254,8 +253,8 @@ RequestDispatcher::handleGraphQueryListTypes(const GraphQueryRequest& req,
 
     auto countsResult = kgStore->getNodeTypeCounts();
     if (!countsResult) {
-        co_return ErrorResponse{.code = countsResult.error().code,
-                                .message = countsResult.error().message};
+        co_return dispatch::makeErrorResponse(countsResult.error().code,
+                                              countsResult.error().message);
     }
 
     GraphQueryResponse resp;
@@ -290,8 +289,8 @@ RequestDispatcher::handleGraphQueryListRelations(const GraphQueryRequest& req,
 
     auto countsResult = kgStore->getRelationTypeCounts();
     if (!countsResult) {
-        co_return ErrorResponse{.code = countsResult.error().code,
-                                .message = countsResult.error().message};
+        co_return dispatch::makeErrorResponse(countsResult.error().code,
+                                              countsResult.error().message);
     }
 
     GraphQueryResponse resp;
@@ -326,14 +325,14 @@ RequestDispatcher::handleGraphQuerySearchMode(const GraphQueryRequest& req,
                   req.limit, req.offset);
 
     if (req.searchPattern.empty()) {
-        co_return ErrorResponse{.code = ErrorCode::InvalidArgument,
-                                .message = "searchPattern is required for search mode"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InvalidArgument,
+                                              "searchPattern is required for search mode");
     }
 
     auto nodesResult = kgStore->searchNodesByLabel(req.searchPattern, req.limit, req.offset);
     if (!nodesResult) {
-        co_return ErrorResponse{.code = nodesResult.error().code,
-                                .message = nodesResult.error().message};
+        co_return dispatch::makeErrorResponse(nodesResult.error().code,
+                                              nodesResult.error().message);
     }
 
     GraphQueryResponse resp;
@@ -376,13 +375,13 @@ RequestDispatcher::handleGraphPathHistoryRequest(const GraphPathHistoryRequest& 
 
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Metadata repository unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
     }
 
     if (req.path.empty()) {
-        co_return ErrorResponse{.code = ErrorCode::InvalidArgument,
-                                .message = "Path is required for path history query"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InvalidArgument,
+                                              "Path is required for path history query");
     }
 
     // Access KnowledgeGraphStore
@@ -398,8 +397,8 @@ RequestDispatcher::handleGraphPathHistoryRequest(const GraphPathHistoryRequest& 
     // Query path history using the KG store's tree diff functionality
     auto historyResult = kgStore->fetchPathHistory(req.path, req.limit);
     if (!historyResult) {
-        co_return ErrorResponse{.code = historyResult.error().code,
-                                .message = historyResult.error().message};
+        co_return dispatch::makeErrorResponse(historyResult.error().code,
+                                              historyResult.error().message);
     }
 
     // Build response
@@ -431,14 +430,14 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
 
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Metadata repository unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
     }
 
     auto kgStore = metaRepo->getKnowledgeGraphStore();
     if (!kgStore) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Knowledge graph store unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Knowledge graph store unavailable");
     }
 
     KgIngestResponse resp;

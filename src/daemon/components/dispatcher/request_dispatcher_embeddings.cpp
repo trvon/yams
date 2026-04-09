@@ -2,6 +2,7 @@
 #include <semaphore>
 #include <sstream>
 #include <utility>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/daemon_lifecycle.h>
@@ -65,7 +66,7 @@ static inline std::string sanitizeUtf8(const std::string& s) {
     return out;
 }
 static inline ErrorResponse makeErrorResponse(ErrorCode code, const std::string& msg) {
-    return ErrorResponse{code, sanitizeUtf8(msg)};
+    return yams::daemon::dispatch::makeErrorResponse(code, sanitizeUtf8(msg));
 }
 
 boost::asio::awaitable<Response>
@@ -176,14 +177,15 @@ RequestDispatcher::handleBatchEmbeddingRequest(const BatchEmbeddingRequest& req)
 boost::asio::awaitable<Response>
 RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req) {
     if (!serviceManager_) {
-        co_return ErrorResponse{ErrorCode::NotInitialized, "ServiceManager not available"};
+        co_return dispatch::makeErrorResponse(ErrorCode::NotInitialized,
+                                              "ServiceManager not available");
     }
     try {
         auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
         if (es.state == EmbeddingProviderState::Degraded ||
             es.state == EmbeddingProviderState::Failed) {
-            co_return ErrorResponse{ErrorCode::InvalidState,
-                                    "Embedding generation disabled: provider degraded"};
+            co_return dispatch::makeErrorResponse(
+                ErrorCode::InvalidState, "Embedding generation disabled: provider degraded");
         }
     } catch (...) {
     }
@@ -259,16 +261,16 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
         signal(false);
     }
     if (!result) {
-        co_return ErrorResponse{ErrorCode::InternalError, "Embedding repair failed"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError, "Embedding repair failed");
     }
     if (!result->has_value()) {
-        co_return ErrorResponse{result->error().code, result->error().message};
+        co_return dispatch::makeErrorResponse(result->error().code, result->error().message);
     }
     const auto& stats = result->value();
     if (!req.documentHashes.empty() && stats.documentsProcessed == 0) {
-        co_return ErrorResponse{ErrorCode::NotFound,
-                                "No requested documents were found in the daemon metadata "
-                                "repository"};
+        co_return dispatch::makeErrorResponse(
+            ErrorCode::NotFound,
+            "No requested documents were found in the daemon metadata repository");
     }
     EmbedDocumentsResponse resp;
     resp.requested = stats.documentsProcessed;

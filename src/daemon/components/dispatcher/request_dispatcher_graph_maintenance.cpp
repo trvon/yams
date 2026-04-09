@@ -2,6 +2,7 @@
 // Copyright (c) 2025 YAMS Contributors
 
 #include <spdlog/spdlog.h>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -14,13 +15,13 @@ RequestDispatcher::handleGraphRepairRequest(const GraphRepairRequest& req) {
 
     auto graphComponent = serviceManager_ ? serviceManager_->getGraphComponent() : nullptr;
     if (!graphComponent) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "GraphComponent not available"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "GraphComponent not available");
     }
 
     auto result = graphComponent->repairGraph(req.dryRun);
     if (!result) {
-        co_return ErrorResponse{.code = result.error().code, .message = result.error().message};
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
     }
 
     const auto& stats = result.value();
@@ -43,13 +44,13 @@ RequestDispatcher::handleGraphValidateRequest(const GraphValidateRequest& /*req*
 
     auto graphComponent = serviceManager_ ? serviceManager_->getGraphComponent() : nullptr;
     if (!graphComponent) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "GraphComponent not available"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "GraphComponent not available");
     }
 
     auto result = graphComponent->validateGraph();
     if (!result) {
-        co_return ErrorResponse{.code = result.error().code, .message = result.error().message};
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
     }
 
     const auto& report = result.value();

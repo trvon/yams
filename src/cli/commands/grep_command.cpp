@@ -773,31 +773,30 @@ public:
                     return Result<void>();
                 };
 
-                yams::daemon::ClientConfig daemonCfg;
-                if (cli_ && cli_->hasExplicitDataDir()) {
-                    daemonCfg.dataDir = cli_->getDataPath();
+                const auto explicitDataDir = (cli_ && cli_->hasExplicitDataDir())
+                                                 ? cli_->getDataPath()
+                                                 : std::filesystem::path{};
+                yams::cli::CliDaemonRequestOptions daemonOpts;
+                daemonOpts.accessPolicy = yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
+                daemonOpts.enableChunkedResponses = enableStreaming_;
+                daemonOpts.requestTimeout = std::chrono::milliseconds(30000);
+                daemonOpts.headerTimeout = std::chrono::milliseconds(30000);
+                daemonOpts.bodyTimeout = std::chrono::milliseconds(120000);
+
+                auto preparedRes =
+                    yams::cli::prepare_cli_retrieval(getExecutor(), explicitDataDir, daemonOpts);
+                if (!preparedRes) {
+                    return preparedRes.error();
                 }
-                auto daemonPlanRes = yams::cli::prepare_cli_daemon_client_plan(
-                    daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
-                if (!daemonPlanRes) {
-                    return daemonPlanRes.error();
-                }
-                auto daemonPlan = std::move(daemonPlanRes.value());
-                if (daemonPlan.usedInProcessFallback) {
+                auto prepared = std::move(preparedRes.value());
+                if (prepared.plan.usedInProcessFallback) {
                     spdlog::info(
                         "grep: socket transport unavailable; using in-process transport: {}",
-                        daemonPlan.fallbackReason);
+                        prepared.plan.fallbackReason);
                 }
 
                 // Use RetrievalService facade with helper-resolved transport plan.
                 yams::app::services::RetrievalService rsvc;
-                yams::app::services::RetrievalOptions ropts;
-                ropts.enableStreaming = enableStreaming_;
-                ropts.headerTimeoutMs = 30000;
-                ropts.bodyTimeoutMs = 120000;
-                ropts.requestTimeoutMs = 30000;
-                yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlan, ropts);
-
                 // Show spinner during search
                 std::shared_ptr<ui::SpinnerRunner> spinner =
                     shouldShowSpinner() ? std::make_shared<ui::SpinnerRunner>() : nullptr;
@@ -810,11 +809,10 @@ public:
                     }
                 };
 
-                auto gres = rsvc.grep(dreq, ropts);
+                auto gres = rsvc.grep(dreq, prepared.options);
                 stopSpinner();
                 if (!gres) {
-                    const bool transportFailure = yams::cli::is_transport_failure(gres.error());
-                    if (transportFailure) {
+                    if (yams::cli::is_transport_failure(gres.error())) {
                         return gres.error();
                     }
                     // Check if it's a regex error and provide helpful hint

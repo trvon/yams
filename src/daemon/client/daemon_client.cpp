@@ -160,6 +160,15 @@ Error makeNotReadyErrorFromStatus(const StatusResponse& status, std::string_view
     return Error{ErrorCode::InvalidState, message};
 }
 
+Error makeErrorFromResponse(const ErrorResponse& response) {
+    std::string message = response.message;
+    if (response.retry.has_value() && response.retry->retryAfterMs > 0 &&
+        message.find("retry in ") == std::string::npos) {
+        message += "; retry in " + std::to_string(response.retry->retryAfterMs) + "ms";
+    }
+    return Error{response.code, std::move(message)};
+}
+
 std::optional<Error> rewriteListTransportError(const Error& err) {
     auto kindOpt = yams::daemon::parseIpcFailureKind(err.message);
     if (!kindOpt) {
@@ -957,7 +966,7 @@ boost::asio::awaitable<Result<SearchResponse>> DaemonClient::unarySearch(const S
         co_return *ok;
     }
     if (auto* er = std::get_if<ErrorResponse>(&payload)) {
-        co_return Error{er->code, er->message};
+        co_return makeErrorFromResponse(*er);
     }
     co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
 }
@@ -980,14 +989,14 @@ boost::asio::awaitable<Result<GetResponse>> DaemonClient::get(const GetRequest& 
             if (auto* res = std::get_if<GetResponse>(&r)) {
                 response_ = *res;
             } else if (auto* err = std::get_if<ErrorResponse>(&r)) {
-                error_ = Error{err->code, err->message};
+                error_ = makeErrorFromResponse(*err);
             }
         }
         bool onChunkReceived(const Response& r, bool /*isLast*/) override {
             if (auto* res = std::get_if<GetResponse>(&r)) {
                 response_.content.append(res->content);
             } else if (auto* err = std::get_if<ErrorResponse>(&r)) {
-                error_ = Error{err->code, err->message};
+                error_ = makeErrorFromResponse(*err);
                 return false;
             }
             return true;
@@ -1047,7 +1056,7 @@ boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status(bool detaile
                 co_return *res;
             }
             if (auto* er = std::get_if<ErrorResponse>(&response.value())) {
-                co_return Error{er->code, er->message};
+                co_return makeErrorFromResponse(*er);
             }
             co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
         }
@@ -1294,7 +1303,7 @@ void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& header
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
         // Store error
-        error_ = Error{errRes->code, errRes->message};
+        error_ = makeErrorFromResponse(*errRes);
     } else if (auto* statusRes = std::get_if<StatusResponse>(&headerResponse)) {
         error_ = makeNotReadyErrorFromStatus(*statusRes, "list");
     }
@@ -1341,7 +1350,7 @@ void DaemonClient::StreamingSearchHandler::onHeaderReceived(const Response& head
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
         // Store error
-        error_ = Error{errRes->code, errRes->message};
+        error_ = makeErrorFromResponse(*errRes);
     }
 }
 
@@ -1377,7 +1386,7 @@ bool DaemonClient::StreamingListHandler::onChunkReceived(const Response& chunkRe
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
         // Store error
-        error_ = Error{errRes->code, errRes->message};
+        error_ = makeErrorFromResponse(*errRes);
         return false; // Stop processing on error
     } else if (auto* statusRes = std::get_if<StatusResponse>(&chunkResponse)) {
         error_ = makeNotReadyErrorFromStatus(*statusRes, "list");
@@ -1414,7 +1423,7 @@ bool DaemonClient::StreamingSearchHandler::onChunkReceived(const Response& chunk
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
         // Store error
-        error_ = Error{errRes->code, errRes->message};
+        error_ = makeErrorFromResponse(*errRes);
         return false; // Stop processing on error
     }
 
@@ -1568,7 +1577,7 @@ void DaemonClient::StreamingGrepHandler::onHeaderReceived(const Response& header
             }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
-        error_ = Error{errRes->code, errRes->message};
+        error_ = makeErrorFromResponse(*errRes);
     }
 }
 
@@ -1624,7 +1633,7 @@ bool DaemonClient::StreamingGrepHandler::onChunkReceived(const Response& chunkRe
             }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
-        error_ = Error{errRes->code, errRes->message};
+        error_ = makeErrorFromResponse(*errRes);
         return false;
     }
     return true;
@@ -1796,7 +1805,7 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
                 return;
             }
             if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
                 return;
             }
             if (auto* st = std::get_if<StatusResponse>(&headerResponse)) {
@@ -1810,7 +1819,7 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
         }
         bool onChunkReceived(const Response& chunkResponse, bool isLastChunk) override {
             if (auto* err = std::get_if<ErrorResponse>(&chunkResponse)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
                 return false;
             }
             if (auto* st = std::get_if<StatusResponse>(&chunkResponse)) {
@@ -1901,7 +1910,7 @@ DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
             if (auto* fin = std::get_if<EmbeddingResponse>(&r))
                 value = *fin;
             if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
+                error = makeErrorFromResponse(*er);
         }
         bool onChunkReceived(const Response& r, bool isLast) override {
             if (auto* ev = std::get_if<EmbeddingEvent>(&r)) {
@@ -1912,7 +1921,7 @@ DaemonClient::generateEmbedding(const GenerateEmbeddingRequest& req) {
                 return true;
             }
             if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
+                error = makeErrorFromResponse(*er);
                 return false;
             }
             if (auto* fin = std::get_if<EmbeddingResponse>(&r)) {
@@ -1957,7 +1966,7 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
                 return;
             }
             if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
                 return;
             }
         }
@@ -1968,7 +1977,7 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
                 return true;
             }
             if (auto* err = std::get_if<ErrorResponse>(&r)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
                 return false;
             }
             if (auto* fin = std::get_if<BatchEmbeddingResponse>(&r)) {
@@ -2099,7 +2108,7 @@ DaemonClient::streamingEmbedDocuments(const EmbedDocumentsRequest& req) {
                 return;
             }
             if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
                 return;
             }
         }
@@ -2127,7 +2136,7 @@ DaemonClient::streamingEmbedDocuments(const EmbedDocumentsRequest& req) {
                 return true;
             }
             if (auto* err = std::get_if<ErrorResponse>(&r)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
                 return false;
             }
             if (auto* fin = std::get_if<EmbedDocumentsResponse>(&r)) {
@@ -2160,7 +2169,7 @@ DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
     struct Handler : public ChunkedResponseHandler {
         void onHeaderReceived(const Response& headerResponse) override {
             if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
             }
         }
         bool onChunkReceived(const Response& r, bool /*isLast*/) override {
@@ -2173,7 +2182,7 @@ DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
                 return true;
             }
             if (auto* err = std::get_if<ErrorResponse>(&r)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
                 return false;
             }
             if (auto* fin = std::get_if<EmbedDocumentsResponse>(&r)) {
@@ -2204,7 +2213,7 @@ DaemonClient::callRepair(const RepairRequest& req,
         explicit Handler(std::function<void(const RepairEvent&)> cb) : onEvent_(std::move(cb)) {}
         void onHeaderReceived(const Response& headerResponse) override {
             if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
             }
         }
         bool onChunkReceived(const Response& r, bool /*isLast*/) override {
@@ -2218,7 +2227,7 @@ DaemonClient::callRepair(const RepairRequest& req,
                 return true;
             }
             if (auto* err = std::get_if<ErrorResponse>(&r)) {
-                error = Error{err->code, err->message};
+                error = makeErrorFromResponse(*err);
                 return false;
             }
             return true;
@@ -2251,7 +2260,7 @@ DaemonClient::loadModel(const LoadModelRequest& req) {
             if (auto* fin = std::get_if<ModelLoadResponse>(&r))
                 value = *fin;
             if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
+                error = makeErrorFromResponse(*er);
         }
         bool onChunkReceived(const Response& r, bool isLast) override {
             if (auto* ev = std::get_if<ModelLoadEvent>(&r)) {
@@ -2265,7 +2274,7 @@ DaemonClient::loadModel(const LoadModelRequest& req) {
                 return true;
             }
             if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
+                error = makeErrorFromResponse(*er);
                 return false;
             }
             if (auto* fin = std::get_if<ModelLoadResponse>(&r)) {

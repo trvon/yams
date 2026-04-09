@@ -31,7 +31,7 @@ RequestDispatcher::handleUseSessionRequest(const UseSessionRequest& req) {
             auto appContext = serviceManager_->getAppContext();
             auto sessionService = app::services::makeSessionService(&appContext);
             if (!sessionService->exists(req.session_name)) {
-                co_return ErrorResponse{ErrorCode::NotFound, "Session not found"};
+                co_return dispatch::makeErrorResponse(ErrorCode::NotFound, "Session not found");
             }
             sessionService->use(req.session_name);
             co_return SuccessResponse{"OK"};
@@ -50,11 +50,12 @@ RequestDispatcher::handleAddPathSelectorRequest(const AddPathSelectorRequest& re
                 if (current) {
                     sessionName = *current;
                 } else {
-                    co_return ErrorResponse{ErrorCode::InvalidState, "No active session"};
+                    co_return dispatch::makeErrorResponse(ErrorCode::InvalidState,
+                                                          "No active session");
                 }
             }
             if (!sessionService->exists(sessionName)) {
-                co_return ErrorResponse{ErrorCode::NotFound, "Session not found"};
+                co_return dispatch::makeErrorResponse(ErrorCode::NotFound, "Session not found");
             }
             std::vector<std::pair<std::string, std::string>> meta;
             for (const auto& kv : req.metadata) {
@@ -77,11 +78,12 @@ RequestDispatcher::handleRemovePathSelectorRequest(const RemovePathSelectorReque
                 if (current) {
                     sessionName = *current;
                 } else {
-                    co_return ErrorResponse{ErrorCode::InvalidState, "No active session"};
+                    co_return dispatch::makeErrorResponse(ErrorCode::InvalidState,
+                                                          "No active session");
                 }
             }
             if (!sessionService->exists(sessionName)) {
-                co_return ErrorResponse{ErrorCode::NotFound, "Session not found"};
+                co_return dispatch::makeErrorResponse(ErrorCode::NotFound, "Session not found");
             }
             sessionService->removePathSelector(req.path);
             co_return SuccessResponse{"OK"};

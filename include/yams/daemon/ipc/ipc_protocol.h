@@ -4818,13 +4818,46 @@ struct SuccessResponse {
 };
 
 struct ErrorResponse {
+    struct RetryInfo {
+        std::uint32_t retryAfterMs{0};
+        std::string reason;
+
+        template <typename Serializer>
+        requires IsSerializer<Serializer>
+        void serialize(Serializer& ser) const {
+            ser << retryAfterMs << reason;
+        }
+
+        template <typename Deserializer>
+        requires IsDeserializer<Deserializer>
+        static Result<RetryInfo> deserialize(Deserializer& deser) {
+            RetryInfo info;
+            auto retryResult = deser.template read<uint32_t>();
+            if (!retryResult)
+                return retryResult.error();
+            info.retryAfterMs = retryResult.value();
+
+            auto reasonResult = deser.readString();
+            if (!reasonResult)
+                return reasonResult.error();
+            info.reason = std::move(reasonResult.value());
+            return info;
+        }
+    };
+
     ErrorCode code;
     std::string message;
+    std::optional<RetryInfo> retry;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << static_cast<uint32_t>(code) << message;
+        const bool hasRetry = retry.has_value();
+        ser << hasRetry;
+        if (hasRetry) {
+            retry->serialize(ser);
+        }
     }
 
     template <typename Deserializer>
@@ -4841,6 +4874,16 @@ struct ErrorResponse {
         if (!messageResult)
             return messageResult.error();
         res.message = std::move(messageResult.value());
+
+        auto hasRetryResult = deser.readBool();
+        if (!hasRetryResult)
+            return hasRetryResult.error();
+        if (hasRetryResult.value()) {
+            auto retryResult = RetryInfo::deserialize(deser);
+            if (!retryResult)
+                return retryResult.error();
+            res.retry = std::move(retryResult.value());
+        }
 
         return res;
     }

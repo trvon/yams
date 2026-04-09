@@ -12,6 +12,7 @@
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 // Repair streaming
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/repair/embedding_repair_util.h>
@@ -671,8 +672,9 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         if (decision.has_value()) {
                             stats_.requests_failed++;
                             completed_requests->fetch_add(1, std::memory_order_release);
-                            (void)co_await send_error_response(
-                                *sock, decision->code, decision->message, message.requestId, &fsm);
+                            (void)co_await send_error_response(*sock, decision->code,
+                                                               decision->message, message.requestId,
+                                                               decision->retry, &fsm);
                             continue;
                         }
                     }
@@ -682,9 +684,9 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                       config_.max_inflight_per_connection);
                         if (cur >= config_.max_inflight_per_connection) {
                             completed_requests->fetch_add(1, std::memory_order_release);
-                            (void)co_await send_error_response(*sock, ErrorCode::ResourceExhausted,
-                                                               "Too many in-flight requests",
-                                                               message.requestId, &fsm);
+                            (void)co_await send_error_response(
+                                *sock, ErrorCode::ResourceExhausted, "Too many in-flight requests",
+                                message.requestId, std::nullopt, &fsm);
                         } else {
                             inflight_.fetch_add(1, std::memory_order_relaxed);
                             // Create per-request context
@@ -968,13 +970,15 @@ boost::asio::awaitable<Response> RequestHandler::process_request(const Request& 
         co_return co_await processor_->process(request);
     }
 
-    co_return ErrorResponse{ErrorCode::NotImplemented, "Request processor not set"};
+    co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotImplemented,
+                                                        "Request processor not set");
 }
 
 boost::asio::awaitable<std::optional<Response>>
 RequestHandler::process_streaming_request(const Request& request) {
     if (!processor_) {
-        co_return ErrorResponse{ErrorCode::NotImplemented, "Request processor not set"};
+        co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotImplemented,
+                                                            "Request processor not set");
     }
 
     // Check if we should use streaming for this request: initialize via processor
@@ -988,8 +992,8 @@ RequestHandler::process_streaming_request(const Request& request) {
         auto r = co_await processor_->process(request);
         co_return std::optional<Response>{std::move(r)};
     }
-    co_return std::optional<Response>{
-        ErrorResponse{ErrorCode::NotImplemented, "Request processor not set"}};
+    co_return std::optional<Response>{yams::daemon::dispatch::makeErrorResponse(
+        ErrorCode::NotImplemented, "Request processor not set")};
 }
 
 bool RequestHandler::can_stream_request(const Request& request) const {
@@ -1624,7 +1628,7 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
             if (enq.error().code == ErrorCode::RateLimited ||
                 enq.error().code == ErrorCode::ResourceExhausted) {
                 co_return co_await write_error_immediate(socket, request_id, enq.error().code,
-                                                         enq.error().message, fsm);
+                                                         enq.error().message, std::nullopt, fsm);
             }
             co_return enq.error();
         }
@@ -1676,7 +1680,7 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
                 enq.error().code == ErrorCode::ResourceExhausted) {
                 // Write error to client, then propagate backpressure error to stop producer
                 auto immediate_res = co_await write_error_immediate(
-                    socket, request_id, enq.error().code, enq.error().message, fsm);
+                    socket, request_id, enq.error().code, enq.error().message, std::nullopt, fsm);
                 if (!immediate_res) {
                     co_return immediate_res.error();
                 }
@@ -1750,10 +1754,9 @@ boost::asio::awaitable<Result<bool>> RequestHandler::enqueue_frame(uint64_t requ
 }
 
 // Immediate, queue-bypass error write used when enqueueing is denied due to caps.
-boost::asio::awaitable<Result<void>>
-RequestHandler::write_error_immediate(boost::asio::local::stream_protocol::socket& socket,
-                                      uint64_t request_id, ErrorCode code,
-                                      const std::string& message, ConnectionFsm* fsm) {
+boost::asio::awaitable<Result<void>> RequestHandler::write_error_immediate(
+    boost::asio::local::stream_protocol::socket& socket, uint64_t request_id, ErrorCode code,
+    const std::string& message, std::optional<ErrorResponse::RetryInfo> retry, ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
     // Early check: if socket is closed, abort immediately (check atomic flag first to avoid TSAN
     // race)
@@ -1777,6 +1780,7 @@ RequestHandler::write_error_immediate(boost::asio::local::stream_protocol::socke
     ErrorResponse err;
     err.code = code;
     err.message = message;
+    err.retry = std::move(retry);
     Message m;
     m.version = PROTOCOL_VERSION;
     m.requestId = request_id;
@@ -2050,7 +2054,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
         ServiceManager* sm = dispatcher_ ? dispatcher_->getServiceManager() : nullptr;
         if (!sm) {
-            ErrorResponse err{ErrorCode::NotInitialized, "ServiceManager not available"};
+            auto err = yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotInitialized,
+                                                                 "ServiceManager not available");
             (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
                                        /*last_chunk=*/true, /*flush=*/true, fsm);
             co_return Result<void>();
@@ -2092,7 +2097,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             auto finishWithError = [state](ErrorCode code, std::string message) {
                 std::lock_guard<std::mutex> lk(state->mu);
                 if (!state->aborted) {
-                    state->final = Response{ErrorResponse{code, std::move(message)}};
+                    state->final = Response{
+                        yams::daemon::dispatch::makeErrorResponse(code, std::move(message))};
                     state->done = true;
                 }
                 state->cv.notify_one();
@@ -2239,7 +2245,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                         state->aborted = true;
                         state->queued.clear();
                     }
-                    ErrorResponse err{ErrorCode::OperationCancelled, "Request canceled"};
+                    auto err = yams::daemon::dispatch::makeErrorResponse(
+                        ErrorCode::OperationCancelled, "Request canceled");
                     (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
                                                /*last_chunk=*/true, /*flush=*/true, fsm);
                     if (producer.joinable())
@@ -2344,8 +2351,9 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         ServiceManager* sm = dispatcher_ ? dispatcher_->getServiceManager() : nullptr;
         auto rs = sm ? sm->getRepairServiceShared() : std::shared_ptr<RepairService>{};
         if (!rs) {
-            ErrorResponse err{ErrorCode::NotInitialized,
-                              "RepairService not available; is the daemon fully initialized?"};
+            auto err = yams::daemon::dispatch::makeErrorResponse(
+                ErrorCode::NotInitialized,
+                "RepairService not available; is the daemon fully initialized?");
             (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
                                        /*last_chunk=*/true, /*flush=*/true, fsm);
             co_return Result<void>();
@@ -2362,59 +2370,60 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
         // Producer runs the synchronous repair logic and pushes events into a queue.
         // We use a separate thread so the streaming loop can write chunks concurrently.
-        std::thread producer(
-            [state, rs, req = std::get<RepairRequest>(request), request_id, requestContext]() {
-                try {
-                    auto progress = [state](const RepairEvent& ev) {
-                        if (!state)
+        std::thread producer([state, rs, req = std::get<RepairRequest>(request), request_id,
+                              requestContext]() {
+            try {
+                auto progress = [state](const RepairEvent& ev) {
+                    if (!state)
+                        return;
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        if (state->aborted)
                             return;
-                        {
-                            std::lock_guard<std::mutex> lk(state->mu);
-                            if (state->aborted)
-                                return;
-                            // Bound memory if the client stops consuming; drop oldest.
-                            if (state->queued.size() >= 4096) {
-                                state->queued.pop_front();
-                            }
-                            state->queued.emplace_back(Response{ev});
+                        // Bound memory if the client stops consuming; drop oldest.
+                        if (state->queued.size() >= 4096) {
+                            state->queued.pop_front();
                         }
-                        state->cv.notify_one();
-                    };
+                        state->queued.emplace_back(Response{ev});
+                    }
+                    state->cv.notify_one();
+                };
 
-                    RepairResponse resp = rs->executeRepair(
-                        req, progress, requestContext ? &requestContext->canceled : nullptr);
-                    {
-                        std::lock_guard<std::mutex> lk(state->mu);
-                        if (!state->aborted) {
-                            state->final = Response{std::move(resp)};
-                            state->done = true;
-                        }
+                RepairResponse resp = rs->executeRepair(
+                    req, progress, requestContext ? &requestContext->canceled : nullptr);
+                {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    if (!state->aborted) {
+                        state->final = Response{std::move(resp)};
+                        state->done = true;
                     }
-                    state->cv.notify_one();
-                } catch (const std::exception& e) {
-                    {
-                        std::lock_guard<std::mutex> lk(state->mu);
-                        if (!state->aborted) {
-                            ErrorResponse err{ErrorCode::InternalError,
-                                              std::string("Repair failed: ") + e.what()};
-                            state->final = Response{std::move(err)};
-                            state->done = true;
-                        }
-                    }
-                    state->cv.notify_one();
-                } catch (...) {
-                    {
-                        std::lock_guard<std::mutex> lk(state->mu);
-                        if (!state->aborted) {
-                            ErrorResponse err{ErrorCode::InternalError, "Repair failed"};
-                            state->final = Response{std::move(err)};
-                            state->done = true;
-                        }
-                    }
-                    state->cv.notify_one();
                 }
-                (void)request_id;
-            });
+                state->cv.notify_one();
+            } catch (const std::exception& e) {
+                {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    if (!state->aborted) {
+                        auto err = yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::InternalError, std::string("Repair failed: ") + e.what());
+                        state->final = Response{std::move(err)};
+                        state->done = true;
+                    }
+                }
+                state->cv.notify_one();
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    if (!state->aborted) {
+                        auto err = yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::InternalError, "Repair failed");
+                        state->final = Response{std::move(err)};
+                        state->done = true;
+                    }
+                }
+                state->cv.notify_one();
+            }
+            (void)request_id;
+        });
 
         // Consumer loop: write queued events, then the final response as last chunk.
         const auto wait_timeout = config_.stream_chunk_timeout;
@@ -2429,7 +2438,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                         state->aborted = true;
                         state->queued.clear();
                     }
-                    ErrorResponse err{ErrorCode::OperationCancelled, "Request canceled"};
+                    auto err = yams::daemon::dispatch::makeErrorResponse(
+                        ErrorCode::OperationCancelled, "Request canceled");
                     (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
                                                /*last_chunk=*/true, /*flush=*/true, fsm);
                     if (producer.joinable())
@@ -2607,8 +2617,9 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             if (chunk_or_timeout.index() == 1) {
                 // next_chunk() exceeded timeout; emit a terminal timeout chunk to unblock client
                 const auto timeout_ms = config_.stream_chunk_timeout.count();
-                ErrorResponse err{ErrorCode::Timeout, "Streaming chunk timed out after " +
-                                                          std::to_string(timeout_ms) + " ms"};
+                auto err = yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::Timeout,
+                    "Streaming chunk timed out after " + std::to_string(timeout_ms) + " ms");
                 chunk_result = RequestProcessor::ResponseChunk{.data = Response{std::move(err)},
                                                                .is_last_chunk = true};
                 last_chunk_received = true;
@@ -2796,9 +2807,13 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
 boost::asio::awaitable<Result<void>>
 RequestHandler::send_error(boost::asio::local::stream_protocol::socket& socket, ErrorCode code,
-                           const std::string& message, uint64_t request_id) {
+                           const std::string& message, uint64_t request_id,
+                           std::optional<ErrorResponse::RetryInfo> retry) {
     using boost::asio::use_awaitable;
-    ErrorResponse error{code, message};
+    ErrorResponse error;
+    error.code = code;
+    error.message = message;
+    error.retry = std::move(retry);
 
     // Create message envelope
     Message error_msg;
@@ -2810,10 +2825,9 @@ RequestHandler::send_error(boost::asio::local::stream_protocol::socket& socket, 
     co_return co_await write_message(socket, error_msg);
 }
 
-boost::asio::awaitable<Result<void>>
-RequestHandler::send_error_response(boost::asio::local::stream_protocol::socket& socket,
-                                    ErrorCode code, const std::string& message, uint64_t request_id,
-                                    ConnectionFsm* fsm) {
+boost::asio::awaitable<Result<void>> RequestHandler::send_error_response(
+    boost::asio::local::stream_protocol::socket& socket, ErrorCode code, const std::string& message,
+    uint64_t request_id, std::optional<ErrorResponse::RetryInfo> retry, ConnectionFsm* fsm) {
     if (fsm) {
         try {
             fsm_helpers::require_can_write(*fsm, "send_error_response");
@@ -2823,7 +2837,7 @@ RequestHandler::send_error_response(boost::asio::local::stream_protocol::socket&
         }
     }
 
-    auto write_result = co_await send_error(socket, code, message, request_id);
+    auto write_result = co_await send_error(socket, code, message, request_id, std::move(retry));
     if (!write_result) {
         co_return write_result.error();
     }

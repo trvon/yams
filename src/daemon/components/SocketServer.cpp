@@ -1,4 +1,6 @@
 #include <yams/common/fs_utils.h>
+#include <yams/daemon/components/admission_control.h>
+#include <yams/daemon/components/AdmissionPolicy.h>
 #include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -17,39 +19,6 @@
 namespace {
 bool stream_trace_enabled() {
     return false;
-}
-
-bool isControlRequest(const yams::daemon::Request& request) {
-    return std::holds_alternative<yams::daemon::StatusRequest>(request) ||
-           std::holds_alternative<yams::daemon::PingRequest>(request) ||
-           std::holds_alternative<yams::daemon::ShutdownRequest>(request);
-}
-
-bool isUxPriorityRequest(const yams::daemon::Request& request) {
-    if (isControlRequest(request)) {
-        return true;
-    }
-    return std::holds_alternative<yams::daemon::SearchRequest>(request) ||
-           std::holds_alternative<yams::daemon::ListRequest>(request) ||
-           std::holds_alternative<yams::daemon::GetRequest>(request) ||
-           std::holds_alternative<yams::daemon::GetInitRequest>(request) ||
-           std::holds_alternative<yams::daemon::GetChunkRequest>(request) ||
-           std::holds_alternative<yams::daemon::GetEndRequest>(request) ||
-           std::holds_alternative<yams::daemon::CatRequest>(request);
-}
-
-bool isWriteAdmissionRequest(const yams::daemon::Request& request) {
-    return std::holds_alternative<yams::daemon::AddDocumentRequest>(request) ||
-           std::holds_alternative<yams::daemon::UpdateDocumentRequest>(request) ||
-           std::holds_alternative<yams::daemon::DeleteRequest>(request) ||
-           std::holds_alternative<yams::daemon::BatchRequest>(request);
-}
-
-size_t emergencySessionLimit(size_t softLimit) {
-    if (softLimit == 0) {
-        return 64;
-    }
-    return std::max<size_t>(32, std::max<size_t>(softLimit * 2, softLimit + 16));
 }
 
 // Diagnostic thread removed - simplified architecture with fixed worker pool
@@ -668,7 +637,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
             if (!isProxy) {
                 const size_t active = activeConnections_.load(std::memory_order_relaxed);
                 const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
-                const size_t hardLimit = emergencySessionLimit(softLimit);
+                const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
                 if (active >= hardLimit) {
                     boost::system::error_code close_ec;
                     socket.close(close_ec);
@@ -909,37 +878,15 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
         handlerConfig.admission_control = [this, isProxy](const Request& request)
             -> std::optional<RequestHandler::Config::AdmissionDecision> {
-            if (isProxy || isControlRequest(request)) {
+            const auto verdict = AdmissionPolicy::evaluateSocketAdmission(
+                activeConnections_.load(std::memory_order_relaxed),
+                slotLimit_.load(std::memory_order_relaxed), request, isProxy);
+            if (verdict != SocketAdmissionVerdict::reject) {
                 return std::nullopt;
             }
 
             const size_t active = activeConnections_.load(std::memory_order_relaxed);
             const size_t limit = slotLimit_.load(std::memory_order_relaxed);
-            if (limit == 0 || active < limit) {
-                return std::nullopt;
-            }
-
-            // Allow a small amount of general overflow beyond the soft socket budget so a fully
-            // pinned set of persistent sessions does not completely starve meaningful work
-            // admission. Then keep separate overflow bands for writes and UX so interactive
-            // reads stay healthy without starving ingest under sustained saturation.
-            const size_t generalHeadroom = std::max<size_t>(1, limit / 6);
-            if (active < (limit + generalHeadroom)) {
-                return std::nullopt;
-            }
-
-            const size_t writeHeadroom = std::max<size_t>(2, limit / 3);
-            if (isWriteAdmissionRequest(request) &&
-                active < (limit + generalHeadroom + writeHeadroom)) {
-                return std::nullopt;
-            }
-
-            // Preserve a smaller amount of extra headroom for interactive UX traffic so heavy
-            // ingest does not force status/list/search clients into reconnect churn.
-            const size_t uxHeadroom = std::max<size_t>(1, limit / 6);
-            if (isUxPriorityRequest(request) && active < (limit + generalHeadroom + uxHeadroom)) {
-                return std::nullopt;
-            }
 
             if (state_) {
                 state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
@@ -947,14 +894,14 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             }
             TuningManager::notifyWakeup();
 
-            const auto retryAfterMs = ResourceGovernor::instance().recommendRetryAfterMs(
-                0, 0, 0, 0, static_cast<std::uint64_t>(active), static_cast<std::uint64_t>(limit),
-                0, 0, 1000);
+            const auto overload = admission::captureSnapshot(
+                dispatcher_ ? dispatcher_->getServiceManager() : nullptr, state_,
+                static_cast<std::uint64_t>(active), static_cast<std::uint64_t>(limit));
+            const auto decisionCore = admission::makeBusyDecision("Server busy", overload);
             RequestHandler::Config::AdmissionDecision decision;
-            decision.code = ErrorCode::ResourceExhausted;
-            decision.message = retryAfterMs > 0
-                                   ? fmt::format("Server busy; retry in {}ms", retryAfterMs)
-                                   : std::string("Server busy; retry shortly");
+            decision.code = decisionCore.code;
+            decision.message = decisionCore.message;
+            decision.retry = ErrorResponse::RetryInfo{decisionCore.retryAfterMs, "overload"};
             return decision;
         };
         // Wire health-check counter so RequestHandler can tag ping/status connections

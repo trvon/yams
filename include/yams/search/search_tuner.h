@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/search/search_engine.h>
+#include <yams/search/tuning_slot.h>
 #include <yams/storage/corpus_stats.h>
 
 #include <nlohmann/json.hpp>
@@ -71,17 +72,16 @@ struct TunedParams {
     // Higher k = smoother ranking across positions
     int rrfK = 60;
 
-    // Component weights (must sum to ~1.0)
-    float textWeight = 0.45f;         // Full-text search (FTS5 + symbol)
-    float vectorWeight = 0.15f;       // Vector similarity (document embeddings)
-    float entityVectorWeight = 0.05f; // Entity/symbol vector similarity (code search)
-    float pathTreeWeight = 0.15f;     // Path tree hierarchical
-    float kgWeight = 0.10f;           // Knowledge graph
-    float tagWeight = 0.10f;          // Tag-based search
-    float metadataWeight = 0.05f;     // Metadata attribute matching
+    // Component weights (must sum to ~1.0).
+    // Stored in WeightSlots for provenance tracking and pinning support.
+    WeightSlots weights = []() {
+        WeightSlots ws;
+        ws.setAll(0.45f, 0.15f, 0.05f, 0.15f, 0.10f, 0.10f, 0.05f, TuningLayer::Default);
+        return ws;
+    }();
 
     // Similarity threshold for vector search
-    float similarityThreshold = 0.65f;
+    TuningSlot<float> similarityThreshold{0.65f};
 
     // Vector boost factor for TEXT_ANCHOR fusion (multiplied with vectorWeight)
     // Higher values = stronger vector influence in text-anchored results
@@ -103,7 +103,7 @@ struct TunedParams {
     float lexicalFloorBoost = 0.0f;
     bool enableLexicalTieBreak = false;
     float lexicalTieBreakEpsilon = 0.0f;
-    size_t semanticRescueSlots = 0;
+    TuningSlot<size_t> semanticRescueSlots{0};
     float semanticRescueMinVectorScore = 0.0f;
     size_t fusionEvidenceRescueSlots = 0;
     float fusionEvidenceRescueMinScore = 0.0f;
@@ -144,14 +144,14 @@ struct TunedParams {
      */
     void applyTo(SearchEngineConfig& config) const {
         config.zoomLevel = zoomLevel;
-        config.textWeight = textWeight;
-        config.vectorWeight = vectorWeight;
-        config.entityVectorWeight = entityVectorWeight;
-        config.pathTreeWeight = pathTreeWeight;
-        config.kgWeight = kgWeight;
-        config.tagWeight = tagWeight;
-        config.metadataWeight = metadataWeight;
-        config.similarityThreshold = similarityThreshold;
+        config.textWeight = weights.text.value;
+        config.vectorWeight = weights.vector.value;
+        config.entityVectorWeight = weights.entityVector.value;
+        config.pathTreeWeight = weights.pathTree.value;
+        config.kgWeight = weights.kg.value;
+        config.tagWeight = weights.tag.value;
+        config.metadataWeight = weights.metadata.value;
+        config.similarityThreshold = similarityThreshold.value;
         config.vectorBoostFactor = vectorBoostFactor;
         config.rrfK = static_cast<float>(rrfK);
         config.fusionStrategy = fusionStrategy;
@@ -173,7 +173,7 @@ struct TunedParams {
         config.lexicalFloorBoost = lexicalFloorBoost;
         config.enableLexicalTieBreak = enableLexicalTieBreak;
         config.lexicalTieBreakEpsilon = lexicalTieBreakEpsilon;
-        config.semanticRescueSlots = semanticRescueSlots;
+        config.semanticRescueSlots = semanticRescueSlots.value;
         config.semanticRescueMinVectorScore = semanticRescueMinVectorScore;
         config.fusionEvidenceRescueSlots = fusionEvidenceRescueSlots;
         config.fusionEvidenceRescueMinScore = fusionEvidenceRescueMinScore;
@@ -196,14 +196,22 @@ struct TunedParams {
         return nlohmann::json{
             {"zoom_level", SearchEngineConfig::navigationZoomLevelToString(zoomLevel)},
             {"rrf_k", rrfK},
-            {"text_weight", textWeight},
-            {"vector_weight", vectorWeight},
-            {"entity_vector_weight", entityVectorWeight},
-            {"path_tree_weight", pathTreeWeight},
-            {"kg_weight", kgWeight},
-            {"tag_weight", tagWeight},
-            {"metadata_weight", metadataWeight},
-            {"similarity_threshold", similarityThreshold},
+            {"text_weight", weights.text.value},
+            {"text_weight_source", tuningLayerToString(weights.text.source)},
+            {"vector_weight", weights.vector.value},
+            {"vector_weight_source", tuningLayerToString(weights.vector.source)},
+            {"entity_vector_weight", weights.entityVector.value},
+            {"entity_vector_weight_source", tuningLayerToString(weights.entityVector.source)},
+            {"path_tree_weight", weights.pathTree.value},
+            {"path_tree_weight_source", tuningLayerToString(weights.pathTree.source)},
+            {"kg_weight", weights.kg.value},
+            {"kg_weight_source", tuningLayerToString(weights.kg.source)},
+            {"tag_weight", weights.tag.value},
+            {"tag_weight_source", tuningLayerToString(weights.tag.source)},
+            {"metadata_weight", weights.metadata.value},
+            {"metadata_weight_source", tuningLayerToString(weights.metadata.source)},
+            {"similarity_threshold", similarityThreshold.value},
+            {"similarity_threshold_source", tuningLayerToString(similarityThreshold.source)},
             {"vector_boost_factor", vectorBoostFactor},
             {"enable_graph_rerank", enableGraphRerank},
             {"graph_rerank_topn", graphRerankTopN},
@@ -223,7 +231,8 @@ struct TunedParams {
             {"lexical_floor_boost", lexicalFloorBoost},
             {"enable_lexical_tie_break", enableLexicalTieBreak},
             {"lexical_tie_break_epsilon", lexicalTieBreakEpsilon},
-            {"semantic_rescue_slots", semanticRescueSlots},
+            {"semantic_rescue_slots", semanticRescueSlots.value},
+            {"semantic_rescue_slots_source", tuningLayerToString(semanticRescueSlots.source)},
             {"semantic_rescue_min_vector_score", semanticRescueMinVectorScore},
             {"fusion_evidence_rescue_slots", fusionEvidenceRescueSlots},
             {"fusion_evidence_rescue_min_score", fusionEvidenceRescueMinScore},
@@ -247,37 +256,22 @@ struct TunedParams {
         case TuningState::SMALL_CODE:
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Street;
             params.rrfK = 20;
-            params.textWeight = 0.45f;
-            params.vectorWeight = 0.15f;
-            params.entityVectorWeight = 0.15f;
-            params.pathTreeWeight = 0.15f;
-            params.kgWeight = 0.05f;
-            params.tagWeight = 0.03f;
-            params.metadataWeight = 0.02f;
+            params.weights.setAll(0.45f, 0.15f, 0.15f, 0.15f, 0.05f, 0.03f, 0.02f,
+                                  TuningLayer::Profile);
             break;
 
         case TuningState::LARGE_CODE:
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Street;
             params.rrfK = 60;
-            params.textWeight = 0.40f;
-            params.vectorWeight = 0.20f;
-            params.entityVectorWeight = 0.15f;
-            params.pathTreeWeight = 0.10f;
-            params.kgWeight = 0.05f;
-            params.tagWeight = 0.05f;
-            params.metadataWeight = 0.05f;
+            params.weights.setAll(0.40f, 0.20f, 0.15f, 0.10f, 0.05f, 0.05f, 0.05f,
+                                  TuningLayer::Profile);
             break;
 
         case TuningState::SMALL_PROSE:
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
             params.rrfK = 25;
-            params.textWeight = 0.50f;
-            params.vectorWeight = 0.40f;
-            params.entityVectorWeight = 0.00f;
-            params.pathTreeWeight = 0.00f;
-            params.kgWeight = 0.00f;
-            params.tagWeight = 0.05f;
-            params.metadataWeight = 0.05f;
+            params.weights.setAll(0.50f, 0.40f, 0.00f, 0.00f, 0.00f, 0.05f, 0.05f,
+                                  TuningLayer::Profile);
             params.lexicalFloorTopN = 12;
             params.lexicalFloorBoost = 0.20f;
             params.enableLexicalTieBreak = true;
@@ -294,13 +288,8 @@ struct TunedParams {
         case TuningState::LARGE_PROSE:
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
             params.rrfK = 60;
-            params.textWeight = 0.40f;
-            params.vectorWeight = 0.45f;
-            params.entityVectorWeight = 0.00f;
-            params.pathTreeWeight = 0.05f;
-            params.kgWeight = 0.00f;
-            params.tagWeight = 0.05f;
-            params.metadataWeight = 0.05f;
+            params.weights.setAll(0.40f, 0.45f, 0.00f, 0.05f, 0.00f, 0.05f, 0.05f,
+                                  TuningLayer::Profile);
             break;
 
         case TuningState::SCIENTIFIC:
@@ -308,18 +297,13 @@ struct TunedParams {
             // For scientific/benchmark corpora: balanced text + vector fusion.
             // WEIGHTED_RECIPROCAL avoids COMB_MNZ's mnzBoost penalty which demotes
             // documents found by only one component.
-            params.rrfK = 12;            // Low k for better top-rank discrimination
-            params.textWeight = 0.60f;   // Text as primary signal
-            params.vectorWeight = 0.35f; // Vector as strong semantic complement
-            params.entityVectorWeight = 0.00f;
-            params.pathTreeWeight = 0.00f;
-            params.kgWeight = 0.00f;
-            params.tagWeight = 0.00f;
-            params.metadataWeight = 0.05f;
+            params.rrfK = 12; // Low k for better top-rank discrimination
+            params.weights.setAll(0.60f, 0.35f, 0.00f, 0.00f, 0.00f, 0.00f, 0.05f,
+                                  TuningLayer::Profile);
             // Lower threshold vs default (0.65) to improve recall for claim-style prose
             // queries where query-document cosine similarity is often in the 0.40-0.54
             // range rather than the >0.55 range seen for code/technical queries.
-            params.similarityThreshold = 0.40f;
+            params.similarityThreshold = TuningSlot<float>(0.40f, TuningLayer::Profile);
             params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
             // Sub-phrase rescoring re-scores already-retrieved docs via AND-clause
             // sub-phrase queries. This is the only mechanism that helps when base FTS5
@@ -329,7 +313,7 @@ struct TunedParams {
             // Rescue high-confidence vector matches that fall below the fusion cutoff.
             // Critical for multi-session conversational data where semantic similarity
             // captures relevance that keyword matching misses.
-            params.semanticRescueSlots = 2;
+            params.semanticRescueSlots = TuningSlot<size_t>(2, TuningLayer::Profile);
             params.semanticRescueMinVectorScore = 0.65f;
             // Widen rerank window to give cross-encoder more candidates to reorder.
             params.rerankTopK = 12;
@@ -343,25 +327,15 @@ struct TunedParams {
         case TuningState::MIXED:
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
             params.rrfK = 45;
-            params.textWeight = 0.40f;
-            params.vectorWeight = 0.25f;
-            params.entityVectorWeight = 0.10f;
-            params.pathTreeWeight = 0.10f;
-            params.kgWeight = 0.05f;
-            params.tagWeight = 0.05f;
-            params.metadataWeight = 0.05f;
+            params.weights.setAll(0.40f, 0.25f, 0.10f, 0.10f, 0.05f, 0.05f, 0.05f,
+                                  TuningLayer::Profile);
             break;
 
         case TuningState::MIXED_PRECISION:
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
             params.rrfK = 45;
-            params.textWeight = 0.40f;
-            params.vectorWeight = 0.25f;
-            params.entityVectorWeight = 0.10f;
-            params.pathTreeWeight = 0.10f;
-            params.kgWeight = 0.05f;
-            params.tagWeight = 0.05f;
-            params.metadataWeight = 0.05f;
+            params.weights.setAll(0.40f, 0.25f, 0.10f, 0.10f, 0.05f, 0.05f, 0.05f,
+                                  TuningLayer::Profile);
             params.vectorOnlyThreshold = 0.94f;
             params.vectorOnlyPenalty = 0.70f;
             params.vectorOnlyNearMissReserve = 2;
@@ -372,7 +346,7 @@ struct TunedParams {
             params.lexicalFloorBoost = 0.20f;
             params.enableLexicalTieBreak = true;
             params.lexicalTieBreakEpsilon = 0.010f;
-            params.semanticRescueSlots = 1;
+            params.semanticRescueSlots = TuningSlot<size_t>(1, TuningLayer::Profile);
             params.semanticRescueMinVectorScore = 0.0f;
             params.fusionEvidenceRescueSlots = 1;
             params.fusionEvidenceRescueMinScore = 0.012f;
@@ -386,13 +360,8 @@ struct TunedParams {
         case TuningState::MINIMAL:
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Street;
             params.rrfK = 15;
-            params.textWeight = 0.55f;
-            params.vectorWeight = 0.30f;
-            params.entityVectorWeight = 0.05f;
-            params.pathTreeWeight = 0.05f;
-            params.kgWeight = 0.00f;
-            params.tagWeight = 0.03f;
-            params.metadataWeight = 0.02f;
+            params.weights.setAll(0.55f, 0.30f, 0.05f, 0.05f, 0.00f, 0.03f, 0.02f,
+                                  TuningLayer::Profile);
             break;
 
         case TuningState::MEDIA:
@@ -400,13 +369,8 @@ struct TunedParams {
             // embeddings are less reliable for images/audio/video.
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
             params.rrfK = 20;
-            params.textWeight = 0.25f;   // filename/title only
-            params.vectorWeight = 0.20f; // embeddings unreliable for binary content
-            params.entityVectorWeight = 0.00f;
-            params.pathTreeWeight = 0.15f; // folder organisation still useful
-            params.kgWeight = 0.25f;       // EXIF, user tags, GLiNER annotations
-            params.tagWeight = 0.10f;
-            params.metadataWeight = 0.05f;
+            params.weights.setAll(0.25f, 0.20f, 0.00f, 0.15f, 0.25f, 0.10f, 0.05f,
+                                  TuningLayer::Profile);
             break;
     }
 
@@ -521,6 +485,16 @@ public:
      * @brief Observe one query worth of runtime telemetry.
      */
     void observe(const RuntimeTelemetry& telemetry);
+
+    /**
+     * @brief Pin weight slots that were overridden via environment variables.
+     *
+     * Call after seedRuntimeConfig(). Pinned slots cannot be modified by
+     * downstream layers (zoom, intent, community, mode), guaranteeing that
+     * env-var overrides reach the query unchanged.
+     */
+    void pinEnvOverrides(bool textPinned, bool vectorPinned, bool kgPinned,
+                         bool similarityThresholdPinned);
 
     /**
      * @brief Export current adaptive runtime state for diagnostics.

@@ -1570,15 +1570,7 @@ public:
     }
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
-        const bool cliOneShot = []() {
-            if (const char* raw = std::getenv("YAMS_CLI_ONE_SHOT"); raw && *raw) {
-                std::string v(raw);
-                std::transform(v.begin(), v.end(), v.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                return v == "1" || v == "true" || v == "yes" || v == "on";
-            }
-            return false;
-        }();
+        const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 
         try {
             // Resolve base query (reuse sync logic for assembling fields)
@@ -1760,45 +1752,19 @@ public:
         // Daemon client config
         yams::daemon::DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds(headerTimeoutMs_),
                                                       std::chrono::milliseconds(bodyTimeoutMs_));
-        yams::daemon::ClientConfig clientConfig;
-        clientConfig.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
-        clientConfig.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
-        clientConfig.requestTimeout = std::chrono::milliseconds(30000);
-        clientConfig.enableChunkedResponses = cliOneShot ? false : enableStreaming_;
-        clientConfig.progressiveOutput = !cliOneShot;
-        clientConfig.maxChunkSize = chunkSize_;
-        clientConfig.singleUseConnections = true;
-        if (!cliOneShot) {
-            clientConfig.executor = getExecutor();
-        } else {
-            clientConfig.socketPath = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
-        }
-        if (cli_) {
-            auto dp = cli_->getDataPath();
-            if (!dp.empty())
-                clientConfig.dataDir = dp;
-        }
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
-            clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
-        if (!leaseRes) {
-            if (yams::cli::is_transport_failure(leaseRes.error())) {
-                co_return leaseRes.error();
-            }
-            spdlog::warn("search: unable to acquire daemon client: {}", leaseRes.error().message);
-            co_return co_await localFallback();
-        }
-        auto leaseHandle = std::move(leaseRes.value());
-        struct LeaseScopeExit {
-            std::shared_ptr<yams::cli::DaemonClientPool::Lease>* handle;
-            ~LeaseScopeExit() {
-                if (handle) {
-                    handle->reset();
-                }
-            }
-        } leaseGuard{&leaseHandle};
-        auto& client = **leaseHandle;
-        client.setStreamingEnabled(clientConfig.enableChunkedResponses);
+        yams::cli::CliDaemonRequestOptions daemonOpts;
+        daemonOpts.accessPolicy = yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
+        daemonOpts.requestTimeout = std::chrono::milliseconds(30000);
+        daemonOpts.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
+        daemonOpts.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
+        daemonOpts.enableChunkedResponses = cliOneShot ? false : enableStreaming_;
+        daemonOpts.progressiveOutput = !cliOneShot;
+        daemonOpts.maxChunkSize = chunkSize_;
+        daemonOpts.singleUseConnections = true;
+        const auto explicitDataDir =
+            (cli_ && !cli_->getDataPath().empty()) ? cli_->getDataPath() : std::filesystem::path{};
+        auto clientConfig =
+            yams::cli::build_cli_daemon_client_config(getExecutor(), explicitDataDir, daemonOpts);
 
         // Request + render
         yams::daemon::SearchRequest dreq;
@@ -1875,12 +1841,10 @@ public:
 
         if (cliOneShot) {
             auto planRes = yams::cli::prepare_cli_daemon_client_plan(
-                clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+                clientConfig, daemonOpts.accessPolicy, daemonOpts.readyTimeout);
             if (!planRes) {
-                if (yams::cli::is_transport_failure(planRes.error())) {
-                    co_return planRes.error();
-                }
-                co_return co_await localFallback();
+                co_return co_await yams::cli::detail::daemon_error_or_local_fallback_async(
+                    planRes.error(), "search", localFallback);
             }
 
             auto plan = std::move(planRes.value());
@@ -1891,13 +1855,29 @@ public:
                 directClient.disconnect();
             }
             if (!directRes) {
-                if (yams::cli::is_transport_failure(directRes.error())) {
-                    co_return directRes.error();
-                }
-                co_return co_await localFallback();
+                co_return co_await yams::cli::detail::daemon_error_or_local_fallback_async(
+                    directRes.error(), "search", localFallback);
             }
             co_return render(directRes.value());
         }
+
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            clientConfig, daemonOpts.accessPolicy);
+        if (!leaseRes) {
+            co_return co_await yams::cli::detail::daemon_error_or_local_fallback_async(
+                leaseRes.error(), "search", localFallback);
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        struct LeaseScopeExit {
+            std::shared_ptr<yams::cli::DaemonClientPool::Lease>* handle;
+            ~LeaseScopeExit() {
+                if (handle) {
+                    handle->reset();
+                }
+            }
+        } leaseGuard{&leaseHandle};
+        auto& client = **leaseHandle;
+        client.setStreamingEnabled(clientConfig.enableChunkedResponses);
 
         auto unaryCallWithFreshLease =
             [&, dreq,

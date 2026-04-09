@@ -77,6 +77,13 @@ struct MetricsSnapshot {
     double searchCacheHitRate{0.0};
     std::uint64_t searchAvgLatencyUs{0};
     std::uint32_t searchConcurrencyLimit{0};
+    std::uint64_t searchRejected{0};
+    std::uint64_t listActive{0};
+    std::uint64_t listRejected{0};
+    std::uint64_t grepActive{0};
+    std::uint64_t grepRejected{0};
+    std::uint64_t addDeferred{0};
+    std::uint64_t addRejected{0};
 
     // Worker pool
     std::size_t workerThreads{0};

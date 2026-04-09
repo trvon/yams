@@ -9,6 +9,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compression/compression_monitor.h>
+#include <yams/daemon/components/admission_control.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -1050,20 +1051,11 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         muxQueuedBytesLocal = msnap.queuedBytes;
     } catch (...) {
     }
-    // Provide a best-effort retryAfter hint for clients when post-ingest queue is saturated.
+    // Shared overload snapshot for retry-after and per-command admission metrics.
     try {
+        out.retryAfterMs =
+            admission::computeRetryAfterMs(admission::captureSnapshot(services_, state_));
         if (services_) {
-            if (auto pq = services_->getPostIngestQueue()) {
-                auto queued = pq->size();
-                auto cap = pq->capacity();
-                if (cap > 0 && queued >= cap) {
-                    // Suggest a small backoff based on tuning control interval
-                    auto cfg = services_->getTuningConfig();
-                    out.retryAfterMs = std::max<uint32_t>(50, cfg.controlIntervalMs / 4);
-                } else {
-                    out.retryAfterMs = 0;
-                }
-            }
             auto searchLoad = services_->getSearchLoadMetrics();
             out.searchActive = searchLoad.active;
             out.searchQueued = searchLoad.queued;
@@ -1071,6 +1063,16 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.searchCacheHitRate = searchLoad.cacheHitRate;
             out.searchAvgLatencyUs = searchLoad.avgLatencyUs;
             out.searchConcurrencyLimit = searchLoad.concurrencyLimit;
+        }
+        if (state_) {
+            out.listActive = state_->stats.listRequestsActive.load(std::memory_order_relaxed);
+            out.listRejected = state_->stats.listRequestsRejected.load(std::memory_order_relaxed);
+            out.grepActive = state_->stats.grepRequestsActive.load(std::memory_order_relaxed);
+            out.grepRejected = state_->stats.grepRequestsRejected.load(std::memory_order_relaxed);
+            out.searchRejected =
+                state_->stats.searchRequestsRejected.load(std::memory_order_relaxed);
+            out.addDeferred = state_->stats.addRequestsDeferred.load(std::memory_order_relaxed);
+            out.addRejected = state_->stats.addRequestsRejected.load(std::memory_order_relaxed);
         }
     } catch (...) {
     }
@@ -1476,14 +1478,17 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                         } else {
                             const auto& p = tuner.getParams();
                             newParams["rrf_k"] = static_cast<double>(p.rrfK);
-                            newParams["text_weight"] = static_cast<double>(p.textWeight);
-                            newParams["vector_weight"] = static_cast<double>(p.vectorWeight);
+                            newParams["text_weight"] = static_cast<double>(p.weights.text.value);
+                            newParams["vector_weight"] =
+                                static_cast<double>(p.weights.vector.value);
                             newParams["entity_vector_weight"] =
-                                static_cast<double>(p.entityVectorWeight);
-                            newParams["path_tree_weight"] = static_cast<double>(p.pathTreeWeight);
-                            newParams["kg_weight"] = static_cast<double>(p.kgWeight);
-                            newParams["tag_weight"] = static_cast<double>(p.tagWeight);
-                            newParams["metadata_weight"] = static_cast<double>(p.metadataWeight);
+                                static_cast<double>(p.weights.entityVector.value);
+                            newParams["path_tree_weight"] =
+                                static_cast<double>(p.weights.pathTree.value);
+                            newParams["kg_weight"] = static_cast<double>(p.weights.kg.value);
+                            newParams["tag_weight"] = static_cast<double>(p.weights.tag.value);
+                            newParams["metadata_weight"] =
+                                static_cast<double>(p.weights.metadata.value);
                             newParams["similarity_threshold"] =
                                 static_cast<double>(p.similarityThreshold);
                             newParams["vector_boost_factor"] =
@@ -1560,45 +1565,6 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             }
         }
     } catch (...) {
-    }
-
-    // Backpressure threshold parsing and retry hint
-    try {
-        uint64_t maxWorkerQueue =
-            services_ ? TuneAdvisor::maxWorkerQueue(services_->getWorkerThreads()) : 0;
-        uint64_t maxMuxBytes = TuneAdvisor::maxMuxBytes();
-        uint64_t maxActiveConn = TuneAdvisor::maxActiveConn();
-        // Active conn default 0 = unlimited; we only compute hint, not gating here
-
-        // Current load
-        uint64_t queued = services_ ? services_->getWorkerQueueDepth() : 0;
-        uint64_t activeConn = state_ ? state_->stats.activeConnections.load() : 0;
-
-        bool bp_worker = (maxWorkerQueue > 0 && queued > maxWorkerQueue);
-        bool bp_mux = (maxMuxBytes > 0 && muxQueuedBytesLocal > static_cast<int64_t>(maxMuxBytes));
-        bool bp_conn = (maxActiveConn > 0 && activeConn > maxActiveConn);
-
-        if (bp_worker || bp_mux || bp_conn) {
-            // Simple retry suggestion: proportional to overload
-            uint32_t base = 100; // 100ms base
-            uint32_t extra = 0;
-            if (bp_worker) {
-                extra += static_cast<uint32_t>(std::min<uint64_t>(queued - maxWorkerQueue, 1000));
-            }
-            if (bp_mux) {
-                // scale by MiB over budget
-                uint64_t over = static_cast<uint64_t>(muxQueuedBytesLocal) - maxMuxBytes;
-                extra += static_cast<uint32_t>(std::min<uint64_t>(over / (256ULL * 1024), 4000));
-            }
-            if (bp_conn) {
-                extra += 200; // flat 200ms if over conn cap
-            }
-            out.retryAfterMs = base + extra;
-        } else {
-            out.retryAfterMs = 0;
-        }
-    } catch (...) {
-        out.retryAfterMs = 0;
     }
 
     // Exclusive write with unique_lock - blocks readers momentarily, then they continue

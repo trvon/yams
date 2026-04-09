@@ -78,6 +78,7 @@ TEST_CASE("RequestHandler: admission rejection keeps persistent session reusable
             return RequestHandler::Config::AdmissionDecision{
                 .code = yams::ErrorCode::ResourceExhausted,
                 .message = "busy",
+                .retry = ErrorResponse::RetryInfo{125, "overload"},
             };
         }
         return std::nullopt;
@@ -120,6 +121,9 @@ TEST_CASE("RequestHandler: admission rejection keeps persistent session reusable
     REQUIRE(rejected_error != nullptr);
     REQUIRE(rejected_error->code == yams::ErrorCode::ResourceExhausted);
     REQUIRE(rejected_error->message == "busy");
+    REQUIRE(rejected_error->retry.has_value());
+    CHECK(rejected_error->retry->retryAfterMs == 125);
+    CHECK(rejected_error->retry->reason == "overload");
 
     Message accepted_request;
     accepted_request.version = 1;

@@ -1,6 +1,7 @@
 /// @file request_dispatcher_repair.cpp
 /// @brief RequestDispatcher handler for RepairRequest — delegates to RepairService.
 
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -12,13 +13,14 @@ namespace yams::daemon {
 
 boost::asio::awaitable<Response> RequestDispatcher::handleRepairRequest(const RepairRequest& req) {
     if (!serviceManager_) {
-        co_return ErrorResponse{ErrorCode::NotInitialized, "ServiceManager not available"};
+        co_return dispatch::makeErrorResponse(ErrorCode::NotInitialized,
+                                              "ServiceManager not available");
     }
 
     auto repairService = serviceManager_->getRepairServiceShared();
     if (!repairService) {
-        co_return ErrorResponse{ErrorCode::NotInitialized,
-                                "RepairService not running; is auto-repair enabled?"};
+        co_return dispatch::makeErrorResponse(ErrorCode::NotInitialized,
+                                              "RepairService not running; is auto-repair enabled?");
     }
 
     auto signal = getWorkerJobSignal();

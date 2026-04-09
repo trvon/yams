@@ -230,6 +230,34 @@ TEST_CASE("MessageFramer: CRC32 validation", "[daemon][protocol][framing][valida
     REQUIRE(parsedResult.error().code == ErrorCode::InvalidData);
 }
 
+TEST_CASE("ErrorResponse retry info round-trips", "[daemon][protocol][error]") {
+    ErrorResponse original;
+    original.code = ErrorCode::ResourceExhausted;
+    original.message = "server busy";
+    original.retry = ErrorResponse::RetryInfo{250, "overload"};
+
+    Message msg;
+    msg.version = PROTOCOL_VERSION;
+    msg.requestId = 77;
+    msg.payload = Response{original};
+
+    MessageFramer framer;
+    auto framed = framer.frame_message(msg);
+    REQUIRE(framed);
+
+    auto parsed = framer.parse_frame(framed.value());
+    REQUIRE(parsed);
+    REQUIRE(std::holds_alternative<Response>(parsed.value().payload));
+    const auto& response = std::get<Response>(parsed.value().payload);
+    REQUIRE(std::holds_alternative<ErrorResponse>(response));
+    const auto& error = std::get<ErrorResponse>(response);
+    REQUIRE(error.code == ErrorCode::ResourceExhausted);
+    REQUIRE(error.message == "server busy");
+    REQUIRE(error.retry.has_value());
+    CHECK(error.retry->retryAfterMs == 250);
+    CHECK(error.retry->reason == "overload");
+}
+
 TEST_CASE("MessageFramer: Large message handling", "[daemon][protocol][framing][size]") {
     auto framer = std::make_unique<MessageFramer>();
 

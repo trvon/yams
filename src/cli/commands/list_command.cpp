@@ -187,16 +187,7 @@ public:
 
     Result<void> execute() override {
         try {
-            const bool cliOneShot = []() {
-                if (const char* raw = std::getenv("YAMS_CLI_ONE_SHOT"); raw && *raw) {
-                    std::string v(raw);
-                    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
-                        return static_cast<char>(std::tolower(c));
-                    });
-                    return v == "1" || v == "true" || v == "yes" || v == "on";
-                }
-                return false;
-            }();
+            const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 
             if (jsonFlag_)
                 format_ = "json";
@@ -422,44 +413,35 @@ public:
 
             // Use RetrievalService with helper-resolved daemon transport plan.
             {
-                yams::daemon::ClientConfig daemonCfg;
-                if (!cliOneShot) {
-                    daemonCfg.executor = getExecutor();
-                } else {
-                    daemonCfg.socketPath =
-                        yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
-                }
-                if (cli_->hasExplicitDataDir()) {
-                    daemonCfg.dataDir = cli_->getDataPath();
-                }
+                const auto explicitDataDir = (cli_ && cli_->hasExplicitDataDir())
+                                                 ? cli_->getDataPath()
+                                                 : std::filesystem::path{};
+                yams::cli::CliDaemonRequestOptions daemonOpts;
+                daemonOpts.accessPolicy = yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
+                daemonOpts.enableChunkedResponses = enableStreaming_;
+                daemonOpts.requestTimeout = std::chrono::milliseconds(30000);
+                daemonOpts.headerTimeout = std::chrono::milliseconds(30000);
+                daemonOpts.bodyTimeout = std::chrono::milliseconds(120000);
+                daemonOpts.singleUseConnections = cliOneShot;
 
-                auto planRes = yams::cli::prepare_cli_daemon_client_plan(
-                    daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
-                if (!planRes) {
+                auto preparedRes =
+                    yams::cli::prepare_cli_retrieval(getExecutor(), explicitDataDir, daemonOpts);
+                if (!preparedRes) {
                     if (spinner) {
                         spinner->stop();
                     }
-                    return planRes.error();
+                    return preparedRes.error();
                 }
-                auto daemonPlan = std::move(planRes.value());
+                auto prepared = std::move(preparedRes.value());
 
-                if (daemonPlan.usedInProcessFallback) {
+                if (prepared.plan.usedInProcessFallback) {
                     spdlog::info(
                         "list: socket transport unavailable; using in-process transport: {}",
-                        daemonPlan.fallbackReason);
+                        prepared.plan.fallbackReason);
                 }
 
                 yams::app::services::RetrievalService rsvc;
-                yams::app::services::RetrievalOptions ropts;
-                ropts.enableStreaming = enableStreaming_;
-                ropts.progressiveOutput = false;
-                ropts.singleUseConnections = cliOneShot;
-                ropts.requestTimeoutMs = 30000;
-                ropts.headerTimeoutMs = 30000;
-                ropts.bodyTimeoutMs = 120000;
-                yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlan, ropts);
-
-                auto res = rsvc.list(dreq, ropts);
+                auto res = rsvc.list(dreq, prepared.options);
                 if (res) {
                     auto r = render(res.value());
                     if (!r)
@@ -470,16 +452,9 @@ public:
                 if (spinner) {
                     spinner->stop();
                 }
-
-                if (yams::cli::is_transport_failure(res.error())) {
-                    return res.error();
-                }
-
-                spdlog::warn("list: daemon path failed ({}); using local services",
-                             res.error().message);
+                return yams::cli::detail::daemon_error_or_local_fallback(
+                    res.error(), "list", [&]() { return executeWithServices(&spinner); });
             }
-
-            return executeWithServices(&spinner);
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};

@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <set>
 #include <vector>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -33,12 +34,14 @@ std::string to_string(PluginHostState state) {
 template <typename Awaitable>
 boost::asio::awaitable<Response> guard_plugin_host_ready(ServiceManager* sm, Awaitable&& fn) {
     if (!sm) {
-        co_return ErrorResponse{ErrorCode::InvalidState, "Plugin host unavailable"};
+        co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::InvalidState,
+                                                            "Plugin host unavailable");
     }
     auto snapshot = sm->getPluginHostFsmSnapshot();
     if (snapshot.state != PluginHostState::Ready) {
-        co_return ErrorResponse{ErrorCode::InvalidState, "Plugin subsystem not ready (state=" +
-                                                             to_string(snapshot.state) + ")"};
+        co_return yams::daemon::dispatch::makeErrorResponse(
+            ErrorCode::InvalidState,
+            "Plugin subsystem not ready (state=" + to_string(snapshot.state) + ")");
     }
     co_return co_await fn();
 }
@@ -67,8 +70,8 @@ RequestDispatcher::handlePluginScanRequest(const PluginScanRequest& req) {
                         serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
 
                     if (!abi && !external)
-                        co_return ErrorResponse{ErrorCode::NotImplemented,
-                                                "No plugin host available"};
+                        co_return yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::NotImplemented, "No plugin host available");
 
                     PluginScanResponse resp;
                     auto scanTarget = [&](const auto& host, const auto& target) {
@@ -95,8 +98,8 @@ RequestDispatcher::handlePluginScanRequest(const PluginScanRequest& req) {
                             any = scanTarget(external, req.target);
                         }
                         if (!any)
-                            co_return ErrorResponse{ErrorCode::NotFound,
-                                                    "No plugin found at target"};
+                            co_return yams::daemon::dispatch::makeErrorResponse(
+                                ErrorCode::NotFound, "No plugin found at target");
                     } else if (!req.dir.empty()) {
                         scanDirectory(abi, req.dir);
                         scanDirectory(external, req.dir);
@@ -127,8 +130,8 @@ RequestDispatcher::handlePluginLoadRequest(const PluginLoadRequest& req) {
                         serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
 
                     if (!abi && !external) {
-                        co_return ErrorResponse{ErrorCode::NotImplemented,
-                                                "No plugin host available"};
+                        co_return yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::NotImplemented, "No plugin host available");
                     }
 
                     PluginLoadResponse lr;
@@ -161,7 +164,8 @@ RequestDispatcher::handlePluginLoadRequest(const PluginLoadRequest& req) {
                         if (scanTarget(external)) {
                             co_return lr;
                         }
-                        co_return ErrorResponse{ErrorCode::NotFound, "Plugin not found"};
+                        co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotFound,
+                                                                            "Plugin not found");
                     }
 
                     if (!std::filesystem::exists(target)) {
@@ -185,7 +189,8 @@ RequestDispatcher::handlePluginLoadRequest(const PluginLoadRequest& req) {
                             }
                         }
                         if (!std::filesystem::exists(target)) {
-                            co_return ErrorResponse{ErrorCode::NotFound, "Plugin not found"};
+                            co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotFound,
+                                                                                "Plugin not found");
                         }
                     }
 
@@ -228,8 +233,8 @@ RequestDispatcher::handlePluginLoadRequest(const PluginLoadRequest& req) {
                         }
                     }
 
-                    co_return ErrorResponse{ErrorCode::InternalError,
-                                            "Plugin load failed for: " + target.string()};
+                    co_return yams::daemon::dispatch::makeErrorResponse(
+                        ErrorCode::InternalError, "Plugin load failed for: " + target.string());
                 });
         });
 }
@@ -256,8 +261,8 @@ RequestDispatcher::handlePluginUnloadRequest(const PluginUnloadRequest& req) con
                             ok = true;
                     }
                     if (!ok)
-                        co_return ErrorResponse{ErrorCode::NotFound,
-                                                "Plugin not found or unload failed"};
+                        co_return yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::NotFound, "Plugin not found or unload failed");
                     // Refresh status snapshot so unloaded plugin is removed from list
                     if (serviceManager_) {
                         serviceManager_->refreshPluginStatusSnapshot();
@@ -307,7 +312,8 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
                     bool externalOk = external && external->trustAdd(req.path);
 
                     if (!abiOk && !externalOk) {
-                        co_return ErrorResponse{ErrorCode::Unknown, "Trust add failed"};
+                        co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::Unknown,
+                                                                            "Trust add failed");
                     }
 
                     auto path = std::filesystem::path(req.path);
@@ -419,7 +425,8 @@ RequestDispatcher::handlePluginTrustRemoveRequest(const PluginTrustRemoveRequest
                     bool externalOk = external && external->trustRemove(req.path);
 
                     if (!abiOk && !externalOk) {
-                        co_return ErrorResponse{ErrorCode::Unknown, "Trust remove failed"};
+                        co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::Unknown,
+                                                                            "Trust remove failed");
                     }
 
                     co_return SuccessResponse{"ok"};

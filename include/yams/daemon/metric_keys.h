@@ -104,6 +104,15 @@ constexpr std::string_view kSearchExecuted = "search_executed";
 constexpr std::string_view kSearchCacheHitRatePct = "search_cache_hit_rate_pct";
 constexpr std::string_view kSearchAvgLatencyUs = "search_avg_latency_us";
 constexpr std::string_view kSearchConcurrencyLimit = "search_concurrency_limit";
+constexpr std::string_view kSearchRejected = "request_search_rejected";
+
+// Unified request admission metrics
+constexpr std::string_view kListActive = "request_list_active";
+constexpr std::string_view kListRejected = "request_list_rejected";
+constexpr std::string_view kGrepActive = "request_grep_active";
+constexpr std::string_view kGrepRejected = "request_grep_rejected";
+constexpr std::string_view kAddDeferred = "request_add_deferred";
+constexpr std::string_view kAddRejected = "request_add_rejected";
 
 // Route-separated DB pool metrics (write/work vs read)
 constexpr std::string_view kDbWritePoolAvailable = "db_write_pool_available";

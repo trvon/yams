@@ -21,6 +21,7 @@
 #include <yams/app/services/session_service.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
+#include <yams/daemon/components/admission_control.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/dispatch_response.hpp>
@@ -41,8 +42,7 @@ namespace yams::daemon {
 
 namespace {
 
-std::atomic<uint32_t> g_inflightListRequests{0};
-std::atomic<uint32_t> g_inflightGrepRequests{0};
+std::atomic<uint64_t> g_testListInflightOverride{0};
 std::atomic<bool> g_forceListUnknownExceptionOnce{false};
 std::atomic<bool> g_forceCatMissingDocumentOnce{false};
 std::atomic<bool> g_forceCatMissingContentOnce{false};
@@ -606,43 +606,6 @@ int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) 
     }
 }
 
-struct ListInflightGuard {
-    ~ListInflightGuard() { g_inflightListRequests.fetch_sub(1, std::memory_order_acq_rel); }
-};
-
-struct GrepInflightGuard {
-    ~GrepInflightGuard() { g_inflightGrepRequests.fetch_sub(1, std::memory_order_acq_rel); }
-};
-
-boost::asio::awaitable<bool> acquireInflightSlot(std::atomic<uint32_t>& counter, int limit,
-                                                 int maxWaitMs) {
-    if (limit <= 0) {
-        co_return true;
-    }
-
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(1, maxWaitMs));
-    auto executor = co_await boost::asio::this_coro::executor;
-    boost::asio::steady_timer timer(executor);
-
-    while (true) {
-        auto current = counter.load(std::memory_order_acquire);
-        while (current < static_cast<uint32_t>(limit)) {
-            if (counter.compare_exchange_weak(current, current + 1, std::memory_order_acq_rel,
-                                              std::memory_order_acquire)) {
-                co_return true;
-            }
-        }
-
-        if (std::chrono::steady_clock::now() >= deadline) {
-            co_return false;
-        }
-
-        timer.expires_after(std::chrono::milliseconds(5));
-        co_await timer.async_wait(boost::asio::use_awaitable);
-    }
-}
-
 int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDelayMs,
                           int maxDelayMs) {
     int expDelay = baseDelayMs;
@@ -700,10 +663,56 @@ boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDoc
     co_return false;
 }
 
+std::string computeImmediateAddHash(const AddDocumentRequest& req, bool isDir) {
+    if (isDir || req.recursive) {
+        return "";
+    }
+
+    try {
+        auto hasher = yams::crypto::createSHA256Hasher();
+        maybeThrowForcedDocumentsHashFailure();
+        if (!req.content.empty()) {
+            return hasher->hash(req.content);
+        }
+        if (!req.path.empty()) {
+            return hasher->hashFile(req.path);
+        }
+    } catch (...) {
+    }
+    return "";
+}
+
+AddDocumentResponse makeQueuedAddResponse(const AddDocumentRequest& req, std::string_view message,
+                                          bool isDir) {
+    AddDocumentResponse response;
+    response.path = req.path.empty() ? req.name : req.path;
+    response.documentsAdded = 0;
+    response.hash = computeImmediateAddHash(req, isDir);
+    response.extractionStatus = "pending";
+    response.message = std::string(message);
+    return response;
+}
+
+boost::asio::awaitable<Response>
+enqueueAddDocumentOrReject(ServiceManager* serviceManager, StateComponent* state,
+                           const AddDocumentRequest& req, std::size_t channelCapacity,
+                           std::string_view message, bool countDeferred, bool isDir) {
+    if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, channelCapacity)) {
+        if (countDeferred) {
+            state->stats.addRequestsDeferred.fetch_add(1, std::memory_order_acq_rel);
+        }
+        co_return makeQueuedAddResponse(req, message, isDir);
+    }
+
+    state->stats.addRequestsRejected.fetch_add(1, std::memory_order_acq_rel);
+    co_return admission::makeBusyError("Ingestion queue is full",
+                                       admission::captureSnapshot(serviceManager, state));
+}
+
 } // namespace
 
 void RequestDispatcher::__test_setListInflightRequests(uint32_t value) {
-    g_inflightListRequests.store(value, std::memory_order_release);
+    g_testListInflightOverride.store(value, std::memory_order_release);
 }
 
 void RequestDispatcher::__test_forceListExceptionOnce(const std::string& message) {
@@ -983,17 +992,14 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
         if (g_forceListUnknownExceptionOnce.exchange(false, std::memory_order_acq_rel)) {
             throw 42;
         }
-        const int listInflightLimit = static_cast<int>(TuneAdvisor::listInflightLimit());
-        const int listAdmissionWaitMs = static_cast<int>(TuneAdvisor::listAdmissionWaitMs());
-        std::optional<ListInflightGuard> inflightGuard;
-        if (listInflightLimit > 0) {
-            const bool acquired = co_await acquireInflightSlot(
-                g_inflightListRequests, listInflightLimit, listAdmissionWaitMs);
-            if (!acquired) {
-                co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                        "List concurrency limit reached; retry shortly"};
-            }
-            inflightGuard.emplace();
+        const uint32_t listInflightLimit = TuneAdvisor::listInflightLimit();
+        const uint32_t listAdmissionWaitMs = TuneAdvisor::listAdmissionWaitMs();
+        auto inflightGuard = co_await acquireBoundedAdmission(
+            state_->stats.listRequestsActive, state_->stats.listRequestsRejected, listInflightLimit,
+            listAdmissionWaitMs, &g_testListInflightOverride);
+        if (listInflightLimit > 0 && !inflightGuard) {
+            co_return admission::makeBusyError("List concurrency limit reached",
+                                               admission::captureSnapshot(serviceManager_, state_));
         }
 
         const auto requestStart = std::chrono::steady_clock::now();
@@ -1262,38 +1268,17 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     YAMS_ZONE_SCOPED_N("handleAddDocumentRequest");
     co_return co_await yams::daemon::dispatch::guard_await(
         "add_document", [this, req]() -> boost::asio::awaitable<Response> {
+            const auto channelCapacity =
+                static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
+
             // Check admission control before accepting new work
             if (!ResourceGovernor::instance().canAdmitWork()) {
-                // Queue for deferred processing instead of rejecting outright
-                const auto channelCapacity =
-                    static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
-                if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, channelCapacity)) {
-                    AddDocumentResponse response;
-                    response.path = req.path.empty() ? req.name : req.path;
-                    response.documentsAdded = 0;
-                    // Compute hash for immediate feedback
-                    bool reqIsDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
-                    if (!reqIsDir && !req.recursive) {
-                        try {
-                            auto hasher = yams::crypto::createSHA256Hasher();
-                            maybeThrowForcedDocumentsHashFailure();
-                            if (!req.content.empty()) {
-                                response.hash = hasher->hash(req.content);
-                            } else if (!req.path.empty()) {
-                                response.hash = hasher->hashFile(req.path);
-                            }
-                        } catch (...) {
-                            response.hash = "";
-                        }
-                    } else {
-                        response.hash = "";
-                    }
-                    response.message = "Queued for deferred processing (system under pressure).";
-                    co_return response;
-                } else {
-                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                            "Ingestion queue is full. Please try again later."};
-                }
+                const bool reqIsDir =
+                    (!req.path.empty() && std::filesystem::is_directory(req.path));
+                co_return co_await enqueueAddDocumentOrReject(
+                    serviceManager_, state_, req, channelCapacity,
+                    "Queued for deferred processing (system under pressure).",
+                    /*countDeferred=*/true, reqIsDir);
             }
 
             // Be forgiving: if the path is a directory but recursive was not set, treat it as
@@ -1319,43 +1304,12 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
 
             // For directories or if daemon not ready, use async queue
             if (isDir || req.recursive || !daemonReady) {
-                const auto channelCapacity =
-                    static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
-                if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, channelCapacity)) {
-                    AddDocumentResponse response;
-                    response.path = req.path.empty() ? req.name : req.path;
-                    response.documentsAdded = 0;
-
-                    // Compute hash for single files/content even with async storage
-                    // This allows callers to get the hash immediately while processing continues
-                    if (!isDir && !req.recursive) {
-                        try {
-                            auto hasher = yams::crypto::createSHA256Hasher();
-                            maybeThrowForcedDocumentsHashFailure();
-                            if (!req.content.empty()) {
-                                response.hash = hasher->hash(req.content);
-                            } else if (!req.path.empty()) {
-                                response.hash = hasher->hashFile(req.path);
-                            }
-                        } catch (...) {
-                            response.hash = "";
-                        }
-                    } else {
-                        response.hash = "";
-                    }
-
-                    if (isDir || req.recursive) {
-                        response.message =
-                            "Directory ingestion accepted for asynchronous processing.";
-                    } else {
-                        response.message =
-                            "Ingestion accepted for asynchronous processing (daemon initializing).";
-                    }
-                    co_return response;
-                } else {
-                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                            "Ingestion queue is full. Please try again later."};
-                }
+                co_return co_await enqueueAddDocumentOrReject(
+                    serviceManager_, state_, req, channelCapacity,
+                    (isDir || req.recursive)
+                        ? "Directory ingestion accepted for asynchronous processing."
+                        : "Ingestion accepted for asynchronous processing (daemon initializing).",
+                    /*countDeferred=*/true, isDir);
             }
 
             // For single files when daemon is ready, prefer async queueing by default
@@ -1378,33 +1332,10 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             }
 
             if (!syncSingleFileAdd) {
-                const auto channelCapacity =
-                    static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
-                if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, channelCapacity)) {
-                    AddDocumentResponse response;
-                    response.path = req.path.empty() ? req.name : req.path;
-                    response.documentsAdded = 0;
-
-                    // Compute hash for immediate feedback for single-file/content adds.
-                    try {
-                        auto hasher = yams::crypto::createSHA256Hasher();
-                        maybeThrowForcedDocumentsHashFailure();
-                        if (!req.content.empty()) {
-                            response.hash = hasher->hash(req.content);
-                        } else if (!req.path.empty()) {
-                            response.hash = hasher->hashFile(req.path);
-                        }
-                    } catch (...) {
-                        response.hash = "";
-                    }
-
-                    response.extractionStatus = "pending";
-                    response.message = "Ingestion accepted for asynchronous processing.";
-                    co_return response;
-                }
-
-                co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                        "Ingestion queue is full. Please try again later."};
+                co_return co_await enqueueAddDocumentOrReject(
+                    serviceManager_, state_, req, channelCapacity,
+                    "Ingestion accepted for asynchronous processing.",
+                    /*countDeferred=*/false, /*isDir=*/false);
             }
 
             // Optional sync fallback path (diagnostics/compat only)
@@ -1485,17 +1416,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
     YAMS_ZONE_SCOPED_N("request_dispatcher::handle_grep");
     co_return co_await yams::daemon::dispatch::guard_await(
         "grep", [this, req]() -> boost::asio::awaitable<Response> {
-            const int grepInflightLimit = static_cast<int>(TuneAdvisor::grepInflightLimit());
-            const int grepAdmissionWaitMs = static_cast<int>(TuneAdvisor::grepAdmissionWaitMs());
-            std::optional<GrepInflightGuard> grepInflightGuard;
-            if (grepInflightLimit > 0) {
-                const bool acquired = co_await acquireInflightSlot(
-                    g_inflightGrepRequests, grepInflightLimit, grepAdmissionWaitMs);
-                if (!acquired) {
-                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                            "Grep concurrency limit reached; retry shortly"};
-                }
-                grepInflightGuard.emplace();
+            const uint32_t grepInflightLimit = TuneAdvisor::grepInflightLimit();
+            const uint32_t grepAdmissionWaitMs = TuneAdvisor::grepAdmissionWaitMs();
+            auto grepInflightGuard = co_await acquireBoundedAdmission(
+                state_->stats.grepRequestsActive, state_->stats.grepRequestsRejected,
+                grepInflightLimit, grepAdmissionWaitMs);
+            if (grepInflightLimit > 0 && !grepInflightGuard) {
+                co_return admission::makeBusyError(
+                    "Grep concurrency limit reached",
+                    admission::captureSnapshot(serviceManager_, state_));
             }
 
             auto appContext = serviceManager_->getAppContext();

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <yams/common/fs_utils.h>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 
@@ -23,13 +24,13 @@ RequestDispatcher::handleListSnapshotsRequest([[maybe_unused]] const ListSnapsho
 
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Metadata repository unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
     }
 
     auto result = metaRepo->getSnapshots();
     if (!result) {
-        co_return ErrorResponse{.code = result.error().code, .message = result.error().message};
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
     }
 
     ListSnapshotsResponse resp;
@@ -54,19 +55,19 @@ RequestDispatcher::handleRestoreCollectionRequest(const RestoreCollectionRequest
 
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Metadata repository unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
     }
 
     auto contentStore = serviceManager_ ? serviceManager_->getContentStore() : nullptr;
     if (!contentStore) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Content store unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Content store unavailable");
     }
 
     if (req.collection.empty()) {
-        co_return ErrorResponse{.code = ErrorCode::InvalidArgument,
-                                .message = "Collection name is required"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InvalidArgument,
+                                              "Collection name is required");
     }
 
     // Get documents from collection using generic metadata query
@@ -75,9 +76,9 @@ RequestDispatcher::handleRestoreCollectionRequest(const RestoreCollectionRequest
     queryOpts.orderByIndexedDesc = true;
     auto docsResult = metaRepo->queryDocuments(queryOpts);
     if (!docsResult) {
-        co_return ErrorResponse{.code = docsResult.error().code,
-                                .message = "Failed to find collection documents: " +
-                                           docsResult.error().message};
+        co_return dispatch::makeErrorResponse(docsResult.error().code,
+                                              "Failed to find collection documents: " +
+                                                  docsResult.error().message);
     }
 
     const auto& documents = docsResult.value();
@@ -97,9 +98,8 @@ RequestDispatcher::handleRestoreCollectionRequest(const RestoreCollectionRequest
     if (!req.dryRun && req.createDirs) {
         std::error_code ec;
         if (!yams::common::ensureDirectories(outputDir, ec)) {
-            co_return ErrorResponse{.code = ErrorCode::IOError,
-                                    .message =
-                                        "Failed to create output directory: " + ec.message()};
+            co_return dispatch::makeErrorResponse(
+                ErrorCode::IOError, "Failed to create output directory: " + ec.message());
         }
     }
 
@@ -282,27 +282,27 @@ RequestDispatcher::handleRestoreSnapshotRequest(const RestoreSnapshotRequest& re
 
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Metadata repository unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
     }
 
     auto contentStore = serviceManager_ ? serviceManager_->getContentStore() : nullptr;
     if (!contentStore) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Content store unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Content store unavailable");
     }
 
     if (req.snapshotId.empty()) {
-        co_return ErrorResponse{.code = ErrorCode::InvalidArgument,
-                                .message = "Snapshot ID is required"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InvalidArgument,
+                                              "Snapshot ID is required");
     }
 
     // Get documents from snapshot
     auto docsResult = metaRepo->findDocumentsBySnapshot(req.snapshotId);
     if (!docsResult) {
-        co_return ErrorResponse{.code = docsResult.error().code,
-                                .message = "Failed to find snapshot documents: " +
-                                           docsResult.error().message};
+        co_return dispatch::makeErrorResponse(docsResult.error().code,
+                                              "Failed to find snapshot documents: " +
+                                                  docsResult.error().message);
     }
 
     // Reuse RestoreCollection logic by converting request
@@ -333,9 +333,8 @@ RequestDispatcher::handleRestoreSnapshotRequest(const RestoreSnapshotRequest& re
     if (!req.dryRun && req.createDirs) {
         std::error_code ec;
         if (!yams::common::ensureDirectories(outputDir, ec)) {
-            co_return ErrorResponse{.code = ErrorCode::IOError,
-                                    .message =
-                                        "Failed to create output directory: " + ec.message()};
+            co_return dispatch::makeErrorResponse(
+                ErrorCode::IOError, "Failed to create output directory: " + ec.message());
         }
     }
 
@@ -504,14 +503,14 @@ RequestDispatcher::handleMetadataValueCountsRequest(const MetadataValueCountsReq
 
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Metadata repository unavailable"};
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
     }
 
     metadata::DocumentQueryOptions opts;
     auto result = metaRepo->getMetadataValueCounts(req.keys, opts);
     if (!result) {
-        co_return ErrorResponse{.code = result.error().code, .message = result.error().message};
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
     }
 
     MetadataValueCountsResponse resp;
@@ -536,8 +535,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleBatchRequest(const Bat
         BatchItemResponse itemResp;
         itemResp.sequenceId = item.sequenceId;
         itemResp.success = false;
-        itemResp.response = ErrorResponse{.code = ErrorCode::NotImplemented,
-                                          .message = "Batch request handling not yet implemented"};
+        itemResp.response = dispatch::makeErrorResponse(
+            ErrorCode::NotImplemented, "Batch request handling not yet implemented");
         resp.items.push_back(std::move(itemResp));
         resp.errorCount++;
     }

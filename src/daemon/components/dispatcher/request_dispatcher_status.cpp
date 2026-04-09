@@ -129,6 +129,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                    static_cast<size_t>(snap->searchCacheHitRate * 100.0));
             setVal(metrics::kSearchAvgLatencyUs, static_cast<size_t>(snap->searchAvgLatencyUs));
             setVal(metrics::kSearchConcurrencyLimit, snap->searchConcurrencyLimit);
+            setVal(metrics::kSearchRejected, static_cast<size_t>(snap->searchRejected));
+            setVal(metrics::kListActive, static_cast<size_t>(snap->listActive));
+            setVal(metrics::kListRejected, static_cast<size_t>(snap->listRejected));
+            setVal(metrics::kGrepActive, static_cast<size_t>(snap->grepActive));
+            setVal(metrics::kGrepRejected, static_cast<size_t>(snap->grepRejected));
+            setVal(metrics::kAddDeferred, static_cast<size_t>(snap->addDeferred));
+            setVal(metrics::kAddRejected, static_cast<size_t>(snap->addRejected));
 
             // PBI-040, task 040-1: Expose queue depth for FTS5 readiness checks
             res.postIngestQueueDepth = static_cast<uint32_t>(snap->postIngestQueued);

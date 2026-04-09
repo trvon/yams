@@ -87,6 +87,15 @@ struct DaemonStats {
     // Database contention metrics (for adaptive concurrency scaling)
     std::atomic<uint64_t> dbLockErrors{0};       // Total "database is locked" errors
     std::atomic<uint64_t> dbLockErrorsWindow{0}; // Errors in current tuning window
+
+    // Unified request admission metrics
+    std::atomic<uint64_t> listRequestsActive{0};
+    std::atomic<uint64_t> listRequestsRejected{0};
+    std::atomic<uint64_t> grepRequestsActive{0};
+    std::atomic<uint64_t> grepRequestsRejected{0};
+    std::atomic<uint64_t> searchRequestsRejected{0};
+    std::atomic<uint64_t> addRequestsDeferred{0};
+    std::atomic<uint64_t> addRequestsRejected{0};
 };
 
 /**

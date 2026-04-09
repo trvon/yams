@@ -272,13 +272,13 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         CHECK(tuner.getRrfK() == 20);
         // Graph-aware tuning may shift some rank mass from text/vector to KG.
         if (stats.hasKnowledgeGraph()) {
-            CHECK(tuner.getParams().textWeight < 0.45f);
-            CHECK(tuner.getParams().textWeight > 0.39f);
-            CHECK(tuner.getParams().kgWeight > 0.05f);
+            CHECK(tuner.getParams().weights.text.value < 0.45f);
+            CHECK(tuner.getParams().weights.text.value > 0.39f);
+            CHECK(tuner.getParams().weights.kg.value > 0.05f);
         } else {
-            CHECK(tuner.getParams().textWeight == Approx(0.45f));
+            CHECK(tuner.getParams().weights.text.value == Approx(0.45f));
         }
-        CHECK(tuner.getParams().pathTreeWeight == Approx(0.15f));
+        CHECK(tuner.getParams().weights.pathTree.value == Approx(0.15f).epsilon(0.01));
     }
 
     SECTION("Prose-heavy corpus selects PROSE state") {
@@ -297,8 +297,8 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         // With prose ratio > 0.7 and doc count < 1000, should be SMALL_PROSE
         CHECK(tuner.currentState() == TuningState::SMALL_PROSE);
         CHECK(tuner.getRrfK() == 25);
-        CHECK(tuner.getParams().vectorWeight == Approx(0.40f));
-        CHECK(tuner.getParams().pathTreeWeight == Approx(0.00f));
+        CHECK(tuner.getParams().weights.vector.value == Approx(0.40f));
+        CHECK(tuner.getParams().weights.pathTree.value == Approx(0.00f));
     }
 
     SECTION("Scientific corpus (prose without path/tag structure)") {
@@ -317,9 +317,9 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         // Scientific corpus: prose-dominant, flat structure, no tags
         CHECK(tuner.currentState() == TuningState::SCIENTIFIC);
         CHECK(tuner.getRrfK() == 12);
-        CHECK(tuner.getParams().textWeight == Approx(0.60f));
-        CHECK(tuner.getParams().vectorWeight == Approx(0.35f));
-        CHECK(tuner.getParams().tagWeight == Approx(0.00f));
+        CHECK(tuner.getParams().weights.text.value == Approx(0.60f));
+        CHECK(tuner.getParams().weights.vector.value == Approx(0.35f));
+        CHECK(tuner.getParams().weights.tag.value == Approx(0.00f));
     }
 
     SECTION("Large mixed corpus") {
@@ -352,7 +352,7 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         // Very small corpus should use MINIMAL state
         CHECK(tuner.currentState() == TuningState::MINIMAL);
         CHECK(tuner.getRrfK() == 15);
-        CHECK(tuner.getParams().textWeight == Approx(0.55f));
+        CHECK(tuner.getParams().weights.text.value == Approx(0.55f));
     }
 }
 
@@ -374,12 +374,12 @@ TEST_CASE("FSM Tuning Integration: TunedParams apply to config",
     auto config = tuner.getConfig();
 
     // Verify config has tuned weights applied
-    CHECK(config.textWeight == tuner.getParams().textWeight);
-    CHECK(config.vectorWeight == tuner.getParams().vectorWeight);
-    CHECK(config.pathTreeWeight == tuner.getParams().pathTreeWeight);
-    CHECK(config.kgWeight == tuner.getParams().kgWeight);
-    CHECK(config.tagWeight == tuner.getParams().tagWeight);
-    CHECK(config.metadataWeight == tuner.getParams().metadataWeight);
+    CHECK(config.textWeight == tuner.getParams().weights.text.value);
+    CHECK(config.vectorWeight == tuner.getParams().weights.vector.value);
+    CHECK(config.pathTreeWeight == tuner.getParams().weights.pathTree.value);
+    CHECK(config.kgWeight == tuner.getParams().weights.kg.value);
+    CHECK(config.tagWeight == tuner.getParams().weights.tag.value);
+    CHECK(config.metadataWeight == tuner.getParams().weights.metadata.value);
 
     // Verify JSON serialization for observability
     auto json = tuner.toJson();

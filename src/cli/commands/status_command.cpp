@@ -78,32 +78,21 @@ public:
     boost::asio::awaitable<Result<void>> executeAsync() override {
         YAMS_ZONE_SCOPED_N("StatusCommand::execute");
         try {
-            const bool cliOneShot = []() {
-                if (const char* raw = std::getenv("YAMS_CLI_ONE_SHOT"); raw && *raw) {
-                    std::string v(raw);
-                    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
-                        return static_cast<char>(std::tolower(c));
-                    });
-                    return v == "1" || v == "true" || v == "yes" || v == "on";
-                }
-                return false;
-            }();
+            const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 
             // Try daemon-first for quick status snapshot
             {
-                yams::daemon::ClientConfig cfg;
-                if (!cliOneShot) {
-                    cfg.executor = getExecutor();
-                } else {
-                    cfg.socketPath = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
-                }
-                cfg.requestTimeout = std::chrono::seconds(10);
-                cfg.singleUseConnections = cliOneShot;
-                if (cli_->hasExplicitDataDir()) {
-                    cfg.dataDir = cli_->getDataPath();
-                }
+                const auto explicitDataDir = (cli_ && cli_->hasExplicitDataDir())
+                                                 ? cli_->getDataPath()
+                                                 : std::filesystem::path{};
+                yams::cli::CliDaemonRequestOptions daemonOpts;
+                daemonOpts.accessPolicy = yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
+                daemonOpts.requestTimeout = std::chrono::seconds(10);
+                daemonOpts.singleUseConnections = cliOneShot;
+                auto cfg = yams::cli::build_cli_daemon_client_config(getExecutor(), explicitDataDir,
+                                                                     daemonOpts);
                 auto planRes = yams::cli::prepare_cli_daemon_client_plan(
-                    cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+                    cfg, daemonOpts.accessPolicy, daemonOpts.readyTimeout);
                 if (planRes) {
                     auto plan = std::move(planRes.value());
                     yams::daemon::DaemonClient client(plan.config);
@@ -1202,14 +1191,16 @@ private:
         info.autoGenerationEnabled = embeddingService && embeddingService->isAvailable();
         info.preferredModel = info.hasModels ? info.availableModels[0] : "none";
 
-        yams::daemon::ClientConfig probeCfg;
-        probeCfg.executor = getExecutor();
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            probeCfg.dataDir = cli_->getDataPath();
-        }
+        const auto explicitDataDir =
+            (cli_ && cli_->hasExplicitDataDir()) ? cli_->getDataPath() : std::filesystem::path{};
+        yams::cli::CliDaemonRequestOptions probeOpts;
+        probeOpts.accessPolicy = yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
+        probeOpts.requestTimeout = std::chrono::seconds(10);
+        auto probeCfg =
+            yams::cli::build_cli_daemon_client_config(getExecutor(), explicitDataDir, probeOpts);
 
         auto leaseProbe = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
-            probeCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+            probeCfg, probeOpts.accessPolicy);
         if (leaseProbe) {
             auto leaseHandle = std::move(leaseProbe.value());
             auto promProbe = std::make_shared<std::promise<Result<yams::daemon::StatusResponse>>>();

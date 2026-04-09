@@ -340,7 +340,16 @@ message PrepareSessionRequest {
 
 // RESPONSES
 message SuccessResponse { string message = 1; }
-message ErrorResponse { uint32 code = 1; string message = 2; }
+message ErrorResponse {
+  message RetryInfo {
+    uint32 retry_after_ms = 1;
+    string reason = 2;
+  }
+
+  uint32 code = 1;
+  string message = 2;
+  RetryInfo retry = 3;
+}
 message PongResponse { uint64 server_time_ns = 1; int64 round_trip_ms = 2; }
 
 message SearchResult {

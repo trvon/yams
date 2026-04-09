@@ -73,6 +73,7 @@ public:
         struct AdmissionDecision {
             ErrorCode code{ErrorCode::ResourceExhausted};
             std::string message;
+            std::optional<ErrorResponse::RetryInfo> retry;
         };
 
         bool enable_streaming = true; // Use streaming response model
@@ -227,13 +228,16 @@ private:
     // Writes a classic unary error frame correlated to request_id without using rr_queues_.
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     write_error_immediate(boost::asio::local::stream_protocol::socket& socket, uint64_t request_id,
-                          ErrorCode code, const std::string& message, ConnectionFsm* fsm = nullptr);
+                          ErrorCode code, const std::string& message,
+                          std::optional<ErrorResponse::RetryInfo> retry = std::nullopt,
+                          ConnectionFsm* fsm = nullptr);
 
     // Send a unary error response and complete the FSM response lifecycle so persistent
     // connections remain readable after protocol-level backpressure or validation failures.
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     send_error_response(boost::asio::local::stream_protocol::socket& socket, ErrorCode code,
                         const std::string& message, uint64_t request_id,
+                        std::optional<ErrorResponse::RetryInfo> retry = std::nullopt,
                         ConnectionFsm* fsm = nullptr);
 
     // Stream chunks from a processor
@@ -315,7 +319,8 @@ private:
     // generally close the connection to avoid desynchronization in persistent mode.
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     send_error(boost::asio::local::stream_protocol::socket& socket, ErrorCode code,
-               const std::string& message, uint64_t request_id = 0);
+               const std::string& message, uint64_t request_id = 0,
+               std::optional<ErrorResponse::RetryInfo> retry = std::nullopt);
 
     std::shared_ptr<RequestProcessor> processor_;
     std::shared_ptr<RequestProcessor> dispatcherAdapter_; // Cached adapter for dispatcher_

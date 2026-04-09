@@ -12,6 +12,7 @@
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
+#include <yams/search/tuning_pipeline.h>
 #include <yams/search/turboquant_packed_reranker.h>
 #include <yams/search/vector_reranker.h>
 #include <yams/vector/compressed_ann.h>
@@ -743,66 +744,6 @@ SearchEngineConfig::NavigationZoomLevel zoomLevelForIntent(QueryIntent intent) {
     return SearchEngineConfig::NavigationZoomLevel::Neighborhood;
 }
 
-void applyNavigationZoomPolicy(SearchEngineConfig& config,
-                               SearchEngineConfig::NavigationZoomLevel zoomLevel) {
-    auto scale = [](float& weight, float factor) {
-        weight = std::clamp(weight * factor, 0.0f, 1.0f);
-    };
-
-    switch (zoomLevel) {
-        case SearchEngineConfig::NavigationZoomLevel::Auto:
-            return;
-        case SearchEngineConfig::NavigationZoomLevel::Map:
-            scale(config.kgWeight, 1.25f);
-            scale(config.graphTextWeight, 1.15f);
-            scale(config.graphVectorWeight, 1.15f);
-            scale(config.pathTreeWeight, 1.10f);
-            scale(config.vectorWeight, 0.90f);
-            scale(config.entityVectorWeight, 0.85f);
-            config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{10});
-            config.graphExpansionMaxSeeds = std::max(config.graphExpansionMaxSeeds, size_t{8});
-            config.graphRerankTopN = std::max(config.graphRerankTopN, size_t{32});
-            config.graphScoringBudgetMs = std::max(config.graphScoringBudgetMs, 12);
-            config.rerankTopK = std::min(config.rerankTopK, size_t{3});
-            config.rerankSnippetMaxChars = std::min(config.rerankSnippetMaxChars, size_t{192});
-            config.semanticRescueSlots = std::min(config.semanticRescueSlots, size_t{1});
-            break;
-        case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
-            scale(config.kgWeight, 1.10f);
-            scale(config.graphTextWeight, 1.05f);
-            scale(config.pathTreeWeight, 1.05f);
-            config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{8});
-            config.graphRerankTopN = std::max(config.graphRerankTopN, size_t{24});
-            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{256});
-            break;
-        case SearchEngineConfig::NavigationZoomLevel::Street:
-            scale(config.textWeight, 1.10f);
-            scale(config.pathTreeWeight, 1.15f);
-            scale(config.entityVectorWeight, 1.10f);
-            scale(config.vectorWeight, 0.85f);
-            scale(config.graphVectorWeight, 0.85f);
-            scale(config.graphTextWeight, 0.95f);
-            scale(config.kgWeight, 0.90f);
-            config.similarityThreshold = std::clamp(config.similarityThreshold + 0.03f, 0.0f, 1.0f);
-            config.vectorOnlyThreshold = std::clamp(config.vectorOnlyThreshold + 0.02f, 0.0f, 1.0f);
-            config.vectorOnlyPenalty = std::clamp(config.vectorOnlyPenalty * 0.90f, 0.0f, 1.0f);
-            config.semanticRescueSlots = 0;
-            config.lexicalFloorTopN = std::max(config.lexicalFloorTopN, size_t{10});
-            config.lexicalFloorBoost = std::max(config.lexicalFloorBoost, 0.16f);
-            config.enableLexicalTieBreak = true;
-            config.lexicalTieBreakEpsilon = std::max(config.lexicalTieBreakEpsilon, 0.010f);
-            config.rerankTopK = std::max(config.rerankTopK, size_t{8});
-            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{384});
-            if (config.graphExpansionMaxTerms > 0) {
-                config.graphExpansionMaxTerms = std::min(config.graphExpansionMaxTerms, size_t{6});
-            }
-            if (config.graphRerankTopN > 0) {
-                config.graphRerankTopN = std::min(config.graphRerankTopN, size_t{18});
-            }
-            break;
-    }
-}
-
 double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent,
                               SearchEngineConfig::NavigationZoomLevel zoomLevel) {
     const double text = result.keywordScore.value_or(0.0);
@@ -870,43 +811,6 @@ double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent,
     }
 
     return signal;
-}
-
-void applyIntentWeights(SearchEngineConfig& config, QueryIntent intent) {
-    if (!config.enableIntentAdaptiveWeighting) {
-        return;
-    }
-
-    auto scale = [](float& weight, float factor) {
-        weight = std::clamp(weight * factor, 0.0f, 1.0f);
-    };
-
-    switch (intent) {
-        case QueryIntent::Path:
-            scale(config.pathTreeWeight, 1.8f);
-            scale(config.textWeight, 0.8f);
-            scale(config.vectorWeight, 0.7f);
-            scale(config.entityVectorWeight, 0.8f);
-            scale(config.kgWeight, 0.8f);
-            scale(config.tagWeight, 0.9f);
-            break;
-        case QueryIntent::Code:
-            scale(config.pathTreeWeight, 1.5f);
-            scale(config.entityVectorWeight, 1.5f);
-            scale(config.textWeight, 0.8f);
-            scale(config.vectorWeight, 0.7f);
-            scale(config.kgWeight, 0.9f);
-            break;
-        case QueryIntent::Prose:
-            scale(config.textWeight, 1.25f);
-            scale(config.vectorWeight, 0.9f);
-            scale(config.pathTreeWeight, 0.6f);
-            scale(config.entityVectorWeight, 0.6f);
-            scale(config.kgWeight, 0.8f);
-            break;
-        case QueryIntent::Mixed:
-            break;
-    }
 }
 
 } // namespace
@@ -1651,18 +1555,56 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const bool zoomLevelInferredFromIntent =
         configuredZoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto;
     workingConfig.zoomLevel = effectiveZoomLevel;
-    applyNavigationZoomPolicy(workingConfig, effectiveZoomLevel);
-    applyIntentWeights(workingConfig, intent);
+    // --- Layered tuning pipeline (layers 4-7) ---
+    // Get a mutable copy of the tuner's params (layers 0-3 baked in).
+    // When no tuner exists, initialize from the current working config so that
+    // explicitly configured values (e.g., from tests) are preserved.
+    TunedParams queryParams;
+    if (tuner_) {
+        queryParams = tuner_->getParams();
+    } else {
+        queryParams.weights.setAll(workingConfig.textWeight, workingConfig.vectorWeight,
+                                   workingConfig.entityVectorWeight, workingConfig.pathTreeWeight,
+                                   workingConfig.kgWeight, workingConfig.tagWeight,
+                                   workingConfig.metadataWeight, TuningLayer::Default);
+        queryParams.similarityThreshold.value = workingConfig.similarityThreshold;
+        queryParams.semanticRescueSlots.value = workingConfig.semanticRescueSlots;
+        queryParams.vectorBoostFactor = workingConfig.vectorBoostFactor;
+        queryParams.rrfK = static_cast<int>(std::lround(workingConfig.rrfK));
+        queryParams.fusionStrategy = workingConfig.fusionStrategy;
+        queryParams.enableGraphRerank = workingConfig.enableGraphRerank;
+        queryParams.graphRerankTopN = workingConfig.graphRerankTopN;
+        queryParams.graphRerankWeight = workingConfig.graphRerankWeight;
+        queryParams.graphRerankMaxBoost = workingConfig.graphRerankMaxBoost;
+        queryParams.graphRerankMinSignal = workingConfig.graphRerankMinSignal;
+        queryParams.graphCommunityWeight = workingConfig.graphCommunityWeight;
+        queryParams.kgMaxResults = workingConfig.kgMaxResults;
+        queryParams.graphScoringBudgetMs = workingConfig.graphScoringBudgetMs;
+        queryParams.vectorOnlyThreshold = workingConfig.vectorOnlyThreshold;
+        queryParams.vectorOnlyPenalty = workingConfig.vectorOnlyPenalty;
+        queryParams.vectorOnlyNearMissReserve = workingConfig.vectorOnlyNearMissReserve;
+        queryParams.vectorOnlyNearMissSlack = workingConfig.vectorOnlyNearMissSlack;
+        queryParams.vectorOnlyNearMissPenalty = workingConfig.vectorOnlyNearMissPenalty;
+        queryParams.rerankTopK = workingConfig.rerankTopK;
+        queryParams.lexicalFloorTopN = workingConfig.lexicalFloorTopN;
+        queryParams.lexicalFloorBoost = workingConfig.lexicalFloorBoost;
+        queryParams.enableLexicalTieBreak = workingConfig.enableLexicalTieBreak;
+        queryParams.lexicalTieBreakEpsilon = workingConfig.lexicalTieBreakEpsilon;
+    }
 
-    // Per-query community override: if the query signals a different domain than the
-    // global corpus profile, apply that community's tuned params on top. This lets a
-    // scientific query in a mixed corpus use SCIENTIFIC params, a code query in a prose
-    // corpus use code params, and a media query use MEDIA params — all without any
-    // offline clustering or additional inference.
+    // Layer 4: Zoom policy
+    applyZoomLayer(effectiveZoomLevel, queryParams);
+    // Layer 5: Intent policy (guarded by config flag)
+    if (workingConfig.enableIntentAdaptiveWeighting) {
+        applyIntentLayer(intent, queryParams);
+    }
+
+    // Layer 6: Per-query community override (blend, not full swap)
+    std::optional<TuningState> communityOverride;
     if (tuner_ && routeDecision.community.has_value()) {
-        if (const auto communityOverride =
-                tuningOverrideForCommunity(routeDecision.community->label, tuner_->currentState());
-            communityOverride.has_value()) {
+        communityOverride =
+            tuningOverrideForCommunity(routeDecision.community->label, tuner_->currentState());
+        if (communityOverride.has_value()) {
             const std::string overrideState = tuningStateToString(*communityOverride);
             response.debugStats["community_override"] = overrideState;
             response.debugStats["trace_query_community"] =
@@ -1671,27 +1613,23 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             spdlog::debug("[Search] community override: global={} → {} (routing={}μs, query='{}')",
                           tuningStateToString(tuner_->currentState()), overrideState,
                           response.componentTimingMicros.at("query_routing"), query);
-            getTunedParams(*communityOverride).applyTo(workingConfig);
-            // Re-apply intent weights on top of the new profile so that the
-            // intent-specific component scaling is preserved.
-            applyIntentWeights(workingConfig, intent);
+            applyCommunityLayer(communityOverride, tuner_->currentState(), queryParams);
         }
     }
 
+    // Layer 7: Semantic-only mode
     if (params.semanticOnly) {
-        workingConfig.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
-        workingConfig.similarityThreshold = std::min(workingConfig.similarityThreshold, 0.30f);
-        workingConfig.textWeight = std::min(workingConfig.textWeight, 0.20f);
-        workingConfig.graphTextWeight = 0.0f;
-        workingConfig.kgWeight = 0.0f;
-        workingConfig.graphVectorWeight = 0.0f;
-        workingConfig.vectorWeight = std::max(workingConfig.vectorWeight, 0.45f);
-        workingConfig.entityVectorWeight = std::max(workingConfig.entityVectorWeight, 0.15f);
-        workingConfig.enableGraphRerank = false;
-        workingConfig.vectorOnlyThreshold =
-            std::min(workingConfig.vectorOnlyThreshold, workingConfig.similarityThreshold);
-        workingConfig.vectorOnlyPenalty = 1.0f;
-        workingConfig.vectorOnlyNearMissPenalty = 1.0f;
+        applySemanticOnlyLayer(queryParams);
+    }
+
+    // Single normalization + apply to working config
+    queryParams.weights.normalize();
+    queryParams.applyTo(workingConfig);
+
+    // Config-only extras (fields not in TunedParams)
+    applyZoomConfigExtras(effectiveZoomLevel, workingConfig);
+    if (params.semanticOnly) {
+        applySemanticOnlyConfigExtras(workingConfig);
     }
 
     // Long prose queries can miss the semantic tier entirely when the default threshold

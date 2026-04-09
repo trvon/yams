@@ -691,6 +691,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_admission_policy_exe = executable('catch2_admission_policy',
+    files('unit/daemon/admission_policy_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_daemon_protocol_exe = executable('catch2_daemon_protocol',
     files(
       'unit/daemon/daemon_protocol_test.cpp',
@@ -1351,6 +1360,16 @@ if catch2_dep.found()
       'unit/search/compressed_ann_fusion_behavior_catch2_test.cpp',
       'unit/search/compressed_ann_dedup_catch2_test.cpp',
     ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+#TuningSlot tests (provenance-tracking primitives for restructured tuning pipeline)
+  catch2_tuning_slot_exe = executable('catch2_tuning_slot',
+    files('unit/search/tuning_slot_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2602,6 +2621,13 @@ if catch2_dep.found()
     is_parallel: false
   )
 
+  test('admission_policy', catch2_admission_policy_exe,
+    suite: ['catch2', 'unit', 'daemon', 'admission-policy'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
   test('repair_service', catch2_repair_service_exe,
     suite: ['catch2', 'unit', 'daemon', 'repair', 'stuck-docs'],
     env: {
@@ -3004,6 +3030,13 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'search', 'yams-1yq'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
+  )
+
+#TuningSlot provenance tests
+  test('tuning_slot', catch2_tuning_slot_exe,
+    suite: ['catch2', 'unit', 'search', 'tuner'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
 #SearchTuner FSM tests(Phase 2 of Epic yams - 7ez4)

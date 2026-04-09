@@ -79,32 +79,8 @@ const SearchTuner::RuntimeFusionSignal* findFusion(const SearchTuner::RuntimeTel
     return &it->second;
 }
 
-void normalizeComponentWeights(TunedParams& params) {
-    params.textWeight = std::max(0.0f, params.textWeight);
-    params.vectorWeight = std::max(0.0f, params.vectorWeight);
-    params.entityVectorWeight = std::max(0.0f, params.entityVectorWeight);
-    params.pathTreeWeight = std::max(0.0f, params.pathTreeWeight);
-    params.kgWeight = std::max(0.0f, params.kgWeight);
-    params.tagWeight = std::max(0.0f, params.tagWeight);
-    params.metadataWeight = std::max(0.0f, params.metadataWeight);
-
-    const float sum = params.textWeight + params.vectorWeight + params.entityVectorWeight +
-                      params.pathTreeWeight + params.kgWeight + params.tagWeight +
-                      params.metadataWeight;
-    if (sum > 0.0f) {
-        const float inv = 1.0f / sum;
-        params.textWeight *= inv;
-        params.vectorWeight *= inv;
-        params.entityVectorWeight *= inv;
-        params.pathTreeWeight *= inv;
-        params.kgWeight *= inv;
-        params.tagWeight *= inv;
-        params.metadataWeight *= inv;
-    }
-}
-
 void clampGraphControls(TunedParams& params) {
-    params.kgWeight = std::max(0.0f, params.kgWeight);
+    params.weights.kg.value = std::max(0.0f, params.weights.kg.value);
     params.kgMaxResults = std::clamp(params.kgMaxResults, kMinKgMaxResults, kMaxKgMaxResults);
     params.graphScoringBudgetMs =
         std::clamp(params.graphScoringBudgetMs, kMinGraphBudgetMs, kMaxGraphBudgetMs);
@@ -123,10 +99,13 @@ void applyAdaptiveClamp(const storage::CorpusStats& stats, TunedParams& params,
     clampGraphControls(params);
 
     if (stats.hasKnowledgeGraph()) {
-        params.kgWeight = std::clamp(params.kgWeight, kMinKgWeightWhenAvailable, kMaxKgWeight);
+        // Clamp KG weight to valid range (respects pinned via set())
+        const float clamped =
+            std::clamp(params.weights.kg.value, kMinKgWeightWhenAvailable, kMaxKgWeight);
+        params.weights.kg.set(clamped, params.weights.kg.source);
     } else {
         if (!preserveExplicitGraphConfig) {
-            params.kgWeight = 0.0f;
+            params.weights.kg.set(0.0f, TuningLayer::Corpus);
             params.kgMaxResults = 0;
             params.graphScoringBudgetMs = 0;
             params.enableGraphRerank = false;
@@ -138,7 +117,7 @@ void applyAdaptiveClamp(const storage::CorpusStats& stats, TunedParams& params,
         }
     }
 
-    normalizeComponentWeights(params);
+    params.weights.normalize();
 }
 
 std::string buildAdaptiveDecision(bool changed, const std::vector<std::string>& reasons) {
@@ -160,39 +139,43 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
                                 std::string& stateReason) {
     const bool hasKG = stats.hasKnowledgeGraph();
     if (!hasKG) {
-        params.kgWeight = 0.0f;
+        params.weights.kg.set(0.0f, TuningLayer::Corpus);
         params.kgMaxResults = 0;
         params.graphScoringBudgetMs = 0;
         params.enableGraphRerank = false;
-        normalizeComponentWeights(params);
+        params.weights.normalize();
         stateReason += ", graph=off(no_kg)";
         return;
     }
 
+    // Multiplicative scaling preserves profile weight ratios (unlike the
+    // old absolute subtraction which destroyed them).
     const float graphRichness =
         std::clamp(static_cast<float>((stats.symbolDensity - 0.1) / 1.5), 0.0f, 1.0f);
-    const float graphBoost = 0.04f + 0.10f * graphRichness;
 
-    params.kgWeight += graphBoost;
-    params.textWeight = std::max(0.0f, params.textWeight - graphBoost * 0.55f);
-    params.vectorWeight = std::max(0.0f, params.vectorWeight - graphBoost * 0.30f);
-    params.entityVectorWeight = std::max(0.0f, params.entityVectorWeight - graphBoost * 0.10f);
-    params.tagWeight = std::max(0.0f, params.tagWeight - graphBoost * 0.05f);
+    // Scale KG weight up: 1.3x–2.5x depending on graph richness
+    params.weights.kg.scaleBy(1.3f + (1.2f * graphRichness), TuningLayer::Corpus);
+    // Scale down other weights proportionally to make room for KG
+    const float reductionFactor = 1.0f - (0.15f * graphRichness);
+    params.weights.text.scaleBy(reductionFactor, TuningLayer::Corpus);
+    params.weights.vector.scaleBy(reductionFactor, TuningLayer::Corpus);
+    params.weights.entityVector.scaleBy(reductionFactor, TuningLayer::Corpus);
+    params.weights.tag.scaleBy(reductionFactor, TuningLayer::Corpus);
 
     params.enableGraphRerank = true;
     params.graphRerankTopN = stats.docCount >= 1000 ? 40 : 30;
-    params.graphRerankWeight = 0.18f + 0.14f * graphRichness;
-    params.graphRerankMaxBoost = 0.22f + 0.16f * graphRichness;
-    params.graphRerankMinSignal = std::max(0.005f, 0.02f - 0.012f * graphRichness);
-    params.graphCommunityWeight = 0.08f + 0.08f * graphRichness;
-    params.kgMaxResults = static_cast<size_t>(std::lround(60.0 + 60.0 * graphRichness));
-    params.graphScoringBudgetMs = static_cast<int>(std::lround(8.0 + 6.0 * graphRichness));
+    params.graphRerankWeight = 0.18f + (0.14f * graphRichness);
+    params.graphRerankMaxBoost = 0.22f + (0.16f * graphRichness);
+    params.graphRerankMinSignal = std::max(0.005f, 0.02f - (0.012f * graphRichness));
+    params.graphCommunityWeight = 0.08f + (0.08f * graphRichness);
+    params.kgMaxResults = static_cast<size_t>(std::lround(60.0 + (60.0 * graphRichness)));
+    params.graphScoringBudgetMs = static_cast<int>(std::lround(8.0 + (6.0 * graphRichness)));
 
-    normalizeComponentWeights(params);
+    params.weights.normalize();
 
     std::ostringstream suffix;
     suffix << ", graph=on(symbol_density=" << stats.symbolDensity
-           << ", kg_weight=" << params.kgWeight
+           << ", kg_weight=" << params.weights.kg.value
            << ", graph_rerank_weight=" << params.graphRerankWeight
            << ", graph_community_weight=" << params.graphCommunityWeight << ")";
     stateReason += suffix.str();
@@ -225,14 +208,14 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     baseConfig_ = config;
     params_.zoomLevel = config.zoomLevel;
-    params_.textWeight = config.textWeight;
-    params_.vectorWeight = config.vectorWeight;
-    params_.entityVectorWeight = config.entityVectorWeight;
-    params_.pathTreeWeight = config.pathTreeWeight;
-    params_.kgWeight = config.kgWeight;
-    params_.tagWeight = config.tagWeight;
-    params_.metadataWeight = config.metadataWeight;
-    params_.similarityThreshold = config.similarityThreshold;
+    params_.weights.text.value = config.textWeight;
+    params_.weights.vector.value = config.vectorWeight;
+    params_.weights.entityVector.value = config.entityVectorWeight;
+    params_.weights.pathTree.value = config.pathTreeWeight;
+    params_.weights.kg.value = config.kgWeight;
+    params_.weights.tag.value = config.tagWeight;
+    params_.weights.metadata.value = config.metadataWeight;
+    params_.similarityThreshold.value = config.similarityThreshold;
     params_.vectorBoostFactor = config.vectorBoostFactor;
     params_.rrfK = static_cast<int>(std::lround(config.rrfK));
     params_.fusionStrategy = config.fusionStrategy;
@@ -246,7 +229,7 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.lexicalFloorBoost = config.lexicalFloorBoost;
     params_.enableLexicalTieBreak = config.enableLexicalTieBreak;
     params_.lexicalTieBreakEpsilon = config.lexicalTieBreakEpsilon;
-    params_.semanticRescueSlots = config.semanticRescueSlots;
+    params_.semanticRescueSlots.value = config.semanticRescueSlots;
     params_.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
     params_.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
     params_.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
@@ -269,6 +252,24 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
          config.graphRerankMaxBoost > 0.0f || config.graphCommunityWeight > 0.0f ||
          config.kgMaxResults > 0 || config.graphScoringBudgetMs > 0);
     applyAdaptiveClamp(stats_, params_, preserveExplicitGraphConfig);
+    baseParams_ = params_;
+}
+
+void SearchTuner::pinEnvOverrides(bool textPinned, bool vectorPinned, bool kgPinned,
+                                  bool similarityThresholdPinned) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (textPinned) {
+        params_.weights.text.forceSet(params_.weights.text.value, TuningLayer::Env);
+    }
+    if (vectorPinned) {
+        params_.weights.vector.forceSet(params_.weights.vector.value, TuningLayer::Env);
+    }
+    if (kgPinned) {
+        params_.weights.kg.forceSet(params_.weights.kg.value, TuningLayer::Env);
+    }
+    if (similarityThresholdPinned) {
+        params_.similarityThreshold.forceSet(params_.similarityThreshold.value, TuningLayer::Env);
+    }
     baseParams_ = params_;
 }
 
@@ -390,9 +391,9 @@ void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
         }
         if (graphMostlySkipping) {
             const float nextKgWeight =
-                std::max(kMinKgWeightWhenAvailable, candidate.kgWeight - 0.01f);
-            if (std::abs(nextKgWeight - candidate.kgWeight) > 1e-6f) {
-                candidate.kgWeight = nextKgWeight;
+                std::max(kMinKgWeightWhenAvailable, candidate.weights.kg.value - 0.01f);
+            if (std::abs(nextKgWeight - candidate.weights.kg.value) > 1e-6f) {
+                candidate.weights.kg.set(nextKgWeight, TuningLayer::Runtime);
                 changed = true;
             }
         }
@@ -409,7 +410,7 @@ void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
         const auto nextBudget = std::min(kMaxGraphBudgetMs, candidate.graphScoringBudgetMs + 1);
         const auto nextTopN = std::min(kMaxGraphRerankTopN, candidate.graphRerankTopN + 2);
         const auto nextRrfK = std::max(kMinRrfK, candidate.rrfK - 1);
-        const float nextKgWeight = std::min(kMaxKgWeight, candidate.kgWeight + 0.005f);
+        const float nextKgWeight = std::min(kMaxKgWeight, candidate.weights.kg.value + 0.005f);
 
         if (nextKgMax != candidate.kgMaxResults) {
             candidate.kgMaxResults = nextKgMax;
@@ -423,8 +424,8 @@ void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
             candidate.graphRerankTopN = nextTopN;
             changed = true;
         }
-        if (std::abs(nextKgWeight - candidate.kgWeight) > 1e-6f) {
-            candidate.kgWeight = nextKgWeight;
+        if (std::abs(nextKgWeight - candidate.weights.kg.value) > 1e-6f) {
+            candidate.weights.kg.set(nextKgWeight, TuningLayer::Runtime);
             changed = true;
         }
         if (nextRrfK != candidate.rrfK) {

@@ -111,11 +111,20 @@ template <> struct ProtoBinding<ErrorResponse> {
         auto* pe = env.mutable_error();
         pe->set_code(static_cast<uint32_t>(er.code));
         pe->set_message(yams::common::sanitizeUtf8(er.message));
+        if (er.retry.has_value()) {
+            auto* retry = pe->mutable_retry();
+            retry->set_retry_after_ms(er.retry->retryAfterMs);
+            retry->set_reason(yams::common::sanitizeUtf8(er.retry->reason));
+        }
     }
     static ErrorResponse get(const Envelope& env) {
         ErrorResponse er{};
         er.code = static_cast<ErrorCode>(env.error().code());
         er.message = env.error().message();
+        if (env.error().has_retry()) {
+            er.retry = ErrorResponse::RetryInfo{env.error().retry().retry_after_ms(),
+                                                env.error().retry().reason()};
+        }
         return er;
     }
 };

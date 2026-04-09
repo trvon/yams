@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -726,6 +727,34 @@ struct CliDaemonClientLease {
     CliDaemonClientPlan plan;
 };
 
+struct CliDaemonRequestOptions {
+    CliDaemonAccessPolicy accessPolicy{CliDaemonAccessPolicy::AllowInProcessFallback};
+    std::chrono::milliseconds readyTimeout{std::chrono::milliseconds{-1}};
+    std::chrono::milliseconds requestTimeout{std::chrono::milliseconds{30000}};
+    std::chrono::milliseconds headerTimeout{std::chrono::milliseconds{0}};
+    std::chrono::milliseconds bodyTimeout{std::chrono::milliseconds{0}};
+    bool singleUseConnections{false};
+    bool enableChunkedResponses{false};
+    bool progressiveOutput{false};
+    std::size_t maxChunkSize{0};
+    bool routeOneShotToSocket{true};
+};
+
+struct CliPreparedRetrieval {
+    CliDaemonClientPlan plan;
+    yams::app::services::RetrievalOptions options;
+};
+
+inline Result<CliDaemonClientPlan>
+prepare_cli_daemon_client_plan(const yams::daemon::ClientConfig& requestedCfg,
+                               CliDaemonAccessPolicy policy,
+                               std::chrono::milliseconds readyTimeout);
+
+inline void apply_cli_daemon_plan_to_retrieval_options(const CliDaemonClientPlan& plan,
+                                                       yams::app::services::RetrievalOptions& opts);
+
+inline bool is_transport_failure(const yams::Error& err);
+
 namespace detail {
 
 inline std::string to_lower_copy(std::string value);
@@ -804,6 +833,27 @@ inline bool explicit_socket_without_autostart() {
     return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
 }
 
+template <typename FallbackFn>
+inline Result<void> daemon_error_or_local_fallback(const yams::Error& err, std::string_view opName,
+                                                   FallbackFn&& fallback) {
+    if (yams::cli::is_transport_failure(err)) {
+        return err;
+    }
+    spdlog::warn("{}: daemon path failed ({}); using local services", opName, err.message);
+    return std::invoke(std::forward<FallbackFn>(fallback));
+}
+
+template <typename FallbackFn>
+inline boost::asio::awaitable<Result<void>>
+daemon_error_or_local_fallback_async(const yams::Error& err, std::string_view opName,
+                                     FallbackFn&& fallback) {
+    if (yams::cli::is_transport_failure(err)) {
+        co_return err;
+    }
+    spdlog::warn("{}: daemon path failed ({}); using local services", opName, err.message);
+    co_return co_await std::invoke(std::forward<FallbackFn>(fallback));
+}
+
 inline Result<void> ensure_socket_daemon_ready(
     const yams::daemon::ClientConfig& cfg,
     std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
@@ -871,6 +921,76 @@ inline Result<void> ensure_socket_daemon_ready(
 }
 
 } // namespace detail
+
+inline bool cli_one_shot_enabled() {
+    const char* raw = std::getenv("YAMS_CLI_ONE_SHOT");
+    if (raw == nullptr || *raw == '\0') {
+        return false;
+    }
+    auto mode = detail::to_lower_copy(detail::trim_copy(raw));
+    return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
+}
+
+inline yams::daemon::ClientConfig
+build_cli_daemon_client_config(boost::asio::any_io_executor executor,
+                               const std::filesystem::path& explicitDataDir,
+                               const CliDaemonRequestOptions& options = {}) {
+    yams::daemon::ClientConfig cfg;
+    const bool cliOneShot = cli_one_shot_enabled();
+    if (cliOneShot && options.routeOneShotToSocket) {
+        cfg.socketPath = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+    } else {
+        cfg.executor = executor;
+    }
+
+    if (!explicitDataDir.empty()) {
+        cfg.dataDir = explicitDataDir;
+    }
+    if (options.requestTimeout.count() > 0) {
+        cfg.requestTimeout = options.requestTimeout;
+    }
+    if (options.headerTimeout.count() > 0) {
+        cfg.headerTimeout = options.headerTimeout;
+    }
+    if (options.bodyTimeout.count() > 0) {
+        cfg.bodyTimeout = options.bodyTimeout;
+    }
+    cfg.singleUseConnections = options.singleUseConnections || cliOneShot;
+    cfg.enableChunkedResponses = options.enableChunkedResponses;
+    cfg.progressiveOutput = options.progressiveOutput;
+    cfg.maxChunkSize = options.maxChunkSize;
+    return cfg;
+}
+
+inline Result<CliPreparedRetrieval>
+prepare_cli_retrieval(boost::asio::any_io_executor executor,
+                      const std::filesystem::path& explicitDataDir,
+                      const CliDaemonRequestOptions& options = {}) {
+    CliPreparedRetrieval prepared;
+    auto cfg = build_cli_daemon_client_config(executor, explicitDataDir, options);
+    auto planRes = prepare_cli_daemon_client_plan(cfg, options.accessPolicy, options.readyTimeout);
+    if (!planRes) {
+        return planRes.error();
+    }
+
+    prepared.plan = std::move(planRes.value());
+    prepared.options.enableStreaming = options.enableChunkedResponses;
+    prepared.options.progressiveOutput = options.progressiveOutput;
+    prepared.options.singleUseConnections = prepared.plan.config.singleUseConnections;
+    prepared.options.requestTimeoutMs =
+        options.requestTimeout.count() > 0 ? options.requestTimeout.count() : 30000;
+    prepared.options.headerTimeoutMs = options.headerTimeout.count() > 0
+                                           ? options.headerTimeout.count()
+                                           : prepared.options.requestTimeoutMs;
+    prepared.options.bodyTimeoutMs = options.bodyTimeout.count() > 0
+                                         ? options.bodyTimeout.count()
+                                         : prepared.options.requestTimeoutMs;
+    if (options.maxChunkSize > 0) {
+        prepared.options.maxChunkSize = options.maxChunkSize;
+    }
+    apply_cli_daemon_plan_to_retrieval_options(prepared.plan, prepared.options);
+    return prepared;
+}
 
 inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
     const yams::daemon::ClientConfig& requestedCfg,
