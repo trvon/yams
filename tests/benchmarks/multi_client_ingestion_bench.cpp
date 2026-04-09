@@ -32,6 +32,10 @@
 //   YAMS_BENCH_CLI_SEARCH_LIMIT   - CLI search result limit
 //   YAMS_BENCH_MCP_SESSION_CHURN_EVERY_N - MCP only: every Nth request uses a fresh
 //                                          MCP session (default: 0; profile may override)
+//   YAMS_BENCH_IDLE_PROBE         - Enable post-run idle transition probe (default: on)
+//   YAMS_BENCH_IDLE_PROBE_BASELINE_MS - Idle baseline sampling window (default: 1500)
+//   YAMS_BENCH_IDLE_PROBE_SAMPLE_MS   - Idle probe sampling interval (default: 50)
+//   YAMS_BENCH_IDLE_PROBE_DETECT_TIMEOUT_MS - Max wake detection window (default: 5000)
 
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_session.hpp>
@@ -46,6 +50,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -67,8 +72,11 @@
 #else
 #include <fcntl.h>
 #include <limits.h>
+#include <spawn.h>
 #include <unistd.h>
 #include <sys/wait.h>
+
+extern char** environ;
 #endif
 
 #include <nlohmann/json.hpp>
@@ -116,6 +124,10 @@ struct BenchConfig {
     std::string cliSearchQuery{"architecture performance tuning daemon"};
     std::string cliSearchType{"hybrid"};
     size_t cliSearchLimit{5};
+    bool idleProbeEnabled{true};
+    int idleProbeBaselineMs{1500};
+    int idleProbeSampleMs{50};
+    int idleProbeDetectTimeoutMs{5000};
 
     // --- Storage / corpus overrides ---
     // Point at an existing YAMS data directory (e.g. /Volumes/picaso/yams)
@@ -176,6 +188,16 @@ struct BenchConfig {
             cfg.cliSearchType = v;
         if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_LIMIT"))
             cfg.cliSearchLimit = std::max<size_t>(1, std::stoull(v));
+        if (auto* v = std::getenv("YAMS_BENCH_IDLE_PROBE")) {
+            std::string s(v);
+            cfg.idleProbeEnabled = !(s == "0" || s == "false" || s == "no" || s == "off");
+        }
+        if (auto* v = std::getenv("YAMS_BENCH_IDLE_PROBE_BASELINE_MS"))
+            cfg.idleProbeBaselineMs = std::max(0, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_IDLE_PROBE_SAMPLE_MS"))
+            cfg.idleProbeSampleMs = std::max(10, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_IDLE_PROBE_DETECT_TIMEOUT_MS"))
+            cfg.idleProbeDetectTimeoutMs = std::max(250, std::atoi(v));
         cfg.scalingMaxClients = std::max(cfg.scalingMaxClients, cfg.numClients * 2);
         cfg.cliProbeOpsPerCommand = std::max(cfg.cliProbeOpsPerCommand, cfg.stressRounds);
         if (cfg.cliSearchQuery.empty())
@@ -501,60 +523,188 @@ std::optional<fs::path> findExecutableInPath(const std::string& name) {
     return std::nullopt;
 }
 
-std::optional<fs::path> findYamsBinary(const BenchConfig& cfg) {
-    if (cfg.cliBinary && fs::exists(*cfg.cliBinary)) {
-        return cfg.cliBinary;
+struct CliBinarySelection {
+    std::optional<fs::path> path;
+    std::string source{"missing"};
+    std::string note;
+    bool explicitSelection{false};
+    bool pathFallback{false};
+    bool usableForStress{false};
+
+    json toJson() const {
+        return json{{"path", path ? path->string() : std::string()},
+                    {"source", source},
+                    {"note", note},
+                    {"explicit_selection", explicitSelection},
+                    {"path_fallback", pathFallback},
+                    {"usable_for_stress", usableForStress}};
+    }
+};
+
+bool isExecutableBinary(const fs::path& candidate) {
+    std::error_code ec;
+    if (!fs::exists(candidate, ec) || ec) {
+        return false;
+    }
+#ifdef _WIN32
+    return true;
+#else
+    return ::access(candidate.c_str(), X_OK) == 0;
+#endif
+}
+
+CliBinarySelection findYamsBinary(const BenchConfig& cfg) {
+    auto resolveCandidate = [](const fs::path& candidate) -> std::optional<fs::path> {
+        if (!isExecutableBinary(candidate)) {
+            return std::nullopt;
+        }
+        return fs::absolute(candidate);
+    };
+
+    if (cfg.cliBinary && fs::exists(cfg.cliBinary.value())) {
+        CliBinarySelection selection;
+        selection.path = fs::absolute(cfg.cliBinary.value());
+        selection.source = "explicit";
+        selection.explicitSelection = true;
+        selection.usableForStress = true;
+        return selection;
     }
 
     if (const char* buildRoot = std::getenv("MESON_BUILD_ROOT")) {
+        for (const auto& relative : {fs::path("tools/yams-cli/yams-cli"),
+                                     fs::path("tools/yams-cli/yams"), fs::path("src/cli/yams")}) {
 #ifdef _WIN32
-        fs::path candidate = fs::path(buildRoot) / "src/cli/yams.exe";
+            const fs::path candidate = fs::path(buildRoot) / relative.replace_extension(".exe");
 #else
-        fs::path candidate = fs::path(buildRoot) / "src/cli/yams";
+            const fs::path candidate = fs::path(buildRoot) / relative;
 #endif
-        if (fs::exists(candidate)) {
-            return candidate;
+            if (auto resolved = resolveCandidate(candidate)) {
+                CliBinarySelection selection;
+                selection.path = resolved.value();
+                selection.source = "meson_build_root";
+                selection.usableForStress = true;
+                return selection;
+            }
         }
     }
 
     for (const auto& relative :
-         {fs::path("builddir/src/cli/yams"), fs::path("build/src/cli/yams"),
-          fs::path("build/debug/src/cli/yams"), fs::path("build/release/src/cli/yams")}) {
-        if (fs::exists(relative)) {
-            return fs::absolute(relative);
+         {fs::path("builddir/tools/yams-cli/yams-cli"), fs::path("build/tools/yams-cli/yams-cli"),
+          fs::path("build/debug/tools/yams-cli/yams-cli"),
+          fs::path("build/release/tools/yams-cli/yams-cli"),
+          fs::path("build/asan/tools/yams-cli/yams-cli"),
+          fs::path("build/opencode-tests/tools/yams-cli/yams-cli"),
+          fs::path("builddir/src/cli/yams"), fs::path("build/src/cli/yams"),
+          fs::path("build/debug/src/cli/yams"), fs::path("build/release/src/cli/yams"),
+          fs::path("build/asan/src/cli/yams"), fs::path("build/opencode-tests/src/cli/yams")}) {
+#ifdef _WIN32
+        const fs::path candidate = relative.replace_extension(".exe");
+#else
+        const fs::path candidate = relative;
+#endif
+        if (auto resolved = resolveCandidate(candidate)) {
+            CliBinarySelection selection;
+            selection.path = resolved.value();
+            selection.source = "local_build_tree";
+            selection.usableForStress = true;
+            return selection;
         }
     }
 
 #ifdef _WIN32
-    return findExecutableInPath("yams.exe");
+    if (auto candidate = findExecutableInPath("yams.exe")) {
+        CliBinarySelection selection;
+        selection.path = candidate.value();
+        selection.source = "path_fallback";
+        selection.note =
+            "PATH fallback may not match the build under test; set YAMS_BENCH_CLI_BIN for "
+            "deterministic CLI stress results";
+        selection.pathFallback = true;
+        selection.usableForStress = false;
+        return selection;
+    }
 #else
-    return findExecutableInPath("yams");
+    if (auto candidate = findExecutableInPath("yams")) {
+        CliBinarySelection selection;
+        selection.path = candidate.value();
+        selection.source = "path_fallback";
+        selection.note =
+            "PATH fallback may not match the build under test; set YAMS_BENCH_CLI_BIN for "
+            "deterministic CLI stress results";
+        selection.pathFallback = true;
+        selection.usableForStress = false;
+        return selection;
+    }
 #endif
+
+    return CliBinarySelection{.source = "missing",
+                              .note =
+                                  "No in-tree CLI binary found; set YAMS_BENCH_CLI_BIN or build "
+                                  "tools/yams-cli/yams-cli to enable CLI stress probes",
+                              .usableForStress = false};
 }
+
+struct ProbeDaemonState {
+    bool captured{false};
+    size_t activeConnections{0};
+    size_t maxConnections{0};
+    size_t connectionSlotsFree{0};
+    int pressureLevel{0};
+    uint32_t retryAfterMs{0};
+    std::string error;
+
+    bool underStress() const {
+        return captured && ((maxConnections > 0 && activeConnections >= maxConnections) ||
+                            connectionSlotsFree == 0 || retryAfterMs > 0 || pressureLevel >= 1);
+    }
+
+    json toJson() const {
+        return json{{"captured", captured},
+                    {"active_connections", activeConnections},
+                    {"max_connections", maxConnections},
+                    {"connection_slots_free", connectionSlotsFree},
+                    {"pressure_level", pressureLevel},
+                    {"retry_after_ms", retryAfterMs},
+                    {"error", error}};
+    }
+};
 
 struct CliProbeResult {
     bool attempted{false};
     bool success{false};
     int exitCode{-1};
+    int signal{-1};
     int64_t latencyUs{0};
+    bool timedOut{false};
+    std::string opType;
     std::string error;
+    std::string stderrText;
+    std::string failureBucket;
+    std::string failureMode;
+    ProbeDaemonState beforeState;
+    ProbeDaemonState afterState;
     std::unordered_map<std::string, int64_t> stageElapsedUs;
+
+    json toJson() const {
+        return json{{"attempted", attempted},
+                    {"success", success},
+                    {"op_type", opType},
+                    {"exit_code", exitCode},
+                    {"signal", signal},
+                    {"latency_us", latencyUs},
+                    {"timed_out", timedOut},
+                    {"error", error},
+                    {"stderr", stderrText},
+                    {"failure_bucket", failureBucket},
+                    {"failure_mode", failureMode},
+                    {"before_state", beforeState.toJson()},
+                    {"after_state", afterState.toJson()},
+                    {"stage_elapsed_us", stageElapsedUs}};
+    }
 };
 
 #ifndef _WIN32
-namespace {
-
-void closeInheritedFdsExceptStd() {
-    long maxFd = ::sysconf(_SC_OPEN_MAX);
-    if (maxFd <= 0) {
-        maxFd = 1024;
-    }
-    for (int fd = 3; fd < maxFd; ++fd) {
-        ::close(fd);
-    }
-}
-
-} // namespace
+namespace {} // namespace
 
 CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPath,
                            const std::vector<std::string>& args,
@@ -574,41 +724,81 @@ CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPat
         return result;
     }
 
-    const auto start = std::chrono::steady_clock::now();
-    pid_t pid = ::fork();
-    if (pid < 0) {
+    std::vector<std::string> owned;
+    owned.reserve(args.size() + 1);
+    owned.push_back(yamsBinary.string());
+    owned.insert(owned.end(), args.begin(), args.end());
+
+    std::vector<char*> argv;
+    argv.reserve(owned.size() + 1);
+    for (auto& arg : owned) {
+        argv.push_back(arg.data());
+    }
+    argv.push_back(nullptr);
+
+    std::vector<std::string> envOwned;
+    if (environ != nullptr) {
+        for (char** env = environ; *env != nullptr; ++env) {
+            envOwned.emplace_back(*env);
+        }
+    }
+    auto setOrReplaceEnv = [&](std::string key, std::string value) {
+        const std::string prefix = key + "=";
+        for (auto& entry : envOwned) {
+            if (entry.rfind(prefix, 0) == 0) {
+                entry = prefix + value;
+                return;
+            }
+        }
+        envOwned.push_back(prefix + value);
+    };
+    setOrReplaceEnv("YAMS_DAEMON_SOCKET_PATH", socketPath.string());
+    setOrReplaceEnv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
+    setOrReplaceEnv("YAMS_CLI_ONE_SHOT", "1");
+    setOrReplaceEnv("YAMS_CLI_PERF_TRACE", "1");
+    setOrReplaceEnv("YAMS_LOG_LEVEL", "error");
+
+    std::vector<char*> envp;
+    envp.reserve(envOwned.size() + 1);
+    for (auto& entry : envOwned) {
+        envp.push_back(entry.data());
+    }
+    envp.push_back(nullptr);
+
+    posix_spawn_file_actions_t actions;
+    if (::posix_spawn_file_actions_init(&actions) != 0) {
         ::close(sinkFd);
         ::close(tracePipe[0]);
         ::close(tracePipe[1]);
-        result.error = "fork() failed";
+        result.error = "posix_spawn file actions init failed";
         return result;
     }
+    (void)::posix_spawn_file_actions_adddup2(&actions, sinkFd, STDOUT_FILENO);
+    (void)::posix_spawn_file_actions_adddup2(&actions, tracePipe[1], STDERR_FILENO);
+    (void)::posix_spawn_file_actions_addclose(&actions, sinkFd);
+    (void)::posix_spawn_file_actions_addclose(&actions, tracePipe[0]);
+    (void)::posix_spawn_file_actions_addclose(&actions, tracePipe[1]);
 
-    if (pid == 0) {
-        ::setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
-        ::setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
-        ::setenv("YAMS_CLI_ONE_SHOT", "1", 1);
-        ::setenv("YAMS_CLI_PERF_TRACE", "1", 1);
-        ::dup2(sinkFd, STDOUT_FILENO);
-        ::dup2(tracePipe[1], STDERR_FILENO);
+    posix_spawnattr_t attr;
+    (void)::posix_spawnattr_init(&attr);
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+    short spawnFlags = 0;
+    spawnFlags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+    (void)::posix_spawnattr_setflags(&attr, spawnFlags);
+#endif
+
+    const auto start = std::chrono::steady_clock::now();
+    pid_t pid = -1;
+    const int spawnErr =
+        ::posix_spawn(&pid, yamsBinary.c_str(), &actions, &attr, argv.data(), envp.data());
+    (void)::posix_spawn_file_actions_destroy(&actions);
+    (void)::posix_spawnattr_destroy(&attr);
+    if (spawnErr != 0) {
         ::close(sinkFd);
         ::close(tracePipe[0]);
         ::close(tracePipe[1]);
-        closeInheritedFdsExceptStd();
-
-        std::vector<std::string> owned;
-        owned.reserve(args.size() + 1);
-        owned.push_back(yamsBinary.string());
-        owned.insert(owned.end(), args.begin(), args.end());
-
-        std::vector<char*> argv;
-        argv.reserve(owned.size() + 1);
-        for (auto& arg : owned) {
-            argv.push_back(arg.data());
-        }
-        argv.push_back(nullptr);
-        ::execv(yamsBinary.c_str(), argv.data());
-        _exit(127);
+        result.error = "posix_spawn() failed: " + std::string(std::strerror(spawnErr));
+        return result;
     }
 
     ::close(sinkFd);
@@ -631,12 +821,13 @@ CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPat
             ::kill(pid, SIGKILL);
             while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
             }
+            result.timedOut = true;
             result.error = "cli probe timed out";
             result.exitCode = 124;
             result.latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
                                    std::chrono::steady_clock::now() - start)
                                    .count();
-            return result;
+            break;
         }
         std::this_thread::sleep_for(10ms);
     }
@@ -645,7 +836,10 @@ CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPat
                            std::chrono::steady_clock::now() - start)
                            .count();
 
-    if (WIFEXITED(status)) {
+    if (WIFSIGNALED(status)) {
+        result.signal = WTERMSIG(status);
+        result.error = "cli probe terminated by signal " + std::to_string(result.signal);
+    } else if (WIFEXITED(status)) {
         result.exitCode = WEXITSTATUS(status);
         result.success = (result.exitCode == 0);
     } else {
@@ -666,10 +860,14 @@ CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPat
 
     std::stringstream traceStream(trace);
     std::string line;
+    std::vector<std::string> stderrLines;
     while (std::getline(traceStream, line)) {
         constexpr std::string_view kPrefix = "[yams-cli-perf] stage=";
         auto prefixPos = line.find(kPrefix);
         if (prefixPos == std::string::npos) {
+            if (!line.empty()) {
+                stderrLines.push_back(line);
+            }
             continue;
         }
         auto stageStart = prefixPos + kPrefix.size();
@@ -685,6 +883,26 @@ CliProbeResult runCliProbe(const fs::path& yamsBinary, const fs::path& socketPat
         try {
             result.stageElapsedUs[stage] = std::stoll(valueText);
         } catch (...) {
+            continue;
+        }
+    }
+
+    if (!stderrLines.empty()) {
+        std::ostringstream stderrBuf;
+        for (size_t i = 0; i < stderrLines.size(); ++i) {
+            if (i > 0) {
+                stderrBuf << '\n';
+            }
+            stderrBuf << stderrLines[i];
+        }
+        result.stderrText = stderrBuf.str();
+    }
+
+    if (!result.success && result.error.empty()) {
+        if (!result.stderrText.empty()) {
+            result.error = result.stderrText;
+        } else if (result.exitCode >= 0) {
+            result.error = "cli probe exited with code " + std::to_string(result.exitCode);
         }
     }
     return result;
@@ -805,6 +1023,182 @@ struct DaemonSnapshot {
                     {"retry_after_ms", retryAfterMs}};
     }
 };
+
+ProbeDaemonState captureProbeDaemonState(const fs::path& socketPath,
+                                         std::chrono::milliseconds timeout = 3s) {
+    ProbeDaemonState state;
+    ClientConfig cfg;
+    cfg.socketPath = socketPath;
+    cfg.autoStart = false;
+    cfg.singleUseConnections = true;
+    cfg.requestTimeout = timeout;
+    DaemonClient client(cfg);
+
+    auto st = yams::cli::run_sync(client.status(), timeout);
+    if (!st) {
+        state.error = st.error().message;
+        return state;
+    }
+
+    state.captured = true;
+    state.activeConnections = st.value().activeConnections;
+    state.maxConnections = st.value().maxConnections;
+    state.connectionSlotsFree = st.value().connectionSlotsFree;
+    state.pressureLevel = 0;
+    auto getCount = [&](std::string_view key) -> uint64_t {
+        auto it = st.value().requestCounts.find(std::string(key));
+        return (it != st.value().requestCounts.end()) ? it->second : 0ULL;
+    };
+    if (state.maxConnections == 0) {
+        state.maxConnections = static_cast<size_t>(getCount("status_max_connections"));
+    }
+    if (state.connectionSlotsFree == 0) {
+        state.connectionSlotsFree = static_cast<size_t>(getCount("status_connection_slots_free"));
+    }
+    auto it = st.value().requestCounts.find(std::string(metrics::kPressureLevel));
+    if (it != st.value().requestCounts.end()) {
+        state.pressureLevel = static_cast<int>(it->second);
+    }
+    state.retryAfterMs = st.value().retryAfterMs;
+    if (state.retryAfterMs == 0) {
+        state.retryAfterMs = static_cast<uint32_t>(getCount("status_retry_after_ms"));
+    }
+    return state;
+}
+
+std::string classifyFailureMessage(const std::string& errorMsg);
+
+std::string classifyCliProbeBucket(const CliProbeResult& probe) {
+    if (probe.success) {
+        return "success";
+    }
+    if (probe.timedOut) {
+        return "timeout";
+    }
+    if (probe.signal > 0) {
+        return "signal";
+    }
+    if (probe.exitCode == 127) {
+        return "exec_failed";
+    }
+    return classifyFailureMessage(!probe.stderrText.empty() ? probe.stderrText : probe.error);
+}
+
+std::string classifyCliProbeMode(const CliProbeResult& probe) {
+    if (probe.success) {
+        return "success";
+    }
+
+    const bool underStress = probe.beforeState.underStress() || probe.afterState.underStress();
+    const std::string bucket =
+        probe.failureBucket.empty() ? classifyCliProbeBucket(probe) : probe.failureBucket;
+
+    if (bucket == "exec_failed") {
+        return "benchmark_wiring";
+    }
+    if (bucket == "signal") {
+        return "unexpected_signal";
+    }
+    if (bucket == "protocol") {
+        return "protocol_or_cli_bug";
+    }
+    if (bucket == "connect_refused") {
+        return underStress ? "stress_expected" : "ambient_daemon_down";
+    }
+    if (bucket == "connection_drop" || bucket == "backpressure") {
+        return underStress ? "stress_expected" : "ambient_failure";
+    }
+    if (bucket == "timeout") {
+        return underStress ? "timeout_under_load" : "ambient_failure";
+    }
+    return underStress ? "stress_expected" : "unexpected_cli_failure";
+}
+
+struct RecoveryCheck {
+    bool statusOk{false};
+    bool listOk{false};
+    std::string statusError;
+    std::string listError;
+    DaemonSnapshot snapshot;
+
+    bool ok() const { return statusOk && listOk; }
+
+    json toJson() const {
+        return json{{"status_ok", statusOk},
+                    {"list_ok", listOk},
+                    {"status_error", statusError},
+                    {"list_error", listError},
+                    {"snapshot", snapshot.toJson()}};
+    }
+};
+
+RecoveryCheck runRecoveryCheck(const fs::path& socketPath) {
+    RecoveryCheck check;
+    ClientConfig cfg;
+    cfg.socketPath = socketPath;
+    cfg.autoStart = false;
+    cfg.singleUseConnections = true;
+    cfg.requestTimeout = 10s;
+    DaemonClient client(cfg);
+
+    auto statusRes = yams::cli::run_sync(client.status(), 10s);
+    if (statusRes) {
+        check.statusOk = true;
+        check.snapshot = DaemonSnapshot::capture(client);
+    } else {
+        check.statusError = statusRes.error().message;
+    }
+
+    ListRequest listReq;
+    listReq.limit = 10;
+    auto listRes = yams::cli::run_sync(client.list(listReq), 10s);
+    if (listRes) {
+        check.listOk = true;
+    } else {
+        check.listError = listRes.error().message;
+    }
+
+    return check;
+}
+
+void printRecoverySummary(const RecoveryCheck& recovery) {
+    std::cout << "  Recovery: status=" << (recovery.statusOk ? "ok" : "FAIL")
+              << " list=" << (recovery.listOk ? "ok" : "FAIL") << "\n";
+    if (!recovery.statusOk && !recovery.statusError.empty()) {
+        std::cout << "    status error: " << recovery.statusError << "\n";
+    }
+    if (!recovery.listOk && !recovery.listError.empty()) {
+        std::cout << "    list error: " << recovery.listError << "\n";
+    }
+}
+
+CliProbeResult runObservedCliProbe(const std::string& opType, const fs::path& cliBinary,
+                                   const fs::path& socketPath, const std::vector<std::string>& args,
+                                   std::chrono::milliseconds timeout = 10s) {
+    auto beforeState = captureProbeDaemonState(socketPath, std::min(timeout, 1500ms));
+    auto probe = runCliProbe(cliBinary, socketPath, args, timeout);
+    probe.opType = opType;
+    probe.beforeState = beforeState;
+    probe.afterState = captureProbeDaemonState(socketPath, std::min(timeout, 1500ms));
+    probe.failureBucket = classifyCliProbeBucket(probe);
+    probe.failureMode = classifyCliProbeMode(probe);
+    return probe;
+}
+
+void printCliProbeFailureSummary(const std::map<std::string, int>& failureModes,
+                                 const std::map<std::string, std::string>& failureSamples) {
+    if (failureModes.empty()) {
+        return;
+    }
+    std::cout << "  CLI failure modes:";
+    for (const auto& [mode, count] : failureModes) {
+        std::cout << " " << mode << "=" << count;
+    }
+    std::cout << "\n";
+    for (const auto& [mode, sample] : failureSamples) {
+        std::cout << "    sample[" << mode << "]: " << sample << "\n";
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Time-series sampler (runs in background during benchmark)
@@ -1277,24 +1671,291 @@ bool isHotspotWindowEligible(int ops, int totalClients) {
 // Wait for queue drain
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool waitForDrain(DaemonClient& client, std::chrono::seconds timeout) {
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    int stableCount = 0;
+struct DrainObservation {
+    bool drained{false};
+    uint64_t elapsedMs{0};
+    int polls{0};
+    int stablePolls{0};
+    uint64_t peakPostIngestQueued{0};
+    uint64_t peakPostIngestInflight{0};
+    double peakCpuPercent{0.0};
+    double peakMemoryMb{0.0};
+    uint32_t maxPressureLevel{0};
+    DaemonSnapshot finalSnapshot;
+
+    json toJson() const {
+        return json{{"drained", drained},
+                    {"elapsed_ms", elapsedMs},
+                    {"polls", polls},
+                    {"stable_polls", stablePolls},
+                    {"peak_post_ingest_queued", peakPostIngestQueued},
+                    {"peak_post_ingest_inflight", peakPostIngestInflight},
+                    {"peak_cpu_pct", peakCpuPercent},
+                    {"peak_memory_mb", peakMemoryMb},
+                    {"max_pressure_level", maxPressureLevel},
+                    {"final_snapshot", finalSnapshot.toJson()}};
+    }
+};
+
+struct IdleBaselineObservation {
+    uint64_t durationMs{0};
+    int samples{0};
+    double meanCpuPercent{0.0};
+    double peakCpuPercent{0.0};
+    double meanMemoryMb{0.0};
+    double peakMemoryMb{0.0};
+    uint64_t maxPostIngestQueued{0};
+    uint64_t maxPostIngestInflight{0};
+    size_t maxActiveConnections{0};
+    uint32_t maxPressureLevel{0};
+
+    json toJson() const {
+        return json{{"duration_ms", durationMs},
+                    {"samples", samples},
+                    {"mean_cpu_pct", meanCpuPercent},
+                    {"peak_cpu_pct", peakCpuPercent},
+                    {"mean_memory_mb", meanMemoryMb},
+                    {"peak_memory_mb", peakMemoryMb},
+                    {"max_post_ingest_queued", maxPostIngestQueued},
+                    {"max_post_ingest_inflight", maxPostIngestInflight},
+                    {"max_active_connections", maxActiveConnections},
+                    {"max_pressure_level", maxPressureLevel}};
+    }
+};
+
+struct IdleWakeProbeObservation {
+    bool enabled{false};
+    bool attempted{false};
+    bool addCompleted{false};
+    bool addSucceeded{false};
+    bool workVisible{false};
+    uint64_t addLatencyUs{0};
+    uint64_t workVisibleUs{0};
+    std::string addError;
+    DaemonSnapshot beforeSnapshot;
+    DaemonSnapshot visibleSnapshot;
+    DrainObservation preProbeDrain;
+    IdleBaselineObservation idleBaseline;
+    DrainObservation postProbeDrain;
+
+    json toJson() const {
+        return json{{"enabled", enabled},
+                    {"attempted", attempted},
+                    {"add_completed", addCompleted},
+                    {"add_succeeded", addSucceeded},
+                    {"work_visible", workVisible},
+                    {"add_latency_us", addLatencyUs},
+                    {"work_visible_us", workVisibleUs},
+                    {"add_error", addError},
+                    {"before_snapshot", beforeSnapshot.toJson()},
+                    {"visible_snapshot", visibleSnapshot.toJson()},
+                    {"pre_probe_drain", preProbeDrain.toJson()},
+                    {"idle_baseline", idleBaseline.toJson()},
+                    {"post_probe_drain", postProbeDrain.toJson()}};
+    }
+};
+
+DrainObservation waitForDrainObservation(DaemonClient& client, std::chrono::milliseconds timeout,
+                                         std::chrono::milliseconds sampleInterval = 500ms) {
+    DrainObservation observation;
+    const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + timeout;
     constexpr int stableRequired = 5;
+    int stableCount = 0;
 
     while (std::chrono::steady_clock::now() < deadline) {
         auto snap = DaemonSnapshot::capture(client);
-        bool drained = (snap.postIngestQueued == 0 && snap.postIngestInflight == 0);
+        observation.polls++;
+        observation.peakPostIngestQueued =
+            std::max(observation.peakPostIngestQueued, snap.postIngestQueued);
+        observation.peakPostIngestInflight =
+            std::max(observation.peakPostIngestInflight, snap.postIngestInflight);
+        observation.peakCpuPercent = std::max(observation.peakCpuPercent, snap.cpuUsagePercent);
+        observation.peakMemoryMb = std::max(observation.peakMemoryMb, snap.memoryUsageMb);
+        observation.maxPressureLevel = std::max(
+            observation.maxPressureLevel, static_cast<uint32_t>(std::max(0, snap.pressureLevel)));
+
+        const bool drained = (snap.postIngestQueued == 0 && snap.postIngestInflight == 0);
         if (drained) {
             ++stableCount;
-            if (stableCount >= stableRequired)
-                return true;
+            if (stableCount >= stableRequired) {
+                observation.drained = true;
+                observation.stablePolls = stableCount;
+                observation.finalSnapshot = snap;
+                observation.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - start)
+                                            .count();
+                return observation;
+            }
         } else {
             stableCount = 0;
         }
-        std::this_thread::sleep_for(500ms);
+
+        std::this_thread::sleep_for(sampleInterval);
     }
-    return false;
+
+    observation.stablePolls = stableCount;
+    observation.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count();
+    observation.finalSnapshot = DaemonSnapshot::capture(client);
+    return observation;
+}
+
+IdleBaselineObservation sampleIdleBaseline(DaemonClient& client, std::chrono::milliseconds duration,
+                                           std::chrono::milliseconds sampleInterval) {
+    IdleBaselineObservation observation;
+    observation.durationMs = static_cast<uint64_t>(std::max<int64_t>(0, duration.count()));
+    if (duration <= 0ms) {
+        return observation;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + duration;
+    double cpuSum = 0.0;
+    double memorySum = 0.0;
+
+    while (true) {
+        auto snap = DaemonSnapshot::capture(client);
+        observation.samples++;
+        cpuSum += snap.cpuUsagePercent;
+        memorySum += snap.memoryUsageMb;
+        observation.peakCpuPercent = std::max(observation.peakCpuPercent, snap.cpuUsagePercent);
+        observation.peakMemoryMb = std::max(observation.peakMemoryMb, snap.memoryUsageMb);
+        observation.maxPostIngestQueued =
+            std::max(observation.maxPostIngestQueued, snap.postIngestQueued);
+        observation.maxPostIngestInflight =
+            std::max(observation.maxPostIngestInflight, snap.postIngestInflight);
+        observation.maxActiveConnections =
+            std::max(observation.maxActiveConnections, snap.activeConnections);
+        observation.maxPressureLevel = std::max(
+            observation.maxPressureLevel, static_cast<uint32_t>(std::max(0, snap.pressureLevel)));
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+        std::this_thread::sleep_for(sampleInterval);
+    }
+
+    if (observation.samples > 0) {
+        observation.meanCpuPercent = cpuSum / static_cast<double>(observation.samples);
+        observation.meanMemoryMb = memorySum / static_cast<double>(observation.samples);
+    }
+    observation.durationMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - start)
+                                 .count();
+    return observation;
+}
+
+bool waitForDrain(DaemonClient& client, std::chrono::seconds timeout) {
+    return waitForDrainObservation(client, timeout).drained;
+}
+
+IdleWakeProbeObservation runIdleWakeProbe(const BenchConfig& cfg, const fs::path& socketPath,
+                                          DaemonClient& monitorClient) {
+    IdleWakeProbeObservation observation;
+    observation.enabled = cfg.idleProbeEnabled;
+    if (!cfg.idleProbeEnabled) {
+        return observation;
+    }
+
+    observation.attempted = true;
+    const auto sampleInterval = std::chrono::milliseconds(cfg.idleProbeSampleMs);
+    observation.preProbeDrain = waitForDrainObservation(
+        monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs), sampleInterval);
+    if (!observation.preProbeDrain.drained) {
+        return observation;
+    }
+
+    observation.idleBaseline = sampleIdleBaseline(
+        monitorClient, std::chrono::milliseconds(cfg.idleProbeBaselineMs), sampleInterval);
+    observation.beforeSnapshot = DaemonSnapshot::capture(monitorClient);
+
+    struct ProbeAddResult {
+        bool success{false};
+        std::string error;
+        int64_t latencyUs{0};
+    };
+
+    auto addFuture = std::async(std::launch::async, [socketPath, &cfg]() {
+        ProbeAddResult result;
+        ClientConfig ccfg;
+        ccfg.socketPath = socketPath;
+        ccfg.autoStart = false;
+        ccfg.requestTimeout = std::chrono::seconds(15);
+        ccfg.singleUseConnections = true;
+        DaemonClient client(ccfg);
+
+        AddDocumentRequest req;
+        req.name = "idle_probe_" + std::to_string(::getpid()) + ".md";
+        req.content = generateDocument(
+            777, 0, std::max<size_t>(256, std::min<size_t>(1024, cfg.docSizeBytes)));
+        req.tags = {"bench", "idle-probe"};
+        req.collection = "bench_idle_probe";
+        req.noEmbeddings = true;
+
+        const auto start = std::chrono::steady_clock::now();
+        auto addResult = yams::cli::run_sync(client.streamingAddDocument(req), 15s);
+        result.latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - start)
+                               .count();
+        result.success = static_cast<bool>(addResult);
+        if (!addResult) {
+            result.error = addResult.error().message;
+        }
+        return result;
+    });
+
+    const auto probeStart = std::chrono::steady_clock::now();
+    const auto detectDeadline =
+        probeStart + std::chrono::milliseconds(cfg.idleProbeDetectTimeoutMs);
+    while (std::chrono::steady_clock::now() < detectDeadline) {
+        if (!observation.addCompleted && addFuture.wait_for(0ms) == std::future_status::ready) {
+            const auto addResult = addFuture.get();
+            observation.addCompleted = true;
+            observation.addSucceeded = addResult.success;
+            observation.addLatencyUs =
+                static_cast<uint64_t>(std::max<int64_t>(0, addResult.latencyUs));
+            observation.addError = addResult.error;
+        }
+
+        auto snap = DaemonSnapshot::capture(monitorClient);
+        if (!observation.workVisible &&
+            (snap.documentsTotal > observation.beforeSnapshot.documentsTotal ||
+             snap.postIngestQueued > 0 || snap.postIngestInflight > 0 || snap.searchQueued > 0 ||
+             snap.searchActive > 0)) {
+            observation.workVisible = true;
+            observation.workVisibleUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - probeStart)
+                                            .count();
+            observation.visibleSnapshot = snap;
+        }
+
+        if (observation.workVisible && observation.addCompleted) {
+            break;
+        }
+        std::this_thread::sleep_for(sampleInterval);
+    }
+
+    if (!observation.addCompleted &&
+        addFuture.wait_for(std::chrono::seconds(20)) == std::future_status::ready) {
+        const auto addResult = addFuture.get();
+        observation.addCompleted = true;
+        observation.addSucceeded = addResult.success;
+        observation.addLatencyUs = static_cast<uint64_t>(std::max<int64_t>(0, addResult.latencyUs));
+        observation.addError = addResult.error;
+    }
+
+    if (observation.visibleSnapshot.maxConnections == 0) {
+        observation.visibleSnapshot = DaemonSnapshot::capture(monitorClient);
+    }
+
+    if (observation.addSucceeded) {
+        observation.postProbeDrain = waitForDrainObservation(
+            monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs), sampleInterval);
+    }
+
+    return observation;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1303,7 +1964,7 @@ bool waitForDrain(DaemonClient& client, std::chrono::seconds timeout) {
 
 void emitJsonl(const fs::path& outputPath, const json& record) {
     json enriched = record;
-    enriched["schema_version"] = "multi_client_record_v2";
+    enriched["schema_version"] = "multi_client_record_v4";
     if (const auto* v = std::getenv("YAMS_BENCH_RUN_ID"); v && *v) {
         enriched["run_id"] = v;
     }
@@ -1350,7 +2011,8 @@ std::optional<int64_t> jsonToInt64(const nlohmann::json& value) {
                 return std::stoll(s);
             }
         }
-    } catch (...) {
+    } catch (const std::exception&) {
+        return std::nullopt;
     }
     return std::nullopt;
 }
@@ -1382,6 +2044,19 @@ void printPercentiles(const std::string& label, const PercentileStats& stats) {
               << " p99=" << stats.p99 << "us"
               << " max=" << stats.max << "us"
               << " mean=" << std::fixed << std::setprecision(0) << stats.mean << "us" << std::endl;
+}
+
+void printDrainAndIdleProbeSummary(const DrainObservation& drainObservation,
+                                   const IdleWakeProbeObservation& idleProbe) {
+    std::cout << "  Drain time: " << drainObservation.elapsedMs << " ms\n";
+    if (idleProbe.attempted) {
+        std::cout << "  Idle probe: baseline_cpu=" << std::fixed << std::setprecision(2)
+                  << idleProbe.idleBaseline.meanCpuPercent
+                  << "% peak=" << idleProbe.idleBaseline.peakCpuPercent
+                  << "% work_visible=" << idleProbe.workVisibleUs
+                  << "us add_latency=" << idleProbe.addLatencyUs
+                  << "us post_drain=" << idleProbe.postProbeDrain.elapsedMs << "ms\n";
+    }
 }
 
 // Create harness options tuned for benchmarking:
@@ -1475,10 +2150,14 @@ TEST_CASE("Multi-client ingestion: baseline single client",
     double elapsedSec = std::chrono::duration<double>(elapsed).count();
     double throughput = static_cast<double>(addLatencies.size()) / elapsedSec;
 
-    // Wait for pipeline drain
-    REQUIRE(waitForDrain(client, std::chrono::seconds(cfg.drainTimeoutSecs)));
+    // Wait for pipeline drain and then probe idle->work transition once.
+    const auto drainObservation =
+        waitForDrainObservation(client, std::chrono::seconds(cfg.drainTimeoutSecs));
+    REQUIRE(drainObservation.drained);
+    const auto idleProbe = runIdleWakeProbe(cfg, harness.socketPath(), client);
 
     auto snap = DaemonSnapshot::capture(client);
+    const auto recovery = runRecoveryCheck(harness.socketPath());
     auto stats = PercentileStats::compute(addLatencies);
 
     std::cout << "\n=== Single Client Baseline ===\n";
@@ -1486,11 +2165,14 @@ TEST_CASE("Multi-client ingestion: baseline single client",
     std::cout << "  Elapsed: " << std::fixed << std::setprecision(2) << elapsedSec << "s\n";
     std::cout << "  Throughput: " << throughput << " docs/s\n";
     printPercentiles("Add latency", stats);
+    printDrainAndIdleProbeSummary(drainObservation, idleProbe);
+    printRecoverySummary(recovery);
     std::cout << "  Final docs_total: " << snap.documentsTotal << "\n";
     std::cout << "  Memory: " << snap.memoryUsageMb << " MB\n\n";
 
     CHECK(static_cast<int>(addLatencies.size()) == cfg.docsPerClient);
     CHECK(throughput > 0.0);
+    CHECK(recovery.ok());
 
     // Emit JSONL record for regression tracking
     json record{
@@ -1502,6 +2184,9 @@ TEST_CASE("Multi-client ingestion: baseline single client",
         {"elapsed_seconds", elapsedSec},
         {"throughput_docs_per_sec", throughput},
         {"add_latency", stats.toJson()},
+        {"drain_metrics", drainObservation.toJson()},
+        {"idle_probe", idleProbe.toJson()},
+        {"recovery", recovery.toJson()},
         {"daemon_snapshot", snap.toJson()},
         {"tuning_profile", cfg.tuningProfile},
     };
@@ -1601,9 +2286,13 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
     double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
     double aggregateThroughput = static_cast<double>(totalDocsIngested.load()) / globalElapsed;
 
-    // Wait for pipeline drain
-    bool drained = waitForDrain(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+    // Wait for pipeline drain and then probe idle->work transition once.
+    const auto drainObservation =
+        waitForDrainObservation(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+    const bool drained = drainObservation.drained;
+    const auto idleProbe = runIdleWakeProbe(cfg, harness.socketPath(), monitorClient);
     auto finalSnap = DaemonSnapshot::capture(monitorClient);
+    const auto recovery = runRecoveryCheck(harness.socketPath());
 
     // Compute aggregate latency stats
     std::vector<int64_t> allAddLatencies;
@@ -1680,11 +2369,14 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
     }
 
     std::cout << "  Queue drained: " << (drained ? "yes" : "NO") << "\n";
+    printDrainAndIdleProbeSummary(drainObservation, idleProbe);
+    printRecoverySummary(recovery);
     std::cout << "  Final docs_total: " << finalSnap.documentsTotal << "\n";
     std::cout << "  Final memory: " << finalSnap.memoryUsageMb << " MB\n\n";
 
     CHECK(totalDocsIngested.load() == cfg.numClients * cfg.docsPerClient);
     CHECK(drained);
+    CHECK(recovery.ok());
 
     // Emit JSONL
     json perClient = json::array();
@@ -1729,6 +2421,9 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
         {"failure_samples", failureSamplesJson},
         {"per_client", perClient},
         {"daemon_snapshot_final", finalSnap.toJson()},
+        {"drain_metrics", drainObservation.toJson()},
+        {"idle_probe", idleProbe.toJson()},
+        {"recovery", recovery.toJson()},
         {"time_series", timeSeries},
         {"tuning_profile", cfg.tuningProfile},
         {"drained", drained},
@@ -1771,7 +2466,7 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
             }
         }
         // Wait for warmup to settle
-        waitForDrain(warmClient, 30s);
+        (void)waitForDrain(warmClient, 30s);
         std::this_thread::sleep_for(1s);
     }
 
@@ -1931,8 +2626,12 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
     auto globalEnd = std::chrono::steady_clock::now();
     double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
 
-    bool drained = waitForDrain(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+    const auto drainObservation =
+        waitForDrainObservation(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+    const bool drained = drainObservation.drained;
+    const auto idleProbe = runIdleWakeProbe(cfg, harness.socketPath(), monitorClient);
     auto finalSnap = DaemonSnapshot::capture(monitorClient);
+    const auto recovery = runRecoveryCheck(harness.socketPath());
 
     // Compute per-op-type latency stats
     std::vector<int64_t> addLats, searchLats, listLats;
@@ -1961,10 +2660,13 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
     printPercentiles("Search latency", searchStats);
     printPercentiles("List latency", listStats);
     std::cout << "  Queue drained: " << (drained ? "yes" : "NO") << "\n";
+    printDrainAndIdleProbeSummary(drainObservation, idleProbe);
+    printRecoverySummary(recovery);
     std::cout << "  Final docs_total: " << finalSnap.documentsTotal << "\n\n";
 
     CHECK(totalAdds.load() > 0);
     CHECK(drained);
+    CHECK(recovery.ok());
 
     json record{
         {"timestamp", isoTimestamp()},
@@ -1982,6 +2684,9 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         {"search_latency", searchStats.toJson()},
         {"list_latency", listStats.toJson()},
         {"daemon_snapshot_final", finalSnap.toJson()},
+        {"drain_metrics", drainObservation.toJson()},
+        {"idle_probe", idleProbe.toJson()},
+        {"recovery", recovery.toJson()},
         {"tuning_profile", cfg.tuningProfile},
         {"drained", drained},
     };
@@ -2047,6 +2752,8 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     const size_t controlLightLoadTarget =
         std::max<size_t>(2, std::min<size_t>(4, static_cast<size_t>(cfg.stressRounds)));
     const auto yamsBinary = findYamsBinary(cfg);
+    const bool cliStressProbesEnabled =
+        yamsBinary.path.has_value() && yamsBinary.usableForStress && cliProbeOpsPerCommand > 0;
 
     std::atomic<int> addOps{0};
     std::atomic<int> addFails{0};
@@ -2064,6 +2771,7 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     std::vector<int64_t> cliSearchLatencies;
     std::vector<int64_t> cliStatusLatencies;
     std::map<std::string, std::vector<int64_t>> cliStageLatencies;
+    std::vector<CliProbeResult> cliProbeResults;
     std::vector<TimedLatencySample> hotspotSamples;
 
     HeldSocketConnections heldConnections;
@@ -2072,7 +2780,7 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     auto globalStart = std::chrono::steady_clock::now();
 
     std::vector<std::thread> threads;
-    threads.reserve(static_cast<size_t>(writerClients + uxClients));
+    threads.reserve(writerClients + uxClients);
 
     for (int writer = 0; writer < writerClients; ++writer) {
         threads.emplace_back([&, writer]() {
@@ -2238,12 +2946,13 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     }
 
 #ifndef _WIN32
-    if (yamsBinary && cliProbeOpsPerCommand > 0) {
-        threads.emplace_back([&, cliBin = *yamsBinary]() {
+    if (cliStressProbesEnabled) {
+        threads.emplace_back([&, cliBin = yamsBinary.path.value()]() {
             std::vector<int64_t> localCliList;
             std::vector<int64_t> localCliSearch;
             std::vector<int64_t> localCliStatus;
             std::map<std::string, std::vector<int64_t>> localCliStageLatencies;
+            std::vector<CliProbeResult> localCliResults;
             const auto cliProbeTimeout = std::chrono::seconds(cfg.cliProbeTimeoutSecs);
 
             auto recordProbe = [&](const std::string& opType, const CliProbeResult& probe,
@@ -2268,19 +2977,21 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                 for (const auto& [stage, elapsedUs] : probe.stageElapsedUs) {
                     localCliStageLatencies[opType + ":" + stage].push_back(elapsedUs);
                 }
+                localCliResults.push_back(probe);
             };
 
             for (int i = 0; i < cliProbeOpsPerCommand; ++i) {
                 recordProbe("cli_list",
-                            runCliProbe(cliBin, harness.socketPath(), {"list", "--limit", "10"},
-                                        cliProbeTimeout),
+                            runObservedCliProbe("cli_list", cliBin, harness.socketPath(),
+                                                {"list", "--limit", "10"}, cliProbeTimeout),
                             localCliList);
                 recordProbe("cli_status",
-                            runCliProbe(cliBin, harness.socketPath(), {"status"}, cliProbeTimeout),
+                            runObservedCliProbe("cli_status", cliBin, harness.socketPath(),
+                                                {"status"}, cliProbeTimeout),
                             localCliStatus);
                 recordProbe("cli_search",
-                            runCliProbe(cliBin, harness.socketPath(), buildCliSearchArgs(cfg),
-                                        cliProbeTimeout),
+                            runObservedCliProbe("cli_search", cliBin, harness.socketPath(),
+                                                buildCliSearchArgs(cfg), cliProbeTimeout),
                             localCliSearch);
             }
 
@@ -2295,6 +3006,8 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                 auto& dest = cliStageLatencies[stage];
                 dest.insert(dest.end(), values.begin(), values.end());
             }
+            cliProbeResults.insert(cliProbeResults.end(), localCliResults.begin(),
+                                   localCliResults.end());
         });
     }
 #endif
@@ -2311,8 +3024,26 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     const auto globalEnd = std::chrono::steady_clock::now();
     const double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
 
-    const bool drained = waitForDrain(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+    const auto drainObservation =
+        waitForDrainObservation(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+    const bool drained = drainObservation.drained;
+    const auto idleProbe = runIdleWakeProbe(cfg, harness.socketPath(), monitorClient);
+    const bool recoveryQuiesced =
+        waitForActiveConnectionsAtMost(monitorClient, controlLightLoadTarget, 20s);
     const auto finalSnap = DaemonSnapshot::capture(monitorClient);
+    const auto recovery = runRecoveryCheck(harness.socketPath());
+    const bool cliRecoveryAttempted = yamsBinary.path.has_value() && yamsBinary.usableForStress;
+    const auto cliRecoveryStatus =
+        cliRecoveryAttempted ? runObservedCliProbe("cli_status_recovery", yamsBinary.path.value(),
+                                                   harness.socketPath(), {"status"}, 10s)
+                             : CliProbeResult{};
+    const auto cliRecoveryList =
+        cliRecoveryAttempted
+            ? runObservedCliProbe("cli_list_recovery", yamsBinary.path.value(),
+                                  harness.socketPath(), {"list", "--limit", "10"}, 10s)
+            : CliProbeResult{};
+    const bool cliRecoveryOk =
+        !cliRecoveryAttempted || (cliRecoveryStatus.success && cliRecoveryList.success);
     const auto samples = sampler.getSamples();
     const auto slotSummary = summarizeSlotScaling(samples);
     const auto resourcePeaks = summarizeResourcePeaks(samples);
@@ -2324,6 +3055,29 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     const auto cliListStats = PercentileStats::compute(cliListLatencies);
     const auto cliSearchStats = PercentileStats::compute(cliSearchLatencies);
     const auto cliStatusStats = PercentileStats::compute(cliStatusLatencies);
+    json cliProbeResultsJson = json::array();
+    for (const auto& probe : cliProbeResults) {
+        cliProbeResultsJson.push_back(probe.toJson());
+    }
+    std::map<std::string, int> cliFailureBuckets;
+    std::map<std::string, int> cliFailureModes;
+    std::map<std::string, std::string> cliFailureSamples;
+    for (const auto& probe : cliProbeResults) {
+        if (probe.success) {
+            continue;
+        }
+        cliFailureBuckets[probe.failureBucket] += 1;
+        cliFailureModes[probe.failureMode] += 1;
+        if (!probe.error.empty() && !cliFailureSamples.contains(probe.failureMode)) {
+            cliFailureSamples[probe.failureMode] = probe.error;
+        }
+    }
+    int unacceptableCliFailures = 0;
+    for (const auto& [mode, count] : cliFailureModes) {
+        if (mode != "timeout_under_load") {
+            unacceptableCliFailures += count;
+        }
+    }
     const bool observedGrowth =
         slotSummary.peakLimit >= grownSlotTarget || slotSummary.growEvents > 0;
     const bool observedShrink =
@@ -2346,11 +3100,18 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
               << ", query=\"" << cfg.searchQuery << "\")"
               << " cli(type=" << cfg.cliSearchType << ", limit=" << cfg.cliSearchLimit
               << ", query=\"" << cfg.cliSearchQuery << "\")\n";
-    if (yamsBinary && cliProbeOpsPerCommand > 0) {
+    if (cliStressProbesEnabled) {
         std::cout << "  CLI probes: " << cliOps.load() << " (fails=" << cliFails.load()
-                  << ") binary=" << yamsBinary->string() << "\n";
+                  << ") binary=" << yamsBinary.path.value().string() << "\n";
     } else {
-        std::cout << "  CLI probes: skipped\n";
+        std::cout << "  CLI probes: skipped";
+        if (!yamsBinary.note.empty()) {
+            std::cout << " (" << yamsBinary.note << ")";
+        }
+        std::cout << "\n";
+    }
+    if (!cliFailureModes.empty()) {
+        printCliProbeFailureSummary(cliFailureModes, cliFailureSamples);
     }
     std::cout << "  Slot scaling: initial=" << slotSummary.initialLimit
               << " peak=" << slotSummary.peakLimit << " final=" << slotSummary.finalLimit
@@ -2395,6 +3156,15 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
               << "  UX failure rate: " << std::setprecision(3) << uxFailureRate
               << "  Final active/max: " << finalSnap.activeConnections << "/"
               << finalSnap.maxConnections << "\n\n";
+    printDrainAndIdleProbeSummary(drainObservation, idleProbe);
+    std::cout << "  Recovery quiesced: " << (recoveryQuiesced ? "yes" : "NO") << "\n";
+    printRecoverySummary(recovery);
+    if (cliRecoveryAttempted) {
+        std::cout << "  CLI post-stress recovery: status="
+                  << (cliRecoveryStatus.success ? "ok" : "FAIL")
+                  << " list=" << (cliRecoveryList.success ? "ok" : "FAIL") << "\n";
+    }
+    std::cout << "\n";
 
     // Phase 3: deterministic control cycle for growth/shrink validation on a fresh daemon
     // instance so realistic phase-2 idle sessions do not distort shrink behavior.
@@ -2505,6 +3275,10 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     CHECK(uxOps.load() > 0);
     CHECK((searchStats.count + listStats.count + statusStats.count) > 0);
     CHECK(drained);
+    CHECK(recoveryQuiesced);
+    CHECK(recovery.ok());
+    CHECK(cliRecoveryOk);
+    CHECK(unacceptableCliFailures == 0);
     CHECK(controlAddOps.load() > 0);
     CHECK(controlUxOps.load() > 0);
     CHECK(controlGrew);
@@ -2537,11 +3311,21 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
         {"search", json{{"latency", searchStats.toJson()}}},
         {"list", json{{"latency", listStats.toJson()}}},
         {"status", json{{"latency", statusStats.toJson()}}},
-        {"cli", json{{"enabled", static_cast<bool>(yamsBinary && cliProbeOpsPerCommand > 0)},
-                     {"binary", yamsBinary ? yamsBinary->string() : std::string()},
+        {"cli", json{{"enabled", cliStressProbesEnabled},
+                     {"binary", yamsBinary.path ? yamsBinary.path.value().string() : std::string()},
+                     {"selection", yamsBinary.toJson()},
                      {"ops", cliOps.load()},
                      {"fails", cliFails.load()},
                      {"ops_per_command", cliProbeOpsPerCommand},
+                     {"failure_buckets", cliFailureBuckets},
+                     {"failure_modes", cliFailureModes},
+                     {"unacceptable_failures", unacceptableCliFailures},
+                     {"failure_samples", cliFailureSamples},
+                     {"probe_results", cliProbeResultsJson},
+                     {"post_stress_recovery", json{{"attempted", cliRecoveryAttempted},
+                                                   {"ok", cliRecoveryOk},
+                                                   {"status_probe", cliRecoveryStatus.toJson()},
+                                                   {"list_probe", cliRecoveryList.toJson()}}},
                      {"list_latency", cliListStats.toJson()},
                      {"search_latency", cliSearchStats.toJson()},
                      {"status_latency", cliStatusStats.toJson()}}},
@@ -2584,6 +3368,10 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
         {"hotspots", hotspotSummary},
         {"elapsed_seconds", globalElapsed},
         {"drained", drained},
+        {"recovery_quiesced", recoveryQuiesced},
+        {"drain_metrics", drainObservation.toJson()},
+        {"idle_probe", idleProbe.toJson()},
+        {"recovery", recovery.toJson()},
         {"daemon_snapshot_final", finalSnap.toJson()},
         {"time_series_samples", samples.size()},
         {"tuning_profile", cfg.tuningProfile},
@@ -2768,7 +3556,7 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
                 knownHashes.push_back(res.value().hash);
             }
         }
-        waitForDrain(warmClient, 60s);
+        (void)waitForDrain(warmClient, 60s);
         std::this_thread::sleep_for(1s);
         std::cout << "  Warmup complete (" << knownHashes.size() << " hashes)\n";
     }
@@ -5594,7 +6382,7 @@ TEST_CASE("Multi-client ingestion: reader starvation under ingest load",
             req.content = generateDocument(0, i, cfg.docSizeBytes);
             yams::cli::run_sync(warmClient.streamingAddDocument(req), 30s);
         }
-        waitForDrain(warmClient, 30s);
+        (void)waitForDrain(warmClient, 30s);
     }
 
     // Writer clients (heavy ingestion)
@@ -5740,7 +6528,7 @@ TEST_CASE("Multi-client ingestion: file access under ingest load",
                 knownHashes.push_back(res.value().hash);
             }
         }
-        waitForDrain(warmClient, 30s);
+        (void)waitForDrain(warmClient, 30s);
     }
 
     const int numWriters = std::max(1, cfg.numClients - std::max(1, cfg.numClients / 3));

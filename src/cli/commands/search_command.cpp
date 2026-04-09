@@ -1570,6 +1570,16 @@ public:
     }
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
+        const bool cliOneShot = []() {
+            if (const char* raw = std::getenv("YAMS_CLI_ONE_SHOT"); raw && *raw) {
+                std::string v(raw);
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return v == "1" || v == "true" || v == "yes" || v == "on";
+            }
+            return false;
+        }();
+
         try {
             // Resolve base query (reuse sync logic for assembling fields)
             // Defer to execute() for argument normalization, then re-run daemon path with co_await
@@ -1754,11 +1764,15 @@ public:
         clientConfig.headerTimeout = std::chrono::milliseconds(headerTimeoutMs_);
         clientConfig.bodyTimeout = std::chrono::milliseconds(bodyTimeoutMs_);
         clientConfig.requestTimeout = std::chrono::milliseconds(30000);
-        clientConfig.enableChunkedResponses = enableStreaming_;
-        clientConfig.progressiveOutput = true;
+        clientConfig.enableChunkedResponses = cliOneShot ? false : enableStreaming_;
+        clientConfig.progressiveOutput = !cliOneShot;
         clientConfig.maxChunkSize = chunkSize_;
         clientConfig.singleUseConnections = true;
-        clientConfig.executor = getExecutor();
+        if (!cliOneShot) {
+            clientConfig.executor = getExecutor();
+        } else {
+            clientConfig.socketPath = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+        }
         if (cli_) {
             auto dp = cli_->getDataPath();
             if (!dp.empty())
@@ -1858,6 +1872,32 @@ public:
 
             return renderResults(items, ctx);
         };
+
+        if (cliOneShot) {
+            auto planRes = yams::cli::prepare_cli_daemon_client_plan(
+                clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+            if (!planRes) {
+                if (yams::cli::is_transport_failure(planRes.error())) {
+                    co_return planRes.error();
+                }
+                co_return co_await localFallback();
+            }
+
+            auto plan = std::move(planRes.value());
+            yams::daemon::DaemonClient directClient(plan.config);
+            directClient.setStreamingEnabled(false);
+            auto directRes = co_await directClient.unarySearch(dreq);
+            if (plan.config.singleUseConnections) {
+                directClient.disconnect();
+            }
+            if (!directRes) {
+                if (yams::cli::is_transport_failure(directRes.error())) {
+                    co_return directRes.error();
+                }
+                co_return co_await localFallback();
+            }
+            co_return render(directRes.value());
+        }
 
         auto unaryCallWithFreshLease =
             [&, dreq,

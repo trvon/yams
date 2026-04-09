@@ -56,6 +56,7 @@ void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
                      static_cast<long long>(elapsed.count()), static_cast<int>(note.size()),
                      note.data());
     }
+    std::fflush(stderr);
 }
 
 } // namespace

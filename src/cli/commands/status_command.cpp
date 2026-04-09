@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cstdlib>
 #include <future>
 #include <iomanip>
 #include <iostream>
@@ -77,23 +78,43 @@ public:
     boost::asio::awaitable<Result<void>> executeAsync() override {
         YAMS_ZONE_SCOPED_N("StatusCommand::execute");
         try {
+            const bool cliOneShot = []() {
+                if (const char* raw = std::getenv("YAMS_CLI_ONE_SHOT"); raw && *raw) {
+                    std::string v(raw);
+                    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                    });
+                    return v == "1" || v == "true" || v == "yes" || v == "on";
+                }
+                return false;
+            }();
+
             // Try daemon-first for quick status snapshot
             {
                 yams::daemon::ClientConfig cfg;
-                cfg.executor = getExecutor();
+                if (!cliOneShot) {
+                    cfg.executor = getExecutor();
+                } else {
+                    cfg.socketPath = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+                }
+                cfg.requestTimeout = std::chrono::seconds(10);
+                cfg.singleUseConnections = cliOneShot;
                 if (cli_->hasExplicitDataDir()) {
                     cfg.dataDir = cli_->getDataPath();
                 }
-                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                auto planRes = yams::cli::prepare_cli_daemon_client_plan(
                     cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
-                if (leaseRes) {
-                    auto leaseHandle = std::move(leaseRes.value());
-                    auto& client = **leaseHandle;
+                if (planRes) {
+                    auto plan = std::move(planRes.value());
+                    yams::daemon::DaemonClient client(plan.config);
                     // Always request non-detailed status to avoid any daemon-side
                     // physical scanning. Verbose mode will format these same fields.
                     yams::daemon::StatusRequest sreq;
                     sreq.detailed = false;
                     auto st = co_await client.call(sreq);
+                    if (plan.config.singleUseConnections) {
+                        client.disconnect();
+                    }
                     if (st) {
                         auto s = st.value();
                         auto getCount = [&](const char* key) -> uint64_t {

@@ -51,8 +51,14 @@ public:
             reporter.setCallback(progress);
         }
 
-        // Hash the complete file
-        std::string fileHash = hasher_->hashFile(path);
+        // ContentStore is shared across daemon worker threads. The default SHA256 hasher owns
+        // mutable OpenSSL EVP state and is not thread-safe, so serialize access when reusing the
+        // injected hasher instance.
+        std::string fileHash;
+        {
+            std::lock_guard<std::mutex> hasherLock(hasherMutex_);
+            fileHash = hasher_->hashFile(path);
+        }
         spdlog::debug("File hash: {} for {}", fileHash, path.string());
 
         // Create file info
@@ -329,10 +335,13 @@ public:
                                    const ContentMetadata& metadata) override {
         auto startTime = std::chrono::steady_clock::now();
 
-        // Hash the data using stream interface
-        hasher_->init();
-        hasher_->update(data);
-        std::string dataHash = hasher_->finalize();
+        std::string dataHash;
+        {
+            std::lock_guard<std::mutex> hasherLock(hasherMutex_);
+            hasher_->init();
+            hasher_->update(data);
+            dataHash = hasher_->finalize();
+        }
 
         // For small data, store directly without chunking
         if (data.size() <= config_.chunkSize) {
@@ -836,6 +845,7 @@ private:
 
     // Metadata storage (in-memory for now)
     mutable std::shared_mutex metadataMutex_;
+    mutable std::mutex hasherMutex_;
     std::unordered_map<std::string, ContentMetadata> metadataStore_;
 
     // Statistics

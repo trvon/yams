@@ -23,6 +23,7 @@ namespace yamsfmt = fmt;
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -186,6 +187,17 @@ public:
 
     Result<void> execute() override {
         try {
+            const bool cliOneShot = []() {
+                if (const char* raw = std::getenv("YAMS_CLI_ONE_SHOT"); raw && *raw) {
+                    std::string v(raw);
+                    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                    });
+                    return v == "1" || v == "true" || v == "yes" || v == "on";
+                }
+                return false;
+            }();
+
             if (jsonFlag_)
                 format_ = "json";
             if (!metadataValuesRaw_.empty()) {
@@ -411,7 +423,12 @@ public:
             // Use RetrievalService with helper-resolved daemon transport plan.
             {
                 yams::daemon::ClientConfig daemonCfg;
-                daemonCfg.executor = getExecutor();
+                if (!cliOneShot) {
+                    daemonCfg.executor = getExecutor();
+                } else {
+                    daemonCfg.socketPath =
+                        yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+                }
                 if (cli_->hasExplicitDataDir()) {
                     daemonCfg.dataDir = cli_->getDataPath();
                 }
@@ -436,7 +453,7 @@ public:
                 yams::app::services::RetrievalOptions ropts;
                 ropts.enableStreaming = enableStreaming_;
                 ropts.progressiveOutput = false;
-                ropts.singleUseConnections = false;
+                ropts.singleUseConnections = cliOneShot;
                 ropts.requestTimeoutMs = 30000;
                 ropts.headerTimeoutMs = 30000;
                 ropts.bodyTimeoutMs = 120000;

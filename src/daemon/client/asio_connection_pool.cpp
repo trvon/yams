@@ -122,8 +122,11 @@ async_connect_with_timeout(const TransportOptions& opts) {
     }
 
     static constexpr bool trace = false;
-    auto executor = co_await this_coro::executor;
-    auto socket = std::make_unique<AsioConnection::socket_t>(executor);
+    auto completion_executor = co_await this_coro::executor;
+    auto io_executor = opts.executor.has_value()
+                           ? *opts.executor
+                           : GlobalIOContext::instance().get_io_context().get_executor();
+    auto socket = std::make_unique<AsioConnection::socket_t>(io_executor);
     boost::asio::local::stream_protocol::endpoint endpoint(opts.socketPath.string());
 
     if (trace) {
@@ -137,14 +140,16 @@ async_connect_with_timeout(const TransportOptions& opts) {
 
     auto connect_result = co_await boost::asio::async_initiate<
         decltype(use_awaitable), void(std::exception_ptr, RaceResult)>(
-        [&socket, &endpoint, executor, timeout = opts.requestTimeout](auto handler) mutable {
+        [&socket, &endpoint, io_executor, completion_executor,
+         timeout = opts.requestTimeout](auto handler) mutable {
             auto completed = std::make_shared<std::atomic<bool>>(false);
-            auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+            auto timer = std::make_shared<boost::asio::steady_timer>(io_executor);
             timer->expires_after(timeout);
 
             using HandlerT = std::decay_t<decltype(handler)>;
             auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
-            auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, executor);
+            auto completion_exec =
+                boost::asio::get_associated_executor(*handlerPtr, completion_executor);
 
             timer->async_wait([completed, handlerPtr,
                                completion_exec](const boost::system::error_code& ec) mutable {
@@ -596,7 +601,7 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 
     auto effective_timeout = timeout;
     if (cli_one_shot_shutdown_enabled()) {
-        effective_timeout = std::chrono::milliseconds(0);
+        effective_timeout = std::max(effective_timeout, std::chrono::milliseconds(100));
     }
 
     for (auto& weak : connection_pool_) {
@@ -774,22 +779,13 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
     auto weak_pool = weak_from_this();
     conn->read_loop_future = co_spawn(
         executor,
-        [weak_conn = std::weak_ptr(conn), weak_pool]() -> awaitable<void> {
-            auto conn = weak_conn.lock();
-            if (!conn) {
-                co_return;
-            }
+        [conn, weak_pool]() -> awaitable<void> {
             co_await boost::asio::post(conn->strand, use_awaitable);
             MessageFramer framer;
             for (;;) {
                 // Check cancellation state at each iteration
                 auto cs = co_await this_coro::cancellation_state;
                 if (cs.cancelled() != boost::asio::cancellation_type::none) {
-                    co_return;
-                }
-
-                // Re-check connection validity (may have been cancelled during co_await)
-                if (auto c = weak_conn.lock(); !c) {
                     co_return;
                 }
 
@@ -810,10 +806,8 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                 if (!hres) {
                     // If connection was cancelled, exit immediately without cleanup
                     // (cleanup is handled by the shutdown code)
-                    if (auto c = weak_conn.lock()) {
-                        if (!c->alive.load(std::memory_order_acquire)) {
-                            co_return;
-                        }
+                    if (!conn->alive.load(std::memory_order_acquire)) {
+                        co_return;
                     }
 
                     Error e = hres.error();
@@ -828,42 +822,40 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                             e.message = formatIpcFailure(IpcFailureKind::Eof, e.message);
                         }
                     }
-                    if (auto c = weak_conn.lock()) {
-                        // Acquire strand before accessing handlers map
-                        co_await boost::asio::dispatch(c->strand, use_awaitable);
-                        for (auto& [rid, h] : c->handlers) {
-                            if (h.unary) {
-                                try {
-                                    h.unary->promise->set_value(Result<Response>(e));
-                                } catch (const std::future_error&) {
-                                    // Promise already satisfied, ignore
-                                }
-                                // Cancel timer to wake up waiter
-                                if (h.unary->notify_timer) {
-                                    h.unary->notify_timer->cancel();
-                                }
+                    // Acquire strand before accessing handlers map
+                    co_await boost::asio::dispatch(conn->strand, use_awaitable);
+                    for (auto& [rid, h] : conn->handlers) {
+                        if (h.unary) {
+                            try {
+                                h.unary->promise->set_value(Result<Response>(e));
+                            } catch (const std::future_error&) {
+                                // Promise already satisfied, ignore
                             }
-                            if (h.streaming) {
-                                h.streaming->onError(e);
-                                try {
-                                    h.streaming->done_promise->set_value(Result<void>(e));
-                                } catch (const std::future_error&) {
-                                    // Promise already satisfied, ignore
-                                }
-                                // Cancel timer to wake up waiter
-                                if (h.streaming->notify_timer) {
-                                    h.streaming->notify_timer->cancel();
-                                }
+                            // Cancel timer to wake up waiter
+                            if (h.unary->notify_timer) {
+                                h.unary->notify_timer->cancel();
                             }
                         }
-                        c->handlers.clear();
-                        c->alive = false;
-                        c->streaming_started.store(false, std::memory_order_relaxed);
-                        if (auto pool = weak_pool.lock()) {
-                            pool->retire_connection(c, e.message.c_str());
-                        } else {
-                            c->cancel();
+                        if (h.streaming) {
+                            h.streaming->onError(e);
+                            try {
+                                h.streaming->done_promise->set_value(Result<void>(e));
+                            } catch (const std::future_error&) {
+                                // Promise already satisfied, ignore
+                            }
+                            // Cancel timer to wake up waiter
+                            if (h.streaming->notify_timer) {
+                                h.streaming->notify_timer->cancel();
+                            }
                         }
+                    }
+                    conn->handlers.clear();
+                    conn->alive = false;
+                    conn->streaming_started.store(false, std::memory_order_relaxed);
+                    if (auto pool = weak_pool.lock()) {
+                        pool->retire_connection(conn, e.message.c_str());
+                    } else {
+                        conn->cancel();
                     }
                     co_return;
                 }
@@ -878,10 +870,8 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                                           conn->opts.bodyTimeout);
                     if (!pres) {
                         // If connection was cancelled, exit immediately without cleanup
-                        if (auto c = weak_conn.lock()) {
-                            if (!c->alive.load(std::memory_order_acquire)) {
-                                co_return;
-                            }
+                        if (!conn->alive.load(std::memory_order_acquire)) {
+                            co_return;
                         }
 
                         Error e = pres.error();
@@ -896,67 +886,9 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 e.message = formatIpcFailure(IpcFailureKind::Eof, e.message);
                             }
                         }
-                        if (auto c = weak_conn.lock()) {
-                            // Acquire strand before accessing handlers map
-                            co_await boost::asio::dispatch(c->strand, use_awaitable);
-                            for (auto& [rid, h] : c->handlers) {
-                                if (h.unary) {
-                                    try {
-                                        h.unary->promise->set_value(Result<Response>(e));
-                                    } catch (const std::future_error&) {
-                                        // Promise already satisfied, ignore
-                                    }
-                                    // Cancel timer to wake up waiter
-                                    if (h.unary->notify_timer) {
-                                        h.unary->notify_timer->cancel();
-                                    }
-                                }
-                                if (h.streaming) {
-                                    h.streaming->onError(e);
-                                    try {
-                                        h.streaming->done_promise->set_value(Result<void>(e));
-                                    } catch (const std::future_error&) {
-                                        // Promise already satisfied, ignore
-                                    }
-                                    // Cancel timer to wake up waiter
-                                    if (h.streaming->notify_timer) {
-                                        h.streaming->notify_timer->cancel();
-                                    }
-                                }
-                            }
-                            c->handlers.clear();
-                            c->alive = false;
-                            c->streaming_started.store(false, std::memory_order_relaxed);
-                            if (auto pool = weak_pool.lock()) {
-                                pool->retire_connection(c, e.message.c_str());
-                            } else {
-                                c->cancel();
-                            }
-                        }
-                        co_return;
-                    }
-                    payload = std::move(pres.value());
-                }
-
-                std::vector<uint8_t> frame;
-                frame.reserve(sizeof(MessageFramer::FrameHeader) + payload.size());
-                frame.insert(frame.end(), hres.value().begin(), hres.value().end());
-                frame.insert(frame.end(), payload.begin(), payload.end());
-
-                auto msgRes = framer.parse_frame(frame);
-                if (!msgRes) {
-                    // If connection was cancelled, exit immediately without cleanup
-                    if (auto c = weak_conn.lock()) {
-                        if (!c->alive.load(std::memory_order_acquire)) {
-                            co_return;
-                        }
-                    }
-
-                    Error e{ErrorCode::InvalidData, "Failed to parse daemon response frame"};
-                    if (auto c = weak_conn.lock()) {
                         // Acquire strand before accessing handlers map
-                        co_await boost::asio::dispatch(c->strand, use_awaitable);
-                        for (auto& [rid, h] : c->handlers) {
+                        co_await boost::asio::dispatch(conn->strand, use_awaitable);
+                        for (auto& [rid, h] : conn->handlers) {
                             if (h.unary) {
                                 try {
                                     h.unary->promise->set_value(Result<Response>(e));
@@ -981,14 +913,66 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 }
                             }
                         }
-                        c->handlers.clear();
-                        c->alive = false;
-                        c->streaming_started.store(false, std::memory_order_relaxed);
+                        conn->handlers.clear();
+                        conn->alive = false;
+                        conn->streaming_started.store(false, std::memory_order_relaxed);
                         if (auto pool = weak_pool.lock()) {
-                            pool->retire_connection(c, e.message.c_str());
+                            pool->retire_connection(conn, e.message.c_str());
                         } else {
-                            c->cancel();
+                            conn->cancel();
                         }
+                        co_return;
+                    }
+                    payload = std::move(pres.value());
+                }
+
+                std::vector<uint8_t> frame;
+                frame.reserve(sizeof(MessageFramer::FrameHeader) + payload.size());
+                frame.insert(frame.end(), hres.value().begin(), hres.value().end());
+                frame.insert(frame.end(), payload.begin(), payload.end());
+
+                auto msgRes = framer.parse_frame(frame);
+                if (!msgRes) {
+                    // If connection was cancelled, exit immediately without cleanup
+                    if (!conn->alive.load(std::memory_order_acquire)) {
+                        co_return;
+                    }
+
+                    Error e{ErrorCode::InvalidData, "Failed to parse daemon response frame"};
+                    // Acquire strand before accessing handlers map
+                    co_await boost::asio::dispatch(conn->strand, use_awaitable);
+                    for (auto& [rid, h] : conn->handlers) {
+                        if (h.unary) {
+                            try {
+                                h.unary->promise->set_value(Result<Response>(e));
+                            } catch (const std::future_error&) {
+                                // Promise already satisfied, ignore
+                            }
+                            // Cancel timer to wake up waiter
+                            if (h.unary->notify_timer) {
+                                h.unary->notify_timer->cancel();
+                            }
+                        }
+                        if (h.streaming) {
+                            h.streaming->onError(e);
+                            try {
+                                h.streaming->done_promise->set_value(Result<void>(e));
+                            } catch (const std::future_error&) {
+                                // Promise already satisfied, ignore
+                            }
+                            // Cancel timer to wake up waiter
+                            if (h.streaming->notify_timer) {
+                                h.streaming->notify_timer->cancel();
+                            }
+                        }
+                    }
+                    conn->handlers.clear();
+                    conn->alive = false;
+                    conn->streaming_started.store(false, std::memory_order_relaxed);
+                    if (auto pool = weak_pool.lock()) {
+                        pool->retire_connection(conn, e.message.c_str());
+                    } else {
+                        conn->cancel();
                     }
                     co_return;
                 }

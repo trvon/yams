@@ -817,6 +817,51 @@ TEST_CASE("ContentStore: Edge cases", "[api][content-store][edge]") {
 
         CHECK(successCount.load() == 5);
     }
+
+    SECTION("Concurrent stores of same file") {
+        auto file = fixture.createTestFile("concurrent_store.txt", "Concurrent store content");
+
+        constexpr int kThreadCount = 6;
+        constexpr int kStoresPerThread = 4;
+        std::vector<std::thread> threads;
+        std::atomic<int> successCount{0};
+        std::mutex resultMutex;
+        std::vector<std::string> hashes;
+        std::vector<std::string> errors;
+        hashes.reserve(kThreadCount * kStoresPerThread);
+
+        for (int i = 0; i < kThreadCount; ++i) {
+            threads.emplace_back([&, i]() {
+                ContentMetadata metadata;
+                metadata.name = "concurrent_store_" + std::to_string(i) + ".txt";
+                metadata.mimeType = "text/plain";
+
+                for (int j = 0; j < kStoresPerThread; ++j) {
+                    auto result = fixture.store_->store(file, metadata);
+                    if (result.has_value()) {
+                        successCount.fetch_add(1, std::memory_order_relaxed);
+                        std::lock_guard<std::mutex> lock(resultMutex);
+                        hashes.push_back(result.value().contentHash);
+                    } else {
+                        std::lock_guard<std::mutex> lock(resultMutex);
+                        errors.push_back("store failed in thread " + std::to_string(i) + " iter " +
+                                         std::to_string(j));
+                    }
+                }
+            });
+        }
+
+        for (auto& t : threads) {
+            t.join();
+        }
+
+        INFO("errors=" << errors.size());
+        CHECK(successCount.load() == kThreadCount * kStoresPerThread);
+        REQUIRE_FALSE(hashes.empty());
+        for (const auto& hash : hashes) {
+            CHECK(hash == hashes.front());
+        }
+    }
 }
 
 } // namespace yams::api::test

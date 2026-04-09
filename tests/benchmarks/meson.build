@@ -359,19 +359,25 @@ if catch2_with_main_dep.found()
     install: false,
   )
 
+  multi_client_bench_env = {
+    'YAMS_TESTING': '1',
+    'YAMS_DISABLE_VECTORS': '1',
+    'YAMS_DISABLE_SESSION_WATCHER': '1',
+    'YAMS_SKIP_MODEL_LOADING': '1',
+    'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+    'LD_LIBRARY_PATH': _test_env_ld_library_path,
+  }
+
+  if get_option('build-cli') and tests_has_cli
+    multi_client_bench_env += { 'YAMS_BENCH_CLI_BIN': yams_cli_exe.full_path() }
+  endif
+
   test('multi_client_ingestion_bench', multi_client_ingestion_bench,
        args: ['--allow-running-no-tests'],
        suite: ['bench', 'multi-client'],
        is_parallel: false,
        timeout: 600,
-       env: {
-         'YAMS_TESTING': '1',
-         'YAMS_DISABLE_VECTORS': '1',
-         'YAMS_DISABLE_SESSION_WATCHER': '1',
-         'YAMS_SKIP_MODEL_LOADING': '1',
-         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-         'LD_LIBRARY_PATH': _test_env_ld_library_path,
-       })
+       env: multi_client_bench_env)
 
   alias_target('bench_multi_client', multi_client_ingestion_bench)
 else
