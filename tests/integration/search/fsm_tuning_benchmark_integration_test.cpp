@@ -303,7 +303,7 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
 
     SECTION("Scientific corpus (prose without path/tag structure)") {
         CorpusStats stats;
-        stats.docCount = 500;
+        stats.docCount = 1500; // Must be >= 1000 (not small) for SCIENTIFIC
         stats.codeRatio = 0.05;
         stats.proseRatio = 0.90;
         stats.symbolDensity = 0.01;
@@ -317,8 +317,8 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         // Scientific corpus: prose-dominant, flat structure, no tags
         CHECK(tuner.currentState() == TuningState::SCIENTIFIC);
         CHECK(tuner.getRrfK() == 12);
-        CHECK(tuner.getParams().textWeight == Approx(0.70f));
-        CHECK(tuner.getParams().vectorWeight == Approx(0.25f));
+        CHECK(tuner.getParams().textWeight == Approx(0.60f));
+        CHECK(tuner.getParams().vectorWeight == Approx(0.35f));
         CHECK(tuner.getParams().tagWeight == Approx(0.00f));
     }
 

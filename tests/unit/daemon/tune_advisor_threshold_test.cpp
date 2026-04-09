@@ -64,6 +64,19 @@ public:
     EnvGuard& operator=(const EnvGuard&) = delete;
 };
 
+class HardwareGuard {
+    unsigned prev_;
+
+public:
+    explicit HardwareGuard(unsigned hw) : prev_(TuneAdvisor::hardwareConcurrency()) {
+        TuneAdvisor::setHardwareConcurrencyForTests(hw);
+    }
+    ~HardwareGuard() { TuneAdvisor::setHardwareConcurrencyForTests(prev_); }
+
+    HardwareGuard(const HardwareGuard&) = delete;
+    HardwareGuard& operator=(const HardwareGuard&) = delete;
+};
+
 /// Reset all eviction threshold overrides to default (unset)
 void resetEvictionOverrides() {
     TuneAdvisor::resetModelEvictThresholdOverrides();
@@ -776,6 +789,80 @@ TEST_CASE("statusTickMs defaults to 5", "[daemon][governance][catch2]") {
 
 TEST_CASE("statusTickMs remains fixed at 5ms", "[daemon][governance][catch2]") {
     CHECK(TuneAdvisor::statusTickMs() == 5);
+}
+
+TEST_CASE("Thread reserve is profile-aware", "[daemon][governance][catch2]") {
+    for (unsigned hw : {8u, 16u}) {
+        const auto effReserve = [&]() {
+            ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+            return TuneAdvisor::testing_reservedHostThreads(hw);
+        }();
+        const auto balReserve = [&]() {
+            ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+            return TuneAdvisor::testing_reservedHostThreads(hw);
+        }();
+        const auto aggReserve = [&]() {
+            ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+            return TuneAdvisor::testing_reservedHostThreads(hw);
+        }();
+
+        INFO("hw=" << hw << " eff=" << effReserve << " bal=" << balReserve
+                   << " agg=" << aggReserve);
+        CHECK(effReserve >= balReserve);
+        CHECK(balReserve >= aggReserve);
+        CHECK(effReserve < hw);
+        CHECK(aggReserve < hw);
+    }
+}
+
+TEST_CASE("recommendedThreads remains profile-aware while leaving host headroom",
+          "[daemon][governance][catch2]") {
+    EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
+    HardwareGuard hwGuard(16);
+
+    const auto effThreads = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        return TuneAdvisor::recommendedThreads(1.0);
+    }();
+    const auto balThreads = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        return TuneAdvisor::recommendedThreads(1.0);
+    }();
+    const auto aggThreads = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        return TuneAdvisor::recommendedThreads(1.0);
+    }();
+
+    INFO("eff=" << effThreads << " bal=" << balThreads << " agg=" << aggThreads);
+    CHECK(effThreads <= balThreads);
+    CHECK(balThreads <= aggThreads);
+    CHECK(aggThreads < 16u);
+    CHECK(effThreads >= 1u);
+}
+
+TEST_CASE("Auto memory budget is profile-aware", "[daemon][governance][catch2]") {
+    constexpr uint64_t kSystemMem = 8ull * 1024ull * 1024ull * 1024ull;
+
+    const auto effBudget = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        return TuneAdvisor::testing_autoMemoryBudgetBytes(kSystemMem);
+    }();
+    const auto balBudget = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        return TuneAdvisor::testing_autoMemoryBudgetBytes(kSystemMem);
+    }();
+    const auto aggBudget = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        return TuneAdvisor::testing_autoMemoryBudgetBytes(kSystemMem);
+    }();
+
+    INFO("eff=" << effBudget << " bal=" << balBudget << " agg=" << aggBudget);
+    CHECK(effBudget < balBudget);
+    CHECK(balBudget < aggBudget);
+    CHECK(aggBudget < kSystemMem);
+    CHECK(effBudget == (kSystemMem * 45ull) / 100ull);
+    CHECK(balBudget == (kSystemMem * 60ull) / 100ull);
+    CHECK(aggBudget == (kSystemMem * 75ull) / 100ull);
 }
 
 // =============================================================================

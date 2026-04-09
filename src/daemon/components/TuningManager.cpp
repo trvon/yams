@@ -6,6 +6,7 @@
 #include <limits>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -30,9 +31,11 @@ namespace {
 std::atomic<uint8_t> gPostIngestScaleTestMode{
     static_cast<uint8_t>(TuningManager::PostIngestScaleTestMode::Normal)};
 
-// Wakeup flag for idle-to-active transition. Set by notifyWakeup(), cleared by tuningLoop().
-// When set, the timer is cancelled early so the loop can re-evaluate immediately.
-std::atomic<bool> gWakeupRequested{false};
+// Active tuning manager used by static wakeup notifications.
+std::atomic<TuningManager*> gActiveTuningManager{nullptr};
+
+// Coalesce repeated wakeup notifications while a timer cancel is already queued.
+std::atomic<bool> gWakeupPosted{false};
 
 void logIgnoredTuningException(const char* context, const std::exception& e) {
     spdlog::debug("{}: {}", context, e.what());
@@ -65,6 +68,9 @@ TuningManager::~TuningManager() {
 void TuningManager::start() {
     if (running_.exchange(true))
         return;
+
+    gWakeupPosted.store(false, std::memory_order_release);
+    gActiveTuningManager.store(this, std::memory_order_release);
 
     // Issue 3 fix: reset all hysteresis counters on start()
     lastOnnxMax_ = lastOnnxGliner_ = lastOnnxEmbed_ = lastOnnxReranker_ = 0;
@@ -106,6 +112,27 @@ void TuningManager::stop() {
     if (!running_.exchange(false))
         return;
 
+    TuningManager* expected = this;
+    (void)gActiveTuningManager.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel,
+                                                       std::memory_order_acquire);
+
+    auto wakeDrain = std::make_shared<std::promise<void>>();
+    auto wakeDrainFuture = wakeDrain->get_future();
+    boost::asio::post(strand_, [this, wakeDrain]() mutable {
+        gWakeupPosted.store(false, std::memory_order_release);
+        if (loopTimer_) {
+            loopTimer_->cancel();
+        }
+        try {
+            wakeDrain->set_value();
+        } catch (...) {
+        }
+    });
+    try {
+        wakeDrainFuture.wait();
+    } catch (...) {
+    }
+
     try {
         if (tuningFuture_.valid()) {
             tuningFuture_.wait();
@@ -119,11 +146,28 @@ void TuningManager::stop() {
 }
 
 void TuningManager::notifyWakeup() {
-    gWakeupRequested.store(true, std::memory_order_release);
+    TuningManager* manager = gActiveTuningManager.load(std::memory_order_acquire);
+    if (!manager || !manager->running_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (gWakeupPosted.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    boost::asio::post(manager->strand_, [manager]() {
+        gWakeupPosted.store(false, std::memory_order_release);
+        if (manager->loopTimer_) {
+            manager->loopTimer_->cancel();
+        }
+    });
 }
 
 boost::asio::awaitable<void> TuningManager::tuningLoop() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    loopTimer_ = &timer;
+    struct LoopTimerGuard {
+        TuningManager* self;
+        ~LoopTimerGuard() { self->loopTimer_ = nullptr; }
+    } loopTimerGuard{this};
     spdlog::debug("TuningManager loop started");
 
     while (running_.load()) {
@@ -139,15 +183,12 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
 
         // Choose cadence: active mode uses the fast 5ms tick, idle mode backs off
         // to a much longer interval (default 1000ms) to reduce CPU wake-ups.
-        // A wakeup flag (set by notifyWakeup()) can cut the idle sleep short.
         const uint32_t ms = idle ? TuneAdvisor::idleTickMs() : TuneAdvisor::statusTickMs();
-        gWakeupRequested.store(false, std::memory_order_relaxed);
         timer.expires_after(std::chrono::milliseconds(ms));
 
         boost::system::error_code ec;
         co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-        // ec == operation_aborted when timer was cancelled (e.g., shutdown or wakeup).
-        // Either way, loop back and re-evaluate.
+        // operation_aborted means stop() or notifyWakeup() cancelled the idle wait.
     }
 
     spdlog::debug("TuningManager loop exiting");
@@ -450,6 +491,53 @@ bool TuningManager::tick_once() {
     const auto msnap = MuxMetricsRegistry::instance().snapshot();
     const std::uint64_t muxQueuedBytes =
         (msnap.queuedBytes > 0) ? static_cast<std::uint64_t>(msnap.queuedBytes) : 0ull;
+    const auto searchLoad = sm_->getSearchLoadMetrics();
+
+    std::size_t deferredQueued = 0;
+    std::size_t fts5Queued = 0;
+    std::size_t postIngestQueuedForIdle = 0;
+    std::size_t postIngestInFlightForIdle = 0;
+    std::size_t kgQueuedForIdle = 0;
+    std::size_t symbolQueuedForIdle = 0;
+    std::size_t entityQueuedForIdle = 0;
+    std::size_t titleQueuedForIdle = 0;
+    std::size_t embedQueuedForIdle = sm_->getEmbeddingQueuedJobs();
+    std::size_t embedInFlightForIdle = sm_->getEmbeddingInFlightJobs();
+    bool repairInProgressForIdle = state_->stats.repairInProgress.load(std::memory_order_relaxed);
+    std::size_t repairQueueDepthForIdle =
+        static_cast<std::size_t>(state_->stats.repairQueueDepth.load(std::memory_order_relaxed));
+
+    try {
+        auto& bus = InternalEventBus::instance();
+        if (auto storeDocumentChannel =
+                bus.get_channel<InternalEventBus::StoreDocumentTask>("store_document_tasks")) {
+            deferredQueued = storeDocumentChannel->size_approx();
+        }
+        if (auto fts5Channel = bus.get_channel<InternalEventBus::Fts5Job>("fts5_jobs")) {
+            fts5Queued = fts5Channel->size_approx();
+        }
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("Idle queue probe failed", e);
+    } catch (...) {
+        logIgnoredTuningException("Idle queue probe failed");
+    }
+
+    if (auto pqForIdle = sm_->getPostIngestQueue()) {
+        postIngestQueuedForIdle = pqForIdle->size();
+        postIngestInFlightForIdle = pqForIdle->totalInFlight();
+        kgQueuedForIdle = pqForIdle->kgQueueDepth();
+        symbolQueuedForIdle = pqForIdle->symbolQueueDepth();
+        entityQueuedForIdle = pqForIdle->entityQueueDepth();
+        titleQueuedForIdle = pqForIdle->titleQueueDepth();
+    }
+
+    const bool daemonIdle =
+        (nonHealthConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0) &&
+        (searchLoad.active == 0) && (searchLoad.queued == 0) && (deferredQueued == 0) &&
+        (fts5Queued == 0) && (postIngestQueuedForIdle == 0) && (postIngestInFlightForIdle == 0) &&
+        (kgQueuedForIdle == 0) && (symbolQueuedForIdle == 0) && (entityQueuedForIdle == 0) &&
+        (titleQueuedForIdle == 0) && (embedQueuedForIdle == 0) && (embedInFlightForIdle == 0) &&
+        (repairQueueDepthForIdle == 0) && !repairInProgressForIdle;
 
     // Idle shrink and pressure grow (centralized mirror of ResourceTuner, using TuneAdvisor)
 
@@ -1220,6 +1308,7 @@ bool TuningManager::tick_once() {
         auto s = std::make_shared<TuningSnapshot>();
         s->workerPollMs = TuneAdvisor::workerPollMs();
         s->backpressureReadPauseMs = TuneAdvisor::backpressureReadPauseMs();
+        s->daemonIdle = daemonIdle;
         s->idleCpuPct = TuneAdvisor::idleCpuThresholdPercent();
         s->idleMuxLowBytes = TuneAdvisor::idleMuxLowBytes();
         s->idleShrinkHoldMs = TuneAdvisor::idleShrinkHoldMs();
@@ -1357,7 +1446,7 @@ bool TuningManager::tick_once() {
     }
 
     // Return idle hint for tuning loop cadence: true when no real work is pending.
-    return (nonHealthConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
+    return daemonIdle;
 }
 
 } // namespace yams::daemon

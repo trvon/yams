@@ -19,6 +19,8 @@
 #include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -125,8 +127,17 @@ boost::asio::awaitable<void> EntityGraphService::channelPoller() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
     auto idleDelay = kMinIdleDelay;
+
+    auto maxIdleDelay = []() {
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            if (snap->daemonIdle) {
+                return std::chrono::milliseconds(
+                    std::max<uint32_t>(TuneAdvisor::idleTickMs(), snap->workerPollMs));
+            }
+        }
+        return std::chrono::milliseconds(10);
+    };
 
     while (!stop_.load(std::memory_order_relaxed)) {
         bool didWork = false;
@@ -164,8 +175,9 @@ boost::asio::awaitable<void> EntityGraphService::channelPoller() {
 
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
-            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
+        const auto maxIdle = maxIdleDelay();
+        if (idleDelay < maxIdle) {
+            idleDelay = std::min(idleDelay * 2, maxIdle);
         }
     }
 
@@ -198,6 +210,7 @@ Result<void> EntityGraphService::submitExtraction(Job job) {
 
     if (channel->try_push(std::move(busJob))) {
         bus.incEntityGraphQueued();
+        TuningManager::notifyWakeup();
     } else {
         bus.incEntityGraphDropped();
         spdlog::debug("EntityGraphService: channel full, dropping job for {}", filePath);

@@ -1696,6 +1696,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     // Long prose queries can miss the semantic tier entirely when the default threshold
     // is tuned for code/navigation queries. Retry only after a zero-hit semantic search.
+    const size_t queryTokenCount = tokenizeLower(query).size();
     relaxedVectorRetryEnabled = intent == QueryIntent::Prose && queryTokenCount >= 6 &&
                                 workingConfig.similarityThreshold > 0.40f;
 

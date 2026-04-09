@@ -26,6 +26,7 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/gpu_info.h>
@@ -489,6 +490,10 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
     auto idleDelay = std::chrono::milliseconds(5);
     auto maxIdleDelay = []() {
         auto snap = TuningSnapshotRegistry::instance().get();
+        if (snap && snap->daemonIdle) {
+            return std::chrono::milliseconds(
+                std::max<uint32_t>(TuneAdvisor::idleTickMs(), snap->workerPollMs));
+        }
         uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
         return std::chrono::milliseconds(std::max<uint32_t>(50, pollMs));
     };
@@ -728,6 +733,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                                     self->inFlight_.fetch_sub(1, std::memory_order_acq_rel);
                                 std::size_t remaining = (previous > 0) ? (previous - 1) : 0;
                                 self->lifecycleCv_.notify_all();
+                                TuningManager::notifyWakeup();
                                 if (poolDebug) {
                                     const auto durMs =
                                         std::chrono::duration_cast<std::chrono::milliseconds>(

@@ -25,6 +25,7 @@
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/connection_fsm.h>
@@ -729,6 +730,10 @@ void YamsDaemon::runLoop() {
         }
 
         uint32_t tick_ms = TuneAdvisor::statusTickMs();
+        if (auto tuningSnap = TuningSnapshotRegistry::instance().get();
+            tuningSnap && tuningSnap->daemonIdle) {
+            tick_ms = TuneAdvisor::idleTickMs();
+        }
         // yams-qe6r fix: Use shorter poll interval when external shutdown flag is bound
         // This ensures prompt SIGTERM response since CV only checks predicate on timeout
         // Default statusTickMs is 250ms, but for SIGTERM we want ~50ms responsiveness
@@ -770,7 +775,7 @@ void YamsDaemon::runLoop() {
                 std::lock_guard<std::mutex> lk(metricsMutex_);
                 m = metrics_;
             }
-            if (m) {
+            if (m && !m->isPollingActive()) {
                 m->refresh();
             }
         } catch (const std::exception& e) {

@@ -7,6 +7,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/detection/file_type_detector.h>
@@ -534,6 +535,9 @@ RepairService::backgroundLoop(std::shared_ptr<ShutdownState> shutdownState) {
         if (!didWork) {
             auto snap = TuningSnapshotRegistry::instance().get();
             uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+            if (snap && snap->daemonIdle) {
+                pollMs = std::max<uint32_t>(TuneAdvisor::idleTickMs(), pollMs);
+            }
             timer.expires_after(std::chrono::milliseconds(std::max<uint32_t>(10, pollMs)));
             co_await timer.async_wait(boost::asio::use_awaitable);
         }
@@ -1327,6 +1331,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
         }
 
         if (pushed) {
+            TuningManager::notifyWakeup();
             // Increment repair attempts
             auto docRes = meta->getDocument(s.docId);
             if (docRes && docRes.value().has_value()) {
@@ -2781,6 +2786,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         }
 
         InternalEventBus::instance().incEmbedQueued();
+        TuningManager::notifyWakeup();
 
         if (!req.foreground) {
             result.succeeded += batch.size();

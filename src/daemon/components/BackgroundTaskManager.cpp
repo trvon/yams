@@ -10,6 +10,7 @@
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
@@ -135,6 +136,9 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
             const uint32_t normalThrottleMs = 10;
             const auto idleThrottleMs = []() {
                 auto snap = TuningSnapshotRegistry::instance().get();
+                if (snap && snap->daemonIdle) {
+                    return std::max<uint32_t>(TuneAdvisor::idleTickMs(), snap->workerPollMs);
+                }
                 uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
                 return std::max<uint32_t>(10, pollMs);
             };
@@ -371,6 +375,8 @@ void BackgroundTaskManager::launchOrphanScanTask() {
 
                                     if (!fts5Q->try_push(std::move(orphanJob))) {
                                         spdlog::debug("[OrphanScan] Queue full, batch dropped");
+                                    } else {
+                                        TuningManager::notifyWakeup();
                                     }
 
                                     // Yield between batches to avoid flooding the queue
@@ -467,6 +473,7 @@ void BackgroundTaskManager::launchStorageGcTask() {
                 Bus::StorageGcJob job{};
                 if (channel->try_push(std::move(job))) {
                     Bus::instance().incGcQueued();
+                    TuningManager::notifyWakeup();
                     spdlog::debug("[StorageGC] Enqueued GC job");
                 } else {
                     Bus::instance().incGcDropped();

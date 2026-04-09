@@ -361,6 +361,9 @@ public:
     void startPolling();
     // Stop background polling loop
     void stopPolling();
+    [[nodiscard]] bool isPollingActive() const noexcept {
+        return pollingActive_.load(std::memory_order_acquire);
+    }
 
     // Retrieve metrics snapshot. When detailed is true, include deep store stats
     // (may perform additional I/O) without poisoning the basic cache.

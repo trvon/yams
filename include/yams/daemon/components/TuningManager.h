@@ -10,6 +10,7 @@
 #include <string>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 
 namespace yams::daemon {
@@ -136,6 +137,9 @@ private:
 
     // Track cumulative bus drop counter to derive per-tick delta.
     uint64_t previousEmbedDropped_{0};
+
+    // Active loop timer, accessed only on the tuning strand.
+    boost::asio::steady_timer* loopTimer_{nullptr};
 
     // Track previous counters for contention-aware post-ingest budget tuning.
     std::size_t previousPostProcessed_{0};

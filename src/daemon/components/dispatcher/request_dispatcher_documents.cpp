@@ -28,6 +28,7 @@
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/extraction/extraction_util.h>
@@ -679,6 +680,7 @@ boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDoc
             pushed = channel->try_push(std::move(task));
         }
         if (pushed) {
+            TuningManager::notifyWakeup();
             if (attempt > 0) {
                 spdlog::debug("[RequestDispatcher] AddDocument enqueue succeeded after {} retries",
                               attempt);

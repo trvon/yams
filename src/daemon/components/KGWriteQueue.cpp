@@ -1,6 +1,7 @@
 #include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -127,7 +128,13 @@ boost::asio::awaitable<void> KGWriteQueue::writerLoop() {
         if (batchesToProcess.empty()) {
             // No batches available - async wait before checking again
             // This yields the thread to other coroutines (non-blocking)
-            pollTimer.expires_after(config_.maxBatchDelayMs);
+            auto idleDelay = config_.maxBatchDelayMs;
+            if (auto snap = TuningSnapshotRegistry::instance().get(); snap && snap->daemonIdle) {
+                idleDelay =
+                    std::max(idleDelay, std::chrono::milliseconds(std::max<uint32_t>(
+                                            TuneAdvisor::idleTickMs(), snap->workerPollMs)));
+            }
+            pollTimer.expires_after(idleDelay);
             boost::system::error_code ec;
             co_await pollTimer.async_wait(
                 boost::asio::redirect_error(boost::asio::use_awaitable, ec));

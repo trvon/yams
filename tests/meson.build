@@ -1084,6 +1084,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_daemon_idle_control_bench_exe = executable('catch2_daemon_idle_control_bench',
+    files('unit/daemon/daemon_idle_control_bench_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_request_lifetime_exe = executable('catch2_request_lifetime',
     files('unit/daemon/request_handler_lifetime_catch2_test.cpp'),
     include_directories: incs,

@@ -732,10 +732,11 @@ TEST_CASE("SearchTuner: biomedical prose corpus selects SCIENTIFIC profile",
           "[unit][corpus_stats][search_tuner]") {
     using namespace yams::search;
 
-    // Simulate SciFact-like corpus: 150 prose docs, deep absolute paths, zero code symbols,
+    // Simulate SciFact-like corpus: prose docs, deep absolute paths, zero code symbols,
     // high GLiNER NER density (1.5 annotations/doc).
+    // docCount must be >= 1000 for SCIENTIFIC (computeState requires !isSmall).
     CorpusStats stats;
-    stats.docCount = 150;
+    stats.docCount = 1500;
     stats.proseRatio = 0.95;
     stats.codeRatio = 0.05;
     stats.binaryRatio = 0.0;

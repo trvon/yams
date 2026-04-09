@@ -22,6 +22,7 @@
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/pressure_limited_poller.h>
@@ -635,6 +636,8 @@ void PostIngestQueue::checkDrainAndSignal() {
                 cb();
             }
 
+            TuningManager::notifyWakeup();
+
             spdlog::debug(
                 "[PostIngestQueue] Queue drained, signaled corpus stats and drain callback");
         }
@@ -716,6 +719,7 @@ void PostIngestQueue::enqueue(Task t) {
     uint32_t waits = 0;
     while (!stop_.load(std::memory_order_acquire)) {
         if (channel->push_wait(task, kEnqueueTimeout)) {
+            TuningManager::notifyWakeup();
             return;
         }
         ++waits;
@@ -752,6 +756,7 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
             break;
         }
         if (channel->push_wait(busTasks[next], kEnqueueTimeout)) {
+            TuningManager::notifyWakeup();
             ++next;
             continue;
         }
@@ -785,7 +790,11 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
     task.hash = t.hash;
     task.mime = t.mime;
 
-    return channel->try_push(task);
+    const bool pushed = channel->try_push(task);
+    if (pushed) {
+        TuningManager::notifyWakeup();
+    }
+    return pushed;
 }
 
 bool PostIngestQueue::tryEnqueue(Task&& t) {
@@ -807,7 +816,11 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
 
-    return channel->try_push(std::move(task));
+    const bool pushed = channel->try_push(std::move(task));
+    if (pushed) {
+        TuningManager::notifyWakeup();
+    }
+    return pushed;
 }
 
 std::size_t PostIngestQueue::size() const {
@@ -1070,6 +1083,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     // Prefer non-blocking fast-path to avoid stalling extraction under load.
     if (channel->try_push(std::move(job))) {
         InternalEventBus::instance().incKgQueued();
+        TuningManager::notifyWakeup();
         return;
     }
 
@@ -1085,6 +1099,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
         InternalEventBus::instance().incKgDropped();
     } else {
         InternalEventBus::instance().incKgQueued();
+        TuningManager::notifyWakeup();
     }
 }
 
@@ -1240,6 +1255,7 @@ void PostIngestQueue::dispatchToSymbolChannel(
         spdlog::info("[PostIngestQueue] Dispatched symbol extraction job for {} ({}) lang={}",
                      filePath, hash.substr(0, 12), language);
         InternalEventBus::instance().incSymbolQueued();
+        TuningManager::notifyWakeup();
     }
 }
 
@@ -1318,6 +1334,7 @@ void PostIngestQueue::dispatchToEntityChannel(
         spdlog::info("[PostIngestQueue] Dispatched entity extraction job for {} ({}) ext={}",
                      filePath, hash.substr(0, 12), extension);
         InternalEventBus::instance().incEntityQueued();
+        TuningManager::notifyWakeup();
     }
 }
 
@@ -1667,6 +1684,7 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
         spdlog::debug("[PostIngestQueue] Dispatched title+NL extraction job for {}",
                       hash.substr(0, 12));
         InternalEventBus::instance().incTitleQueued();
+        TuningManager::notifyWakeup();
     }
 }
 
@@ -2610,6 +2628,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         while (!stop_.load(std::memory_order_acquire)) {
             if (embedQ->push_wait(job, kEnqueueTimeout)) {
                 InternalEventBus::instance().incEmbedQueued(job.batchSize);
+                TuningManager::notifyWakeup();
                 if (preparedDocsCount > 0) {
                     InternalEventBus::instance().incEmbedPreparedQueued(preparedDocsCount,
                                                                         preparedChunksCount);

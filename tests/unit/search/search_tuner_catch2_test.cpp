@@ -503,13 +503,26 @@ TEST_CASE("SearchTuner: priority order - MINIMAL takes precedence", "[unit][sear
     CHECK(state == TuningState::MINIMAL);
 }
 
-TEST_CASE("SearchTuner: priority order - SCIENTIFIC before PROSE", "[unit][search_tuner][edge]") {
-    // Scientific detection comes before prose classification
+TEST_CASE("SearchTuner: small scientific-like prose defaults to SMALL_PROSE",
+          "[unit][search_tuner][edge]") {
     CorpusStats stats;
     stats.docCount = 500;
     stats.proseRatio = 0.9f;
     stats.pathDepthAvg = 6.0f; // Deep paths still scientific when low-structure
     stats.tagCoverage = 0.02f; // No tags
+    stats.symbolDensity = 0.0f;
+
+    auto state = SearchTuner::computeState(stats);
+    CHECK(state == TuningState::SMALL_PROSE);
+}
+
+TEST_CASE("SearchTuner: large scientific-like prose still uses SCIENTIFIC",
+          "[unit][search_tuner][edge]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.9f;
+    stats.pathDepthAvg = 6.0f;
+    stats.tagCoverage = 0.02f;
     stats.symbolDensity = 0.0f;
 
     auto state = SearchTuner::computeState(stats);

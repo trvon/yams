@@ -199,6 +199,10 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
 
     auto maxIdleDelay = []() {
         auto snap = TuningSnapshotRegistry::instance().get();
+        if (snap && snap->daemonIdle) {
+            return std::chrono::milliseconds(
+                std::max<uint32_t>(TuneAdvisor::idleTickMs(), snap->workerPollMs));
+        }
         uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
         return std::chrono::milliseconds(std::max<uint32_t>(50, pollMs));
     };

@@ -17,6 +17,7 @@
 #include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 
 namespace yams::daemon {
 
@@ -70,6 +71,18 @@ inline bool applyCpuThrottlingForPoller(boost::asio::steady_timer& timer) {
     return false;
 }
 
+inline std::chrono::milliseconds pollerMaxIdleDelay() {
+    if (auto snap = TuningSnapshotRegistry::instance().get()) {
+        if (snap->daemonIdle) {
+            return std::chrono::milliseconds(
+                std::max<uint32_t>(TuneAdvisor::idleTickMs(), snap->workerPollMs));
+        }
+        return std::chrono::milliseconds(
+            std::max<uint32_t>(5u, std::min<uint32_t>(snap->workerPollMs, 25u)));
+    }
+    return std::chrono::milliseconds(5);
+}
+
 } // namespace detail
 
 /// Configuration for a pressure-limited poller coroutine.
@@ -120,7 +133,6 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
     spdlog::info("[PostIngestQueue] {} poller started", cfg.stageName);
 
     constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(5);
     auto idleDelay = kMinIdleDelay;
 
     while (!cfg.stopFlag->load()) {
@@ -136,7 +148,7 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
             detail::applyPressureToLimit(maxConcurrent);
 
             if (cfg.pauseFlag->load(std::memory_order_acquire) || maxConcurrent == 0) {
-                timer.expires_after(kMinIdleDelay);
+                timer.expires_after(detail::pollerMaxIdleDelay());
                 co_await timer.async_wait(boost::asio::use_awaitable);
                 continue;
             }
@@ -294,10 +306,11 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
             }
 
             // Adaptive backoff when idle
+            const auto maxIdleDelay = detail::pollerMaxIdleDelay();
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
-            if (idleDelay < kMaxIdleDelay) {
-                idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
+            if (idleDelay < maxIdleDelay) {
+                idleDelay = std::min(idleDelay * 2, maxIdleDelay);
             }
         } catch (const std::exception& e) {
             spdlog::error("[PostIngestQueue] {} poller exception: {}", cfg.stageName, e.what());

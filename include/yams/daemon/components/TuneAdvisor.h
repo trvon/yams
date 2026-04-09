@@ -745,12 +745,61 @@ public:
         return 0;
     }
 
+    // Profile-aware host reserve so daemon auto-sizing leaves room for other workloads.
+    static uint32_t hostThreadReserve(unsigned hw) {
+        if (hw <= 1u)
+            return 0u;
+
+        uint32_t reserve = 1u;
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                reserve = std::max<uint32_t>(2u, static_cast<uint32_t>(std::ceil(hw * 0.25)));
+                break;
+            case Profile::Aggressive:
+                reserve = std::max<uint32_t>(1u, static_cast<uint32_t>(std::ceil(hw * 0.10)));
+                break;
+            case Profile::Balanced:
+            default:
+                reserve = std::max<uint32_t>(2u, static_cast<uint32_t>(std::ceil(hw * 0.15)));
+                break;
+        }
+        return std::min(reserve, hw - 1u);
+    }
+
+    static uint32_t daemonThreadCapacity(unsigned hw) {
+        if (hw == 0u)
+            hw = 1u;
+        const uint32_t reserve = hostThreadReserve(hw);
+        return std::max<uint32_t>(1u, hw - reserve);
+    }
+
+    static uint64_t autoMemoryBudgetBytes(uint64_t systemMem) {
+        if (systemMem == 0) {
+            return 256ull * 1024ull * 1024ull;
+        }
+
+        uint32_t budgetPercent = 60u;
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                budgetPercent = 45u;
+                break;
+            case Profile::Aggressive:
+                budgetPercent = 75u;
+                break;
+            case Profile::Balanced:
+            default:
+                budgetPercent = 60u;
+                break;
+        }
+
+        const uint64_t budget = (systemMem * budgetPercent) / 100ull;
+        const uint64_t minBudget = 256ull * 1024ull * 1024ull;
+        const uint64_t maxBudget = (systemMem > minBudget) ? (systemMem - minBudget) : minBudget;
+        return std::clamp<uint64_t>(budget, minBudget, maxBudget);
+    }
+
     // WorkCoordinator threads (override, env, or derived).
-    // Default: max(12, hardware_concurrency). I/O-bound SQL work (sqlite3_step blocks
-    // on disk I/O) benefits from oversubscription: when some threads wait on I/O, others
-    // can still service requests. The floor of 12 prevents total starvation on ≤8-core
-    // machines where external storage (USB/NAS) can stall all worker threads during
-    // page cache warmup.
+    // Default: profile-aware, host-aware thread capacity with a small safety floor.
     // Environment: YAMS_WORK_COORDINATOR_THREADS
     static uint32_t workCoordinatorThreads() {
         uint32_t ov = workCoordinatorThreadsOverride_.load(std::memory_order_relaxed);
@@ -765,7 +814,7 @@ public:
                 ignoreInvalidEnvParseFailure();
             }
         }
-        return std::max(12u, recommendedThreads(1.0));
+        return std::max(2u, recommendedThreads(1.0));
     }
     static void setWorkCoordinatorThreads(uint32_t n) {
         workCoordinatorThreadsOverride_.store(std::clamp<uint32_t>(n, 1u, 512u),
@@ -779,8 +828,9 @@ public:
         if (backgroundFactor <= 0.0)
             backgroundFactor = 0.5;
         double eff = std::clamp(budget * backgroundFactor, 0.1, 1.0);
-        uint32_t cap =
+        uint32_t budgetCap =
             static_cast<uint32_t>(std::max(1.0, std::floor(eff * static_cast<double>(hw))));
+        uint32_t cap = std::min(budgetCap, daemonThreadCapacity(hw));
         uint32_t absMax = maxThreadsOverall();
         if (absMax > 0)
             cap = std::min(cap, absMax);
@@ -788,6 +838,14 @@ public:
             cap = std::min(cap, hardMax);
         return std::max(1u, cap);
     }
+
+#ifdef YAMS_TESTING
+    static uint32_t testing_reservedHostThreads(unsigned hw) { return hostThreadReserve(hw); }
+    static uint32_t testing_daemonThreadCapacity(unsigned hw) { return daemonThreadCapacity(hw); }
+    static uint64_t testing_autoMemoryBudgetBytes(uint64_t systemMem) {
+        return autoMemoryBudgetBytes(systemMem);
+    }
+#endif
 
     // Cached hardware concurrency (process-wide)
     static unsigned hardwareConcurrency() {
@@ -1638,10 +1696,7 @@ public:
                 ignoreInvalidEnvParseFailure();
             }
         }
-        uint32_t hw = static_cast<uint32_t>(std::thread::hardware_concurrency());
-        if (hw == 0)
-            hw = 1;
-        return hw;
+        return std::max(1u, recommendedThreads(1.0));
     }
     static void setMaxIngestWorkers(uint32_t v) {
         maxIngestWorkersOverride_.store(v, std::memory_order_relaxed);
@@ -1981,7 +2036,7 @@ public:
                 ignoreInvalidEnvParseFailure();
             }
         }
-        uint32_t hw = hardwareConcurrency();
+        uint32_t hw = daemonThreadCapacity(hardwareConcurrency());
 
         // Use round-up division to avoid integer truncation starving small systems.
         // Without rounding: (8*20)/100 = 1, base = max(2,1) = 2, no scaling benefit.
@@ -2001,7 +2056,7 @@ public:
             total = std::max(total, activeStages);
         }
 
-        return std::clamp(total, 2u, hw);
+        return std::clamp(total, 2u, std::max(2u, hw));
     }
     static void setPostIngestTotalConcurrent(uint32_t v) {
         if (v == 0) {
@@ -2935,10 +2990,11 @@ public:
         governorWarningScalePctOverride_.store(0, std::memory_order_relaxed);
     }
 
-    /// Memory budget in bytes. 0 = auto-detect based on profile:
-    ///   Efficient:  60% system RAM
-    ///   Balanced:   80% system RAM
-    ///   Aggressive: 90% system RAM
+    /// Memory budget in bytes. 0 = auto-detect based on profile while leaving
+    /// headroom for other system workloads.
+    ///   Efficient:  45% system RAM
+    ///   Balanced:   60% system RAM
+    ///   Aggressive: 75% system RAM
     /// Environment: YAMS_MEMORY_BUDGET_BYTES
     static uint64_t memoryBudgetBytes() {
         uint64_t ov = memoryBudgetBytesOverride_.load(std::memory_order_relaxed);
@@ -2953,16 +3009,7 @@ public:
                 ignoreInvalidEnvParseFailure();
             }
         }
-        // Auto-detect based on profile
-        uint64_t systemMem = detectSystemMemory();
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return systemMem * 60 / 100;
-            case Profile::Aggressive:
-                return systemMem * 90 / 100;
-            default:
-                return systemMem * 80 / 100;
-        }
+        return autoMemoryBudgetBytes(detectSystemMemory());
     }
     static void setMemoryBudgetBytes(uint64_t bytes) {
         memoryBudgetBytesOverride_.store(bytes, std::memory_order_relaxed);
@@ -3323,7 +3370,7 @@ public:
                 ignoreInvalidEnvParseFailure();
             }
         }
-        uint32_t hw = hardwareConcurrency();
+        uint32_t hw = daemonThreadCapacity(hardwareConcurrency());
         uint32_t reserved = onnxGlinerReserved() + onnxEmbedReserved() + onnxRerankerReserved();
 
         // Use round-up division to avoid integer truncation on small systems.
@@ -3333,6 +3380,7 @@ public:
         // Ensure at least 1 shared slot beyond total reserved.
         total = std::max(total, reserved + 1);
 
+        total = std::max(total, reserved + 1u);
         return std::clamp(total, 2u, 12u);
     }
     static void setOnnxMaxConcurrent(uint32_t n) {

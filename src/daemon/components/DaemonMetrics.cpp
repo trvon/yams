@@ -125,9 +125,9 @@ double safeRatio(NumeratorT numerator, DenominatorT denominator) {
     return static_cast<double>(numerator) / denom;
 }
 
-// Read CPU usage percent for the current process using /proc deltas.
-// Percent is relative to total system capacity (all CPUs). A single fully utilized
-// core on a 4-core system will be ~25%.
+// Read CPU usage percent for the current process using platform deltas.
+// Percent is relative to total system capacity (all CPUs) and normalized to 0..100.
+// A single fully utilized core on a 4-core system will be ~25%.
 double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTotalJiffies) {
 #if defined(_WIN32)
     FILETIME idleFT{}, kernelFT{}, userFT{};
@@ -162,13 +162,8 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
     if (dTotal == 0)
         return 0.0;
 
-    SYSTEM_INFO sysInfo{};
-    GetSystemInfo(&sysInfo);
-    const double maxPct =
-        100.0 *
-        static_cast<double>(sysInfo.dwNumberOfProcessors ? sysInfo.dwNumberOfProcessors : 1);
     double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
-    return std::clamp(pct, 0.0, maxPct);
+    return std::clamp(pct, 0.0, 100.0);
 #elif defined(__APPLE__)
     // Process CPU time
     task_thread_times_info_data_t thread_info;
@@ -209,10 +204,7 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
     }
 
     double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
-    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
-    if (nprocs < 1)
-        nprocs = 1;
-    return std::clamp(pct, 0.0, 100.0 * static_cast<double>(nprocs));
+    return std::clamp(pct, 0.0, 100.0);
 #else
     // Read process jiffies from /proc/self/stat (utime + stime)
     std::ifstream pstat("/proc/self/stat");

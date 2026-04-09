@@ -525,7 +525,7 @@ TuningState SearchTuner::computeState(const storage::CorpusStats& stats, std::st
     if (isMinimal) {
         state = TuningState::MINIMAL;
         reason << "docCount=" << stats.docCount << " < 100";
-    } else if (isScientific) {
+    } else if (isScientific && !isSmall) {
         state = TuningState::SCIENTIFIC;
         reason << "prose_dominant (" << static_cast<int>(stats.proseRatio * 100)
                << "%), benchmark_like (relative_path_depth=" << stats.pathRelativeDepthAvg
