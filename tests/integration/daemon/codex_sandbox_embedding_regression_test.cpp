@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <optional>
 #include <string>
@@ -270,6 +271,11 @@ TEST_CASE("EmbedDocuments request model handling with daemon harness",
     opts.autoLoadPlugins = false;
 
     SECTION("Repro: fails when neither request nor service config provides a model") {
+        // Isolate from host config — prevent resolvePreferredModel() from reading
+        // ~/.config/yams/config.toml which would defeat the "no model" scenario.
+        auto emptyCfgDir = makeUniqueTempDir("codex_embed_nocfg_");
+        opts.configPath = emptyCfgDir / "nonexistent_config.toml";
+
         DaemonHarness harness(opts);
         startHarnessWithRetry(harness);
         injectMockProviderWithoutConfiguredModel(harness, kModelName);
@@ -288,6 +294,17 @@ TEST_CASE("EmbedDocuments request model handling with daemon harness",
     }
 
     SECTION("Guard: empty request model resolves through daemon config") {
+        // Provide an explicit config with preferred_model so resolution works
+        // through the daemon config path, not the host system's config.
+        auto cfgDir = makeUniqueTempDir("codex_embed_withcfg_");
+        auto cfgPath = cfgDir / "config.toml";
+        {
+            std::ofstream out(cfgPath);
+            out << "[embeddings]\n";
+            out << "preferred_model = \"" << kModelName << "\"\n";
+        }
+        opts.configPath = cfgPath;
+
         DaemonHarness harness(opts);
         startHarnessWithRetry(harness);
         injectMockProviderWithoutConfiguredModel(harness, kModelName);
@@ -311,6 +328,10 @@ TEST_CASE("EmbedDocuments request model handling with daemon harness",
     }
 
     SECTION("Guard: succeeds when request explicitly provides model name") {
+        // Isolate from host config — model comes from the request, not config.
+        auto emptyCfgDir = makeUniqueTempDir("codex_embed_explicit_");
+        opts.configPath = emptyCfgDir / "nonexistent_config.toml";
+
         DaemonHarness harness(opts);
         startHarnessWithRetry(harness);
         injectMockProviderWithoutConfiguredModel(harness, kModelName);

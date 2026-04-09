@@ -8,6 +8,7 @@
 #include <yams/search/kg_scorer.h>
 #include <yams/search/kg_scorer_simple.h>
 #include <yams/search/query_expansion.h>
+#include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
@@ -497,9 +498,8 @@ bool envFlagEnabled(const char* name) {
 }
 
 size_t envSizeTOrDefault(const char* name, size_t defaultValue, size_t minValue, size_t maxValue) {
-    if (const char* env = std::getenv(name);
-        env &&
-        *env) { // NOLINT(concurrency-mt-unsafe) — read-only; env vars not modified concurrently
+    // NOLINTNEXTLINE(concurrency-mt-unsafe) — read-only; env vars not modified concurrently
+    if (const char* env = std::getenv(name); env && *env) {
         size_t parsed{};
         const auto* end = env + std::strlen(env);
         auto [ptr, ec] = std::from_chars(env, end, parsed);
@@ -700,20 +700,35 @@ float filenamePathBoost(const std::string& query, const std::string& filePath,
     return 1.0f;
 }
 
-enum class QueryIntent { Code, Path, Prose, Mixed };
+bool isCodeProfileState(TuningState state) {
+    return state == TuningState::SMALL_CODE || state == TuningState::LARGE_CODE;
+}
 
-constexpr const char* queryIntentToString(QueryIntent intent) {
-    switch (intent) {
-        case QueryIntent::Code:
-            return "code";
-        case QueryIntent::Path:
-            return "path";
-        case QueryIntent::Prose:
-            return "prose";
-        case QueryIntent::Mixed:
-            return "mixed";
+QueryRouteContext makeQueryRouteContext(TuningState state) {
+    QueryRouteContext context;
+    context.corpusUsesCodeProfile = isCodeProfileState(state);
+    context.corpusUsesScientificProfile = state == TuningState::SCIENTIFIC;
+    context.corpusUsesMediaProfile = state == TuningState::MEDIA;
+    return context;
+}
+
+std::optional<TuningState> tuningOverrideForCommunity(QueryCommunity community,
+                                                      TuningState globalState) {
+    switch (community) {
+        case QueryCommunity::Code:
+            return isCodeProfileState(globalState)
+                       ? std::nullopt
+                       : std::optional<TuningState>{TuningState::SMALL_CODE};
+        case QueryCommunity::Scientific:
+            return globalState == TuningState::SCIENTIFIC
+                       ? std::nullopt
+                       : std::optional<TuningState>{TuningState::SCIENTIFIC};
+        case QueryCommunity::Media:
+            return globalState == TuningState::MEDIA
+                       ? std::nullopt
+                       : std::optional<TuningState>{TuningState::MEDIA};
     }
-    return "mixed";
+    return std::nullopt;
 }
 
 SearchEngineConfig::NavigationZoomLevel zoomLevelForIntent(QueryIntent intent) {
@@ -855,159 +870,6 @@ double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent,
     }
 
     return signal;
-}
-
-bool hasCamelCase(const std::string& input) {
-    bool tokenHasAlpha = false;
-    bool tokenHasLower = false;
-    bool tokenHasUpper = false;
-    bool tokenHasInteriorUpper = false;
-
-    const auto flushToken = [&]() {
-        const bool camelToken =
-            tokenHasAlpha && tokenHasLower && tokenHasUpper && tokenHasInteriorUpper;
-        tokenHasAlpha = false;
-        tokenHasLower = false;
-        tokenHasUpper = false;
-        tokenHasInteriorUpper = false;
-        return camelToken;
-    };
-
-    for (unsigned char c : input) {
-        if (std::isalnum(c)) {
-            if (std::isalpha(c)) {
-                if (std::isupper(c) && tokenHasAlpha) {
-                    tokenHasInteriorUpper = true;
-                }
-                tokenHasAlpha = true;
-                tokenHasLower = tokenHasLower || std::islower(c);
-                tokenHasUpper = tokenHasUpper || std::isupper(c);
-            }
-            continue;
-        }
-
-        if (flushToken()) {
-            return true;
-        }
-    }
-
-    if (flushToken()) {
-        return true;
-    }
-
-    return false;
-}
-
-bool hasFileExtension(std::string_view input) {
-    const auto dot = input.rfind('.');
-    if (dot == std::string_view::npos || dot == 0 || dot + 1 >= input.size()) {
-        return false;
-    }
-    const auto ext = input.substr(dot + 1);
-    if (ext.size() > 5) {
-        return false;
-    }
-    for (unsigned char c : ext) {
-        if (!std::isalnum(c)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-QueryIntent detectQueryIntent(const std::string& query) {
-    if (query.empty()) {
-        return QueryIntent::Mixed;
-    }
-
-    const bool hasPathSeparator =
-        query.find('/') != std::string::npos || query.find('\\') != std::string::npos;
-    const bool hasPathPrefix = query.rfind("./", 0) == 0 || query.rfind("../", 0) == 0;
-    const bool hasCodeSig =
-        query.find("::") != std::string::npos || query.find("->") != std::string::npos ||
-        query.find("#") != std::string::npos || query.find("_") != std::string::npos;
-    const bool hasExt = hasFileExtension(query);
-    const bool hasCamel = hasCamelCase(query);
-
-    if (hasPathSeparator || hasPathPrefix) {
-        return QueryIntent::Path;
-    }
-
-    if (hasCodeSig || hasCamel || hasExt) {
-        return QueryIntent::Code;
-    }
-
-    const auto tokens = tokenizeLower(query);
-    if (tokens.size() >= 3) {
-        return QueryIntent::Prose;
-    }
-
-    return QueryIntent::Mixed;
-}
-
-// Detect which content community a query targets and return a tuning-state override
-// if the query clearly belongs to a different domain than the global corpus profile.
-// Returns std::nullopt when no confident override can be made.
-// This is pure lexical signal matching — no inference, no ONNX calls.
-std::optional<TuningState> detectQueryCommunity(const std::string& query, QueryIntent intent,
-                                                TuningState globalState) {
-    // Code / path queries always benefit from a code profile regardless of corpus type.
-    if (intent == QueryIntent::Code || intent == QueryIntent::Path) {
-        const bool alreadyCode =
-            (globalState == TuningState::SMALL_CODE || globalState == TuningState::LARGE_CODE);
-        if (!alreadyCode) {
-            return TuningState::SMALL_CODE;
-        }
-        return std::nullopt;
-    }
-
-    if (intent == QueryIntent::Prose || intent == QueryIntent::Mixed) {
-        const auto tokens = tokenizeLower(query);
-
-        // Scientific vocabulary: require ≥ 2 hits for sufficient confidence.
-        static constexpr std::array kScientificTerms = {
-            std::string_view{"study"},       std::string_view{"analysis"},
-            std::string_view{"trial"},       std::string_view{"effect"},
-            std::string_view{"association"}, std::string_view{"mechanism"},
-            std::string_view{"inhibit"},     std::string_view{"protein"},
-            std::string_view{"gene"},        std::string_view{"disease"},
-            std::string_view{"treatment"},   std::string_view{"cohort"},
-            std::string_view{"hypothesis"},  std::string_view{"evidence"},
-            std::string_view{"receptor"},    std::string_view{"exposure"},
-            std::string_view{"mutation"},    std::string_view{"clinical"},
-        };
-        int sciHits = 0;
-        for (const auto& tok : tokens) {
-            for (const auto& sci : kScientificTerms) {
-                if (tok == sci) {
-                    ++sciHits;
-                    break;
-                }
-            }
-        }
-        if (sciHits >= 2 && globalState != TuningState::SCIENTIFIC) {
-            return TuningState::SCIENTIFIC;
-        }
-
-        // Media vocabulary: single hit is sufficient — these terms are highly specific.
-        static constexpr std::array kMediaTerms = {
-            std::string_view{"photo"},      std::string_view{"video"},
-            std::string_view{"image"},      std::string_view{"audio"},
-            std::string_view{"screenshot"}, std::string_view{"recording"},
-            std::string_view{"camera"},     std::string_view{"album"},
-            std::string_view{"clip"},       std::string_view{"thumbnail"},
-            std::string_view{"podcast"},    std::string_view{"playlist"},
-        };
-        for (const auto& tok : tokens) {
-            for (const auto& med : kMediaTerms) {
-                if (tok == med) {
-                    return TuningState::MEDIA;
-                }
-            }
-        }
-    }
-
-    return std::nullopt;
 }
 
 void applyIntentWeights(SearchEngineConfig& config, QueryIntent intent) {
@@ -1761,7 +1623,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig = tuner_->getConfig();
     }
 
-    const QueryIntent intent = detectQueryIntent(query);
+    const QueryRouter queryRouter;
+    const QueryRouteContext routeContext =
+        tuner_ ? makeQueryRouteContext(tuner_->currentState()) : QueryRouteContext{};
+    const auto routingStart = std::chrono::steady_clock::now();
+    const QueryRouteDecision routeDecision = queryRouter.route(query, routeContext);
+    response.componentTimingMicros["query_routing"] =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                              routingStart)
+            .count();
+    if (tuner_) {
+        response.componentTimingMicros["community_detection"] =
+            response.componentTimingMicros.at("query_routing");
+    }
+
+    const QueryIntent intent = routeDecision.intent.label;
     const auto configuredZoomLevel = workingConfig.zoomLevel;
     const auto effectiveZoomLevel =
         configuredZoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto
@@ -1778,22 +1654,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     // scientific query in a mixed corpus use SCIENTIFIC params, a code query in a prose
     // corpus use code params, and a media query use MEDIA params — all without any
     // offline clustering or additional inference.
-    if (tuner_) {
-        const auto cdStart = std::chrono::steady_clock::now();
-        const auto communityOverride = detectQueryCommunity(query, intent, tuner_->currentState());
-        response.componentTimingMicros["community_detection"] =
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
-                                                                  cdStart)
-                .count();
-
-        if (communityOverride.has_value()) {
-            const std::string overrideState = tuningStateToString(communityOverride.value());
+    if (tuner_ && routeDecision.community.has_value()) {
+        if (const auto communityOverride =
+                tuningOverrideForCommunity(routeDecision.community->label, tuner_->currentState());
+            communityOverride.has_value()) {
+            const std::string overrideState = tuningStateToString(*communityOverride);
             response.debugStats["community_override"] = overrideState;
-            spdlog::debug(
-                "[Search] community override: global={} → {} (detection={}μs, query='{}')",
-                tuningStateToString(tuner_->currentState()), overrideState,
-                response.componentTimingMicros.at("community_detection"), query);
-            getTunedParams(communityOverride.value()).applyTo(workingConfig);
+            response.debugStats["trace_query_community"] =
+                queryCommunityToString(routeDecision.community->label);
+            response.debugStats["trace_query_community_reason"] = routeDecision.community->reason;
+            spdlog::debug("[Search] community override: global={} → {} (routing={}μs, query='{}')",
+                          tuningStateToString(tuner_->currentState()), overrideState,
+                          response.componentTimingMicros.at("query_routing"), query);
+            getTunedParams(*communityOverride).applyTo(workingConfig);
             // Re-apply intent weights on top of the new profile so that the
             // intent-specific component scaling is preserved.
             applyIntentWeights(workingConfig, intent);
@@ -3100,10 +2973,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     // Opt-in diagnostic: help explain "0 results" situations by showing per-component
     // hit counts (pre-fusion) and whether an embedding was available.
-    if (const char* env = std::getenv("YAMS_SEARCH_DIAG");
-        env &&
-        std::string(env) ==
-            "1") { // NOLINT(concurrency-mt-unsafe) — debug env var; not modified concurrently
+    // NOLINTNEXTLINE(concurrency-mt-unsafe) — debug env var; not modified concurrently
+    if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
         const bool embeddingsAvailable = queryEmbedding.has_value();
         spdlog::warn("[search_diag] query='{}' components: contributing={} failed={} timed_out={} "
                      "skipped={} embedding={} pre_fusion_total={} "
@@ -5029,6 +4900,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         response.debugStats["trace_enabled"] = "1";
         response.debugStats["trace_query_intent"] = queryIntentToString(intent);
+        response.debugStats["trace_query_intent_reason"] = routeDecision.intent.reason;
+        response.debugStats["trace_query_community"] =
+            routeDecision.community.has_value()
+                ? queryCommunityToString(routeDecision.community->label)
+                : "none";
+        response.debugStats["trace_query_community_reason"] =
+            routeDecision.community.has_value() ? routeDecision.community->reason : "";
         response.debugStats["trace_zoom_level"] =
             SearchEngineConfig::navigationZoomLevelToString(effectiveZoomLevel);
         response.debugStats["trace_zoom_source"] =
@@ -5260,7 +5138,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
     }
 
     try {
-        const QueryIntent queryIntent = detectQueryIntent(query);
+        const QueryRouter queryRouter;
+        const QueryIntent queryIntent = queryRouter.classifyIntent(query).label;
         float nonCodeFileMultiplier = 1.0f;
         if (config.enableIntentAdaptiveWeighting) {
             switch (queryIntent) {
@@ -5614,10 +5493,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
         spdlog::debug("queryFullText: {} results for query '{}' (limit={})", results.size(),
                       query.substr(0, 50), limit);
 
-        if (const char* env = std::getenv("YAMS_SEARCH_DIAG");
-            env &&
-            std::string(env) ==
-                "1") { // NOLINT(concurrency-mt-unsafe) — debug env var; not modified concurrently
+        // NOLINTNEXTLINE(concurrency-mt-unsafe) — debug env var; not modified concurrently
+        if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
             spdlog::warn("[search_diag] text_hits={} limit={} query='{}'", results.size(), limit,
                          query);
         }

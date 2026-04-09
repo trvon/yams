@@ -768,6 +768,25 @@ jobs:
           echo "Setting version: ${VERSION}"
           
           ./setup.sh Release
+          # Source Conan build env so meson compile uses the same Meson version
+          # that setup.sh used for meson setup (Conan provides Meson 1.10.x which
+          # creates build.dat incompatible with older system Meson).
+          CONAN_BUILD_ENV=""
+          for candidate in \
+            "build/release/build-release/conan/conanbuild.sh" \
+            "build/release/conan/conanbuild.sh"
+          do
+            if [ -f "$candidate" ]; then
+              CONAN_BUILD_ENV="$candidate"
+              break
+            fi
+          done
+          if [ -n "$CONAN_BUILD_ENV" ]; then
+            set +u
+            source "$CONAN_BUILD_ENV"
+            set -u
+          fi
+          meson --version
           meson compile -C build/release
           echo "BUILD_DIR=build/release" >> $GITHUB_ENV
 
@@ -814,6 +833,22 @@ jobs:
           fi
           # Install to an absolute stage path under the build dir to avoid path duplication
           BD="$(cd "$BUILD_DIR" && pwd)"
+          CONAN_BUILD_ENV=""
+          for candidate in \
+            "$BD/build-release/conan/conanbuild.sh" \
+            "$BD/conan/conanbuild.sh"
+          do
+            if [ -f "$candidate" ]; then
+              CONAN_BUILD_ENV="$candidate"
+              break
+            fi
+          done
+          if [ -n "$CONAN_BUILD_ENV" ]; then
+            set +u
+            source "$CONAN_BUILD_ENV"
+            set -u
+          fi
+          meson --version
           meson install -C "$BD" --destdir "$BD/stage"
           if [ ! -d "$BD/stage" ]; then
             echo "Stage directory missing after meson install" >&2

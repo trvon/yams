@@ -197,7 +197,8 @@ MetadataRepository::batchGetDocumentsWithContentPreview(const std::vector<std::s
 
                 std::string preview = stmt.getString(13);
 
-                result[info.sha256Hash] = std::make_pair(std::move(info), std::move(preview));
+                std::string hashKey = info.sha256Hash;
+                result[hashKey] = std::make_pair(std::move(info), std::move(preview));
             }
 
             return result;

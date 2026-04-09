@@ -288,6 +288,8 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         stats.proseRatio = 0.85;
         stats.symbolDensity = 0.01;
         stats.pathDepthAvg = 2.0;
+        stats.pathRelativeDepthAvg = 3.0; // Deep nesting disqualifies isScientific
+        stats.nativeSymbolDensity = 0.0;
         stats.tagCoverage = 0.3;
 
         SearchTuner tuner(stats);
@@ -305,8 +307,10 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         stats.codeRatio = 0.05;
         stats.proseRatio = 0.90;
         stats.symbolDensity = 0.01;
-        stats.pathDepthAvg = 1.0; // Flat structure
-        stats.tagCoverage = 0.05; // Minimal tags
+        stats.pathDepthAvg = 1.0;
+        stats.pathRelativeDepthAvg = 0.5; // Flat structure triggers isScientific
+        stats.nativeSymbolDensity = 0.01; // Low code structure
+        stats.tagCoverage = 0.05;         // Minimal tags
 
         SearchTuner tuner(stats);
 

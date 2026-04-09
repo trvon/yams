@@ -45,6 +45,18 @@ void stopAndResetQueue(std::unique_ptr<PostIngestQueue>& queue) {
     queue.reset();
 }
 
+/// Drain leftover items from the singleton post_ingest channel to prevent
+/// cross-test interference (tasks enqueued by a previous test that the previous
+/// queue didn't consume before stopping).
+void drainPostIngestChannel() {
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest", 32);
+    InternalEventBus::PostIngestTask drain;
+    while (channel->try_pop(drain)) {
+    }
+}
+
 int setEnvValue(const char* name, const char* value) {
 #if defined(_WIN32)
     return _putenv_s(name, value);
@@ -504,6 +516,7 @@ bool isMpmcEnabled() {
 
 TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][background][queue]") {
     BusToggleGuard busGuard(false); // Disable bus for direct queue testing
+    drainPostIngestChannel();
 
     // WorkCoordinator is required for PostIngestQueue strand creation
     WorkCoordinator coordinator;
@@ -593,6 +606,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embeds",
           "[daemon][background][queue][batch]") {
     BusToggleGuard busGuard(false);
+    drainPostIngestChannel();
     PostIngestBatchGuard batchGuard(4);
 
     // Ensure embed chunking policy is exercised through the PostIngestQueue -> embed_jobs path.
@@ -633,14 +647,6 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
         metadataRepo->setDocument(doc);
         store->setContent(doc.sha256Hash, payload);
         docs.push_back(doc);
-    }
-
-    // Drain any leftover items from previous tests (singleton channels)
-    auto postIngestChannel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", 32);
-    InternalEventBus::PostIngestTask drain;
-    while (postIngestChannel->try_pop(drain)) {
     }
 
     auto embedChannel =
@@ -713,6 +719,7 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
 TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
           "[daemon][background][queue][batch][regression]") {
     BusToggleGuard busGuard(false);
+    drainPostIngestChannel();
     PostIngestBatchGuard batchGuard(64);
     PostIngestConcurrencyGuard concurrencyGuard(64, 16);
 
@@ -786,6 +793,7 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
 TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
           "[daemon][background][queue][batch][enqueue]") {
     BusToggleGuard busGuard(false);
+    drainPostIngestChannel();
     PostIngestBatchGuard batchGuard(8);
     PostIngestConcurrencyGuard concurrencyGuard(32, 8);
 
@@ -849,6 +857,7 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
 TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency is low",
           "[daemon][background][queue][batch][throughput]") {
     BusToggleGuard busGuard(false);
+    drainPostIngestChannel();
     PostIngestBatchGuard batchGuard(16);
     PostIngestConcurrencyGuard concurrencyGuard(32, 1);
 
@@ -905,6 +914,7 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
 
 TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
           "[daemon][background][queue][logging]") {
+    drainPostIngestChannel();
     SpdlogCaptureGuard logs(spdlog::level::info);
 
     auto store = std::make_shared<StubContentStore>();
@@ -940,6 +950,7 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
     }
 
     BusToggleGuard busGuard(true); // Enable bus routing
+    drainPostIngestChannel();
 
     // WorkCoordinator is required for PostIngestQueue strand creation
     WorkCoordinator coordinator;
