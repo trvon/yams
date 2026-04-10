@@ -726,3 +726,21 @@ TEST_CASE("SearchService: lightIndex retries transient metadata errors",
     auto result = f.searchService->lightIndexForHash(f.testHashes.front(), 512 * 1024);
     REQUIRE(result);
 }
+
+TEST_CASE("SearchService: extension facet telemetry is populated for local keyword searches",
+          "[unit][services][search]") {
+    SearchServiceFixture f;
+    auto request = f.createBasicSearchRequest("Artificial");
+    request.type = "keyword";
+
+    auto result = runAwait(f.searchService->search(request));
+    REQUIRE(result);
+
+    const auto& response = result.value();
+    REQUIRE(response.searchStats.contains("facet_workers_used"));
+    REQUIRE(response.searchStats.contains("facet_input_count"));
+    REQUIRE(response.searchStats.contains("facet_sample_count"));
+    REQUIRE(response.searchStats.contains("facet_approximate"));
+    CHECK(response.searchStats.at("facet_approximate") == "false");
+    CHECK(response.searchStats.at("budget_short_query") == "true");
+}

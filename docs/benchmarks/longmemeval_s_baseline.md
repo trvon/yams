@@ -138,7 +138,25 @@ YAMS_SEARCH_VECTOR_WEIGHT=0.35          # override auto-tuner adjustment
 YAMS_SEARCH_CHUNK_AGGREGATION=sum       # SUM chunk aggregation
 ```
 
+## Second Tuning Attempt — Graph Pipeline Activation (2026-04-09)
+
+Fixes: entity extraction enabled (`PostIngestQueue.cpp:1102`), SCIENTIFIC zoom
+`Map` → `Auto` (`search_tuner.h`), 7 graph fields added to `toJson()`.
+
+### Pre-Fix Benchmark (v3 — entity extraction off, zoom=Map)
+
+| Metric | Baseline | v3 | Delta |
+|--------|----------|----|-------|
+| MRR | 0.407 | 0.507 | +0.100 |
+| Recall@10 | 0.653 | 0.554 | **-0.099** |
+| NDCG@10 | 0.418 | — | — |
+| graph_rerank_apply_rate | 0.0 | 0.0 | — |
+
+### Pending Validation
+
+Both fixes applied but not yet benchmarked together.
+
 ## Improvement Targets
 
-- Recall@10: 0.653 -> 0.75+
-- MRR: 0.407 -> 0.50+
+- Recall@10: 0.653 → 0.75+
+- MRR: 0.407 → 0.55+

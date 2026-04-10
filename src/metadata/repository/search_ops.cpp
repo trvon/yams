@@ -331,15 +331,12 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                      ftsSearchSucceeded, results.results.size());
 
         if (!ftsSearchSucceeded) {
-            spdlog::debug("FTS5 search failed for query '{}', falling back to fuzzy search", query);
-            auto fuzzyResults = fuzzySearch(query, 0.3, limit, docIds);
-            if (fuzzyResults) {
-                results = fuzzyResults.value();
-                spdlog::debug("Successfully fell back to fuzzy search for query '{}'", query);
-            } else {
-                results.errorMessage =
-                    "Both FTS5 and fuzzy search failed: " + fuzzyResults.error().message;
-            }
+            // Keep repository search keyword-only. Fuzzy fallback is orchestrated by the
+            // service layer so callers that explicitly requested keyword search do not
+            // accidentally fan out into SymSpell. This also avoids nested read-pool acquisition
+            // (search() -> fuzzySearch()) while the outer FTS read connection is still held,
+            // which can turn concurrent zero-hit searches into connection-pool starvation.
+            spdlog::debug("FTS5 search returned no results for query '{}'", query);
         }
 
         auto end = std::chrono::high_resolution_clock::now();
@@ -360,18 +357,20 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
     YAMS_ZONE_SCOPED_N("MetadataRepo::fuzzySearch");
     (void)minSimilarity;
 
+    auto initResult = ensureSymSpellInitialized();
+    if (!initResult || !symspellIndex_) {
+        SearchResults results;
+        results.query = query;
+        results.errorMessage = "SymSpell index not available";
+        return results;
+    }
+
     return executeReadQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         SearchResults results;
         results.query = query;
 
         spdlog::debug("[FUZZY] fuzzySearch starting for query='{}' limit={}", query, limit);
         auto totalStart = std::chrono::high_resolution_clock::now();
-
-        auto initResult = ensureSymSpellInitialized();
-        if (!initResult || !symspellIndex_) {
-            results.errorMessage = "SymSpell index not available";
-            return results;
-        }
 
         std::string ftsQuery;
         const bool advancedQuery = hasAdvancedFts5Operators(query);

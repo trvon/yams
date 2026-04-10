@@ -17,6 +17,9 @@
 #endif
 #include <yams/plugins/search_provider_v1.h>
 #include <yams/search/parallel_post_processor.hpp>
+#include <yams/search/query_router.h>
+#include <yams/search/query_text_utils.h>
+#include <yams/search/search_execution_context.h>
 #include <yams/search/query_concept_extractor.h>
 #include <yams/search/query_qualifiers.hpp>
 #include <yams/search/symbol_enrichment.h>
@@ -221,6 +224,44 @@ std::vector<search::SearchResultItem> toPostProcessItems(const std::vector<Searc
     return out;
 }
 
+search::SearchExecutionContext buildSearchExecutionContext(const AppContext& ctx,
+                                                           const SearchRequest& req,
+                                                           std::string_view normalizedQuery) {
+    auto context = search::defaultSearchExecutionContext();
+#ifdef YAMS_ENABLE_DAEMON_FEATURES
+    if (ctx.service_manager) {
+        const auto metrics = ctx.service_manager->getSearchLoadMetrics();
+        context.activeRequests = std::max<std::uint32_t>(1, metrics.active);
+        context.queuedRequests = metrics.queued;
+        context.concurrencyLimit = std::max<std::uint32_t>(
+            1, metrics.concurrencyLimit == 0
+                   ? static_cast<std::uint32_t>(yams::daemon::TuneAdvisor::searchConcurrencyLimit())
+                   : metrics.concurrencyLimit);
+        context.recommendedWorkers = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(yams::daemon::TuneAdvisor::recommendedThreads(0.5, 0)));
+    }
+#endif
+    if (ctx.workerExecutor) {
+        context.workerExecutor = ctx.workerExecutor;
+    }
+
+    const search::QueryRouter router;
+    const auto intent = router.classifyIntent(normalizedQuery).label;
+    const auto tokenCount = search::tokenizeLower(std::string(normalizedQuery)).size();
+    const bool shortQueryBudgeted = intent == search::QueryIntent::Code ||
+                                    intent == search::QueryIntent::Path ||
+                                    (intent == search::QueryIntent::Mixed && tokenCount <= 2);
+    const auto concurrencyLimit = std::max<std::uint32_t>(1, context.concurrencyLimit);
+    const bool pressureBudgeted =
+        context.activeRequests >= 2 || (context.activeRequests * 2) >= concurrencyLimit;
+
+    context.shortQueryBudgeted = shortQueryBudgeted;
+    context.pressureBudgeted = pressureBudgeted;
+    context.allowApproximateFacets = pressureBudgeted || context.queuedRequests > 0;
+    (void)req;
+    return context;
+}
+
 void applyExtensionFacets(SearchResponse& resp) {
     if (resp.results.empty()) {
         return;
@@ -232,6 +273,10 @@ void applyExtensionFacets(SearchResponse& resp) {
     auto items = toPostProcessItems(resp.results);
     auto processed = search::ParallelPostProcessor::process(std::move(items), nullptr,
                                                             {"extension"}, nullptr, 0, 0);
+    resp.searchStats["facet_workers_used"] = std::to_string(processed.workersUsed);
+    resp.searchStats["facet_input_count"] = std::to_string(processed.facetInputCount);
+    resp.searchStats["facet_sample_count"] = std::to_string(processed.facetSampleCount);
+    resp.searchStats["facet_approximate"] = processed.facetsApproximate ? "true" : "false";
     for (auto& facet : processed.facets) {
         if (facet.name == "extension") {
             facet.displayName = "File Type";
@@ -752,6 +797,10 @@ public:
             co_return Error{ErrorCode::InvalidArgument, "Limit is out of allowed range"};
         }
 
+        auto searchExecutionContext =
+            buildSearchExecutionContext(ctx_, normalizedReq, normalizedReq.query);
+        search::SearchExecutionContextGuard searchExecutionContextGuard(searchExecutionContext);
+
         if (!parsed.scope.name.empty()) {
             if (normalizedReq.pathPattern.empty()) {
                 normalizedReq.pathPattern = parsed.scope.name;
@@ -945,6 +994,18 @@ public:
         if (result) {
             auto resp = std::move(result).value();
             const bool metadataOnlyResult = resp.type == "metadata";
+            resp.searchStats["search_active_requests"] =
+                std::to_string(searchExecutionContext.activeRequests);
+            resp.searchStats["search_queued_requests"] =
+                std::to_string(searchExecutionContext.queuedRequests);
+            resp.searchStats["search_concurrency_limit"] =
+                std::to_string(searchExecutionContext.concurrencyLimit);
+            resp.searchStats["search_recommended_workers"] =
+                std::to_string(searchExecutionContext.recommendedWorkers);
+            resp.searchStats["budget_short_query"] =
+                searchExecutionContext.shortQueryBudgeted ? "true" : "false";
+            resp.searchStats["budget_pressure"] =
+                searchExecutionContext.pressureBudgeted ? "true" : "false";
             if (forcedHybridFallback) {
                 const auto& fallbackReason =
                     repairDetails_.empty() ? "hybrid_disabled" : repairDetails_;

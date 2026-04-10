@@ -822,6 +822,16 @@ if catch2_dep.found()
     install: false,
   )
 
+#ParallelPostProcessor daemon-aware budgeting tests
+  catch2_parallel_post_processor_exe = executable('catch2_parallel_post_processor',
+    files('unit/search/parallel_post_processor_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #FTS5 performance / stress tests(migrated from GTest, opt - in via YAMS_RUN_STRESS_TESTS = 1)
   catch2_fts5_stress_exe = executable('catch2_fts5_stress',
     files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),

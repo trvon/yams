@@ -10,6 +10,7 @@
 #include <yams/search/query_expansion.h>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
+#include <yams/search/search_execution_context.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
 #include <yams/search/tuning_pipeline.h>
@@ -1528,6 +1529,35 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     // Long prose queries can miss the semantic tier entirely when the default threshold
     // is tuned for code/navigation queries. Retry only after a zero-hit semantic search.
     const size_t queryTokenCount = tokenizeLower(query).size();
+    const SearchExecutionContext searchExecutionContext = currentSearchExecutionContext();
+    const bool shortQueryBudgeted = searchExecutionContext.shortQueryBudgeted;
+    const bool pressureBudgeted = searchExecutionContext.pressureBudgeted;
+    const bool semanticBudgetActive = shortQueryBudgeted || pressureBudgeted;
+    const bool delayEmbeddingUntilTier1 = semanticBudgetActive;
+    response.debugStats["semantic_budget_short_query"] = shortQueryBudgeted ? "1" : "0";
+    response.debugStats["semantic_budget_pressure"] = pressureBudgeted ? "1" : "0";
+    response.debugStats["semantic_budget_delay_embedding"] = delayEmbeddingUntilTier1 ? "1" : "0";
+    if (shortQueryBudgeted) {
+        workingConfig.vectorMaxResults = std::min(workingConfig.vectorMaxResults, size_t{8});
+        workingConfig.entityVectorMaxResults =
+            std::min(workingConfig.entityVectorMaxResults, size_t{4});
+        workingConfig.kgMaxResults = 0;
+        workingConfig.kgWeight = 0.0f;
+        workingConfig.enableGraphRerank = false;
+        workingConfig.graphRerankTopN = 0;
+        workingConfig.graphScoringBudgetMs = 0;
+        response.debugStats["semantic_budget_mode"] = "short_query";
+    }
+    if (pressureBudgeted) {
+        workingConfig.vectorMaxResults = std::min(workingConfig.vectorMaxResults, size_t{16});
+        workingConfig.entityVectorMaxResults =
+            std::min(workingConfig.entityVectorMaxResults, size_t{8});
+        workingConfig.kgMaxResults = std::min(workingConfig.kgMaxResults, size_t{24});
+        workingConfig.graphRerankTopN = std::min(workingConfig.graphRerankTopN, size_t{10});
+        workingConfig.graphScoringBudgetMs = std::min(workingConfig.graphScoringBudgetMs, 4);
+        response.debugStats["semantic_budget_mode"] =
+            shortQueryBudgeted ? "short_query+pressure" : "pressure";
+    }
     relaxedVectorRetryEnabled = intent == QueryIntent::Prose && queryTokenCount >= 6 &&
                                 workingConfig.similarityThreshold > 0.40f;
 
@@ -1610,9 +1640,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     };
 
-    // Preserve overlap with the lexical tiers by launching embedding work eagerly whenever the
-    // query may need a semantic signal later in the pipeline.
-    launchEmbeddingIfNeeded();
+    // Preserve overlap with the lexical tiers unless daemon-aware budgeting asks us to
+    // prove lexical strength before paying semantic costs.
+    if (!delayEmbeddingUntilTier1) {
+        launchEmbeddingIfNeeded();
+    }
 
     std::future<Result<QueryConceptResult>> conceptFuture;
     std::chrono::steady_clock::time_point conceptStart;
@@ -1728,6 +1760,27 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (workingConfig.enableCompressedANN) {
             traceCollector.markStageSkipped("compressed_ann", vectorTierSkipReason);
         }
+    };
+
+    auto computeLexicalEvidence = [&](const std::vector<ComponentResult>& componentResults) {
+        size_t lexicalHits = 0;
+        float topTextScore = 0.0f;
+        for (const auto& componentResult : componentResults) {
+            if (componentResult.source == ComponentResult::Source::Text) {
+                ++lexicalHits;
+                topTextScore = std::max(topTextScore, componentResult.score);
+            } else if (componentResult.source == ComponentResult::Source::PathTree) {
+                ++lexicalHits;
+            }
+        }
+        return std::pair<size_t, float>{lexicalHits, topTextScore};
+    };
+
+    auto budgetGuardStrongLexical = [&](const std::vector<ComponentResult>& componentResults) {
+        const auto [lexicalHits, topTextScore] = computeLexicalEvidence(componentResults);
+        response.debugStats["semantic_budget_lexical_hits"] = std::to_string(lexicalHits);
+        response.debugStats["semantic_budget_top_text_score"] = fmt::format("{:.4f}", topTextScore);
+        return lexicalHits >= 5 || topTextScore >= 0.20f;
     };
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
@@ -2137,21 +2190,30 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     effectiveEntityVectorMaxResults);
             }
 
-            const bool shouldSkipSemantic = workingConfig.enableAdaptiveVectorFallback &&
-                                            (tier1CandidateCount >= adaptiveSkipMinHits) &&
-                                            hasStrongTextSignal;
+            const bool strongBudgetLexical =
+                semanticBudgetActive && (tier1TextHits >= 5 || tier1TopTextScore >= 0.20f);
+            const bool shouldSkipSemantic =
+                (workingConfig.enableAdaptiveVectorFallback &&
+                 (tier1CandidateCount >= adaptiveSkipMinHits) && hasStrongTextSignal) ||
+                strongBudgetLexical;
 
             if (shouldSkipSemantic) {
                 semanticTierSkipped = true;
-                semanticTierSkipReason = "adaptive_vector_skip";
+                semanticTierSkipReason =
+                    strongBudgetLexical ? "budget_guard_strong_lexical" : "adaptive_vector_skip";
                 skipped.push_back("vector");
                 skipped.push_back("entity_vector");
-                traceCollector.markStageSkipped("vector", "adaptive_vector_skip");
-                traceCollector.markStageSkipped("entity_vector", "adaptive_vector_skip");
-                spdlog::debug("Tiered search: skipping embedding/vector tier (tier1 candidates={} "
-                              ">= threshold={}, text_hits={}, top_text_score={:.3f})",
-                              tier1CandidateCount, adaptiveSkipMinHits, tier1TextHits,
-                              tier1TopTextScore);
+                if (workingConfig.enableCompressedANN) {
+                    skipped.push_back("compressed_ann");
+                    traceCollector.markStageSkipped("compressed_ann", semanticTierSkipReason);
+                }
+                traceCollector.markStageSkipped("vector", semanticTierSkipReason);
+                traceCollector.markStageSkipped("entity_vector", semanticTierSkipReason);
+                response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
+                spdlog::debug("Tiered search: skipping embedding/vector tier (reason={}, tier1 "
+                              "candidates={}, threshold={}, text_hits={}, top_text_score={:.3f})",
+                              semanticTierSkipReason, tier1CandidateCount, adaptiveSkipMinHits,
+                              tier1TextHits, tier1TopTextScore);
             } else if (workingConfig.enableAdaptiveVectorFallback &&
                        tier1CandidateCount >= adaptiveSkipMinHits && !hasStrongTextSignal) {
                 spdlog::debug("Tiered search: retaining semantic tier due to weak text signal "
@@ -2244,7 +2306,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                          &textExpansionStats, &graphExpansionTerms);
                 });
 
-            if (kgStore_) {
+            const bool deferSemanticStages = semanticBudgetActive;
+            if (kgStore_ && !deferSemanticStages) {
                 if (workingConfig.graphUseQueryConcepts && workingConfig.waitForConceptExtraction) {
                     materializeConcepts(true);
                 }
@@ -2281,54 +2344,88 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                              return queryMetadata(params, workingConfig.metadataMaxResults);
                          });
 
-            // Await embedding (ran in parallel with text/kg/path above) then schedule vector
-            awaitEmbedding();
-            if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
-                effectiveVectorMaxResults = workingConfig.vectorMaxResults;
-                effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
-                vectorFuture =
-                    schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
-                             stats_.avgVectorTimeMicros,
-                             [&queryEmbedding, &workingConfig, &queryVectorWithRelaxedRetry]() {
-                                 YAMS_ZONE_SCOPED_N("component::vector");
-                                 return queryVectorWithRelaxedRetry(queryEmbedding.value(),
-                                                                    workingConfig.vectorMaxResults);
-                             });
-
-                entityVectorFuture = schedule(
-                    "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
-                    stats_.avgEntityVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::entity_vector");
-                        return queryEntityVectors(queryEmbedding.value(), workingConfig,
-                                                  workingConfig.entityVectorMaxResults);
-                    });
-
-                // Compressed ANN traversal: runs alongside vector search, inserts into
-                // allComponentResults
-                if (workingConfig.enableCompressedANN) {
-                    compressedAnnFuture = schedule(
-                        "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
-                        stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
-                            YAMS_ZONE_SCOPED_N("component::compressed_ann");
-                            return queryCompressedANN(queryEmbedding.value(), workingConfig,
-                                                      workingConfig.compressedAnnTopK);
-                        });
-                }
-            } else if (hasVectorTierDimMismatch()) {
-                markVectorTierDimMismatch();
-            }
-
             collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
-            collectIf(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
             collectIf(pathFuture, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
-            collectIf(vectorFuture, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
-            collectIf(entityVectorFuture, "entity_vector", stats_.entityVectorQueries,
-                      stats_.avgEntityVectorTimeMicros);
             collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
-            compressedAnnAttempted = compressedAnnFuture.valid();
-            collectIf(compressedAnnFuture, "compressed_ann", stats_.vectorQueries,
-                      stats_.avgVectorTimeMicros);
+
+            const bool strongBudgetLexical =
+                deferSemanticStages && budgetGuardStrongLexical(allComponentResults);
+            if (deferSemanticStages && strongBudgetLexical) {
+                semanticTierSkipped = true;
+                semanticTierSkipReason = "budget_guard_strong_lexical";
+                response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
+                skipped.push_back("kg");
+                skipped.push_back("vector");
+                skipped.push_back("entity_vector");
+                traceCollector.markStageSkipped("kg", semanticTierSkipReason);
+                traceCollector.markStageSkipped("vector", semanticTierSkipReason);
+                traceCollector.markStageSkipped("entity_vector", semanticTierSkipReason);
+                if (workingConfig.enableCompressedANN) {
+                    skipped.push_back("compressed_ann");
+                    traceCollector.markStageSkipped("compressed_ann", semanticTierSkipReason);
+                }
+            } else {
+                if (kgStore_) {
+                    if (workingConfig.graphUseQueryConcepts &&
+                        workingConfig.waitForConceptExtraction) {
+                        materializeConcepts(true);
+                    }
+                    kgFuture = schedule("kg", workingConfig.kgWeight, stats_.kgQueries,
+                                        stats_.avgKgTimeMicros,
+                                        [this, &query, &workingConfig, &concepts]() {
+                                            YAMS_ZONE_SCOPED_N("component::kg");
+                                            return queryKnowledgeGraph(
+                                                query, workingConfig.kgMaxResults, &concepts);
+                                        });
+                }
+
+                // Await embedding (ran in parallel with early lexical stages unless budgeted)
+                // then schedule vector work if still needed.
+                awaitEmbedding();
+                if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
+                    effectiveVectorMaxResults = workingConfig.vectorMaxResults;
+                    effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
+                    vectorFuture =
+                        schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
+                                 stats_.avgVectorTimeMicros,
+                                 [&queryEmbedding, &workingConfig, &queryVectorWithRelaxedRetry]() {
+                                     YAMS_ZONE_SCOPED_N("component::vector");
+                                     return queryVectorWithRelaxedRetry(
+                                         queryEmbedding.value(), workingConfig.vectorMaxResults);
+                                 });
+
+                    entityVectorFuture = schedule(
+                        "entity_vector", workingConfig.entityVectorWeight,
+                        stats_.entityVectorQueries, stats_.avgEntityVectorTimeMicros,
+                        [this, &queryEmbedding, &workingConfig]() {
+                            YAMS_ZONE_SCOPED_N("component::entity_vector");
+                            return queryEntityVectors(queryEmbedding.value(), workingConfig,
+                                                      workingConfig.entityVectorMaxResults);
+                        });
+
+                    if (workingConfig.enableCompressedANN) {
+                        compressedAnnFuture = schedule(
+                            "compressed_ann", workingConfig.compressedAnnWeight,
+                            stats_.vectorQueries, stats_.avgVectorTimeMicros,
+                            [this, &queryEmbedding, &workingConfig]() {
+                                YAMS_ZONE_SCOPED_N("component::compressed_ann");
+                                return queryCompressedANN(queryEmbedding.value(), workingConfig,
+                                                          workingConfig.compressedAnnTopK);
+                            });
+                    }
+                } else if (hasVectorTierDimMismatch()) {
+                    markVectorTierDimMismatch();
+                }
+
+                collectIf(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
+                collectIf(vectorFuture, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
+                collectIf(entityVectorFuture, "entity_vector", stats_.entityVectorQueries,
+                          stats_.avgEntityVectorTimeMicros);
+                compressedAnnAttempted = compressedAnnFuture.valid();
+                collectIf(compressedAnnFuture, "compressed_ann", stats_.vectorQueries,
+                          stats_.avgVectorTimeMicros);
+            }
         }
     } else {
         auto runSequential = [&](auto queryFn, const char* name, float weight,
@@ -2372,52 +2469,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             },
             "text", workingConfig.textWeight, stats_.textQueries, stats_.avgTextTimeMicros);
 
-        if (kgStore_) {
-            if (workingConfig.graphUseQueryConcepts && workingConfig.waitForConceptExtraction) {
-                materializeConcepts(true);
-            }
-            runSequential(
-                [&]() { return queryKnowledgeGraph(query, workingConfig.kgMaxResults, &concepts); },
-                "kg", workingConfig.kgWeight, stats_.kgQueries, stats_.avgKgTimeMicros);
-        }
-
         runSequential([&]() { return queryPathTree(query, workingConfig.pathTreeMaxResults); },
                       "path", workingConfig.pathTreeWeight, stats_.pathTreeQueries,
                       stats_.avgPathTreeTimeMicros);
-
-        // Await embedding (ran in parallel with sequential components above)
-        awaitEmbedding();
-        if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
-            effectiveVectorMaxResults = workingConfig.vectorMaxResults;
-            effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
-            runSequential(
-                [&]() {
-                    return queryVectorWithRelaxedRetry(queryEmbedding.value(),
-                                                       workingConfig.vectorMaxResults);
-                },
-                "vector", workingConfig.vectorWeight, stats_.vectorQueries,
-                stats_.avgVectorTimeMicros);
-
-            runSequential(
-                [&]() {
-                    return queryEntityVectors(queryEmbedding.value(), workingConfig,
-                                              workingConfig.entityVectorMaxResults);
-                },
-                "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
-                stats_.avgEntityVectorTimeMicros);
-
-            if (workingConfig.enableCompressedANN) {
-                runSequential(
-                    [&]() {
-                        return queryCompressedANN(queryEmbedding.value(), workingConfig,
-                                                  workingConfig.compressedAnnTopK);
-                    },
-                    "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
-                    stats_.avgVectorTimeMicros);
-            }
-        } else if (hasVectorTierDimMismatch()) {
-            markVectorTierDimMismatch();
-        }
 
         if (!params.tags.empty()) {
             runSequential(
@@ -2430,6 +2484,69 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         runSequential([&]() { return queryMetadata(params, workingConfig.metadataMaxResults); },
                       "metadata", workingConfig.metadataWeight, stats_.metadataQueries,
                       stats_.avgMetadataTimeMicros);
+
+        const bool strongBudgetLexical =
+            semanticBudgetActive && budgetGuardStrongLexical(allComponentResults);
+        if (semanticBudgetActive && strongBudgetLexical) {
+            semanticTierSkipped = true;
+            semanticTierSkipReason = "budget_guard_strong_lexical";
+            response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
+            skipped.push_back("kg");
+            skipped.push_back("vector");
+            skipped.push_back("entity_vector");
+            traceCollector.markStageSkipped("kg", semanticTierSkipReason);
+            traceCollector.markStageSkipped("vector", semanticTierSkipReason);
+            traceCollector.markStageSkipped("entity_vector", semanticTierSkipReason);
+            if (workingConfig.enableCompressedANN) {
+                skipped.push_back("compressed_ann");
+                traceCollector.markStageSkipped("compressed_ann", semanticTierSkipReason);
+            }
+        } else {
+            if (kgStore_) {
+                if (workingConfig.graphUseQueryConcepts && workingConfig.waitForConceptExtraction) {
+                    materializeConcepts(true);
+                }
+                runSequential(
+                    [&]() {
+                        return queryKnowledgeGraph(query, workingConfig.kgMaxResults, &concepts);
+                    },
+                    "kg", workingConfig.kgWeight, stats_.kgQueries, stats_.avgKgTimeMicros);
+            }
+
+            // Await embedding after lexical stages if budgeted, otherwise it may already be ready.
+            awaitEmbedding();
+            if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
+                effectiveVectorMaxResults = workingConfig.vectorMaxResults;
+                effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
+                runSequential(
+                    [&]() {
+                        return queryVectorWithRelaxedRetry(queryEmbedding.value(),
+                                                           workingConfig.vectorMaxResults);
+                    },
+                    "vector", workingConfig.vectorWeight, stats_.vectorQueries,
+                    stats_.avgVectorTimeMicros);
+
+                runSequential(
+                    [&]() {
+                        return queryEntityVectors(queryEmbedding.value(), workingConfig,
+                                                  workingConfig.entityVectorMaxResults);
+                    },
+                    "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
+                    stats_.avgEntityVectorTimeMicros);
+
+                if (workingConfig.enableCompressedANN) {
+                    runSequential(
+                        [&]() {
+                            return queryCompressedANN(queryEmbedding.value(), workingConfig,
+                                                      workingConfig.compressedAnnTopK);
+                        },
+                        "compressed_ann", workingConfig.compressedAnnWeight, stats_.vectorQueries,
+                        stats_.avgVectorTimeMicros);
+                }
+            } else if (hasVectorTierDimMismatch()) {
+                markVectorTierDimMismatch();
+            }
+        }
     }
 
     if (!compressedAnnEnabled) {
@@ -2441,7 +2558,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     } else if (!vectorTierSkipReason.empty()) {
         compressedAnnSkipReason = vectorTierSkipReason;
     } else if (semanticTierSkipped && !compressedAnnAttempted) {
-        compressedAnnSkipReason = "adaptive_vector_skip";
+        compressedAnnSkipReason =
+            semanticTierSkipReason.empty() ? "adaptive_vector_skip" : semanticTierSkipReason;
     } else {
         size_t preDedupCompressedAnnCount = static_cast<size_t>(std::count_if(
             allComponentResults.begin(), allComponentResults.end(), [](const auto& comp) {

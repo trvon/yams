@@ -1129,6 +1129,44 @@ TEST_CASE("MetadataRepository: fuzzy search returns content matches",
     CHECK(searchResults.results.front().document.id == docId);
 }
 
+TEST_CASE("MetadataRepository: keyword search does not implicitly run fuzzy fallback",
+          "[unit][metadata][repository]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath(
+        "/notes/keyword_no_fuzzy_fallback.txt",
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE");
+
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE(insertResult.has_value());
+    auto docId = insertResult.value();
+
+    constexpr char kIndexedTerm[] = "blorptastic";
+    std::string contentText = std::string("The ") + kIndexedTerm;
+
+    DocumentContent content;
+    content.documentId = docId;
+    content.contentText = contentText;
+    content.contentLength = static_cast<int64_t>(contentText.length());
+    content.extractionMethod = "test";
+    content.language = "en";
+    REQUIRE(fix.repository_->insertContent(content).has_value());
+
+    REQUIRE(fix.repository_->indexDocumentContent(docId, doc.fileName, contentText, "text/plain")
+                .has_value());
+    fix.repository_->addSymSpellTerm(kIndexedTerm, 1);
+
+    auto fuzzyResult = fix.repository_->fuzzySearch("blorptastik", 0.6f, 10);
+    REQUIRE(fuzzyResult.has_value());
+    REQUIRE(fuzzyResult.value().results.size() == 1);
+    CHECK(fuzzyResult.value().results.front().document.id == docId);
+
+    auto keywordResult = fix.repository_->search("blorptastik", 10);
+    REQUIRE(keywordResult.has_value());
+    CHECK(keywordResult.value().results.empty());
+    CHECK(keywordResult.value().totalCount == 0);
+}
+
 TEST_CASE("MetadataRepository: search sanitizes snippet UTF-8", "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 
