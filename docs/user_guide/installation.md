@@ -83,7 +83,8 @@ docker run -it --rm -v yams-data:/home/yams/.local/share/yams ghcr.io/trvon/yams
 
 ### Requirements
 - **Compiler:** GCC 13+, Clang 16+, or MSVC 2022+ (C++20 minimum)
-- **Build tools:** meson, ninja-build, cmake, pkg-config, conan
+- **Build tools:** meson, ninja-build, cmake, pkg-config
+- **Optional dependency manager:** conan (default bootstrap path)
 - **System libs:** libssl-dev, libsqlite3-dev, protobuf-compiler (Linux/macOS)
 
 ### Quick Setup
@@ -111,7 +112,7 @@ cd yams
 
 **Linux/macOS:**
 ```bash
-# Quick build (auto-detects Clang/GCC, configures Conan + Meson)
+# Quick build (portable optimized build: `-O2 -g`, `NDEBUG`)
 ./setup.sh Release
 
 # Build
@@ -123,7 +124,7 @@ meson install -C build/release
 
 **Windows:**
 ```pwsh
-# Quick build (MSVC + Conan + Meson)
+# Quick build (portable optimized build: `-O2 -g`, `NDEBUG`)
 ./setup.ps1 Release
 
 # Build
@@ -141,6 +142,16 @@ meson compile -C builddir
 
 # Cross-compilation
 YAMS_CONAN_HOST_PROFILE=path/to/profile ./setup.sh Release
+
+# Offline from Conan cache only
+./setup.sh Release --offline
+
+# System dependencies only (no Conan, no network)
+YAMS_USE_SYSTEM_DEPS=true \
+YAMS_OFFLINE=true \
+YAMS_PKG_CONFIG_PATH=/opt/yams-deps/lib/pkgconfig \
+YAMS_CMAKE_PREFIX_PATH=/opt/yams-deps \
+./setup.sh Release --system-deps --offline
 
 # Custom C++ standard
 YAMS_CPPSTD=20 ./setup.sh Release

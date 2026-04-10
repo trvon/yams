@@ -7,6 +7,7 @@ Cross-platform build guide for Linux, macOS, and Windows.
 ### Linux/macOS
 
 ```bash
+# Portable optimized build (`-O2 -g`, `NDEBUG`)
 ./setup.sh Release
 meson compile -C build/release
 ```
@@ -36,7 +37,7 @@ All require C++20 support.
 |------|----------|---------|
 | Meson | Yes | `pip install meson` |
 | Ninja | Yes | `pip install ninja` |
-| Conan | Yes | `pip install conan` |
+| Conan | Default path only | `pip install conan` |
 | CMake | Yes | Package manager |
 | pkg-config | Linux/macOS | Package manager |
 
@@ -71,11 +72,20 @@ brew install cmake meson ninja pkg-config openssl sqlite protobuf
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `YAMS_OFFLINE` | false | Disable network dependency resolution; use only local Conan cache and local sources |
+| `YAMS_USE_SYSTEM_DEPS` | false | Skip Conan and resolve dependencies from system/pkg-config/CMake paths |
 | `YAMS_COMPILER` | auto | Force `gcc` or `clang` |
 | `YAMS_CPPSTD` | 20 | C++ standard (20 or 23) |
 | `YAMS_DISABLE_ONNX` | false | Disable ONNX embeddings |
 | `YAMS_DISABLE_SYMBOL_EXTRACTION` | false | Disable Tree-sitter symbol extraction |
 | `YAMS_INSTALL_PREFIX` | /usr/local | Install location |
+| `YAMS_PKG_CONFIG_PATH` | unset | Extra host `pkg-config` search path passed to Meson |
+| `YAMS_BUILD_PKG_CONFIG_PATH` | unset | Extra build-machine `pkg-config` path for cross-build tools |
+| `YAMS_CMAKE_PREFIX_PATH` | unset | Extra host CMake prefix path passed to Meson |
+| `YAMS_BUILD_CMAKE_PREFIX_PATH` | unset | Extra build-machine CMake prefix path for cross-build tools |
+| `YAMS_MESON_NATIVE_FILE` | unset | Use this Meson native file instead of Conan-generated metadata |
+| `YAMS_MESON_CROSS_FILE` | unset | Use this Meson cross file instead of Conan-generated metadata |
+| `SOURCE_DATE_EPOCH` | unset | If set, YAMS uses this timestamp for reproducible build metadata |
 
 ### Meson Options
 
@@ -98,10 +108,11 @@ meson configure builddir -Dbuild-tests=true
 
 ```bash
 conan install . -of build/release -s build_type=Release \
-  -s compiler.cppstd=20 -b missing
+  -s compiler.cppstd=20 --build=missing
 meson setup build/release \
   --native-file build/release/build-release/conan/conan_meson_native.ini \
-  --buildtype=release
+  --buildtype=debugoptimized \
+  -Db_ndebug=true
 meson compile -C build/release
 ```
 
@@ -109,10 +120,11 @@ meson compile -C build/release
 
 ```bash
 conan install . -of build/release -s build_type=Release \
-  -s compiler=clang -s compiler.cppstd=20 -b missing
+  -s compiler=clang -s compiler.cppstd=20 --build=missing
 CC=clang CXX=clang++ meson setup build/release \
   --native-file build/release/build-release/conan/conan_meson_native.ini \
-  --buildtype=release
+  --buildtype=debugoptimized \
+  -Db_ndebug=true
 meson compile -C build/release
 ```
 
@@ -129,9 +141,72 @@ conan install . -of build\release `
 
 meson setup build\release `
   --native-file build\release\build-release\conan\conan_meson_native.ini `
-  --buildtype=release
+  --buildtype=debugoptimized `
+  -Db_ndebug=true
 
 meson compile -C build\release
+```
+
+## Offline and System Dependency Builds
+
+### Conan Cache Only (no network)
+
+```bash
+./setup.sh Release --offline
+meson compile -C build/release
+```
+
+This mode uses Conan only from the local cache and disables Meson wrap downloads.
+
+### System Dependencies Only (no Conan)
+
+```bash
+YAMS_USE_SYSTEM_DEPS=true \
+YAMS_OFFLINE=true \
+YAMS_PKG_CONFIG_PATH=/opt/yams-deps/lib/pkgconfig \
+YAMS_CMAKE_PREFIX_PATH=/opt/yams-deps \
+./setup.sh Release --system-deps --offline
+
+meson compile -C build/release
+```
+
+This path is intended for distro/package-manager integration, sandboxed builders, and manually staged dependency prefixes.
+
+### Direct Meson with Manual Prefixes
+
+```bash
+meson setup build/release \
+  --buildtype=debugoptimized \
+  -Db_ndebug=true \
+  --wrap-mode=nofallback \
+  --pkg-config-path=/opt/yams-deps/lib/pkgconfig \
+  --cmake-prefix-path=/opt/yams-deps
+
+meson compile -C build/release
+```
+
+### CMake Bootstrap
+
+```bash
+cmake -S . -B build/cmake-bootstrap \
+  -DYAMS_PROFILE=Release \
+  -DYAMS_OFFLINE=ON \
+  -DYAMS_USE_SYSTEM_DEPS=ON
+
+cmake --build build/cmake-bootstrap
+```
+
+This entrypoint is a thin wrapper around the repo's canonical Meson setup flow. It exists so integrators can start from source with CMake while keeping Meson as the maintained build graph.
+
+### System-Deps Cross Build
+
+```bash
+YAMS_USE_SYSTEM_DEPS=true \
+YAMS_OFFLINE=true \
+YAMS_MESON_CROSS_FILE=/path/to/cross.ini \
+YAMS_BUILD_PKG_CONFIG_PATH=/opt/build-tools/lib/pkgconfig \
+YAMS_PKG_CONFIG_PATH=/opt/target-sysroot/usr/lib/pkgconfig \
+./setup.sh Release --system-deps --offline
 ```
 
 ## Testing
@@ -218,13 +293,15 @@ CXXFLAGS="-flto" LDFLAGS="-flto" ./setup.sh Release
 CXXFLAGS="-march=native" ./setup.sh Release
 ```
 
-Note: Binary not portable to other CPUs.
+Use this only for local benchmarking. Do not ship or package binaries built with `-march=native`.
 
 ## Verification
 
 ```bash
 ./build/release/tools/yams-cli/yams --version
 echo "test" | ./build/release/tools/yams-cli/yams add - --tags test
+pkg-config --modversion yams
+pkg-config --libs yams
 ```
 
 ## References

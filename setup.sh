@@ -3,7 +3,7 @@
 # Unified build script for YAMS
 #
 # Usage: ./setup.sh [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan]
-#        ./setup.sh Release --with-tests
+#        ./setup.sh Release --with-tests [--offline] [--system-deps]
 #   build_type: Release (default), Debug, Profiling, or Fuzzing (TODO)
 #   --coverage: Enable code coverage instrumentation (Debug builds only)
 #   --tsan: Enable ThreadSanitizer for race detection (default for Debug builds)
@@ -12,10 +12,22 @@
 #   --no-asan: Disable AddressSanitizer (overrides default)
 #
 # Environment variables (for CI/advanced use):
+#   YAMS_OFFLINE            - Disable network access for dependency resolution
+#                              (Conan cache only, no wrap downloads)
+#   YAMS_USE_SYSTEM_DEPS    - Skip Conan entirely and resolve dependencies via
+#                              pkg-config/CMake/system prefixes
 #   YAMS_CONAN_HOST_PROFILE  - Path to Conan host profile (bypasses auto-detection)
 #   YAMS_CONAN_ARCH          - Target architecture (x86_64, armv8, etc.)
 #   YAMS_BUILD_DIR           - Override the Meson/Conan build directory
 #   YAMS_EXTRA_MESON_FLAGS   - Additional Meson setup flags
+#   YAMS_PKG_CONFIG_PATH     - Extra host pkg-config search path passed to Meson
+#   YAMS_BUILD_PKG_CONFIG_PATH - Extra build-machine pkg-config path for Meson
+#   YAMS_CMAKE_PREFIX_PATH   - Extra host CMake prefix path passed to Meson
+#   YAMS_BUILD_CMAKE_PREFIX_PATH - Extra build-machine CMake prefix path for Meson
+#   YAMS_MESON_NATIVE_FILE   - Use this Meson native file instead of Conan output
+#   YAMS_MESON_CROSS_FILE    - Use this Meson cross file instead of Conan output
+#   YAMS_MESON_WRAP_MODE     - Override Meson wrap mode (default, nofallback,
+#                              nodownload, forcefallback, nopromote)
 #   YAMS_ENABLE_MOBILE_BINDINGS - Build mobile C ABI shared library (true/false)
 #   YAMS_DISABLE_RE2         - Disable RE2 dependency and use std::regex fallback (true/false)
 #   YAMS_COMPILER            - Force compiler (clang or gcc)
@@ -52,6 +64,19 @@
 
 set -euo pipefail
 
+is_true() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ENABLE_OFFLINE=false
+USE_SYSTEM_DEPS=false
 ENABLE_COVERAGE=false
 ENABLE_TSAN="${ENABLE_TSAN:-}"  # Preserve environment variable if set
 ENABLE_ASAN="${ENABLE_ASAN:-}"  # Preserve environment variable if set
@@ -59,6 +84,14 @@ BUILD_TYPE_INPUT=""
 ENABLE_RELEASE_TESTS=false
 TSAN_EXPLICIT=false
 ASAN_EXPLICIT=false
+
+if is_true "${YAMS_OFFLINE:-false}"; then
+  ENABLE_OFFLINE=true
+fi
+
+if is_true "${YAMS_USE_SYSTEM_DEPS:-false}"; then
+  USE_SYSTEM_DEPS=true
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -91,6 +124,14 @@ while [[ $# -gt 0 ]]; do
       ENABLE_RELEASE_TESTS=true
       shift
       ;;
+    --offline)
+      ENABLE_OFFLINE=true
+      shift
+      ;;
+    --system-deps)
+      USE_SYSTEM_DEPS=true
+      shift
+      ;;
     Debug|Release|Profiling|Fuzzing|debug|release|profiling|fuzzing)
       if [[ -n "${BUILD_TYPE_INPUT}" ]]; then
         echo "Error: Build type specified multiple times" >&2
@@ -100,7 +141,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan] [--with-tests]" >&2
+      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan] [--with-tests] [--offline] [--system-deps]" >&2
       exit 1
       ;;
   esac
@@ -234,7 +275,13 @@ if [[ -n "${CONAN_HOST_PROFILE}" ]]; then
   echo "Using explicit Conan host profile: ${CONAN_HOST_PROFILE}"
 fi
 
-CONAN_ARGS=(-s "build_type=${BUILD_TYPE}" -b missing --update)
+CONAN_ARGS=(-s "build_type=${BUILD_TYPE}")
+
+if [[ "${ENABLE_OFFLINE}" == "true" ]]; then
+  CONAN_ARGS+=(-nr --build=never)
+else
+  CONAN_ARGS+=(--update --build=missing)
+fi
 
 # Add common Conan options (sqlite3 with FTS5, etc.)
 CONAN_ARGS+=(-o "sqlite3/*:fts5=True")
@@ -377,7 +424,7 @@ elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
 else
   BUILD_DIR="build/${BUILD_TYPE_INPUT_LOWER}"
   CONAN_SUBDIR="build-${BUILD_TYPE_INPUT_LOWER}"
-  BUILD_TYPE_MESON_LOWER="${BUILD_TYPE_INPUT_LOWER}"
+  BUILD_TYPE_MESON_LOWER="debugoptimized"
 fi
 
 if [[ -n "${YAMS_BUILD_DIR:-}" ]]; then
@@ -416,6 +463,8 @@ fi
 echo "Build Dir:         ${BUILD_DIR}"
 echo "Install Prefix:    ${INSTALL_PREFIX}"
 echo "C++ Std:           ${MESON_CPPSTD} (Conan: ${CPPSTD})"
+echo "Offline Mode:      ${ENABLE_OFFLINE}"
+echo "System Deps:       ${USE_SYSTEM_DEPS}"
 if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
   echo "libc++ Hardening:  ${LIBCXX_HARDENING}"
 fi
@@ -423,28 +472,30 @@ if [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
   echo "Release Tests:     enabled (--with-tests)"
 fi
 
-echo "--- Exporting custom Conan recipes... ---"
-# qpdf export removed - PDF plugin will be updated in separate PBI
+if [[ "${USE_SYSTEM_DEPS}" != "true" ]]; then
+  echo "--- Exporting custom Conan recipes... ---"
+  # qpdf export removed - PDF plugin will be updated in separate PBI
 
-# Export custom onnxruntime recipe if it exists
-if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
-  echo "Skipping onnxruntime recipe export (YAMS_DISABLE_ONNX=true)"
-elif [[ -f "conan/onnxruntime/conanfile.py" ]]; then
-  # Avoid sporadic Conan cache race/collision errors by retrying export once.
-  echo "Exporting onnxruntime/1.23.0 from conan/onnxruntime/"
-  if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.0; then
-    echo "Retrying conan export onnxruntime/1.23.0..."
-    conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
+  # Export custom onnxruntime recipe if it exists
+  if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
+    echo "Skipping onnxruntime recipe export (YAMS_DISABLE_ONNX=true)"
+  elif [[ -f "conan/onnxruntime/conanfile.py" ]]; then
+    # Avoid sporadic Conan cache race/collision errors by retrying export once.
+    echo "Exporting onnxruntime/1.23.0 from conan/onnxruntime/"
+    if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.0; then
+      echo "Retrying conan export onnxruntime/1.23.0..."
+      conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
+    fi
   fi
-fi
 
-echo "--- Running conan install... ---"
-# Add policy toolchain for legacy recipes if in Docker or CI
-POLICY_TC=""
-if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
-  POLICY_TC="/tmp/yams_policy_toolchain.cmake"
-  echo 'cmake_policy(VERSION 3.5)' > "$POLICY_TC"
-  CONAN_ARGS+=(-c "tools.cmake.cmaketoolchain:user_toolchain+=${POLICY_TC}")
+  echo "--- Running conan install... ---"
+  # Add policy toolchain for legacy recipes if in Docker or CI
+  POLICY_TC=""
+  if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
+    POLICY_TC="/tmp/yams_policy_toolchain.cmake"
+    echo 'cmake_policy(VERSION 3.5)' > "$POLICY_TC"
+    CONAN_ARGS+=(-c "tools.cmake.cmaketoolchain:user_toolchain+=${POLICY_TC}")
+  fi
 fi
 
 # Enable tests for Debug builds in Conan (needed for Catch2/gtest dependencies)
@@ -649,91 +700,153 @@ if [[ "${YAMS_DISABLE_RE2:-}" == "true" ]]; then
   CONAN_ARGS+=(-o "yams/*:enable_re2=False")
 fi
 
-# Force building missing packages to ensure ABI compatibility
-# This is especially important for C++23 with Clang + libstdc++
-CONAN_ARGS+=(--build=missing)
+MESON_TOOLCHAIN_ARG=""
+MESON_TOOLCHAIN_FILE=""
+MESON_NATIVE_FILE_OVERRIDE="${YAMS_MESON_NATIVE_FILE:-}"
+MESON_CROSS_FILE_OVERRIDE="${YAMS_MESON_CROSS_FILE:-}"
 
-# Use runtime_deploy to copy shared libraries next to executables (mainly for Windows, no-op on Unix with RPATH)
-conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}" -c tools.deployer:symlinks=False
-
-# Check for either native or cross file (Conan generates cross file for cross-compilation)
-# Conan 2.x sometimes nests generator output under build-<type>/conan even when -of points at
-# ${BUILD_DIR}. Probe primary, then CONAN_GENERATED_DIR, then the legacy root, then CONAN_ALT_DIR.
-NATIVE_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"
-CROSS_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_cross.ini"
-NATIVE_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_native.ini"
-CROSS_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_cross.ini"
-NATIVE_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_native.ini"
-CROSS_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_cross.ini"
-NATIVE_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_native.ini"
-CROSS_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_cross.ini"
-
-if [[ -f "${NATIVE_FILE_PRIMARY}" ]]; then
-  MESON_TOOLCHAIN_ARG="--native-file"
-  MESON_TOOLCHAIN_FILE="${NATIVE_FILE_PRIMARY}"
-elif [[ -f "${CROSS_FILE_PRIMARY}" ]]; then
-  MESON_TOOLCHAIN_ARG="--cross-file"
-  MESON_TOOLCHAIN_FILE="${CROSS_FILE_PRIMARY}"
-elif [[ -f "${NATIVE_FILE_SECONDARY}" ]]; then
-  MESON_TOOLCHAIN_ARG="--native-file"
-  MESON_TOOLCHAIN_FILE="${NATIVE_FILE_SECONDARY}"
-elif [[ -f "${CROSS_FILE_SECONDARY}" ]]; then
-  MESON_TOOLCHAIN_ARG="--cross-file"
-  MESON_TOOLCHAIN_FILE="${CROSS_FILE_SECONDARY}"
-elif [[ -f "${NATIVE_FILE_TERTIARY}" ]]; then
-  MESON_TOOLCHAIN_ARG="--native-file"
-  MESON_TOOLCHAIN_FILE="${NATIVE_FILE_TERTIARY}"
-elif [[ -f "${CROSS_FILE_TERTIARY}" ]]; then
-  MESON_TOOLCHAIN_ARG="--cross-file"
-  MESON_TOOLCHAIN_FILE="${CROSS_FILE_TERTIARY}"
-elif [[ -n "${CONAN_ALT_DIR}" && -f "${NATIVE_FILE_QUAT}" ]]; then
-  MESON_TOOLCHAIN_ARG="--native-file"
-  MESON_TOOLCHAIN_FILE="${NATIVE_FILE_QUAT}"
-elif [[ -n "${CONAN_ALT_DIR}" && -f "${CROSS_FILE_QUAT}" ]]; then
-  MESON_TOOLCHAIN_ARG="--cross-file"
-  MESON_TOOLCHAIN_FILE="${CROSS_FILE_QUAT}"
-else
-  echo "Error: Conan meson toolchain file not found" >&2
-  echo "Checked: ${NATIVE_FILE_PRIMARY}" >&2
-  echo "     and: ${CROSS_FILE_PRIMARY}" >&2
-  echo "     and: ${NATIVE_FILE_SECONDARY}" >&2
-  echo "     and: ${CROSS_FILE_SECONDARY}" >&2
-  echo "     and: ${NATIVE_FILE_TERTIARY}" >&2
-  echo "     and: ${CROSS_FILE_TERTIARY}" >&2
-  if [[ -n "${CONAN_ALT_DIR}" ]]; then
-    echo "     and: ${NATIVE_FILE_QUAT}" >&2
-    echo "     and: ${CROSS_FILE_QUAT}" >&2
-  fi
-  echo "Please check the output path from 'conan install'." >&2
+if [[ -n "${MESON_NATIVE_FILE_OVERRIDE}" && -n "${MESON_CROSS_FILE_OVERRIDE}" ]]; then
+  echo "Error: Set only one of YAMS_MESON_NATIVE_FILE or YAMS_MESON_CROSS_FILE." >&2
   exit 1
 fi
 
-CONAN_TOOLCHAIN_DIR="$(cd "$(dirname "${MESON_TOOLCHAIN_FILE}")" && pwd)"
-CONAN_BUILD_ENV="${CONAN_TOOLCHAIN_DIR}/conanbuild.sh"
-if [[ -f "${CONAN_BUILD_ENV}" ]]; then
-  # Activate Conan's build-machine tools before Meson configure so cross-build
-  # generators resolve native utilities like protoc from the Conan graph.
-  # Conan-generated env scripts may reference variables (e.g. ACLOCAL_PATH)
-  # that are unset in minimal environments like Docker; disable nounset temporarily.
-  for maybe_unset_var in ACLOCAL_PATH PKG_CONFIG_PATH LD_LIBRARY_PATH DYLD_LIBRARY_PATH \
-      DYLD_FALLBACK_LIBRARY_PATH LIBRARY_PATH CMAKE_PREFIX_PATH MANPATH; do
-    if [[ -z "${!maybe_unset_var+x}" ]]; then
-      export "${maybe_unset_var}="
-    fi
-  done
-  # shellcheck disable=SC1090
-  set +u
-  source "${CONAN_BUILD_ENV}"
-  set -u
+if [[ -n "${MESON_NATIVE_FILE_OVERRIDE}" ]]; then
+  if [[ ! -f "${MESON_NATIVE_FILE_OVERRIDE}" ]]; then
+    echo "Error: Meson native file not found: ${MESON_NATIVE_FILE_OVERRIDE}" >&2
+    exit 1
+  fi
+  MESON_TOOLCHAIN_ARG="--native-file"
+  MESON_TOOLCHAIN_FILE="${MESON_NATIVE_FILE_OVERRIDE}"
+elif [[ -n "${MESON_CROSS_FILE_OVERRIDE}" ]]; then
+  if [[ ! -f "${MESON_CROSS_FILE_OVERRIDE}" ]]; then
+    echo "Error: Meson cross file not found: ${MESON_CROSS_FILE_OVERRIDE}" >&2
+    exit 1
+  fi
+  MESON_TOOLCHAIN_ARG="--cross-file"
+  MESON_TOOLCHAIN_FILE="${MESON_CROSS_FILE_OVERRIDE}"
 fi
-YAMS_PROTOC_PATH="${YAMS_PROTOC_PATH:-$(command -v protoc || true)}"
+
+if [[ "${USE_SYSTEM_DEPS}" == "true" ]]; then
+  echo "--- Skipping Conan install (system dependency mode) ---"
+else
+  # Use runtime_deploy to copy shared libraries next to executables (mainly for Windows, no-op on Unix with RPATH)
+  conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}" -c tools.deployer:symlinks=False
+
+  # Check for either native or cross file (Conan generates cross file for cross-compilation)
+  # Conan 2.x sometimes nests generator output under build-<type>/conan even when -of points at
+  # ${BUILD_DIR}. Probe primary, then CONAN_GENERATED_DIR, then the legacy root, then CONAN_ALT_DIR.
+  NATIVE_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"
+  CROSS_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_cross.ini"
+  NATIVE_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_native.ini"
+  CROSS_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_cross.ini"
+  NATIVE_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_native.ini"
+  CROSS_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_cross.ini"
+  NATIVE_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_native.ini"
+  CROSS_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_cross.ini"
+
+  if [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${NATIVE_FILE_PRIMARY}" ]]; then
+    MESON_TOOLCHAIN_ARG="--native-file"
+    MESON_TOOLCHAIN_FILE="${NATIVE_FILE_PRIMARY}"
+  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${CROSS_FILE_PRIMARY}" ]]; then
+    MESON_TOOLCHAIN_ARG="--cross-file"
+    MESON_TOOLCHAIN_FILE="${CROSS_FILE_PRIMARY}"
+  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${NATIVE_FILE_SECONDARY}" ]]; then
+    MESON_TOOLCHAIN_ARG="--native-file"
+    MESON_TOOLCHAIN_FILE="${NATIVE_FILE_SECONDARY}"
+  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${CROSS_FILE_SECONDARY}" ]]; then
+    MESON_TOOLCHAIN_ARG="--cross-file"
+    MESON_TOOLCHAIN_FILE="${CROSS_FILE_SECONDARY}"
+  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${NATIVE_FILE_TERTIARY}" ]]; then
+    MESON_TOOLCHAIN_ARG="--native-file"
+    MESON_TOOLCHAIN_FILE="${NATIVE_FILE_TERTIARY}"
+  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${CROSS_FILE_TERTIARY}" ]]; then
+    MESON_TOOLCHAIN_ARG="--cross-file"
+    MESON_TOOLCHAIN_FILE="${CROSS_FILE_TERTIARY}"
+  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -n "${CONAN_ALT_DIR}" && -f "${NATIVE_FILE_QUAT}" ]]; then
+    MESON_TOOLCHAIN_ARG="--native-file"
+    MESON_TOOLCHAIN_FILE="${NATIVE_FILE_QUAT}"
+  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -n "${CONAN_ALT_DIR}" && -f "${CROSS_FILE_QUAT}" ]]; then
+    MESON_TOOLCHAIN_ARG="--cross-file"
+    MESON_TOOLCHAIN_FILE="${CROSS_FILE_QUAT}"
+  fi
+
+  if [[ -z "${MESON_TOOLCHAIN_ARG}" ]]; then
+    echo "Error: Conan meson toolchain file not found" >&2
+    echo "Checked: ${NATIVE_FILE_PRIMARY}" >&2
+    echo "     and: ${CROSS_FILE_PRIMARY}" >&2
+    echo "     and: ${NATIVE_FILE_SECONDARY}" >&2
+    echo "     and: ${CROSS_FILE_SECONDARY}" >&2
+    echo "     and: ${NATIVE_FILE_TERTIARY}" >&2
+    echo "     and: ${CROSS_FILE_TERTIARY}" >&2
+    if [[ -n "${CONAN_ALT_DIR}" ]]; then
+      echo "     and: ${NATIVE_FILE_QUAT}" >&2
+      echo "     and: ${CROSS_FILE_QUAT}" >&2
+    fi
+    echo "Please check the output path from 'conan install'." >&2
+    exit 1
+  fi
+
+  CONAN_TOOLCHAIN_DIR="$(cd "$(dirname "${MESON_TOOLCHAIN_FILE}")" && pwd)"
+  CONAN_BUILD_ENV="${CONAN_TOOLCHAIN_DIR}/conanbuild.sh"
+  if [[ -f "${CONAN_BUILD_ENV}" ]]; then
+    # Activate Conan's build-machine tools before Meson configure so cross-build
+    # generators resolve native utilities like protoc from the Conan graph.
+    # Conan-generated env scripts may reference variables (e.g. ACLOCAL_PATH)
+    # that are unset in minimal environments like Docker; disable nounset temporarily.
+    for maybe_unset_var in ACLOCAL_PATH PKG_CONFIG_PATH LD_LIBRARY_PATH DYLD_LIBRARY_PATH \
+        DYLD_FALLBACK_LIBRARY_PATH LIBRARY_PATH CMAKE_PREFIX_PATH MANPATH; do
+      if [[ -z "${!maybe_unset_var+x}" ]]; then
+        export "${maybe_unset_var}="
+      fi
+    done
+    # shellcheck disable=SC1090
+    set +u
+    source "${CONAN_BUILD_ENV}"
+    set -u
+  fi
+fi
+YAMS_PROTOC_PATH="${YAMS_PROTOC_PATH:-}"
 
 MESON_ARGS=(
   "${BUILD_DIR}"
   "--prefix" "${INSTALL_PREFIX}"
-  "${MESON_TOOLCHAIN_ARG}" "${MESON_TOOLCHAIN_FILE}"
   "--buildtype" "${BUILD_TYPE_MESON_LOWER}"
 )
+
+if [[ -n "${MESON_TOOLCHAIN_ARG}" ]]; then
+  MESON_ARGS+=("${MESON_TOOLCHAIN_ARG}" "${MESON_TOOLCHAIN_FILE}")
+fi
+
+MESON_WRAP_MODE="${YAMS_MESON_WRAP_MODE:-}"
+if [[ -z "${MESON_WRAP_MODE}" ]]; then
+  if [[ "${USE_SYSTEM_DEPS}" == "true" ]]; then
+    MESON_WRAP_MODE="nofallback"
+  elif [[ "${ENABLE_OFFLINE}" == "true" ]]; then
+    MESON_WRAP_MODE="nodownload"
+  else
+    MESON_WRAP_MODE="default"
+  fi
+fi
+
+if [[ "${MESON_WRAP_MODE}" != "default" ]]; then
+  MESON_ARGS+=("--wrap-mode" "${MESON_WRAP_MODE}")
+fi
+
+if [[ -n "${YAMS_PKG_CONFIG_PATH:-}" ]]; then
+  MESON_ARGS+=("--pkg-config-path" "${YAMS_PKG_CONFIG_PATH}")
+fi
+
+if [[ -n "${YAMS_BUILD_PKG_CONFIG_PATH:-}" ]]; then
+  MESON_ARGS+=("--build.pkg-config-path" "${YAMS_BUILD_PKG_CONFIG_PATH}")
+fi
+
+if [[ -n "${YAMS_CMAKE_PREFIX_PATH:-}" ]]; then
+  MESON_ARGS+=("--cmake-prefix-path" "${YAMS_CMAKE_PREFIX_PATH}")
+fi
+
+if [[ -n "${YAMS_BUILD_CMAKE_PREFIX_PATH:-}" ]]; then
+  MESON_ARGS+=("--build.cmake-prefix-path" "${YAMS_BUILD_CMAKE_PREFIX_PATH}")
+fi
 
 # Detect previous configured cpp_std to decide on reconfigure vs wipe
 PREV_CPPSTD=""
@@ -758,6 +871,16 @@ if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
   MESON_OPTIONS+=("-Dplugin-onnx=false")
 fi
 
+if [[ "${YAMS_DISABLE_RE2:-}" == "true" ]]; then
+  MESON_OPTIONS+=("-Denable-re2=disabled")
+fi
+
+if [[ "${BUILD_TYPE_MESON_LOWER}" == "debugoptimized" ]]; then
+  MESON_OPTIONS+=("-Db_ndebug=true")
+else
+  MESON_OPTIONS+=("-Db_ndebug=false")
+fi
+
 if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
   MESON_OPTIONS+=("-Dplugin-symbols=false")
 fi
@@ -770,7 +893,19 @@ if [[ "${LIBSQL_BACKEND_LOWER}" != "libsql" && "${LIBSQL_BACKEND_LOWER}" != "sql
   exit 1
 fi
 
-if [[ "${LIBSQL_BACKEND_LOWER}" == "libsql" && "$(uname -s)" != "Darwin" ]]; then
+if [[ "${LIBSQL_BACKEND_LOWER}" == "libsql" && "${USE_SYSTEM_DEPS}" == "true" ]]; then
+  LIBSQL_PKG_FOUND=false
+  if command -v pkg-config >/dev/null 2>&1; then
+    if pkg-config --exists libsql || pkg-config --exists libsql-sqlite3; then
+      LIBSQL_PKG_FOUND=true
+    fi
+  fi
+
+  if [[ "${LIBSQL_PKG_FOUND}" != "true" ]]; then
+    echo "System dependency mode: libSQL not found via pkg-config; falling back to sqlite" >&2
+    LIBSQL_BACKEND_LOWER="sqlite"
+  fi
+elif [[ "${LIBSQL_BACKEND_LOWER}" == "libsql" && "$(uname -s)" != "Darwin" ]]; then
   LIBSQL_PKG_FOUND=false
   if command -v pkg-config >/dev/null 2>&1; then
     if pkg-config --exists libsql || pkg-config --exists libsql-sqlite3; then
@@ -791,7 +926,13 @@ fi
 if [[ "${LIBSQL_BACKEND_LOWER}" == "libsql" ]]; then
   echo "Database backend: libsql"
   if [[ -f "subprojects/libsql.wrap" && ! -d "subprojects/libsql" ]]; then
-    if command -v meson >/dev/null 2>&1; then
+    if [[ "${USE_SYSTEM_DEPS}" == "true" ]]; then
+      echo "libSQL not found via system dependencies; falling back to sqlite" >&2
+      LIBSQL_BACKEND_LOWER="sqlite"
+    elif [[ "${ENABLE_OFFLINE}" == "true" ]]; then
+      echo "Offline mode: not fetching libSQL subproject; falling back to sqlite" >&2
+      LIBSQL_BACKEND_LOWER="sqlite"
+    elif command -v meson >/dev/null 2>&1; then
       echo "Fetching libSQL subproject (meson wrap)..."
       if ! meson subprojects download libsql; then
         echo "Failed to fetch libSQL subproject; falling back to sqlite" >&2
@@ -879,8 +1020,11 @@ elif [[ "${ENABLE_ASAN}" == "true" ]]; then
   echo "AddressSanitizer enabled (memory safety checks)"
 else
   # Ensure any previous sanitizer setting doesn't persist across reconfigure.
-  # Users can override via YAMS_EXTRA_MESON_FLAGS.
-  MESON_OPTIONS+=("-Db_sanitize=none")
+  # Users can override via YAMS_EXTRA_MESON_FLAGS. Only reset explicit sanitizer
+  # state when reconfiguring an existing builddir; clean builds do not need it.
+  if [[ -f "${INTRO_OPTS_JSON}" ]]; then
+    MESON_OPTIONS+=("-Db_sanitize=none")
+  fi
 fi
 
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then

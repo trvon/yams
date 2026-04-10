@@ -93,6 +93,12 @@ while using the richer v2 metrics when present.
 - `connection_contention.fail_rate`: non-regressing
 - `connection_contention.retry_after_rate`: stable or decreasing
 
+## Current contention policy notes
+
+- Peak-load CLI probe failures should now be classified, not treated as opaque harness failures.
+- `timeout_under_load` is the only accepted CLI failure mode during the saturation window.
+- Post-stress CLI recovery must pass for `status` and `list` before a contention run is considered healthy.
+
 ## Phase1 Daemon Scheduling Defaults
 
 For large-corpus mixed read stability, use `[tuning]` keys instead of ad-hoc env overrides:

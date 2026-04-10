@@ -722,7 +722,6 @@ void ConnectionPool::refreshAll() {
     spdlog::debug("[PBI-079] refreshAll: generation {} -> {}, discarding {} idle connections",
                   oldGen, newGen, available_.size());
 
-    size_t discarded = 0;
     while (!available_.empty()) {
         auto conn = std::move(available_.front());
         available_.pop();
@@ -732,7 +731,6 @@ void ConnectionPool::refreshAll() {
         conn->returned_ = true;
 
         totalConnections_--;
-        discarded++;
     }
 }
 

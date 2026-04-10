@@ -9,7 +9,8 @@ For step-by-step build instructions, see [Developer Setup](setup.md). For compil
 | Layer | Tool |
 |-------|------|
 | Build | Meson ≥ 1.2 |
-| Dependencies | Conan 2.x |
+| Bootstrap | CMake wrapper (`CMakeLists.txt`) |
+| Dependencies | Conan 2.x or system/pkg-config/CMake prefixes |
 | Generator | Ninja (preferred) |
 | Optional | ccache, lld, clang-tidy |
 
@@ -30,11 +31,28 @@ Meson options:
 ## 4. Configure & Build
 ```bash
 # Using Meson (preferred)
-meson setup builddir
+meson setup builddir --buildtype=debugoptimized -Db_ndebug=true
 ninja -C builddir
 
 # Install
 sudo meson install -C builddir
+```
+
+For integrator-style builds, prefer one of these entrypoints:
+
+```bash
+# Default bootstrap path (Conan + Meson)
+./setup.sh Release
+
+# Cache-only/offline Conan path
+./setup.sh Release --offline
+
+# System dependency path (no Conan, no network)
+YAMS_USE_SYSTEM_DEPS=true \
+YAMS_OFFLINE=true \
+YAMS_PKG_CONFIG_PATH=/opt/yams-deps/lib/pkgconfig \
+YAMS_CMAKE_PREFIX_PATH=/opt/yams-deps \
+./setup.sh Release --system-deps --offline
 ```
 
 ## 5. Tests
@@ -146,14 +164,14 @@ meson setup builddir -Denable-onnx=true -Dbuild-cli=true
 
 ## 7. Dependency Management Notes
 
-Edit `conanfile.py` then re-run `conan install` for each configuration. Prefer pinned versions. Use `--build=missing` to compile absent binaries.
+Edit `conanfile.py` then re-run `conan install` for each configuration. Prefer pinned versions. For sandboxed or distro builds, skip Conan entirely and use `--system-deps` with explicit pkg-config/CMake prefixes.
 
 ## 8. Common Scenarios
 
 | Scenario | Commands |
 |---------|----------|
 | Fresh debug loop | Conan install (Debug) → meson setup → ninja → meson test |
-| System-only (no Conan) | Provide all libs, configure manually with flags |
+| System-only (no Conan) | Provide all libs, `--wrap-mode=nofallback`, explicit pkg-config/CMake prefixes |
 | Release packaging | Conan install (Release) → meson setup → ninja → package |
 
 ## 9. CI Flow
@@ -161,7 +179,7 @@ Edit `conanfile.py` then re-run `conan install` for each configuration. Prefer p
 ```bash
 conan profile detect --force
 conan install . -of build/release -s build_type=Release --build=missing
-meson setup build/release --native-file build/release/conan_meson_native.ini
+meson setup build/release --native-file build/release/conan_meson_native.ini --buildtype=debugoptimized -Db_ndebug=true
 ninja -C build/release
 meson test -C build/release
 ```
@@ -184,7 +202,7 @@ Cache `~/.conan` + optionally `build/`.
 
 ## 11. Conventions
 
-Out-of-source only. Keep Release for perf/benchmarks; iterate in Debug. Avoid committing generated build artifacts.
+Out-of-source only. Keep portable optimized builds on `debugoptimized` + `b_ndebug=true`; reserve more aggressive tuning for explicit local benchmarking. Avoid committing generated build artifacts.
 
 ## 12. Test Organization (Active Improvement)
 

@@ -41,6 +41,13 @@ yams_mcp_lib = static_library('yams_mcp',
   install: true,
 )
 
+pkg = import('pkgconfig')
+pkg.generate(yams_mcp_lib,
+  name: 'yams-mcp',
+  description: 'YAMS MCP server library',
+  subdirs: ['yams'],
+)
+
 yams_mcp_dep = declare_dependency(
   link_with: yams_mcp_lib,
   include_directories: yams_mcp_inc_dirs,

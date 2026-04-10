@@ -31,6 +31,13 @@ yams_api_lib = static_library('yams_api',
   install: true,
 )
 
+pkg = import('pkgconfig')
+pkg.generate(yams_api_lib,
+  name: 'yams-api',
+  description: 'YAMS public API library',
+  subdirs: ['yams'],
+)
+
 yams_api_dep = declare_dependency(
   link_with: yams_api_lib,
   include_directories: include_directories('../../include'),

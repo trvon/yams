@@ -170,8 +170,10 @@ meson compile -C builddir
 |------|---------|------------|---------|---------|------------|
 | Baseline single client | 1 | 83.2 docs/s | 11.2 ms | 11.3 ms | **+38.4%** |
 | Concurrent pure ingest | 4 | 244.0 docs/s | 11.2 ms | 11.3 ms | ~flat |
-| Mixed read/write | 4 | — | — | — | SIGSEGV (pre-existing) |
-| Connection contention | 16 | 1,368 ops/s | 11.2 ms | 12.0 ms | **+17.1%** |
+| Mixed read/write | 4 | — | — | — | no longer blocked by the old concurrent-ingest SIGSEGV; rerun canonical baseline before publishing replacement numbers |
+| Connection contention | 16 | 1,368 ops/s | 11.2 ms | 12.0 ms | **+17.1%**; current harness also requires post-stress CLI recovery and classifies peak-load CLI timeouts as `timeout_under_load` |
+
+> Current harness status (Apr 2026): reduced ASAN contention runs now keep `status`/`list` CLI recovery green after load. Peak-load CLI failures are no longer opaque harness errors; they are classified explicitly, with `timeout_under_load` the only accepted failure mode during saturation.
 
 #### Search Benchmarks
 

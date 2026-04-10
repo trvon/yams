@@ -196,7 +196,6 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
     // Global options
     // Use platform-specific data directory (XDG_DATA_HOME on Unix, LOCALAPPDATA on Windows)
     std::filesystem::path defaultDataPath = yams::config::get_data_dir();
-
     // Try to load default data dir from config.toml (core.data_dir)
     try {
         auto cfgPath = getConfigPath();
@@ -617,7 +616,9 @@ int YamsCLI::run(int argc, char* argv[]) {
             // Non-fatal: keep whatever CLI11 assigned
         }
 
-        // Check for config migration before storage initialization
+        // Check for config migration before storage initialization unless this is a one-shot
+        // daemon-backed hot path with an explicit socket. Those commands do not need local storage
+        // preflight and can skip filesystem/config churn.
         checkConfigMigration();
 
         // Storage initialization is performed lazily by commands via ensureStorageInitialized()

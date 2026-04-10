@@ -18,6 +18,9 @@
 
 namespace {
 
+void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
+                    std::string_view note);
+
 bool cli_perf_trace_enabled() {
     const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
     if (raw == nullptr || *raw == '\0') {

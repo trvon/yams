@@ -9,11 +9,12 @@ yams_onnx_resource_dep = dependency('yams_onnx_resource')
 # Tracy profiling support (optional, controlled by -Denable-profiling=true)
 enable_profiling = get_option('enable-profiling')
 enable_rocprofiler_tracy = get_option('enable-rocprofiler-tracy')
-tracy_dep = dependency('tracy', required: enable_profiling, static: true)
 tracy_args = []
 tracy_deps = []
-tracy_enabled = tracy_dep.found() and enable_profiling
-if tracy_enabled
+tracy_enabled = false
+if enable_profiling
+  tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: true, static: true)
+  tracy_enabled = tracy_dep.found()
   tracy_args += ['-DTRACY_ENABLE']
   tracy_deps += tracy_dep
   rocm_hint = '/opt/rocm'

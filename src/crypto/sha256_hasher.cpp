@@ -1,6 +1,5 @@
 #include <spdlog/spdlog.h>
 #include <openssl/evp.h>
-#include <openssl/sha.h>
 #include <yams/crypto/hasher.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -164,21 +163,33 @@ void SHA256Hasher::setProgressCallback(ProgressCallback callback) {
 }
 
 std::string SHA256Hasher::hash(std::span<const std::byte> data) {
-    SHA256_CTX ctx;
-    std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
-    if (SHA256_Init(&ctx) != 1) {
+    auto* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
         throw std::runtime_error("Failed to initialize one-shot SHA256 context");
     }
+
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int digestLen = 0;
+
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
+        EVP_MD_CTX_free(ctx);
+        throw std::runtime_error("Failed to initialize one-shot SHA256 context");
+    }
+
     if (!data.empty()) {
-        const auto* input = reinterpret_cast<const unsigned char*>(data.data());
-        if (SHA256_Update(&ctx, input, data.size()) != 1) {
+        if (EVP_DigestUpdate(ctx, data.data(), data.size()) != 1) {
+            EVP_MD_CTX_free(ctx);
             throw std::runtime_error("Failed to update one-shot SHA256 hash");
         }
     }
-    if (SHA256_Final(digest.data(), &ctx) != 1) {
+
+    if (EVP_DigestFinal_ex(ctx, digest.data(), &digestLen) != 1) {
+        EVP_MD_CTX_free(ctx);
         throw std::runtime_error("Failed to finalize one-shot SHA256 hash");
     }
-    return bytesToHex(digest.data(), SHA256_DIGEST_LENGTH);
+
+    EVP_MD_CTX_free(ctx);
+    return bytesToHex(digest.data(), digestLen);
 }
 
 std::unique_ptr<IContentHasher> createSHA256Hasher() {

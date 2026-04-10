@@ -1,7 +1,8 @@
 project('yams', ['cpp', 'c'],
   version: '0.12.0', # x-release-please-version
   default_options: [
-    'buildtype=release',
+    'buildtype=debugoptimized',
+    'b_ndebug=if-release',
     'warning_level=2',
     'cpp_std=c++20',
     'c_std=c11',
@@ -147,6 +148,7 @@ if host_machine.system() == 'darwin' and cpp.get_id() == 'clang'
   # Apple clang + external fmt/spdlog can fail when fmt enables
   # consteval format-string checking inside spdlog headers.
   add_project_arguments('-DFMT_CONSTEVAL=', language: 'cpp')
+  add_project_arguments('-Wno-macro-redefined', language: 'cpp')
 endif
 
 # --- C++20 Modules Support (Experimental) ---
@@ -433,7 +435,7 @@ if not wasi_enabled
   if meson.is_cross_build()
     warning('Cross-compiling: skipping SQLite FTS5 runtime check. Ensure FTS5 is enabled in your target SQLite build.')
   elif sqlite_dep.type_name() == 'internal'
-    warning('Using subproject sqlite3: skipping FTS5 runtime check. Subproject sqlite3 has FTS5 enabled by default.')
+    message('Using subproject sqlite3: skipping FTS5 runtime check. Subproject sqlite3 has FTS5 enabled by default.')
   elif using_libsql
     message('Using libSQL: skipping FTS5 runtime check. libSQL includes FTS5 support.')
   else
@@ -456,7 +458,7 @@ meson.override_dependency('boost', boost_dep)
 
 # --- RE2 regex engine (optional, for high-performance grep) ---
 re2_opt = get_option('enable-re2')
-re2_dep = dependency('re2', required: re2_opt)
+re2_dep = dependency('re2', required: re2_opt, include_type: 'system')
 if re2_dep.found()
   add_project_arguments('-DYAMS_HAS_RE2=1', language: 'cpp')
   message('RE2 regex engine enabled (grep will use RE2 with std::regex fallback)')
@@ -495,7 +497,18 @@ else
 endif
 
 python_exe = find_program('python3', 'python')
-_build_timestamp = run_command(python_exe, '-c', 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))', check: true).stdout().strip()
+_build_timestamp = run_command(
+  python_exe,
+  '-c',
+  '''import datetime, os
+epoch = os.environ.get("SOURCE_DATE_EPOCH")
+if epoch:
+    dt = datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc)
+else:
+    dt = datetime.datetime.now(datetime.timezone.utc)
+print(dt.strftime("%Y-%m-%dT%H:%M:%SZ"))''',
+  check: true,
+).stdout().strip()
 
 _git_desc = ''
 _git_commit = ''
@@ -659,6 +672,21 @@ endif
 
 sql_install_dir = join_paths(get_option('datadir'), 'yams', 'sql')
 install_data('sql/reference_schema.sql', install_dir: sql_install_dir)
+
+if not wasi_enabled
+  yams_pc_config = configuration_data()
+  yams_pc_config.set('PREFIX', get_option('prefix'))
+  yams_pc_config.set('LIBDIR', get_option('libdir'))
+  yams_pc_config.set('INCLUDEDIR', get_option('includedir'))
+  yams_pc_config.set('VERSION', _effective_version)
+  configure_file(
+    input: files('packaging/yams.pc.in'),
+    output: 'yams.pc',
+    configuration: yams_pc_config,
+    install: true,
+    install_dir: join_paths(get_option('libdir'), 'pkgconfig'),
+  )
+endif
 
 summary({
   'project': meson.project_name(),

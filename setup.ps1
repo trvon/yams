@@ -4,11 +4,23 @@ Param(
 
     [switch]$Package,
 
+    [switch]$Offline,
+
+    [switch]$SystemDeps,
+
     [string]$Version = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $forceVs2022Toolset = $false
+
+if (-not $Offline -and $env:YAMS_OFFLINE -match '^(1|true|yes|on)$') {
+    $Offline = $true
+}
+
+if (-not $SystemDeps -and $env:YAMS_USE_SYSTEM_DEPS -match '^(1|true|yes|on)$') {
+    $SystemDeps = $true
+}
 
 # Initialize Visual Studio environment if not already set
 if (-not $env:VSINSTALLDIR -or -not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
@@ -302,6 +314,10 @@ if (-not (Get-Command meson -ErrorAction SilentlyContinue)) { $needsInstall += '
 if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { $needsInstall += 'ninja' }
 
 if ($needsInstall.Count -gt 0) {
+    if ($Offline -or $SystemDeps) {
+        Write-Error "Missing required build tools in offline/system dependency mode: $($needsInstall -join ', '). Install them ahead of time and retry."
+    }
+
     Write-Host "Installing missing tools: $($needsInstall -join ', ')"
     python -m pip install --user --upgrade pip | Out-Null
     # Install numpy as it is often required by boost build checks even if python is disabled
@@ -330,6 +346,8 @@ $buildDir = $buildDir -replace '/', '\\'
 Write-Host "Build Type:      $BuildType"
 Write-Host "Build Dir:       $buildDir"
 Write-Host "C++ Std (Conan): $($env:YAMS_CPPSTD)"
+Write-Host "Offline Mode:    $Offline"
+Write-Host "System Deps:     $SystemDeps"
 
 # Conan args (mirror setup.sh defaults, but with MSVC settings)
 # Allow overriding MSVC version via env vars for CI (e.g. windows-2022 uses 193/17)
@@ -345,9 +363,14 @@ $conanArgs = @(
     '-s', 'compiler=msvc',
     '-s', "compiler.version=$msvcVersion",
     '-s', 'compiler.runtime=dynamic',
-    '-s', "compiler.cppstd=$($env:YAMS_CPPSTD)",
-    '--update'
+    '-s', "compiler.cppstd=$($env:YAMS_CPPSTD)"
 )
+
+if ($Offline) {
+    $conanArgs += @('-nr', '--build=never')
+} else {
+    $conanArgs += @('--update', '--build=missing')
+}
 
 # Prefer Ninja generator on VS 2025 to avoid unsupported VS generator names
 $cmakeGenerator = $env:YAMS_CMAKE_GENERATOR
@@ -366,19 +389,21 @@ if ($cmakeGenerator) {
 # VS 2025/2024 is version 18, MSVC compiler version 195
 $conanArgs += @('-c', "tools.microsoft.msbuild:vs_version=$vsVersion")
 
-# Always rebuild missing packages
-$conanArgs += @('--build=missing', '-c', 'tools.env.virtualenv:powershell=True')
+# Generate PowerShell build environment files for Conan-managed builds
+$conanArgs += @('-c', 'tools.env.virtualenv:powershell=True')
 
-# Export custom Conan recipes before install (must happen before conan install)
-Write-Host '--- Exporting custom Conan recipes... ---'
-# qpdf export removed - PDF plugin will be updated in separate PBI
+if (-not $SystemDeps) {
+    # Export custom Conan recipes before install (must happen before conan install)
+    Write-Host '--- Exporting custom Conan recipes... ---'
+    # qpdf export removed - PDF plugin will be updated in separate PBI
 
-if (Test-Path 'conan/onnxruntime/conanfile.py') {
-    Write-Host 'Exporting onnxruntime/1.23.0 from conan/onnxruntime/'
-    conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to export onnxruntime recipe"
-        exit $LASTEXITCODE
+    if (Test-Path 'conan/onnxruntime/conanfile.py') {
+        Write-Host 'Exporting onnxruntime/1.23.0 from conan/onnxruntime/'
+        conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to export onnxruntime recipe"
+            exit $LASTEXITCODE
+        }
     }
 }
 
@@ -480,25 +505,27 @@ if ($env:YAMS_DISABLE_PDF -eq 'true') {
     $conanArgs += @('-o', 'yams/*:enable_pdf=False')
 }
 
-Write-Host '--- Running conan install (Windows/MSVC)... ---'
-try {
-    # Use runtime_deploy to copy DLLs next to executables
-    conan install @conanArgs --deployer=runtime_deploy --deployer-folder=$buildDir
-    if ($LASTEXITCODE -ne 0) {
-        throw "Conan install failed with exit code $LASTEXITCODE"
+if (-not $SystemDeps) {
+    Write-Host '--- Running conan install (Windows/MSVC)... ---'
+    try {
+        # Use runtime_deploy to copy DLLs next to executables
+        conan install @conanArgs --deployer=runtime_deploy --deployer-folder=$buildDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "Conan install failed with exit code $LASTEXITCODE"
+        }
+    } catch {
+        Write-Error $_
+        Write-Warning "Build failed. Common fixes:"
+        Write-Warning "1. If using VS 2025 (Preview), try installing the VS 2022 (v143) toolset via Visual Studio Installer."
+        Write-Warning "2. Try cleaning the cache: conan remove boost/* -c"
+        Write-Warning "3. Vcpkg is often more stable on Windows for bleeding-edge compilers, but this project uses Conan for cross-platform consistency."
+        exit 1
     }
-} catch {
-    Write-Error $_
-    Write-Warning "Build failed. Common fixes:"
-    Write-Warning "1. If using VS 2025 (Preview), try installing the VS 2022 (v143) toolset via Visual Studio Installer."
-    Write-Warning "2. Try cleaning the cache: conan remove boost/* -c"
-    Write-Warning "3. Vcpkg is often more stable on Windows for bleeding-edge compilers, but this project uses Conan for cross-platform consistency."
-    exit 1
 }
 
 # Workaround: libiconv static libs may be missing from Conan package on Windows
 $libiconvPc = Join-Path $buildDir "$conanSubdir/conan/libiconv.pc"
-if (Test-Path $libiconvPc) {
+if ((-not $SystemDeps) -and (Test-Path $libiconvPc)) {
     $libiconvPrefix = $null
     $libiconvLibDir = $null
     try {
@@ -555,7 +582,7 @@ if (Test-Path $libiconvPc) {
     }
 }
 
-# Meson setup: prefer native file; if cross file is generated, use that instead
+# Meson setup: prefer explicit overrides first, then Conan-generated files
 $nativeFile = Join-Path $buildDir "$conanSubdir/conan/conan_meson_native.ini"
 $crossFile  = Join-Path $buildDir "$conanSubdir/conan/conan_meson_cross.ini"
 
@@ -566,19 +593,37 @@ if (-not (Test-Path $buildDir)) {
 $mesonToolchainArg = $null
 $mesonToolchainFile = $null
 
-if (Test-Path $nativeFile) {
-    $mesonToolchainArg  = '--native-file'
-    $mesonToolchainFile = $nativeFile
-} elseif (Test-Path $crossFile) {
-    $mesonToolchainArg  = '--cross-file'
-    $mesonToolchainFile = $crossFile
-} else {
-    Write-Error "Conan Meson toolchain file not found. Expected: $nativeFile or $crossFile"
+if ($env:YAMS_MESON_NATIVE_FILE -and $env:YAMS_MESON_CROSS_FILE) {
+    Write-Error 'Set only one of YAMS_MESON_NATIVE_FILE or YAMS_MESON_CROSS_FILE.'
+}
+
+if ($env:YAMS_MESON_NATIVE_FILE) {
+    if (-not (Test-Path $env:YAMS_MESON_NATIVE_FILE)) {
+        Write-Error "Meson native file not found: $($env:YAMS_MESON_NATIVE_FILE)"
+    }
+    $mesonToolchainArg = '--native-file'
+    $mesonToolchainFile = $env:YAMS_MESON_NATIVE_FILE
+} elseif ($env:YAMS_MESON_CROSS_FILE) {
+    if (-not (Test-Path $env:YAMS_MESON_CROSS_FILE)) {
+        Write-Error "Meson cross file not found: $($env:YAMS_MESON_CROSS_FILE)"
+    }
+    $mesonToolchainArg = '--cross-file'
+    $mesonToolchainFile = $env:YAMS_MESON_CROSS_FILE
+} elseif (-not $SystemDeps) {
+    if (Test-Path $nativeFile) {
+        $mesonToolchainArg  = '--native-file'
+        $mesonToolchainFile = $nativeFile
+    } elseif (Test-Path $crossFile) {
+        $mesonToolchainArg  = '--cross-file'
+        $mesonToolchainFile = $crossFile
+    } else {
+        Write-Error "Conan Meson toolchain file not found. Expected: $nativeFile or $crossFile"
+    }
 }
 
 # Activate Conan build environment to ensure tools like pkg-config are in PATH
 $conanBuildPs1 = Join-Path $buildDir "$conanSubdir/conan/conanbuild.ps1"
-if (Test-Path $conanBuildPs1) {
+if ((-not $SystemDeps) -and (Test-Path $conanBuildPs1)) {
     Write-Host "Activating Conan build environment: $conanBuildPs1"
     . $conanBuildPs1
 }
@@ -612,7 +657,7 @@ if ($env:YAMS_ENABLE_MOBILE_BINDINGS -eq 'true') {
 
 if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     Write-Host 'Configuring Meson builddir...'
-    $buildTypeLower = $BuildType.ToLower()
+    $buildTypeLower = if ($BuildType -eq 'Release') { 'debugoptimized' } else { $BuildType.ToLower() }
     
     # Parse extra Meson flags from environment variable
     # PowerShell can expand environment variables character-by-character in some contexts
@@ -667,6 +712,20 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
         Write-Error "Unknown database backend: $dbBackend. Expected libsql or sqlite."
     }
 
+    if ($dbBackend -eq 'libsql' -and $SystemDeps) {
+        $libsqlPkgFound = $false
+        if (Get-Command pkg-config -ErrorAction SilentlyContinue) {
+            if ((pkg-config --exists libsql) -or (pkg-config --exists libsql-sqlite3)) {
+                $libsqlPkgFound = $true
+            }
+        }
+
+        if (-not $libsqlPkgFound) {
+            Write-Warning 'System dependency mode: libSQL not found via pkg-config; falling back to sqlite'
+            $dbBackend = 'sqlite'
+        }
+    }
+
     if ($dbBackend -eq 'libsql') {
         $libsqlPkgFound = $false
         if (Get-Command pkg-config -ErrorAction SilentlyContinue) {
@@ -677,7 +736,13 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
 
         if (-not $libsqlPkgFound -and -not (Test-Path 'subprojects\libsql')) {
             if (Test-Path 'subprojects\libsql.wrap') {
-                if (Get-Command meson -ErrorAction SilentlyContinue) {
+                if ($SystemDeps) {
+                    Write-Warning 'libSQL not found via system dependencies; falling back to sqlite'
+                    $dbBackend = 'sqlite'
+                } elseif ($Offline) {
+                    Write-Warning 'Offline mode: not fetching libSQL subproject; falling back to sqlite'
+                    $dbBackend = 'sqlite'
+                } elseif (Get-Command meson -ErrorAction SilentlyContinue) {
                     Write-Host 'Fetching libSQL subproject (meson wrap)...'
                     meson subprojects download libsql | Out-Null
                     if ($LASTEXITCODE -ne 0) {
@@ -697,6 +762,16 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
 
     Write-Host "Database backend: $dbBackend"
 
+    $wrapMode = if ($env:YAMS_MESON_WRAP_MODE) {
+        $env:YAMS_MESON_WRAP_MODE
+    } elseif ($SystemDeps) {
+        'nofallback'
+    } elseif ($Offline) {
+        'nodownload'
+    } else {
+        'default'
+    }
+
     # Build meson command arguments as a proper array
     $mesonArgs = @('setup', $buildDir, "--buildtype=$buildTypeLower", "--prefix=$InstallPrefix", "-Denable-modules=$enableModulesFlag", "-Ddatabase-backend=$dbBackend")
     if ($enableZyp) { $mesonArgs += '-Dplugin-zyp=true' }
@@ -704,6 +779,13 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     if ($enableMobileBindingsArg) { $mesonArgs += $enableMobileBindingsArg }
     if ($mesonToolchainArg) { $mesonArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $mesonArgs += $mesonToolchainFile }
+    if ($wrapMode -ne 'default') { $mesonArgs += @('--wrap-mode', $wrapMode) }
+    if ($env:YAMS_PKG_CONFIG_PATH) { $mesonArgs += @('--pkg-config-path', $env:YAMS_PKG_CONFIG_PATH) }
+    if ($env:YAMS_BUILD_PKG_CONFIG_PATH) { $mesonArgs += @('--build.pkg-config-path', $env:YAMS_BUILD_PKG_CONFIG_PATH) }
+    if ($env:YAMS_CMAKE_PREFIX_PATH) { $mesonArgs += @('--cmake-prefix-path', $env:YAMS_CMAKE_PREFIX_PATH) }
+    if ($env:YAMS_BUILD_CMAKE_PREFIX_PATH) { $mesonArgs += @('--build.cmake-prefix-path', $env:YAMS_BUILD_CMAKE_PREFIX_PATH) }
+    if ($buildTypeLower -eq 'debugoptimized') { $mesonArgs += '-Db_ndebug=true' } else { $mesonArgs += '-Db_ndebug=false' }
+    if ($env:YAMS_DISABLE_RE2 -eq 'true') { $mesonArgs += '-Denable-re2=disabled' }
     
     # Enable vector tests for Debug/Profiling/Fuzzing builds (parity with setup.sh)
     if ($BuildType -in @('Debug','Profiling','Fuzzing')) {
@@ -718,11 +800,26 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
 } else {
     Write-Host 'Meson builddir already configured, reconfiguring...'
     Write-Host "Ensuring prefix is set to: $InstallPrefix"
+    $buildTypeLower = if ($BuildType -eq 'Release') { 'debugoptimized' } else { $BuildType.ToLower() }
     # Auto-detect libSQL backend for reconfigure as well
     $dbBackend = if ($env:YAMS_DATABASE_BACKEND) { $env:YAMS_DATABASE_BACKEND } else { 'libsql' }
     $dbBackend = $dbBackend.ToLowerInvariant()
     if ($dbBackend -ne 'libsql' -and $dbBackend -ne 'sqlite') {
         Write-Error "Unknown database backend: $dbBackend. Expected libsql or sqlite."
+    }
+
+    if ($dbBackend -eq 'libsql' -and $SystemDeps) {
+        $libsqlPkgFound = $false
+        if (Get-Command pkg-config -ErrorAction SilentlyContinue) {
+            if ((pkg-config --exists libsql) -or (pkg-config --exists libsql-sqlite3)) {
+                $libsqlPkgFound = $true
+            }
+        }
+
+        if (-not $libsqlPkgFound) {
+            Write-Warning 'System dependency mode: libSQL not found via pkg-config; falling back to sqlite'
+            $dbBackend = 'sqlite'
+        }
     }
 
     if ($dbBackend -eq 'libsql') {
@@ -735,7 +832,13 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
 
         if (-not $libsqlPkgFound -and -not (Test-Path 'subprojects\libsql')) {
             if (Test-Path 'subprojects\libsql.wrap') {
-                if (Get-Command meson -ErrorAction SilentlyContinue) {
+                if ($SystemDeps) {
+                    Write-Warning 'libSQL not found via system dependencies; falling back to sqlite'
+                    $dbBackend = 'sqlite'
+                } elseif ($Offline) {
+                    Write-Warning 'Offline mode: not fetching libSQL subproject; falling back to sqlite'
+                    $dbBackend = 'sqlite'
+                } elseif (Get-Command meson -ErrorAction SilentlyContinue) {
                     Write-Host 'Fetching libSQL subproject (meson wrap)...'
                     meson subprojects download libsql | Out-Null
                     if ($LASTEXITCODE -ne 0) {
@@ -755,11 +858,28 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
 
     Write-Host "Database backend: $dbBackend"
 
+    $wrapMode = if ($env:YAMS_MESON_WRAP_MODE) {
+        $env:YAMS_MESON_WRAP_MODE
+    } elseif ($SystemDeps) {
+        'nofallback'
+    } elseif ($Offline) {
+        'nodownload'
+    } else {
+        'default'
+    }
+
     # Use --reconfigure to handle Meson version upgrades gracefully
     $reconfigureArgs = @('setup', '--reconfigure', $buildDir, "-Dprefix=$InstallPrefix", "-Ddatabase-backend=$dbBackend")
     if ($mesonToolchainArg) { $reconfigureArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $reconfigureArgs += $mesonToolchainFile }
     if ($enableMobileBindingsArg) { $reconfigureArgs += $enableMobileBindingsArg }
+    if ($wrapMode -ne 'default') { $reconfigureArgs += @('--wrap-mode', $wrapMode) }
+    if ($env:YAMS_PKG_CONFIG_PATH) { $reconfigureArgs += @('--pkg-config-path', $env:YAMS_PKG_CONFIG_PATH) }
+    if ($env:YAMS_BUILD_PKG_CONFIG_PATH) { $reconfigureArgs += @('--build.pkg-config-path', $env:YAMS_BUILD_PKG_CONFIG_PATH) }
+    if ($env:YAMS_CMAKE_PREFIX_PATH) { $reconfigureArgs += @('--cmake-prefix-path', $env:YAMS_CMAKE_PREFIX_PATH) }
+    if ($env:YAMS_BUILD_CMAKE_PREFIX_PATH) { $reconfigureArgs += @('--build.cmake-prefix-path', $env:YAMS_BUILD_CMAKE_PREFIX_PATH) }
+    if ($buildTypeLower -eq 'debugoptimized') { $reconfigureArgs += '-Db_ndebug=true' } else { $reconfigureArgs += '-Db_ndebug=false' }
+    if ($env:YAMS_DISABLE_RE2 -eq 'true') { $reconfigureArgs += '-Denable-re2=disabled' }
     
     # Ensure vector tests are enabled for Debug/Profiling/Fuzzing builds (parity with setup.sh)
     if ($BuildType -in @('Debug','Profiling','Fuzzing')) {

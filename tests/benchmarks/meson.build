@@ -5,10 +5,10 @@ fs = import('fs')
 # Tracy profiling support (optional, off unless enable-profiling is set)
 enable_profiling = get_option('enable-profiling')
 enable_rocprofiler_tracy = get_option('enable-rocprofiler-tracy')
-tracy_dep = dependency('tracy', required: enable_profiling, static: true)
 tracy_args = []
 tracy_deps = []
-if enable_profiling and tracy_dep.found()
+if enable_profiling
+  tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: true, static: true)
   tracy_args += ['-DTRACY_ENABLE']
   tracy_deps += tracy_dep
   rocm_hint = '/opt/rocm'

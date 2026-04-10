@@ -29,7 +29,7 @@ configuration aligned with the supported CI path.
 ### Linux/macOS
 
 ```bash
-# Release build
+# Portable optimized build
 ./setup.sh Release
 meson compile -C build/release
 
@@ -41,7 +41,7 @@ meson compile -C builddir
 ### Windows
 
 ```pwsh
-# Release build
+# Portable optimized build
 ./setup.ps1 Release
 meson compile -C build/release
 
@@ -61,7 +61,19 @@ For the full list of build variables and Meson options, see [BUILD.md](../BUILD.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `YAMS_ONNX_GPU` | auto | GPU provider: `auto`, `cuda`, `coreml`, `directml`, `none` |
+| `YAMS_OFFLINE` | false | Disable network dependency resolution |
+| `YAMS_USE_SYSTEM_DEPS` | false | Skip Conan and resolve from system/pkg-config/CMake prefixes |
 | `FAST_MODE` | 0 | Disable ONNX and tests for quick iteration |
+
+For distro/package-manager style builds:
+
+```bash
+YAMS_USE_SYSTEM_DEPS=true \
+YAMS_OFFLINE=true \
+YAMS_PKG_CONFIG_PATH=/opt/yams-deps/lib/pkgconfig \
+YAMS_CMAKE_PREFIX_PATH=/opt/yams-deps \
+./setup.sh Release --system-deps --offline
+```
 
 Common post-setup tweak:
 ```bash
