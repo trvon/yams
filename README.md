@@ -29,6 +29,7 @@
 - SourceHut: https://sr.ht/~trvon/yams/
 - GitHub mirror: https://github.com/trvon/yams
 - Docs: https://yamsmemory.ai
+- Benchmark docs: [docs/benchmarks/README.md](docs/benchmarks/README.md)
 - Discord: https://discord.gg/rTBmRHdTEc
 - License: GPL-3.0-or-later
 

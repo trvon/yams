@@ -1,22 +1,26 @@
 # Benchmarks
 
-This section centralizes public benchmark guidance and latest reported results.
+This section is the public benchmark index for YAMS.
 
-## Available benchmark docs
+Each page should answer three things:
 
-- [Performance Report](performance_report.md) - canonical performance tables and release baselines.
-- [Storage Backends (Local vs S3-compatible)](storage_backends.md) - benchmark runner for
-  local storage compared with S3-compatible providers, including multi-client local-vs-R2 tracks.
+- what workload or dataset was measured,
+- what the latest published results are,
+- how to run the benchmark locally.
 
-## Validation status policy
+## Benchmark Docs
 
-- Public benchmark docs distinguish between:
-  - **tested** paths validated in this repository, and
-  - **supported** paths that are available but not currently part of automated validation.
+- [Performance Report](performance_report.md) - canonical ingestion, metadata, IPC, and multi-client baseline tables plus run commands.
+- [LongMemEval_S Retrieval Quality Baseline](longmemeval_s_baseline.md) - dataset statistics, retrieval-quality baselines, and the benchmark command.
+- [Storage Backends Benchmark](storage_backends.md) - local vs R2 CLI CRUD and multi-client benchmark results.
+- [Multi-Client Optimization Loop](multi_client_optimization_loop.md) - throughput/stability runbook plus summary and regression commands.
+- [Retrieval Precision Optimization](retrieval_precision_optimization.md) - ranking-quality tuning loop and summary workflow.
 
-When in doubt, treat tested paths as production-ready defaults.
+## Scope
 
-## Public vs internal benchmark assets
+- Public benchmark docs focus on benchmark data, workload context, and reproducible commands.
+- Internal harness plumbing and generated artifacts are intentionally omitted from public docs.
+- `tested` means the path is validated in this repository.
+- `supported` means the path exists but is not currently part of automated validation here.
 
-- Public docs in this section contain scope, status, and published results.
-- Internal harness scripts and run plumbing are intentionally not shipped in public docs.
+When in doubt, treat tested paths as the default reference point.

@@ -102,6 +102,7 @@ brew install trvon/yams/yams
 
 | Resource | URL |
 |----------|-----|
+| Benchmarks | [Benchmark docs](benchmarks/README.md) |
 | Roadmap | [What's planned](roadmap.md) |
 | SourceHut | https://sr.ht/~trvon/yams/ |
 | GitHub | https://github.com/trvon/yams |
