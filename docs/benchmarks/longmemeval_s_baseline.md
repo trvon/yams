@@ -47,14 +47,17 @@ Reranker: `bge-reranker-base` (cross-encoder, CPU)
 ## Run Configuration
 
 ```bash
+./setup.sh Debug --with-tests
+meson compile -C build/debug retrieval_quality_bench
+
 DYLD_INSERT_LIBRARIES=... \
 YAMS_TEST_SAFE_SINGLE_INSTANCE=1 \
 YAMS_BENCH_DATASET=longmemeval_s \
 YAMS_BENCH_EMBED_MAX_WAIT=0 \
-./builddir/tests/benchmarks/retrieval_quality_bench
+./build/debug/tests/benchmarks/retrieval_quality_bench
 ```
 
-Total runtime: ~4 hours (system under heavy concurrent load from LoRA training)
+Total runtime: ~4 hours
 
 ## Root Cause Analysis
 
@@ -62,8 +65,8 @@ Vector search adds only +3.3% recall and MRR *regresses* by -0.095. Three compou
 
 ### 1. MAX-POOL Chunk Aggregation
 
-`search_engine.cpp:5989-6018` — only the single highest-scoring chunk per document
-contributes to the vector score. With 5.37 chunks/doc average, 80%+ of chunk-level
+Only the single highest-scoring chunk per document contributes to the vector score.
+With 5.37 chunks/doc average, 80%+ of chunk-level
 semantic signal is discarded. For multi-session conversational data where different
 parts of a session may be relevant, this is the wrong trade-off.
 

@@ -3,24 +3,18 @@
 **Generated**: 2026-02-12
 **Last Updated**: 2026-04-08
 **YAMS Version**: 0.12.0-dev
-**Test Environment**: macOS 26.4 (Apple Silicon M4 Max, 16 cores, 128GB RAM)
 **Build Configuration**: Debug (no TSAN) and Release
 
-> Note: This page is the canonical place for benchmark results. Keep the latest numbers inlined here (avoid relying on generated `bench_results/*` artifacts).
+> Note: This page is the canonical place for benchmark results. Keep the latest numbers inlined here rather than relying on generated artifacts.
 
 ## Contents
 
 - [Executive Summary](#executive-summary)
-- [Test Environment Specifications](#test-environment-specifications)
+- [Benchmark Data and Commands](#benchmark-data-and-commands)
 - [Performance Benchmarks](#performance-benchmarks)
-  - [Latest Debug Runs (M4 Max)](#latest-debug-runs-m4-max-2026-04-08)
-  - [Multi-Client Benchmarks (M4 Max)](#multi-client-benchmarks-m4-max-2026-04-08)
-  - [Previous Release Runs (M3 Max)](#previous-release-runs-m3-max-2026-02-12)
-  - [Storage Backend Benchmarks](#storage-backend-benchmarks-local-vs-r2)
-  - [Cryptographic Operations (SHA-256)](#1-cryptographic-operations-sha-256)
-  - [Content Chunking (Rabin Fingerprinting)](#2-content-chunking-rabin-fingerprinting)
-  - [Compression Performance (Zstandard)](#3-compression-performance-zstandard)
-  - [Concurrent Compression Performance](#4-concurrent-compression-performance)
+- [Key Performance Insights](#key-performance-insights)
+- [Benchmark Methodology](#benchmark-methodology)
+- [Known Issues and Limitations](#known-issues-and-limitations)
 
 ## Executive Summary
 
@@ -28,7 +22,7 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 
 > Note: For benchmarks that report percentiles, the “Throughput” values in the tables are the p50 numbers.
 
-**Current Baseline (Debug no-TSAN, M4 Max, 2026-04-08)**:
+**Current Baseline (Debug no-TSAN, M4, 2026-04-08)**:
 
 | Benchmark | Throughput | Δ vs Apr 7 | Notes |
 |-----------|------------|------------|-------|
@@ -39,7 +33,7 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 | `IPC StreamingFramer_32x10` | 4,680 ops/s | **+4.9%** | 256 B chunks |
 | `IPC UnaryFramer_8KB` | 13,158 ops/s | **+9.5%** | 8 KB payload |
 
-**Multi-Client Baseline (Debug no-TSAN, M4 Max, 2026-04-08)**:
+**Multi-Client Baseline (Debug no-TSAN, M4, 2026-04-08)**:
 
 | Benchmark | Throughput | Latency (p50) | Latency (p95) | Notes |
 |-----------|------------|---------------|---------------|-------|
@@ -48,7 +42,7 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 | Mixed read/write (4 clients) | — | — | — | SIGSEGV (pre-existing) |
 | Connection contention (16 burst) | 1,368 ops/s | 11.2 ms | 12.0 ms | 0 failures (**+17.1%**) |
 
-**Previous Baseline (Release, M3 Max, 2026-02-12)**:
+**Previous Baseline (Release, M3, 2026-02-12)**:
 
 | Benchmark | Throughput | Notes |
 |-----------|------------|-------|
@@ -59,9 +53,9 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 | `IPC StreamingFramer_32x10` | 16,579 ops/s | 256 B chunks |
 | `IPC UnaryFramer_8KB` | 50,000 ops/s | 8 KB payload |
 
-> **Note**: The M3 Max numbers above are from Release builds. The M4 Max numbers are from Debug (no-TSAN) builds for safe comparison — Debug adds ~2-4x overhead for ingestion and IPC. Release M4 Max numbers will be higher.
+> **Note**: The M3 numbers above are from Release builds. The M4 numbers are from Debug (no-TSAN) builds for safe comparison. Debug adds ~2-4x overhead for ingestion and IPC, so Release numbers will be higher.
 
-**Historical Debug Baseline (M3 Max, Jan 2026 vs Oct 2025)**:
+**Historical Debug Baseline (Oct 2025 vs Jan 2026 vs Apr 2026)**:
 
 | Benchmark | Oct 2025 | Jan 2026 | Apr 7 (M4) | Apr 8 (M4, optimized) | Δ Apr 7→8 |
 |-----------|----------|----------|------------|----------------------|-----------|
@@ -74,76 +68,59 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 
 > Apr 8 optimizations: CRC32 slicing-by-8, FrameReader memcpy, Rabin lazy chunking, lock-free stats, proto serializer, IngestService futures reuse.
 
-## Test Environment Specifications
+## Benchmark Data and Commands
 
-### Current (M4 Max)
+### Data Included in Headline Tables
 
-- **Platform**: macOS 26.4 (Build 25E246)
-- **Hardware**: MacBook Pro (Apple M4 Max)
-- **CPU**: Apple M4 Max, 16 cores
-- **Memory**: 128 GB unified memory
-- **Compiler**: Apple Clang 21.0.0 (clang-2100.0.123.102) with C++23 standard
-- **Build Type**: Debug (no-TSAN) for safe baseline; Release for production numbers
-- **Package Management**: Conan 2.0
-- **Build System**: Meson
+- API ingestion: 1 KB and 100 KB documents.
+- Metadata updates: single-update and 500-update batch workloads over 1,000 documents.
+- IPC framing: streaming frames with 256 B and 512 B chunks, plus 8 KB unary payloads.
+- Multi-client ingest: 2 KB documents across 1-client, 4-client, and 16-client contention scenarios.
+- Search benchmarks are intentionally excluded from the headline tables because dataset choice and cache state can dominate the reported numbers.
 
-### Previous (M3 Max)
+### Run Commands
 
-- **Platform**: macOS 26.2 (Build 25C56)
-- **Hardware**: MacBook Pro (Mac15,9)
-- **CPU**: Apple M3 Max, 16 cores (12 performance + 4 efficiency)
-- **Memory**: 48 GB unified memory
-- **Cache Hierarchy**: L1D 64KB, L1I 128KB, L2 4MB (x16)
-- **Compiler**: Apple Clang 17.0.0 (clang-1700.6.3.2) with C++23 standard
-- **Build Type**: Release
-- **Package Management**: Conan 2.0
-- **Build System**: Meson
+**Debug baseline**
 
-> **Note**: Use Release builds for public-facing numbers. Debug + TSAN can add ~2-6x overhead.
+```bash
+./setup.sh Debug --no-tsan --with-tests
+meson compile -C build/debug yams_api_benchmarks ipc_stream_bench multi_client_ingestion_bench
 
-### Available Benchmark Executables
+./build/debug/tests/benchmarks/yams_api_benchmarks --iterations 5 --quiet
+./build/debug/tests/benchmarks/ipc_stream_bench --iterations 8 --quiet
+meson test -C build/debug multi_client_ingestion_bench --test-args='[!benchmark][multi-client] --durations yes'
+```
 
-Located in `build/release/tests/benchmarks/` (when the Release build is configured with `-Dbuild-tests=true`):
-- `yams_api_benchmarks` - API ingestion and metadata operations (writes `bench_results/api_*`)
-- `yams_search_benchmarks` - Search + query parsing (writes `bench_results/search_*`)
-- `ipc_stream_bench` - IPC streaming performance (writes `bench_results/ipc_stream_*`)
-- `retrieval_quality_bench` - Retrieval-quality evaluation (stdout metrics; uses embedded daemon harness)
-- `yams_retrieval_service_benchmarks` - Retrieval service benchmarks
-- `metadata_path_query_bench` - Metadata query performance
-- `tree_list_filter_bench` - Tree-based list filtering
-- `tree_diff_benchmarks` - Tree diff operations
-- `ingestion_throughput_bench` - Ingestion throughput
-- `daemon_socket_accept_bench` - Daemon socket operations (GTest runner)
+**Release baseline**
+
+```bash
+./setup.sh Release --with-tests
+meson compile -C build/release yams_api_benchmarks ipc_stream_bench
+
+./build/release/tests/benchmarks/yams_api_benchmarks --iterations 5
+./build/release/tests/benchmarks/ipc_stream_bench --iterations 8
+```
+
+**Search profiling only**
+
+```bash
+./setup.sh Debug --no-tsan --with-tests
+meson compile -C build/debug yams_search_benchmarks
+
+./build/debug/tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
+```
 
 ## Performance Benchmarks
 
-### Latest Debug Runs (M4 Max, 2026-04-08)
+### Latest Debug Runs (M4, 2026-04-08)
 
 #### Quick Links
-- [API Benchmarks](#api-benchmarks-m4)
-- [IPC Streaming Benchmarks](#ipc-streaming-benchmarks-m4)
+- [API Benchmarks](#api-benchmarks)
+- [IPC Streaming Benchmarks](#ipc-streaming-benchmarks)
 - [Multi-Client Benchmarks](#multi-client-benchmarks)
 - [Storage Backends Benchmark (Local vs S3-compatible)](storage_backends.md)
 
-#### Run Commands
-```bash
-# Debug build (no TSAN) for benchmarks
-./setup.sh Debug --no-tsan --with-tests
-meson compile -C builddir
-
-# API
-./builddir/tests/benchmarks/yams_api_benchmarks --iterations 5 --quiet
-
-# IPC streaming
-./builddir/tests/benchmarks/ipc_stream_bench --iterations 8 --quiet
-
-# Multi-client
-./builddir/tests/benchmarks/multi_client_ingestion_bench “[!benchmark][multi-client]” --durations yes
-```
-
-#### API Benchmarks (M4)
-
-(From `builddir/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`, Debug no-TSAN)
+#### API Benchmarks
 
 | Benchmark | Throughput | Δ vs Apr 7 | Notes |
 |-----------|------------|------------|-------|
@@ -152,9 +129,7 @@ meson compile -C builddir
 | Metadata_SingleUpdate | 12,038 ops/sec | **+26.4%** | 1,000 docs |
 | Metadata_BulkUpdate | 150,875 ops/sec | **+8.7%** | 500 updates/batch |
 
-#### IPC Streaming Benchmarks (M4)
-
-(From `builddir/tests/benchmarks/ipc_stream_bench`, `--iterations 8`, Debug no-TSAN)
+#### IPC Streaming Benchmarks
 
 | Benchmark | Throughput | Δ vs Apr 7 |
 |-----------|------------|------------|
@@ -162,9 +137,7 @@ meson compile -C builddir
 | StreamingFramer_64x6_512B | 1,780 ops/sec | **+5.6%** |
 | UnaryFramer_Success_8KB | 13,158 ops/sec | **+9.5%** |
 
-#### Multi-Client Benchmarks (M4)
-
-(From `builddir/tests/benchmarks/multi_client_ingestion_bench`, Debug no-TSAN, 2 KB docs)
+#### Multi-Client Benchmarks
 
 | Test | Clients | Throughput | Add p50 | Add p95 | Δ vs Apr 7 |
 |------|---------|------------|---------|---------|------------|
@@ -177,15 +150,11 @@ meson compile -C builddir
 
 #### Search Benchmarks
 
-Search benchmarks are intentionally not included in the “improvements” summary because the reported numbers can be misleading (different datasets, caching, and internal operation definitions). If you need them for profiling, run the benchmark binary and inspect its output locally:
+Search benchmarks are intentionally not included in the “improvements” summary because the reported numbers can be misleading (different datasets, caching, and internal operation definitions). Use the search profiling command in [Benchmark Data and Commands](#benchmark-data-and-commands) when you need those numbers.
 
-```bash
-./builddir/tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
-```
+### Previous Release Runs (M3, 2026-02-12)
 
-### Previous Release Runs (M3 Max, 2026-02-12)
-
-#### API Benchmarks (M3, Release)
+#### API Benchmarks
 
 | Benchmark | Latency | Throughput |
 |-----------|---------|------------|
@@ -194,7 +163,7 @@ Search benchmarks are intentionally not included in the “improvements” summa
 | Metadata_SingleUpdate | 6.57 ms | 15,232 ops/sec |
 | Metadata_BulkUpdate | 2.75 ms | 181,818 ops/sec |
 
-#### IPC Streaming Benchmarks (M3, Release)
+#### IPC Streaming Benchmarks
 
 | Benchmark | Latency | Throughput |
 |-----------|---------|------------|
@@ -307,7 +276,7 @@ See [Storage Backends](storage_backends.md) for detailed CLI CRUD and multi-clie
 2. **Parallel Scaling**: Linear scaling achieved up to 16 threads with 25.8x speedup
 3. **Query Processing**: Up to 3.4M items/second tokenization rate for complex queries
 4. **Result Ranking**: Partial sort algorithms provide 10x performance improvement for top-K operations
-5. **Memory Efficiency**: Stable performance maintained across varying data sizes
+5. **Workload Stability**: Stable performance maintained across varying data sizes
 
 ### Areas for Investigation
 
@@ -319,7 +288,6 @@ See [Storage Backends](storage_backends.md) for detailed CLI CRUD and multi-clie
 
 - **Compression Level**: 3 (optimal speed-to-compression ratio)
 - **Thread Pool Size**: 8-16 threads (linear scaling observed)
-- **Memory Allocation**: Match L2 cache size (4MB per core)
 
 ## Benchmark Methodology
 
@@ -332,29 +300,7 @@ See [Storage Backends](storage_backends.md) for detailed CLI CRUD and multi-clie
 
 ### Test Execution
 
-**For Release Build Benchmarks** (recommended):
-```bash
-# Configure and build release version (with tests enabled so benchmark executables are built)
-./setup.sh Release --with-tests
-meson compile -C build/release
-
-# Run benchmarks
-./build/release/tests/benchmarks/yams_api_benchmarks --iterations 5
-./build/release/tests/benchmarks/ipc_stream_bench --iterations 8
-```
-
-**For Debug Build** (current):
-```bash
-cd build/debug
-./tests/benchmarks/yams_api_benchmarks
-./tests/benchmarks/yams_search_benchmarks
-```
-
-**Unit Tests** (for test pass rate statistics):
-```bash
-cd build/debug
-meson test --suite unit --print-errorlogs
-```
+Use the commands in [Benchmark Data and Commands](#benchmark-data-and-commands) for the published benchmark runs.
 
 ### Data Generation
 
@@ -363,11 +309,10 @@ meson test --suite unit --print-errorlogs
 - **Iteration Count**: Sufficient iterations for statistical significance
 - **Timing**: CPU time measurements with Google Benchmark framework
 
-### Hardware Considerations
+### Portability Notes
 
-- Tests run on Apple Silicon with hardware SHA acceleration
-- Results may vary on different architectures (x86_64, ARM64 without acceleration)
-- Memory bandwidth and cache performance significantly impact results
+- Tests run on Apple Silicon with hardware SHA acceleration.
+- Results may vary on architectures without equivalent acceleration.
 
 ## Known Issues and Limitations
 
@@ -383,7 +328,7 @@ YAMS demonstrates strong performance characteristics across core components:
 
 - **Parallel processing** exhibits linear scaling to 16 threads
 - **Query processing** delivers high-throughput tokenization and ranking
-- **Memory efficiency** maintained across varying workload sizes
+- **Performance remains stable** across varying workload sizes
 - **Overall architecture** optimized for high-performance production deployment
 
 The benchmark results validate YAMS as a high-performance content-addressable storage system. Test failures in non-critical modules (vector database, PDF extraction) require attention but do not impact core functionality.

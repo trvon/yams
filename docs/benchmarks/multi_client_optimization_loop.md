@@ -7,7 +7,7 @@ It executes:
 1. phase 2 (throughput-first)
 2. phase 1 (stability-first)
 
-and saves artifacts for phase 3 (tuning sweeps) and phase 4 (regression gating).
+and prepares outputs for phase 3 (tuning sweeps) and phase 4 (regression gating).
 
 ## Prerequisites
 
@@ -26,7 +26,7 @@ From repo root:
 ```bash
 tests/benchmarks/run_multi_client_optimization_loop.sh \
   --bench-bin build/debug/tests/benchmarks/multi_client_ingestion_bench \
-  --data-dir /path/to/existing/yams-corpus
+  --data-dir <corpus-dir>
 ```
 
 By default, `--data-dir` is copied to an isolated temporary snapshot (`--data-dir-mode snapshot`)
@@ -37,19 +37,11 @@ Use the source directory directly only when you explicitly want that behavior:
 ```bash
 tests/benchmarks/run_multi_client_optimization_loop.sh \
   --bench-bin build/debug/tests/benchmarks/multi_client_ingestion_bench \
-  --data-dir /path/to/existing/yams-corpus \
+  --data-dir <corpus-dir> \
   --data-dir-mode direct
 ```
 
-Artifacts are written to:
-
-- `bench_results/optimization_loop/<timestamp>/phase2_throughput_first.jsonl`
-- `bench_results/optimization_loop/<timestamp>/phase1_stability_first.jsonl`
-- `bench_results/optimization_loop/<timestamp>/phase2_throughput_first.summary.json`
-- `bench_results/optimization_loop/<timestamp>/phase1_stability_first.summary.json`
-- `bench_results/optimization_loop/<timestamp>/combined.summary.json`
-- `bench_results/optimization_loop/<timestamp>/cases.manifest.jsonl`
-- `bench_results/optimization_loop/<timestamp>/run_manifest.json`
+The run emits per-phase JSONL, per-phase summaries, a combined summary, a case manifest, and a run manifest.
 
 The summary schema is versioned (`multi_client_summary_v2`) and now includes:
 
@@ -65,9 +57,9 @@ If `--data-dir` is omitted, large-corpus runs are skipped and contention runs st
 
 ```bash
 python3 tests/scripts/summarize_multi_client_jsonl.py \
-  --input bench_results/optimization_loop/<run>/phase2_throughput_first.jsonl \
-  --input bench_results/optimization_loop/<run>/phase1_stability_first.jsonl \
-  --output bench_results/optimization_loop/<run>/combined.summary.json
+  --input <phase2.jsonl> \
+  --input <phase1.jsonl> \
+  --output <combined-summary.json>
 ```
 
 ## Regression Check
@@ -76,9 +68,9 @@ Compare current vs baseline summaries:
 
 ```bash
 python3 tests/scripts/check_multi_client_regression.py \
-  bench_results/optimization_loop/<current>/combined.summary.json \
-  bench_results/optimization_loop/<baseline>/combined.summary.json \
-  --output bench_results/optimization_loop/<current>/regression.json \
+  <current-summary.json> \
+  <baseline-summary.json> \
+  --output <regression-report.json> \
   --fail-on-regression
 ```
 

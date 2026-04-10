@@ -10,10 +10,7 @@ Scope:
 
 ## Baseline Inputs
 
-Use existing optimization artifacts as baseline anchors:
-
-- `builddir/retrieval_opt_scifact_isolated.jsonl`
-- `builddir/retrieval_opt_scifact_stability.jsonl` (optional repeat set)
+Use one or more JSONL candidate runs from the same fixed corpus/query slice as baseline anchors.
 
 ## Build a Baseline Summary
 
@@ -21,9 +18,9 @@ Generate a normalized summary artifact from one or more runs:
 
 ```bash
 python3 tests/scripts/summarize_retrieval_opt_jsonl.py \
-  --input builddir/retrieval_opt_scifact_isolated.jsonl \
-  --input builddir/retrieval_opt_scifact_stability.jsonl \
-  --output builddir/retrieval_opt_scifact_summary.json
+  --input <candidate-run-a.jsonl> \
+  --input <candidate-run-b.jsonl> \
+  --output <summary.json>
 ```
 
 The summary includes:
