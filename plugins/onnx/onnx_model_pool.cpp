@@ -127,6 +127,81 @@ int envIntOr(const char* name, int fallback) {
     return fallback;
 }
 
+std::string lowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+bool supportsCoreMLCpuFallbackModel(const std::string& modelName) {
+    const std::string lowerName = lowerCopy(modelName);
+    return lowerName.find("embeddinggemma") != std::string::npos ||
+           lowerName.find("gemma") != std::string::npos;
+}
+
+bool isGpuExecutionProviderName(std::string provider) {
+    provider = lowerCopy(std::move(provider));
+    return provider.find("cuda") != std::string::npos ||
+           provider.find("migraphx") != std::string::npos ||
+           provider.find("coreml") != std::string::npos ||
+           provider.find("dml") != std::string::npos ||
+           provider.find("directml") != std::string::npos;
+}
+
+GraphOptimizationLevel resolveGraphOptimizationLevel(bool cpuFallback) {
+    GraphOptimizationLevel optLevel = cpuFallback ? GraphOptimizationLevel::ORT_ENABLE_BASIC
+                                                  : GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
+    if (const char* opt = std::getenv("YAMS_ONNX_OPT_LEVEL")) {
+        std::string level = lowerCopy(opt);
+        if (level == "all") {
+            optLevel = GraphOptimizationLevel::ORT_ENABLE_ALL;
+            if (!cpuFallback) {
+                spdlog::info("[ONNX] Using ORT_ENABLE_ALL optimization (slow first load)");
+            }
+        } else if (level == "extended") {
+            optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
+        } else if (level == "basic") {
+            optLevel = GraphOptimizationLevel::ORT_ENABLE_BASIC;
+        }
+    }
+    return optLevel;
+}
+
+int resolveCpuFallbackIntraThreads(int configuredIntraThreads) {
+    if (const char* value = std::getenv("YAMS_ONNX_INTRA_OP_THREADS")) {
+        try {
+            const int parsed = std::stoi(value);
+            if (parsed >= 1 && parsed <= 64) {
+                return parsed;
+            }
+        } catch (...) {
+        }
+    }
+    const int fallback = configuredIntraThreads > 0 ? configuredIntraThreads : 2;
+    return std::clamp(fallback, 1, 2);
+}
+
+int resolveCpuFallbackInterThreads(int configuredInterThreads) {
+    if (const char* value = std::getenv("YAMS_ONNX_INTER_OP_THREADS")) {
+        try {
+            const int parsed = std::stoi(value);
+            if (parsed >= 1 && parsed <= 64) {
+                return parsed;
+            }
+        } catch (...) {
+        }
+    }
+    (void)configuredInterThreads;
+    return 1;
+}
+
+bool resolveCpuFallbackAllowSpinning() {
+    if (const char* value = std::getenv("YAMS_ONNX_ALLOW_SPINNING")) {
+        return envTruthy(value);
+    }
+    return false;
+}
+
 // Resolve path for caching ONNX Runtime optimized graphs on disk.
 // Precedence: YAMS_DATA_DIR > XDG_DATA_HOME > ~/.local/share > model directory.
 fs::path resolveOptimizedModelPath(const std::string& modelPath, GraphOptimizationLevel optLevel) {
@@ -308,6 +383,29 @@ size_t mergeSharedBatchLimit(const std::string& modelName, const std::string& pr
     return merged;
 }
 
+size_t resolveCpuFallbackBatchCap() {
+    constexpr size_t kSafeCpuFallbackBatchCap = 4;
+    const size_t configuredCap = TuneAdvisor::getEmbedDocCap();
+    if (configuredCap == 0) {
+        return kSafeCpuFallbackBatchCap;
+    }
+    return std::max<size_t>(1u, std::min(configuredCap, kSafeCpuFallbackBatchCap));
+}
+
+size_t applyCpuFallbackSafetyCap(const std::string& modelName, const std::string& provider,
+                                 std::atomic<size_t>& providerBatchLimit) {
+    const size_t safeCap = resolveCpuFallbackBatchCap();
+    const size_t mergedCap = mergeSharedBatchLimit(modelName, provider, safeCap);
+    providerBatchLimit.store(mergedCap, std::memory_order_relaxed);
+
+    const size_t currentCap = TuneAdvisor::getEmbedDocCap();
+    if (currentCap == 0 || currentCap > mergedCap) {
+        TuneAdvisor::setEmbedDocCap(mergedCap);
+    }
+
+    return mergedCap;
+}
+
 } // namespace
 
 // ============================================================================
@@ -460,19 +558,7 @@ public:
         // which significantly benefits transformer embedding models.
         // ORT_ENABLE_ALL performs additional expensive transformations (minutes for large models).
         // Override with YAMS_ONNX_OPT_LEVEL=basic|extended|all
-        GraphOptimizationLevel optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
-        if (const char* opt = std::getenv("YAMS_ONNX_OPT_LEVEL")) {
-            std::string level(opt);
-            std::transform(level.begin(), level.end(), level.begin(), ::tolower);
-            if (level == "all") {
-                optLevel = GraphOptimizationLevel::ORT_ENABLE_ALL;
-                spdlog::info("[ONNX] Using ORT_ENABLE_ALL optimization (slow first load)");
-            } else if (level == "extended") {
-                optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
-            } else if (level == "basic") {
-                optLevel = GraphOptimizationLevel::ORT_ENABLE_BASIC;
-            }
-        }
+        GraphOptimizationLevel optLevel = resolveGraphOptimizationLevel(false);
         sessionOptions_->SetGraphOptimizationLevel(optLevel);
 
         // Cache the optimized graph to disk so subsequent loads skip optimization passes.
@@ -496,15 +582,24 @@ public:
 
         if (config.enable_gpu) {
             if (OnnxModelSession::isCoreMLDenylisted(modelName)) {
-                // Scale up CPU threads since GPU won't be available
-                const int hwThreads = static_cast<int>(std::thread::hardware_concurrency());
-                const int fallbackIntra =
-                    std::max(configuredIntraThreads_, std::min(hwThreads, 12));
+                const int fallbackIntra = resolveCpuFallbackIntraThreads(configuredIntraThreads_);
+                const int fallbackInter = resolveCpuFallbackInterThreads(configuredInterThreads_);
+                const bool allowSpinning = resolveCpuFallbackAllowSpinning();
                 sessionOptions_->SetIntraOpNumThreads(fallbackIntra);
+                sessionOptions_->SetInterOpNumThreads(fallbackInter);
+                sessionOptions_->AddConfigEntry("session.intra_op.allow_spinning",
+                                                allowSpinning ? "1" : "0");
+                sessionOptions_->AddConfigEntry("session.inter_op.allow_spinning",
+                                                allowSpinning ? "1" : "0");
                 configuredIntraThreads_ = fallbackIntra;
+                configuredInterThreads_ = fallbackInter;
+                const size_t fallbackBatchCap =
+                    applyCpuFallbackSafetyCap(modelName_, "cpu", providerBatchLimit_);
                 spdlog::info("[ONNX] Skipping CoreML for '{}' (previously failed; "
-                             "CPU with intra_threads={})",
-                             modelName, fallbackIntra);
+                             "CPU with intra_threads={} inter_threads={} batch_cap={} "
+                             "spinning={})",
+                             modelName, fallbackIntra, fallbackInter, fallbackBatchCap,
+                             allowSpinning ? 1 : 0);
                 actualExecutionProvider_ = "cpu";
             } else {
                 appendGpuExecutionProvider();
@@ -970,8 +1065,7 @@ public:
     }
 
     bool supportsCpuFallbackForCurrentModel() const {
-        return modelName_.find("embeddinggemma") != std::string::npos ||
-               modelName_.find("gemma") != std::string::npos;
+        return supportsCoreMLCpuFallbackModel(modelName_);
     }
 
     bool isCoreMLMaskFeatureFailure(const std::string& message) const {
@@ -994,29 +1088,15 @@ public:
             actualExecutionProvider_ = "cpu";
             providerBatchLimit_.store(0, std::memory_order_relaxed);
 
-            // Scale up CPU threads when falling back from GPU — the original
-            // configuredIntraThreads_ (default 4) was conservative because GPU
-            // was expected to handle the heavy lifting.
             const int hwThreads = static_cast<int>(std::thread::hardware_concurrency());
-            const int fallbackIntra = std::max(configuredIntraThreads_, std::min(hwThreads, 12));
+            const int fallbackIntra = resolveCpuFallbackIntraThreads(configuredIntraThreads_);
+            const int fallbackInter = resolveCpuFallbackInterThreads(configuredInterThreads_);
             sessionOptions_->SetIntraOpNumThreads(fallbackIntra);
-            sessionOptions_->SetInterOpNumThreads(configuredInterThreads_);
+            sessionOptions_->SetInterOpNumThreads(fallbackInter);
+            configuredIntraThreads_ = fallbackIntra;
+            configuredInterThreads_ = fallbackInter;
 
-            const bool allowSpinning = []() {
-                if (const char* s = std::getenv("YAMS_ONNX_ALLOW_SPINNING")) {
-                    std::string val(s);
-                    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
-                    if (val == "0" || val == "false" || val == "no")
-                        return false;
-                    if (val == "1" || val == "true" || val == "yes")
-                        return true;
-                }
-#ifdef _WIN32
-                return false;
-#else
-                return true;
-#endif
-            }();
+            const bool allowSpinning = resolveCpuFallbackAllowSpinning();
             sessionOptions_->AddConfigEntry("session.intra_op.allow_spinning",
                                             allowSpinning ? "1" : "0");
             sessionOptions_->AddConfigEntry("session.inter_op.allow_spinning",
@@ -1026,18 +1106,7 @@ public:
             sessionOptions_->SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
 #endif
 
-            GraphOptimizationLevel optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
-            if (const char* opt = std::getenv("YAMS_ONNX_OPT_LEVEL")) {
-                std::string level(opt);
-                std::transform(level.begin(), level.end(), level.begin(), ::tolower);
-                if (level == "all") {
-                    optLevel = GraphOptimizationLevel::ORT_ENABLE_ALL;
-                } else if (level == "extended") {
-                    optLevel = GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
-                } else if (level == "basic") {
-                    optLevel = GraphOptimizationLevel::ORT_ENABLE_BASIC;
-                }
-            }
+            GraphOptimizationLevel optLevel = resolveGraphOptimizationLevel(true);
             sessionOptions_->SetGraphOptimizationLevel(optLevel);
 
             // Graph cache is on by default; disable with YAMS_ONNX_GRAPH_CACHE=0
@@ -1065,9 +1134,13 @@ public:
             useIoBinding_ = false;
             ioBinding_.reset();
             OnnxModelSession::denylistCoreML(modelName_);
+            const size_t fallbackBatchCap = applyCpuFallbackSafetyCap(
+                modelName_, actualExecutionProvider_, providerBatchLimit_);
             spdlog::warn("[ONNX] Reinitialized '{}' on CPU after CoreML inference failure "
-                         "(denylisted for future instances, intra_threads={}, hw={})",
-                         modelName_, fallbackIntra, hwThreads);
+                         "(denylisted for future instances, intra_threads={}, inter_threads={}, "
+                         "batch_cap={}, spinning={}, hw={})",
+                         modelName_, fallbackIntra, fallbackInter, fallbackBatchCap,
+                         allowSpinning ? 1 : 0, hwThreads);
             return Result<void>();
         } catch (const Ort::Exception& e) {
             return Error{ErrorCode::InternalError,
@@ -2557,7 +2630,7 @@ Result<void> OnnxModelPool::loadModelSync(const std::string& modelName) {
     // Use TuneAdvisor for GPU-aware pool sizing:
     //   GPU mode: larger pool (GPU handles inference, more sessions for throughput)
     //   CPU mode: smaller pool (avoid CPU saturation from parallel inference)
-    const bool gpuEnabled = runtimeGpuEnabled_;
+    const bool gpuEnabled = runtimeGpuEnabled_ && !OnnxModelSession::isCoreMLDenylisted(modelName);
     const size_t embedConcurrencyCap =
         std::max<size_t>(1u, std::min<size_t>(TuneAdvisor::postEmbedConcurrent(),
                                               TuneAdvisor::getEmbedMaxConcurrency()));
@@ -2809,9 +2882,17 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
     // The initial handle is still held; additional sessions are acquired and immediately
     // released back to the pool so they are pre-initialized for future use.
     {
+        const std::string activeProvider = handle->getExecutionProvider();
+        const bool providerGpuEnabled = isGpuExecutionProviderName(activeProvider);
+        const bool cpuFallbackPinned = !providerGpuEnabled && runtimeGpuEnabled_ &&
+                                       OnnxModelSession::isCoreMLDenylisted(modelName);
+
         size_t targetWarm =
-            std::min(static_cast<size_t>(TuneAdvisor::onnxSessionsPerModel(runtimeGpuEnabled_)),
-                     runtimeGpuEnabled_ ? size_t{3} : size_t{2});
+            std::min(static_cast<size_t>(TuneAdvisor::onnxSessionsPerModel(providerGpuEnabled)),
+                     providerGpuEnabled ? size_t{3} : size_t{2});
+        if (cpuFallbackPinned) {
+            targetWarm = std::min<size_t>(targetWarm, 1u);
+        }
 
         // Keep warm session count aligned with current embedding throughput budget
         // to avoid retaining idle ONNX sessions under low-concurrency settings.
@@ -2841,8 +2922,8 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
             // Session returned to pool when extra goes out of scope
         }
         if (targetWarm > 1) {
-            spdlog::info("[ONNX Plugin] Pre-warmed {} sessions for '{}' (gpu={})", targetWarm,
-                         modelName, runtimeGpuEnabled_ ? "yes" : "no");
+            spdlog::info("[ONNX Plugin] Pre-warmed {} sessions for '{}' (provider={} gpu={})",
+                         targetWarm, modelName, activeProvider, providerGpuEnabled ? "yes" : "no");
         }
     }
 
