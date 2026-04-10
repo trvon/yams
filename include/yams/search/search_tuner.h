@@ -132,12 +132,21 @@ struct TunedParams {
     // Graph reranking controls (dynamically adapted by SearchTuner)
     bool enableGraphRerank = false;
     size_t graphRerankTopN = 25;
-    float graphRerankWeight = 0.15f;
-    float graphRerankMaxBoost = 0.20f;
-    float graphRerankMinSignal = 0.01f;
-    float graphCommunityWeight = 0.10f;
+    float graphRerankWeight = 0.15F;
+    float graphRerankMaxBoost = 0.20F;
+    float graphRerankMinSignal = 0.01F;
+    float graphCommunityWeight = 0.10F;
     size_t kgMaxResults = 100;
     int graphScoringBudgetMs = 10;
+    bool graphEnablePathEnumeration = false;
+    bool enableGraphQueryExpansion = false;
+
+    // Per-profile graph signal weights for reranking composition
+    float graphEntitySignalWeight = 0.40F;
+    float graphStructuralSignalWeight = 0.20F;
+    float graphCoverageSignalWeight = 0.20F;
+    float graphPathSignalWeight = 0.10F;
+    float graphCorroborationFloor = 0.35F;
 
     /**
      * @brief Apply tuned parameters to a SearchEngineConfig.
@@ -163,6 +172,13 @@ struct TunedParams {
         config.graphCommunityWeight = graphCommunityWeight;
         config.kgMaxResults = kgMaxResults;
         config.graphScoringBudgetMs = graphScoringBudgetMs;
+        config.graphEnablePathEnumeration = graphEnablePathEnumeration;
+        config.enableGraphQueryExpansion = enableGraphQueryExpansion;
+        config.graphEntitySignalWeight = graphEntitySignalWeight;
+        config.graphStructuralSignalWeight = graphStructuralSignalWeight;
+        config.graphCoverageSignalWeight = graphCoverageSignalWeight;
+        config.graphPathSignalWeight = graphPathSignalWeight;
+        config.graphCorroborationFloor = graphCorroborationFloor;
         config.vectorOnlyThreshold = vectorOnlyThreshold;
         config.vectorOnlyPenalty = vectorOnlyPenalty;
         config.vectorOnlyNearMissReserve = vectorOnlyNearMissReserve;
@@ -258,6 +274,11 @@ struct TunedParams {
             params.rrfK = 20;
             params.weights.setAll(0.45f, 0.15f, 0.15f, 0.15f, 0.05f, 0.03f, 0.02f,
                                   TuningLayer::Profile);
+            params.graphEntitySignalWeight = 0.25F;
+            params.graphStructuralSignalWeight = 0.35F;
+            params.graphCoverageSignalWeight = 0.20F;
+            params.graphPathSignalWeight = 0.15F;
+            params.graphCorroborationFloor = 0.40F;
             break;
 
         case TuningState::LARGE_CODE:
@@ -322,6 +343,11 @@ struct TunedParams {
             // (e.g., multi-turn chat sessions) benefit from accumulating semantic signal
             // across chunks rather than taking only the single best chunk.
             params.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
+            params.graphEntitySignalWeight = 0.50F;
+            params.graphStructuralSignalWeight = 0.15F;
+            params.graphCoverageSignalWeight = 0.15F;
+            params.graphPathSignalWeight = 0.10F;
+            params.graphCorroborationFloor = 0.25F;
             break;
 
         case TuningState::MIXED:

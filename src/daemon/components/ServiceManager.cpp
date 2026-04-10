@@ -2089,6 +2089,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         std::atomic_store_explicit(&postIngest_, newPostIngest, std::memory_order_release);
         spdlog::info("Post-ingest queue initialized (capacity={})", qcap);
 
+        // Wire PluginManager to PIQ so adoptEntityProviders() can reach it
+        if (pluginManager_) {
+            pluginManager_->setPostIngestQueue(newPostIngest.get());
+        }
+
         // Wire PostIngestQueue drain to SearchEngineManager FSM
         {
             auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);

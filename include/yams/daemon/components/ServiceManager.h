@@ -188,11 +188,11 @@ public:
     }
     void onSearchRequestQueued() { searchQueued_.fetch_add(1, std::memory_order_relaxed); }
     bool tryStartSearchRequest(std::uint32_t concurrencyCap) {
-        std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
-        while (queued > 0 && !searchQueued_.compare_exchange_weak(queued, queued - 1,
-                                                                  std::memory_order_relaxed)) {
-        }
         if (concurrencyCap == 0) {
+            std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
+            while (queued > 0 && !searchQueued_.compare_exchange_weak(queued, queued - 1,
+                                                                      std::memory_order_relaxed)) {
+            }
             searchActive_.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
@@ -203,6 +203,10 @@ public:
             }
             if (searchActive_.compare_exchange_weak(active, active + 1,
                                                     std::memory_order_relaxed)) {
+                std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
+                while (queued > 0 && !searchQueued_.compare_exchange_weak(
+                                         queued, queued - 1, std::memory_order_relaxed)) {
+                }
                 return true;
             }
         }

@@ -850,7 +850,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             if (!result) {
                 spdlog::warn("RequestDispatcher: DocumentService::retrieve failed: {}",
                              result.error().message);
-                co_return ErrorResponse{result.error().code, result.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                    result.error().message);
             }
             auto serviceResp = result.value();
             if (g_forceGetDocumentsVectorOnce.exchange(false, std::memory_order_acq_rel) &&
@@ -871,8 +872,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                 response = yams::daemon::dispatch::GetResponseMapper::fromServiceDoc(
                     serviceResp.documents[0], req.extract);
             } else {
-                co_return ErrorResponse{ErrorCode::NotFound,
-                                        "No documents found matching criteria"};
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::NotFound, "No documents found matching criteria");
             }
             response.graphEnabled = serviceResp.graphEnabled;
             if (serviceResp.graphEnabled) {
@@ -908,30 +909,34 @@ RequestDispatcher::handleGetInitRequest(const GetInitRequest& req) {
                         return documentService->resolveNameToHash(name);
                     });
                 if (!rh) {
-                    co_return ErrorResponse{rh.error().code, rh.error().message};
+                    co_return yams::daemon::dispatch::makeErrorResponse(rh.error().code,
+                                                                        rh.error().message);
                 }
                 hash = rh.value();
             }
             if (hash.empty()) {
-                co_return ErrorResponse{ErrorCode::InvalidArgument, "hash or name required"};
+                co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::InvalidArgument,
+                                                                    "hash or name required");
             }
             auto store = serviceManager_->getContentStore();
             if (!store) {
-                co_return ErrorResponse{ErrorCode::NotInitialized, "content store unavailable"};
+                co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotInitialized,
+                                                                    "content store unavailable");
             }
             // Retrieve bytes (in-memory). For very large content, future improvement: stream from
             // CAS; for now, bounded by max memory and typical use in tests/CLI.
             auto rb = co_await yams::daemon::dispatch::offload_to_worker(
                 serviceManager_, [store, hash]() mutable { return store->retrieveBytes(hash); });
             if (!rb) {
-                co_return ErrorResponse{ErrorCode::InternalError,
-                                        std::string("retrieveBytes failed: ") + rb.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::InternalError,
+                    std::string("retrieveBytes failed: ") + rb.error().message);
             }
             std::vector<std::byte> bytes = std::move(rb.value());
             auto* rsm = serviceManager_->getRetrievalSessionManager();
             if (!rsm) {
-                co_return ErrorResponse{ErrorCode::NotInitialized,
-                                        "retrieval session manager unavailable"};
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::NotInitialized, "retrieval session manager unavailable");
             }
             uint32_t chunkSize = req.chunkSize > 0 ? req.chunkSize : (512 * 1024);
             uint64_t maxBytes = req.maxBytes; // 0 = unlimited
@@ -952,13 +957,14 @@ RequestDispatcher::handleGetChunkRequest(const GetChunkRequest& req) {
         "get_chunk", [this, req]() -> boost::asio::awaitable<Response> {
             auto* rsm = serviceManager_->getRetrievalSessionManager();
             if (!rsm) {
-                co_return ErrorResponse{ErrorCode::NotInitialized,
-                                        "retrieval session manager unavailable"};
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::NotInitialized, "retrieval session manager unavailable");
             }
             uint64_t remaining = 0;
             auto data = rsm->chunk(req.transferId, req.offset, req.length, remaining);
             if (!data) {
-                co_return ErrorResponse{data.error().code, data.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(data.error().code,
+                                                                    data.error().message);
             }
             GetChunkResponse out;
             out.data = std::move(data.value());
@@ -1091,7 +1097,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
                                    std::chrono::steady_clock::now() - serviceStart)
                                    .count();
         if (!result) {
-            co_return ErrorResponse{result.error().code, result.error().message};
+            co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                result.error().message);
         }
 
         const auto& serviceResp = result.value();
@@ -1126,10 +1133,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
         co_return response;
     } catch (const std::exception& e) {
         spdlog::error("[handleListRequest] Exception: {}", e.what());
-        co_return ErrorResponse{ErrorCode::InternalError, std::string("List failed: ") + e.what()};
+        co_return yams::daemon::dispatch::makeErrorResponse(
+            ErrorCode::InternalError, std::string("List failed: ") + e.what());
     } catch (...) {
         spdlog::error("[handleListRequest] Unknown exception");
-        co_return ErrorResponse{ErrorCode::InternalError, "List failed: unknown error"};
+        co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                                            "List failed: unknown error");
     }
 }
 
@@ -1157,29 +1166,34 @@ boost::asio::awaitable<Response> RequestDispatcher::handleCatRequest(const CatRe
                     return documentService->retrieve(sreq);
                 });
             if (!result) {
-                co_return ErrorResponse{result.error().code, result.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                    result.error().message);
             }
 
             auto r = result.value();
             if (g_forceCatMissingDocumentOnce.exchange(false, std::memory_order_acq_rel)) {
-                co_return ErrorResponse{ErrorCode::NotFound, "Document not found"};
+                co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotFound,
+                                                                    "Document not found");
             }
             if (g_forceCatNativeMissingDocumentOnce.exchange(false, std::memory_order_acq_rel)) {
                 r.document.reset();
             }
             if (!r.document.has_value()) {
-                co_return ErrorResponse{ErrorCode::NotFound, "Document not found"};
+                co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotFound,
+                                                                    "Document not found");
             }
 
             auto doc = r.document.value();
             if (g_forceCatMissingContentOnce.exchange(false, std::memory_order_acq_rel)) {
-                co_return ErrorResponse{ErrorCode::InternalError, "Content unavailable"};
+                co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                                                    "Content unavailable");
             }
             if (g_forceCatNativeMissingContentOnce.exchange(false, std::memory_order_acq_rel)) {
                 doc.content.reset();
             }
             if (!doc.content.has_value()) {
-                co_return ErrorResponse{ErrorCode::InternalError, "Content unavailable"};
+                co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                                                    "Content unavailable");
             }
 
             CatResponse out;
@@ -1208,9 +1222,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
             serviceReq.verbose = req.verbose;
             if (!req.directory.empty()) {
                 if (!req.recursive) {
-                    co_return ErrorResponse{
+                    co_return yams::daemon::dispatch::makeErrorResponse(
                         ErrorCode::InvalidArgument,
-                        "Directory deletion requires recursive flag for safety"};
+                        "Directory deletion requires recursive flag for safety");
                 }
                 serviceReq.pattern = req.directory;
                 if (serviceReq.pattern.back() != '/') {
@@ -1223,7 +1237,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                     return documentService->deleteByName(serviceReq);
                 });
             if (!result) {
-                co_return ErrorResponse{result.error().code, result.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                    result.error().message);
             }
             const auto& serviceResp = result.value();
             DeleteResponse response;
@@ -1256,8 +1271,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 response.results.push_back(daemonResult);
             }
             if (response.results.empty() && !response.dryRun) {
-                co_return ErrorResponse{ErrorCode::NotFound,
-                                        "No documents found matching criteria"};
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::NotFound, "No documents found matching criteria");
             }
             co_return response;
         });
@@ -1286,8 +1301,8 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             // that didn't set the flag (common with LLM-driven clients).
             bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
             if (req.path.empty() && (req.content.empty() || req.name.empty())) {
-                co_return ErrorResponse{ErrorCode::InvalidArgument,
-                                        "Provide either 'path' or 'content' + 'name'"};
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::InvalidArgument, "Provide either 'path' or 'content' + 'name'");
             }
 
             // Check if daemon is ready for synchronous operations
@@ -1359,7 +1374,8 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
 
             auto result = docService->store(serviceReq);
             if (!result) {
-                co_return ErrorResponse{result.error().code, result.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                    result.error().message);
             }
 
             const auto& serviceResp = result.value();
@@ -1397,7 +1413,8 @@ RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequest& req)
                     return documentService->updateMetadata(serviceReq);
                 });
             if (!result) {
-                co_return ErrorResponse{result.error().code, result.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                    result.error().message);
             }
             const auto& serviceResp = result.value();
             UpdateDocumentResponse response;
@@ -1469,7 +1486,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
                     return grepService->grep(serviceReq);
                 });
             if (!result) {
-                co_return ErrorResponse{result.error().code, result.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                    result.error().message);
             }
             const auto& serviceResp = result.value();
             // Special handling: when pathsOnly is requested, the app-level GrepService
@@ -1568,7 +1586,8 @@ RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
             }
             auto checksum = parseDaemonDownloadChecksum(req.checksum);
             if (!checksum) {
-                co_return ErrorResponse{checksum.error().code, checksum.error().message};
+                co_return yams::daemon::dispatch::makeErrorResponse(checksum.error().code,
+                                                                    checksum.error().message);
             }
             auto job = downloadJobRegistry().begin(dataDir, req);
             auto appContext = serviceManager_->getAppContext();
@@ -1652,7 +1671,8 @@ RequestDispatcher::handleDownloadStatusRequest(const DownloadStatusRequest& req)
         "downloadStatus", [this, req]() -> boost::asio::awaitable<Response> {
             auto job = downloadJobRegistry().get(serviceManager_->getConfig().dataDir, req.jobId);
             if (!job) {
-                co_return ErrorResponse{ErrorCode::NotFound, "Download job not found"};
+                co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotFound,
+                                                                    "Download job not found");
             }
             co_return toDownloadResponse(*job);
         });
@@ -1665,7 +1685,8 @@ RequestDispatcher::handleCancelDownloadJobRequest(const CancelDownloadJobRequest
             auto job =
                 downloadJobRegistry().cancel(serviceManager_->getConfig().dataDir, req.jobId);
             if (!job) {
-                co_return ErrorResponse{ErrorCode::NotFound, "Download job not found"};
+                co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotFound,
+                                                                    "Download job not found");
             }
             co_return toDownloadResponse(*job);
         });
@@ -1692,8 +1713,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleCancelRequest(const Ca
             bool ok = RequestContextRegistry::instance().cancel(req.targetRequestId);
             if (ok)
                 co_return SuccessResponse{"Cancel accepted"};
-            co_return ErrorResponse{ErrorCode::NotFound,
-                                    "RequestId not found or already completed"};
+            co_return yams::daemon::dispatch::makeErrorResponse(
+                ErrorCode::NotFound, "RequestId not found or already completed");
         });
 }
 
@@ -1705,8 +1726,8 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
             spdlog::info("[FileHistory] Inside guard_await lambda");
             auto appContext = serviceManager_->getAppContext();
             if (!appContext.metadataRepo) {
-                co_return ErrorResponse{ErrorCode::NotInitialized,
-                                        "Metadata repository not available"};
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::NotInitialized, "Metadata repository not available");
             }
 
             // Normalize filepath to absolute path
@@ -1715,8 +1736,8 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                 absPath = std::filesystem::absolute(req.filepath);
                 absPath = absPath.lexically_normal();
             } catch (const std::exception& e) {
-                co_return ErrorResponse{ErrorCode::InvalidArgument,
-                                        "Invalid filepath: " + std::string(e.what())};
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::InvalidArgument, "Invalid filepath: " + std::string(e.what()));
             }
             std::string normalizedPath = absPath.string();
 

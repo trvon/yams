@@ -113,6 +113,21 @@ int ipc_wait_warn_ms() {
     return warn_ms;
 }
 
+bool should_run_stale_cleanup(std::atomic<int64_t>& last_cleanup_ns,
+                              std::chrono::steady_clock::time_point now) {
+    constexpr int64_t kCleanupIntervalNs = 100'000'000; // 100ms
+    const int64_t now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    int64_t last = last_cleanup_ns.load(std::memory_order_acquire);
+    while ((now_ns - last) >= kCleanupIntervalNs) {
+        if (last_cleanup_ns.compare_exchange_weak(last, now_ns, std::memory_order_acq_rel,
+                                                  std::memory_order_acquire)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 awaitable<Result<std::unique_ptr<AsioConnection::socket_t>>>
 async_connect_with_timeout(const TransportOptions& opts) {
     // Check cancellation before proceeding
@@ -527,39 +542,45 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::acquire()
     }
 
     // Fast path: try to reuse an existing idle connection
+    std::vector<std::weak_ptr<AsioConnection>> pool_snapshot;
+    size_t pool_size = 0;
     {
         YAMS_ZONE_SCOPED_N("ConnectionPool::acquire::tryReuse");
         std::lock_guard<std::mutex> lk(mutex_);
-        cleanup_stale_connections();
+        if (should_run_stale_cleanup(this->last_cleanup_ns_, acquire_start)) {
+            cleanup_stale_connections();
+        }
+        pool_snapshot = connection_pool_;
+        pool_size = pool_snapshot.size();
+    }
 
-        for (auto& weak : connection_pool_) {
-            if (auto conn = weak.lock()) {
-                if (conn->alive.load(std::memory_order_acquire) &&
-                    !conn->in_use.exchange(true, std::memory_order_acq_rel)) {
-                    if (conn->read_loop_future.valid() &&
-                        conn->read_loop_future.wait_for(std::chrono::milliseconds(0)) ==
-                            std::future_status::ready) {
-                        conn->alive.store(false, std::memory_order_release);
-                        conn->in_use.store(false, std::memory_order_release);
-                        continue;
-                    }
-                    if (socket_looks_healthy_cached(*conn, acquire_start)) {
-                        if (ipc_wait_trace_enabled()) {
-                            const auto elapsed_ms =
-                                std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now() - acquire_start)
-                                    .count();
-                            if (elapsed_ms >= ipc_wait_warn_ms()) {
-                                spdlog::info("[IPCWait] stage=pool.acquire.reuse slow "
-                                             "elapsed_ms={} pool_size={}",
-                                             elapsed_ms, connection_pool_.size());
-                            }
-                        }
-                        co_return conn;
-                    }
+    for (auto& weak : pool_snapshot) {
+        if (auto conn = weak.lock()) {
+            if (conn->alive.load(std::memory_order_acquire) &&
+                !conn->in_use.exchange(true, std::memory_order_acq_rel)) {
+                if (conn->read_loop_future.valid() &&
+                    conn->read_loop_future.wait_for(std::chrono::milliseconds(0)) ==
+                        std::future_status::ready) {
                     conn->alive.store(false, std::memory_order_release);
                     conn->in_use.store(false, std::memory_order_release);
+                    continue;
                 }
+                if (socket_looks_healthy_cached(*conn, acquire_start)) {
+                    if (ipc_wait_trace_enabled()) {
+                        const auto elapsed_ms =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - acquire_start)
+                                .count();
+                        if (elapsed_ms >= ipc_wait_warn_ms()) {
+                            spdlog::info("[IPCWait] stage=pool.acquire.reuse slow elapsed_ms={} "
+                                         "pool_size={}",
+                                         elapsed_ms, pool_size);
+                        }
+                    }
+                    co_return conn;
+                }
+                conn->alive.store(false, std::memory_order_release);
+                conn->in_use.store(false, std::memory_order_release);
             }
         }
     }

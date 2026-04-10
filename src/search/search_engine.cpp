@@ -3411,10 +3411,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     maxLexicalAnchor = std::max(maxLexicalAnchor, lexicalAnchor);
                     graphCommunitySignalMass += communitySignal;
 
-                    // Composite graph relevance signal.
+                    // Composite graph relevance signal (per-profile weights).
                     const float rawSignal =
-                        std::clamp((entitySignal * 0.40f + structuralSignal * 0.20f +
-                                    queryCoverage * 0.20f + pathSupport * 0.10f) *
+                        std::clamp((entitySignal * workingConfig.graphEntitySignalWeight +
+                                    structuralSignal * workingConfig.graphStructuralSignalWeight +
+                                    queryCoverage * workingConfig.graphCoverageSignalWeight +
+                                    pathSupport * workingConfig.graphPathSignalWeight) *
                                            baseSignalWeight +
                                        communitySignal * communityWeight,
                                    0.0f, 1.0f);
@@ -3447,8 +3449,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         std::clamp(signal * 0.6f + normalizedSignal * 0.4f, 0.0f, 1.0f);
                     const float lexicalAnchorRatio =
                         maxLexicalAnchor > 0.0f ? lexicalAnchors[i] / maxLexicalAnchor : 0.0f;
+                    const float corrobFloor = workingConfig.graphCorroborationFloor;
                     const float corroboration =
-                        std::clamp(0.35f + 0.65f * std::max(lexicalAnchorRatio, queryCoverages[i]),
+                        std::clamp(corrobFloor + (1.0f - corrobFloor) * std::max(lexicalAnchorRatio,
+                                                                                 queryCoverages[i]),
                                    0.0f, 1.0f);
                     const float rankPrior = 1.0f / std::sqrt(1.0f + static_cast<float>(i));
                     const float guardedSignal =

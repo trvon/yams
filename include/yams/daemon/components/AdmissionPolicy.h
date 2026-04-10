@@ -24,6 +24,7 @@ struct HeadroomBands {
     std::size_t general{0};
     std::size_t write{0};
     std::size_t interactive{0};
+    std::size_t search{0};
 };
 
 class AdmissionPolicy {
@@ -77,7 +78,8 @@ public:
         HeadroomBands bands;
         bands.general = std::max<std::size_t>(1, softLimit / 6);
         bands.write = std::max<std::size_t>(2, softLimit / 3);
-        bands.interactive = std::max<std::size_t>(1, softLimit / 6);
+        bands.interactive = std::max<std::size_t>(2, softLimit / 4);
+        bands.search = bands.interactive + std::max<std::size_t>(1, softLimit / 8);
         return bands;
     }
 
@@ -101,8 +103,13 @@ public:
             return SocketAdmissionVerdict::admit;
         }
 
-        if ((commandClass == CommandClass::read || commandClass == CommandClass::search) &&
+        if (commandClass == CommandClass::read &&
             activeConnections < (softLimit + bands.general + bands.interactive)) {
+            return SocketAdmissionVerdict::admit;
+        }
+
+        if (commandClass == CommandClass::search &&
+            activeConnections < (softLimit + bands.general + bands.search)) {
             return SocketAdmissionVerdict::admit;
         }
 

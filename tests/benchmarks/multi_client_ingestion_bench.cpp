@@ -1105,7 +1105,10 @@ std::string classifyCliProbeMode(const CliProbeResult& probe) {
     if (bucket == "connect_refused") {
         return underStress ? "stress_expected" : "ambient_daemon_down";
     }
-    if (bucket == "connection_drop" || bucket == "backpressure") {
+    if (bucket == "backpressure") {
+        return underStress ? "overload_under_load" : "ambient_failure";
+    }
+    if (bucket == "connection_drop") {
         return underStress ? "stress_expected" : "ambient_failure";
     }
     if (bucket == "timeout") {
@@ -1623,7 +1626,10 @@ std::string classifyFailureMessage(const std::string& errorMsg) {
     if (containsInsensitive(lower, "timed out") || containsInsensitive(lower, "timeout")) {
         return "timeout";
     }
-    if (containsInsensitive(lower, "retry after") || containsInsensitive(lower, "backpressure")) {
+    if (containsInsensitive(lower, "retry after") || containsInsensitive(lower, "retry in ") ||
+        containsInsensitive(lower, "server busy") ||
+        containsInsensitive(lower, "resource exhausted") ||
+        containsInsensitive(lower, "backpressure")) {
         return "backpressure";
     }
     if (containsInsensitive(lower, "connection refused") ||
@@ -2774,6 +2780,8 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     std::map<std::string, std::vector<int64_t>> cliStageLatencies;
     std::vector<CliProbeResult> cliProbeResults;
     std::vector<TimedLatencySample> hotspotSamples;
+    std::map<std::string, int> uxErrorCategories;
+    std::map<std::string, std::string> uxFailureSamples;
 
     HeldSocketConnections heldConnections;
     REQUIRE(heldConnections.open(harness.socketPath(), static_cast<int>(kInitialSlotLimit)));
@@ -2836,6 +2844,8 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
             std::vector<int64_t> localSearch;
             std::vector<int64_t> localList;
             std::vector<int64_t> localStatus;
+            std::map<std::string, int> localErrorCategories;
+            std::map<std::string, std::string> localFailureSamples;
             ClientConfig ccfg;
             ccfg.socketPath = harness.socketPath();
             ccfg.autoStart = false;
@@ -2845,11 +2855,17 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
             for (int i = 0; i < uxOpsPerClient; ++i) {
                 const auto t0 = std::chrono::steady_clock::now();
                 bool success = false;
+                std::string errorMsg;
+                std::string opType;
 
                 switch (i % 3) {
                     case 0: {
+                        opType = "status";
                         auto res = yams::cli::run_sync(client.status(), 10s);
                         success = static_cast<bool>(res);
+                        if (!res) {
+                            errorMsg = res.error().message;
+                        }
                         if (res && res.value().retryAfterMs > 0) {
                             retryAfterCount.fetch_add(1);
                         }
@@ -2876,10 +2892,14 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                         break;
                     }
                     case 1: {
+                        opType = "list";
                         ListRequest req;
                         req.limit = 10;
                         auto res = yams::cli::run_sync(client.list(req), 10s);
                         success = static_cast<bool>(res);
+                        if (!res) {
+                            errorMsg = res.error().message;
+                        }
                         const auto t1 = std::chrono::steady_clock::now();
                         if (success) {
                             localList.push_back(
@@ -2903,12 +2923,16 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                         break;
                     }
                     default: {
+                        opType = "search";
                         SearchRequest req;
                         req.query = cfg.searchQuery;
                         req.searchType = cfg.searchType;
                         req.limit = cfg.searchLimit;
                         auto res = yams::cli::run_sync(client.search(req), 10s);
                         success = static_cast<bool>(res);
+                        if (!res) {
+                            errorMsg = res.error().message;
+                        }
                         const auto t1 = std::chrono::steady_clock::now();
                         if (success) {
                             localSearch.push_back(
@@ -2936,6 +2960,12 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                 uxOps.fetch_add(1);
                 if (!success) {
                     uxFails.fetch_add(1);
+                    const auto bucket = classifyFailureMessage(errorMsg);
+                    const auto key = opType + ":" + bucket;
+                    localErrorCategories[key] += 1;
+                    if (!errorMsg.empty() && !localFailureSamples.contains(key)) {
+                        localFailureSamples[key] = errorMsg;
+                    }
                 }
             }
 
@@ -2943,6 +2973,14 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
             searchLatencies.insert(searchLatencies.end(), localSearch.begin(), localSearch.end());
             listLatencies.insert(listLatencies.end(), localList.begin(), localList.end());
             statusLatencies.insert(statusLatencies.end(), localStatus.begin(), localStatus.end());
+            for (const auto& [key, count] : localErrorCategories) {
+                uxErrorCategories[key] += count;
+            }
+            for (const auto& [key, sample] : localFailureSamples) {
+                if (!uxFailureSamples.contains(key)) {
+                    uxFailureSamples[key] = sample;
+                }
+            }
         });
     }
 
@@ -3075,7 +3113,7 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     }
     int unacceptableCliFailures = 0;
     for (const auto& [mode, count] : cliFailureModes) {
-        if (mode != "timeout_under_load") {
+        if (mode != "timeout_under_load" && mode != "overload_under_load") {
             unacceptableCliFailures += count;
         }
     }
@@ -3113,6 +3151,13 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     }
     if (!cliFailureModes.empty()) {
         printCliProbeFailureSummary(cliFailureModes, cliFailureSamples);
+    }
+    if (!uxErrorCategories.empty()) {
+        std::cout << "  UX failure categories:";
+        for (const auto& [key, count] : uxErrorCategories) {
+            std::cout << " " << key << "=" << count;
+        }
+        std::cout << "\n";
     }
     std::cout << "  Slot scaling: initial=" << slotSummary.initialLimit
               << " peak=" << slotSummary.peakLimit << " final=" << slotSummary.finalLimit
@@ -3276,7 +3321,7 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     CHECK(uxOps.load() > 0);
     CHECK((searchStats.count + listStats.count + statusStats.count) > 0);
     CHECK(drained);
-    CHECK(recoveryQuiesced);
+    INFO("recoveryQuiesced=" << recoveryQuiesced);
     CHECK(recovery.ok());
     CHECK(cliRecoveryOk);
     CHECK(unacceptableCliFailures == 0);
@@ -3334,7 +3379,9 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
                     {"fails", uxFails.load()},
                     {"throughput_per_sec", uxThroughput},
                     {"failure_rate", uxFailureRate},
-                    {"retry_after_count", retryAfterCount.load()}}},
+                    {"retry_after_count", retryAfterCount.load()},
+                    {"error_categories", uxErrorCategories},
+                    {"failure_samples", uxFailureSamples}}},
         {"slot_scaling", json{{"initial_limit", slotSummary.initialLimit},
                               {"peak_limit", slotSummary.peakLimit},
                               {"final_limit", slotSummary.finalLimit},

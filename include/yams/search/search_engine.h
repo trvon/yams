@@ -373,6 +373,13 @@ struct SearchEngineConfig {
     size_t graphMaxPaths = 32;               // Soft cap on path enumeration
     float graphHopDecay = 0.90f;             // Per-hop decay factor when path scoring is enabled
 
+    // Per-profile graph signal weights for reranking composition
+    float graphEntitySignalWeight = 0.40F;
+    float graphStructuralSignalWeight = 0.20F;
+    float graphCoverageSignalWeight = 0.20F;
+    float graphPathSignalWeight = 0.10F;
+    float graphCorroborationFloor = 0.35F;
+
     // Model-based reranking (cross-encoder) - opt-in, requires ONNX model
     bool enableModelReranking = false; // Use cross-encoder model (slow, opt-in)
 

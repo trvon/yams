@@ -513,17 +513,17 @@ TEST_CASE("SearchTuner: priority order - MINIMAL takes precedence", "[unit][sear
     CHECK(state == TuningState::MINIMAL);
 }
 
-TEST_CASE("SearchTuner: small scientific-like prose defaults to SMALL_PROSE",
+TEST_CASE("SearchTuner: small scientific-like prose gets SCIENTIFIC",
           "[unit][search_tuner][edge]") {
     CorpusStats stats;
     stats.docCount = 500;
     stats.proseRatio = 0.9f;
-    stats.pathDepthAvg = 6.0f; // Deep paths still scientific when low-structure
+    stats.pathDepthAvg = 6.0f; // Deep absolute paths, but relative depth defaults to 0 (flat)
     stats.tagCoverage = 0.02f; // No tags
     stats.symbolDensity = 0.0f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::SMALL_PROSE);
+    CHECK(state == TuningState::SCIENTIFIC);
 }
 
 TEST_CASE("SearchTuner: large scientific-like prose still uses SCIENTIFIC",
@@ -859,4 +859,221 @@ TEST_CASE("lerpValue: float and integral types", "[unit][search_tuner][community
 
     // Int lerp
     CHECK(lerpValue(0, 10, 0.3f) == 3); // round(3.0) = 3
+}
+
+// =============================================================================
+// Phase 7: Graph activation tests (validates downstream path works)
+// =============================================================================
+
+TEST_CASE("SearchTuner: graph features activate when symbolDensity > 0.1",
+          "[unit][search_tuner][graph]") {
+    CorpusStats stats;
+    stats.docCount = 940;
+    stats.proseRatio = 0.90f;
+    stats.codeRatio = 0.05f;
+    stats.binaryRatio = 0.05f;
+    stats.symbolDensity = 0.25f; // hasKnowledgeGraph() = true
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+
+    CHECK(p.enableGraphRerank == true);
+    CHECK(p.weights.kg.value > 0.0f);
+    CHECK(p.kgMaxResults > 0);
+    CHECK(p.graphScoringBudgetMs > 0);
+}
+
+TEST_CASE("SearchTuner: graph features disabled when symbolDensity = 0",
+          "[unit][search_tuner][graph]") {
+    CorpusStats stats;
+    stats.docCount = 940;
+    stats.proseRatio = 0.90f;
+    stats.codeRatio = 0.05f;
+    stats.binaryRatio = 0.05f;
+    stats.symbolDensity = 0.0f; // hasKnowledgeGraph() = false
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+
+    CHECK(p.enableGraphRerank == false);
+    CHECK(p.weights.kg.value == 0.0f);
+    CHECK(p.kgMaxResults == 0);
+}
+
+TEST_CASE("SearchTuner: graph richness scales budget and results", "[unit][search_tuner][graph]") {
+    // Low richness: symbolDensity=0.2 → graphRichness=(0.2-0.1)/1.5≈0.067
+    CorpusStats low;
+    low.docCount = 2000;
+    low.codeRatio = 0.50f;
+    low.proseRatio = 0.40f;
+    low.symbolDensity = 0.2f;
+    low.embeddingCoverage = 0.80f;
+
+    // High richness: symbolDensity=1.0 → graphRichness=(1.0-0.1)/1.5=0.6
+    CorpusStats high;
+    high.docCount = 2000;
+    high.codeRatio = 0.50f;
+    high.proseRatio = 0.40f;
+    high.symbolDensity = 1.0f;
+    high.embeddingCoverage = 0.80f;
+
+    SearchTuner lowTuner(low);
+    SearchTuner highTuner(high);
+
+    // Higher richness → more budget and results (these don't normalize away)
+    CHECK(highTuner.getParams().graphScoringBudgetMs > lowTuner.getParams().graphScoringBudgetMs);
+    CHECK(highTuner.getParams().kgMaxResults > lowTuner.getParams().kgMaxResults);
+    CHECK(highTuner.getParams().graphRerankWeight > lowTuner.getParams().graphRerankWeight);
+}
+
+// =============================================================================
+// Phase 8: SCIENTIFIC size guard removal tests
+// =============================================================================
+
+TEST_CASE("SearchTuner: 940-doc scientific corpus gets SCIENTIFIC state",
+          "[unit][search_tuner][scientific]") {
+    CorpusStats stats;
+    stats.docCount = 940; // < 1000 (isSmall)
+    stats.proseRatio = 0.90f;
+    stats.codeRatio = 0.05f;
+    stats.binaryRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5; // < 1.5 (flat paths)
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+    stats.symbolDensity = 0.25f;
+    stats.embeddingCoverage = 0.80f;
+
+    auto state = SearchTuner::computeState(stats);
+    CHECK(state == TuningState::SCIENTIFIC);
+
+    // Verify SCIENTIFIC params activate
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+    CHECK(p.semanticRescueSlots.value == 2);
+    CHECK(p.enableSubPhraseRescoring == true);
+    CHECK(p.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
+}
+
+TEST_CASE("SearchTuner: 50-doc scientific corpus still gets MINIMAL",
+          "[unit][search_tuner][scientific]") {
+    CorpusStats stats;
+    stats.docCount = 50; // < 100 (isMinimal takes priority)
+    stats.proseRatio = 0.90f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+
+    auto state = SearchTuner::computeState(stats);
+    CHECK(state == TuningState::MINIMAL);
+}
+
+// =============================================================================
+// Phase 9: Graph feature activation tests
+// =============================================================================
+
+TEST_CASE("SearchTuner: path enumeration activates for rich KG",
+          "[unit][search_tuner][graph_features]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.90f;
+    stats.codeRatio = 0.05f;
+    stats.symbolDensity = 0.8f; // graphRichness = (0.8-0.1)/1.5 ≈ 0.47 > 0.3
+    stats.embeddingCoverage = 0.80f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+    CHECK(p.graphEnablePathEnumeration == true);
+    CHECK(p.enableGraphQueryExpansion == true);
+}
+
+TEST_CASE("SearchTuner: path enumeration off for sparse KG",
+          "[unit][search_tuner][graph_features]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.90f;
+    stats.codeRatio = 0.05f;
+    stats.symbolDensity = 0.2f; // graphRichness = (0.2-0.1)/1.5 ≈ 0.067 < 0.3
+    stats.embeddingCoverage = 0.80f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+    CHECK(p.graphEnablePathEnumeration == false);
+    CHECK(p.enableGraphQueryExpansion == false);
+}
+
+TEST_CASE("SearchTuner: path enumeration off when no KG", "[unit][search_tuner][graph_features]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.90f;
+    stats.codeRatio = 0.05f;
+    stats.symbolDensity = 0.0f; // no KG
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+    CHECK(p.graphEnablePathEnumeration == false);
+    CHECK(p.enableGraphQueryExpansion == false);
+}
+
+// =============================================================================
+// Phase 10: Graph signal weight tuning tests
+// =============================================================================
+
+TEST_CASE("TunedParams: SCIENTIFIC profile has entity-heavy graph signals",
+          "[unit][search_tuner][graph_signals]") {
+    auto p = getTunedParams(TuningState::SCIENTIFIC);
+    CHECK(p.graphEntitySignalWeight == Approx(0.50f));
+    CHECK(p.graphStructuralSignalWeight == Approx(0.15f));
+    CHECK(p.graphCoverageSignalWeight == Approx(0.15f));
+    CHECK(p.graphPathSignalWeight == Approx(0.10f));
+    CHECK(p.graphCorroborationFloor == Approx(0.25f));
+}
+
+TEST_CASE("TunedParams: SMALL_CODE profile has structure-heavy graph signals",
+          "[unit][search_tuner][graph_signals]") {
+    auto p = getTunedParams(TuningState::SMALL_CODE);
+    CHECK(p.graphEntitySignalWeight == Approx(0.25f));
+    CHECK(p.graphStructuralSignalWeight == Approx(0.35f));
+    CHECK(p.graphCoverageSignalWeight == Approx(0.20f));
+    CHECK(p.graphPathSignalWeight == Approx(0.15f));
+    CHECK(p.graphCorroborationFloor == Approx(0.40f));
+}
+
+TEST_CASE("TunedParams: default profiles use balanced graph signals",
+          "[unit][search_tuner][graph_signals]") {
+    auto p = getTunedParams(TuningState::MIXED_PRECISION);
+    CHECK(p.graphEntitySignalWeight == Approx(0.40f));
+    CHECK(p.graphStructuralSignalWeight == Approx(0.20f));
+    CHECK(p.graphCoverageSignalWeight == Approx(0.20f));
+    CHECK(p.graphPathSignalWeight == Approx(0.10f));
+    CHECK(p.graphCorroborationFloor == Approx(0.35f));
+}
+
+TEST_CASE("Community blend lerps graph signal weights", "[unit][search_tuner][graph_signals]") {
+    auto params = getTunedParams(TuningState::MIXED_PRECISION);
+    applyCommunityLayer(TuningState::SCIENTIFIC, TuningState::MIXED_PRECISION, params);
+    // 60% toward SCIENTIFIC: 0.4*0.40 + 0.6*0.50 = 0.46
+    CHECK(params.graphEntitySignalWeight == Approx(0.46f).margin(0.01f));
+    // 60% toward SCIENTIFIC: 0.4*0.20 + 0.6*0.15 = 0.17
+    CHECK(params.graphStructuralSignalWeight == Approx(0.17f).margin(0.01f));
+    // 60% toward SCIENTIFIC: 0.4*0.35 + 0.6*0.25 = 0.29
+    CHECK(params.graphCorroborationFloor == Approx(0.29f).margin(0.01f));
+}
+
+TEST_CASE("Graph signal weights propagate to SearchEngineConfig",
+          "[unit][search_tuner][graph_signals]") {
+    auto p = getTunedParams(TuningState::SCIENTIFIC);
+    SearchEngineConfig config;
+    p.applyTo(config);
+    CHECK(config.graphEntitySignalWeight == Approx(0.50f));
+    CHECK(config.graphStructuralSignalWeight == Approx(0.15f));
+    CHECK(config.graphCorroborationFloor == Approx(0.25f));
 }

@@ -436,6 +436,7 @@ private:
     [[nodiscard]] bool hasTitleExtractor() const;
     void refreshStageAvailability();
     void logStageAvailabilitySnapshot() const;
+    void requeueMissedEntityExtractions();
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;

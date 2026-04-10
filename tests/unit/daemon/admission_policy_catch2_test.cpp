@@ -37,14 +37,16 @@ TEST_CASE("AdmissionPolicy computes socket headroom bands", "[daemon][admission-
         const auto bands = AdmissionPolicy::computeSocketHeadroomBands(1);
         CHECK(bands.general == 1);
         CHECK(bands.write == 2);
-        CHECK(bands.interactive == 1);
+        CHECK(bands.interactive == 2);
+        CHECK(bands.search == 3);
     }
 
     SECTION("medium limit") {
         const auto bands = AdmissionPolicy::computeSocketHeadroomBands(12);
         CHECK(bands.general == 2);
         CHECK(bands.write == 4);
-        CHECK(bands.interactive == 2);
+        CHECK(bands.interactive == 3);
+        CHECK(bands.search == 4);
     }
 }
 
@@ -78,14 +80,21 @@ TEST_CASE("AdmissionPolicy evaluates socket admission consistently",
                                                        false) == SocketAdmissionVerdict::admit);
     }
 
-    SECTION("interactive headroom favors reads and search") {
+    SECTION("interactive headroom favors reads") {
         CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 3, kLimit, CommandClass::read,
                                                        false) == SocketAdmissionVerdict::admit);
         CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 3, kLimit, CommandClass::search,
                                                        false) == SocketAdmissionVerdict::admit);
         CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 3, kLimit, CommandClass::write,
                                                        false) == SocketAdmissionVerdict::admit);
-        CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 4, kLimit, CommandClass::read,
+        CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 5, kLimit, CommandClass::read,
+                                                       false) == SocketAdmissionVerdict::reject);
+    }
+
+    SECTION("search gets one extra headroom band") {
+        CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 5, kLimit, CommandClass::search,
+                                                       false) == SocketAdmissionVerdict::admit);
+        CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 6, kLimit, CommandClass::search,
                                                        false) == SocketAdmissionVerdict::reject);
     }
 
@@ -94,12 +103,14 @@ TEST_CASE("AdmissionPolicy evaluates socket admission consistently",
                                                        false) == SocketAdmissionVerdict::admit);
         CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 5, kLimit, CommandClass::read,
                                                        false) == SocketAdmissionVerdict::reject);
+        CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 6, kLimit, CommandClass::read,
+                                                       false) == SocketAdmissionVerdict::reject);
     }
 
     SECTION("beyond all headroom rejects") {
-        CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 6, kLimit, CommandClass::search,
+        CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 7, kLimit, CommandClass::read,
                                                        false) == SocketAdmissionVerdict::reject);
-        CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 6, kLimit, CommandClass::write,
+        CHECK(AdmissionPolicy::evaluateSocketAdmission(kLimit + 8, kLimit, CommandClass::write,
                                                        false) == SocketAdmissionVerdict::reject);
     }
 }

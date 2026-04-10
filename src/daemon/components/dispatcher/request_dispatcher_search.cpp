@@ -26,7 +26,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         const auto requestStart = std::chrono::steady_clock::now();
         const std::string traceId = yams::core::generateUUID();
         const uint32_t searchCap = ResourceGovernor::instance().maxSearchConcurrency();
-        auto searchGuard = acquireSearchAdmission(searchCap);
+        auto searchGuard = co_await acquireSearchAdmission(searchCap);
         if (serviceManager_ != nullptr && !searchGuard) {
             co_return admission::makeBusyError("Search concurrency limit reached",
                                                admission::captureSnapshot(serviceManager_, state_));

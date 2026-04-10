@@ -453,11 +453,24 @@ void PostIngestQueue::setSymbolExtensionMap(std::unordered_map<std::string, std:
 
 void PostIngestQueue::setEntityProviders(
     std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> providers) {
+    bool hadProviders = false;
     {
         std::lock_guard<std::mutex> lock(entityMutex_);
+        hadProviders = !entityProviders_.empty();
         entityProviders_ = std::move(providers);
     }
     refreshStageAvailability();
+
+    // If providers were just added for the first time, re-queue already-processed
+    // documents that missed entity extraction during initial ingest.
+    bool hasProviders = false;
+    {
+        std::lock_guard<std::mutex> lock(entityMutex_);
+        hasProviders = !entityProviders_.empty();
+    }
+    if (!hadProviders && hasProviders && processed_.load(std::memory_order_relaxed) > 0) {
+        requeueMissedEntityExtractions();
+    }
 }
 
 void PostIngestQueue::setTitleExtractor(search::EntityExtractionFunc extractor) {
@@ -535,6 +548,53 @@ void PostIngestQueue::logStageAvailabilitySnapshot() const {
         stagePaused_[3].load(std::memory_order_acquire),
         stagePaused_[4].load(std::memory_order_acquire), maxExtractionConcurrent(),
         maxKgConcurrent(), maxSymbolConcurrent(), maxEntityConcurrent(), maxTitleConcurrent());
+}
+
+void PostIngestQueue::requeueMissedEntityExtractions() {
+    if (!meta_) {
+        return;
+    }
+
+    // Snapshot current entity providers to check extension support
+    std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> providers;
+    {
+        std::lock_guard<std::mutex> lock(entityMutex_);
+        providers = entityProviders_;
+    }
+    if (providers.empty()) {
+        return;
+    }
+
+    // Query all indexed documents and dispatch eligible ones to the entity channel
+    metadata::DocumentQueryOptions opts;
+    auto result = meta_->queryDocuments(opts);
+    if (!result) {
+        spdlog::warn("[PostIngestQueue] Failed to query documents for entity re-queue: {}",
+                     result.error().message);
+        return;
+    }
+
+    size_t dispatched = 0;
+    for (const auto& doc : result.value()) {
+        bool supported = false;
+        for (const auto& prov : providers) {
+            if (prov && prov->supports(doc.fileExtension)) {
+                supported = true;
+                break;
+            }
+        }
+        if (supported) {
+            dispatchToEntityChannel(doc.sha256Hash, doc.id, doc.filePath, doc.fileExtension,
+                                    nullptr);
+            ++dispatched;
+        }
+    }
+
+    if (dispatched > 0) {
+        spdlog::info(
+            "[PostIngestQueue] Re-queued {} already-indexed documents for entity extraction",
+            dispatched);
+    }
 }
 
 std::size_t PostIngestQueue::resolveChannelCapacity() const {

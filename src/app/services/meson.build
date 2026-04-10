@@ -1,7 +1,7 @@
 tl_expected_dep = dependency('tl-expected', required: true)
 
-# RE2 is resolved at the project root; pick it up here for grep_service.
-re2_dep = dependency('re2', required: false)
+# RE2 is resolved at the project root; reuse that dependency so its include_type
+# policy (system includes for third-party headers) is preserved here.
 
 # Collect optional deps so they're added consistently to both lib and dep.
 _optional_deps = []

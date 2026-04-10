@@ -10,6 +10,116 @@
 namespace yams {
 namespace search {
 
+namespace {
+
+std::string facetFieldValue(const SearchResultItem& item, const std::string& field) {
+    if (field == "contentType") {
+        return item.contentType;
+    }
+    if (field == "language") {
+        return item.detectedLanguage;
+    }
+    if (field == "extension") {
+        const auto pos = item.path.rfind('.');
+        if (pos != std::string::npos) {
+            return item.path.substr(pos);
+        }
+        return {};
+    }
+    auto it = item.metadata.find(field);
+    if (it != item.metadata.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+void generateHighlightsForItem(SearchResultItem& item, const std::vector<std::string>& queryTerms,
+                               size_t maxHighlights) {
+    if (queryTerms.empty()) {
+        return;
+    }
+
+    if (!item.contentPreview.empty()) {
+        SearchHighlight highlight;
+        highlight.field = "content";
+        highlight.snippet = item.contentPreview;
+        highlight.startOffset = 0;
+        highlight.endOffset = item.contentPreview.length();
+
+        for (const auto& term : queryTerms) {
+            const size_t pos = item.contentPreview.find(term);
+            if (pos != std::string::npos) {
+                highlight.highlights.emplace_back(pos, pos + term.length());
+            }
+        }
+
+        if (!highlight.highlights.empty()) {
+            item.highlights.push_back(std::move(highlight));
+        }
+    }
+
+    for (const auto& term : queryTerms) {
+        const size_t pos = item.title.find(term);
+        if (pos != std::string::npos) {
+            SearchHighlight titleHighlight;
+            titleHighlight.field = "title";
+            titleHighlight.snippet = item.title;
+            titleHighlight.startOffset = 0;
+            titleHighlight.endOffset = item.title.length();
+            titleHighlight.highlights.emplace_back(pos, pos + term.length());
+
+            item.highlights.push_back(std::move(titleHighlight));
+            break;
+        }
+    }
+
+    if (item.highlights.size() > maxHighlights) {
+        item.highlights.resize(maxHighlights);
+    }
+}
+
+void generateSnippetForItem(SearchResultItem& item, size_t snippetLength) {
+    if (snippetLength == 0) {
+        return;
+    }
+    if (item.contentPreview.length() > snippetLength) {
+        item.contentPreview = item.contentPreview.substr(0, snippetLength) + "...";
+    }
+    item.previewLength = item.contentPreview.length();
+}
+
+void finalizeFacetCounts(
+    const std::vector<std::string>& facetFields,
+    const std::unordered_map<std::string, std::unordered_map<std::string, size_t>>& mergedCounts,
+    std::vector<SearchFacet>& facets) {
+    facets.clear();
+    facets.reserve(facetFields.size());
+
+    for (const auto& field : facetFields) {
+        auto it = mergedCounts.find(field);
+        if (it == mergedCounts.end()) {
+            continue;
+        }
+
+        SearchFacet facet;
+        facet.name = field;
+        facet.displayName = field;
+        facet.values.reserve(it->second.size());
+        for (const auto& [val, count] : it->second) {
+            facet.values.push_back({val, val, count, false});
+        }
+
+        std::sort(facet.values.begin(), facet.values.end(),
+                  [](const auto& a, const auto& b) { return a.count > b.count; });
+        facet.totalValues = facet.values.size();
+        if (!facet.values.empty()) {
+            facets.push_back(std::move(facet));
+        }
+    }
+}
+
+} // namespace
+
 ParallelPostProcessor::ProcessingResult
 ParallelPostProcessor::process(std::vector<SearchResultItem> results, const SearchFilters* filters,
                                const std::vector<std::string>& facetFields,
@@ -75,21 +185,7 @@ ParallelPostProcessor::process(std::vector<SearchResultItem> results, const Sear
                         for (size_t idx = start; idx < end; ++idx) {
                             const auto& item = result.filteredResults[idx];
                             for (const auto& field : facetFields) {
-                                std::string value;
-                                if (field == "contentType")
-                                    value = item.contentType;
-                                else if (field == "language")
-                                    value = item.detectedLanguage;
-                                else if (field == "extension") {
-                                    auto pos = item.path.rfind('.');
-                                    if (pos != std::string::npos) {
-                                        value = item.path.substr(pos);
-                                    }
-                                } else {
-                                    auto it = item.metadata.find(field);
-                                    if (it != item.metadata.end())
-                                        value = it->second;
-                                }
+                                std::string value = facetFieldValue(item, field);
                                 if (!value.empty())
                                     fieldCounts[field][value]++;
                             }
@@ -118,52 +214,11 @@ ParallelPostProcessor::process(std::vector<SearchResultItem> results, const Sear
                         // Generate highlights (reads contentPreview)
                         if (!queryTerms.empty()) {
                             // Logic from generateHighlightsParallel inlined/adapted for single item
-                            if (!item.contentPreview.empty()) {
-                                SearchHighlight h;
-                                h.field = "content";
-                                h.snippet = item.contentPreview; // Copy before truncate? No,
-                                                                 // highlight uses offsets
-                                h.startOffset = 0;
-                                h.endOffset = item.contentPreview.length();
-
-                                for (const auto& term : queryTerms) {
-                                    size_t pos = item.contentPreview.find(term);
-                                    if (pos != std::string::npos) {
-                                        h.highlights.emplace_back(pos, pos + term.length());
-                                    }
-                                }
-                                if (!h.highlights.empty())
-                                    item.highlights.push_back(std::move(h));
-                            }
-
-                            // Title highlights
-                            for (const auto& term : queryTerms) {
-                                size_t pos = item.title.find(term);
-                                if (pos != std::string::npos) {
-                                    SearchHighlight h;
-                                    h.field = "title";
-                                    h.snippet = item.title;
-                                    h.startOffset = 0;
-                                    h.endOffset = item.title.length();
-                                    h.highlights.emplace_back(pos, pos + term.length());
-                                    item.highlights.push_back(std::move(h));
-                                    break;
-                                }
-                            }
-
-                            if (item.highlights.size() > maxHighlights) {
-                                item.highlights.resize(maxHighlights);
-                            }
+                            generateHighlightsForItem(item, queryTerms, maxHighlights);
                         }
 
                         // Generate snippets (modifies contentPreview)
-                        if (snippetLength > 0) {
-                            if (item.contentPreview.length() > snippetLength) {
-                                item.contentPreview =
-                                    item.contentPreview.substr(0, snippetLength) + "...";
-                            }
-                            item.previewLength = item.contentPreview.length();
-                        }
+                        generateSnippetForItem(item, snippetLength);
                     }
 
                     return localFacets;
@@ -183,26 +238,7 @@ ParallelPostProcessor::process(std::vector<SearchResultItem> results, const Sear
         }
 
         // Finalize facets
-        for (const auto& field : facetFields) {
-            if (mergedCounts.find(field) == mergedCounts.end())
-                continue;
-
-            SearchFacet facet;
-            facet.name = field;
-            facet.displayName = field;
-            auto& counts = mergedCounts[field];
-
-            for (const auto& [val, count] : counts) {
-                facet.values.push_back({val, val, count, false});
-            }
-
-            // Sort
-            std::sort(facet.values.begin(), facet.values.end(),
-                      [](const auto& a, const auto& b) { return a.count > b.count; });
-
-            facet.totalValues = facet.values.size();
-            result.facets.push_back(std::move(facet));
-        }
+        finalizeFacetCounts(facetFields, mergedCounts, result.facets);
 
         result.highlightsGenerated = (queryAst != nullptr);
         result.snippetsGenerated = (snippetLength > 0);
@@ -217,23 +253,31 @@ ParallelPostProcessor::process(std::vector<SearchResultItem> results, const Sear
             result.filteredResults = std::move(results);
         }
 
-        // 2. Generate facets
+        std::unordered_map<std::string, std::unordered_map<std::string, size_t>> facetCounts;
         if (!facetFields.empty()) {
-            result.facets = generateFacetsParallel(result.filteredResults, facetFields);
+            facetCounts.reserve(facetFields.size());
         }
 
-        // 3. Generate highlights
-        if (queryAst) {
-            auto queryTerms = extractQueryTerms(queryAst);
-            generateHighlightsParallel(result.filteredResults, queryTerms, maxHighlights);
-            result.highlightsGenerated = true;
+        for (auto& item : result.filteredResults) {
+            if (!facetFields.empty()) {
+                for (const auto& field : facetFields) {
+                    std::string value = facetFieldValue(item, field);
+                    if (!value.empty()) {
+                        facetCounts[field][value]++;
+                    }
+                }
+            }
+            if (!queryTerms.empty()) {
+                generateHighlightsForItem(item, queryTerms, maxHighlights);
+            }
+            generateSnippetForItem(item, snippetLength);
         }
 
-        // 4. Generate snippets
-        if (snippetLength > 0) {
-            generateSnippetsParallel(result.filteredResults, snippetLength);
-            result.snippetsGenerated = true;
+        if (!facetFields.empty()) {
+            finalizeFacetCounts(facetFields, facetCounts, result.facets);
         }
+        result.highlightsGenerated = !queryTerms.empty();
+        result.snippetsGenerated = (snippetLength > 0);
     }
 
     return result;
@@ -254,24 +298,7 @@ ParallelPostProcessor::generateFacetsParallel(const std::vector<SearchResultItem
 
         // Count values for this facet field
         for (const auto& result : results) {
-            std::string value;
-
-            if (fieldName == "contentType") {
-                value = result.contentType;
-            } else if (fieldName == "language") {
-                value = result.detectedLanguage;
-            } else if (fieldName == "extension") {
-                auto pos = result.path.rfind('.');
-                if (pos != std::string::npos) {
-                    value = result.path.substr(pos);
-                }
-            } else {
-                // Check metadata
-                auto it = result.metadata.find(fieldName);
-                if (it != result.metadata.end()) {
-                    value = it->second;
-                }
-            }
+            std::string value = facetFieldValue(result, fieldName);
 
             if (!value.empty()) {
                 valueCounts[value]++;
@@ -308,57 +335,14 @@ void ParallelPostProcessor::generateHighlightsParallel(std::vector<SearchResultI
                                                        const std::vector<std::string>& queryTerms,
                                                        size_t maxHighlights) {
     for (auto& result : results) {
-        // Generate highlights for content preview
-        if (!result.contentPreview.empty()) {
-            SearchHighlight highlight;
-            highlight.field = "content";
-            highlight.snippet = result.contentPreview;
-            highlight.startOffset = 0;
-            highlight.endOffset = result.contentPreview.length();
-
-            // Find term positions (simplified)
-            for (const auto& term : queryTerms) {
-                size_t pos = result.contentPreview.find(term);
-                if (pos != std::string::npos) {
-                    highlight.highlights.emplace_back(pos, pos + term.length());
-                }
-            }
-
-            if (!highlight.highlights.empty()) {
-                result.highlights.push_back(std::move(highlight));
-            }
-        }
-
-        // Generate highlights for title
-        for (const auto& term : queryTerms) {
-            size_t pos = result.title.find(term);
-            if (pos != std::string::npos) {
-                SearchHighlight titleHighlight;
-                titleHighlight.field = "title";
-                titleHighlight.snippet = result.title;
-                titleHighlight.startOffset = 0;
-                titleHighlight.endOffset = result.title.length();
-                titleHighlight.highlights.emplace_back(pos, pos + term.length());
-
-                result.highlights.push_back(std::move(titleHighlight));
-                break; // Only one title highlight
-            }
-        }
-
-        // Limit highlights per result
-        if (result.highlights.size() > maxHighlights) {
-            result.highlights.resize(maxHighlights);
-        }
+        generateHighlightsForItem(result, queryTerms, maxHighlights);
     }
 }
 
 void ParallelPostProcessor::generateSnippetsParallel(std::vector<SearchResultItem>& results,
                                                      size_t snippetLength) {
     for (auto& result : results) {
-        if (result.contentPreview.length() > snippetLength) {
-            result.contentPreview = result.contentPreview.substr(0, snippetLength) + "...";
-        }
-        result.previewLength = result.contentPreview.length();
+        generateSnippetForItem(result, snippetLength);
     }
 }
 

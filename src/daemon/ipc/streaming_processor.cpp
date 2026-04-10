@@ -10,6 +10,7 @@
 #include <variant>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
@@ -382,7 +383,8 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                 co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
             }
             // pending_final_ should always be set for BatchEmbed/EmbedDocs, but handle gracefully
-            ErrorResponse err{ErrorCode::InternalError, "Missing final response for embedding"};
+            auto err = yams::daemon::dispatch::makeErrorResponse(
+                ErrorCode::InternalError, "Missing final response for embedding");
             reset_state();
             co_return ResponseChunk{.data = Response{std::move(err)}, .is_last_chunk = true};
         }
@@ -400,8 +402,8 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                 reset_state();
                 co_return ResponseChunk{.data = std::move(final), .is_last_chunk = true};
             }
-            ErrorResponse err{ErrorCode::InternalError,
-                              "Missing final response for embed documents"};
+            auto err = yams::daemon::dispatch::makeErrorResponse(
+                ErrorCode::InternalError, "Missing final response for embed documents");
             reset_state();
             co_return ResponseChunk{.data = Response{std::move(err)}, .is_last_chunk = true};
         }
@@ -584,7 +586,8 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
         co_return ResponseChunk{.data = Response{std::move(ok)}, .is_last_chunk = true};
     } catch (const std::exception& e) {
         spdlog::error("StreamingRequestProcessor::next_chunk() exception: {}", e.what());
-        ErrorResponse err{ErrorCode::InternalError, std::string("Streaming error: ") + e.what()};
+        auto err = yams::daemon::dispatch::makeErrorResponse(
+            ErrorCode::InternalError, std::string("Streaming error: ") + e.what());
         co_return ResponseChunk{.data = Response{std::move(err)}, .is_last_chunk = true};
     }
 }

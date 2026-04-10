@@ -212,18 +212,29 @@ void RequestDispatcher::recordRejected(std::atomic<uint64_t>& counter) {
     counter.fetch_add(1, std::memory_order_acq_rel);
 }
 
-RequestDispatcher::SearchAdmissionGuard
+boost::asio::awaitable<RequestDispatcher::SearchAdmissionGuard>
 RequestDispatcher::acquireSearchAdmission(uint32_t concurrencyCap) {
     if (serviceManager_ == nullptr) {
-        return SearchAdmissionGuard{};
+        co_return SearchAdmissionGuard{};
     }
 
     serviceManager_->onSearchRequestQueued();
-    if (!serviceManager_->tryStartSearchRequest(concurrencyCap)) {
-        recordRejected(state_->stats.searchRequestsRejected);
-        return SearchAdmissionGuard{serviceManager_, false};
+    const auto maxWaitMs = std::max<uint32_t>(1000u, TuneAdvisor::listAdmissionWaitMs());
+    auto executor = co_await boost::asio::this_coro::executor;
+    boost::asio::steady_timer timer(executor);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(maxWaitMs);
+
+    while (true) {
+        if (serviceManager_->tryStartSearchRequest(concurrencyCap)) {
+            co_return SearchAdmissionGuard{serviceManager_, true};
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            recordRejected(state_->stats.searchRequestsRejected);
+            co_return SearchAdmissionGuard{serviceManager_, false};
+        }
+        timer.expires_after(std::chrono::milliseconds(5));
+        co_await timer.async_wait(boost::asio::use_awaitable);
     }
-    return SearchAdmissionGuard{serviceManager_, true};
 }
 
 boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req) {

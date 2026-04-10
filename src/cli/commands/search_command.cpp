@@ -2,6 +2,8 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -49,6 +51,35 @@ using json = nlohmann::json;
 using yams::app::services::utils::normalizeLookupPath;
 
 namespace {
+
+bool cli_perf_trace_enabled() {
+    const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
+    if (raw == nullptr || *raw == '\0') {
+        return false;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value == "1" || value == "true" || value == "on" || value == "yes";
+}
+
+void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
+                    std::string_view note = {}) {
+    if (!cli_perf_trace_enabled()) {
+        return;
+    }
+    if (note.empty()) {
+        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld\n",
+                     static_cast<int>(stage.size()), stage.data(),
+                     static_cast<long long>(elapsed.count()));
+    } else {
+        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld note=%.*s\n",
+                     static_cast<int>(stage.size()), stage.data(),
+                     static_cast<long long>(elapsed.count()), static_cast<int>(note.size()),
+                     note.data());
+    }
+    std::fflush(stderr);
+}
 
 std::string relationTypesToHuman(std::string relationTypes) {
     if (relationTypes.empty()) {
@@ -1814,6 +1845,7 @@ public:
         dreq.indexedBefore = indexedBefore_;
 
         auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
+            const auto renderStart = std::chrono::steady_clock::now();
             stopSpinner();
             // Convert daemon results to unified items
             std::vector<UnifiedItem> items;
@@ -1836,27 +1868,37 @@ public:
             ctx.method = "daemon";
             ctx.traceId = resp.traceId;
 
-            return renderResults(items, ctx);
+            auto rendered = renderResults(items, ctx);
+            cli_perf_trace("search.render",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - renderStart),
+                           rendered ? "ok" : "error");
+            return rendered;
         };
 
         if (cliOneShot) {
             auto planRes = yams::cli::prepare_cli_daemon_client_plan(
                 clientConfig, daemonOpts.accessPolicy, daemonOpts.readyTimeout);
             if (!planRes) {
-                co_return co_await yams::cli::detail::daemon_error_or_local_fallback_async(
-                    planRes.error(), "search", localFallback);
+                stopSpinner();
+                co_return planRes.error();
             }
 
             auto plan = std::move(planRes.value());
             yams::daemon::DaemonClient directClient(plan.config);
             directClient.setStreamingEnabled(false);
+            const auto daemonCallStart = std::chrono::steady_clock::now();
             auto directRes = co_await directClient.unarySearch(dreq);
+            cli_perf_trace("search.daemon_call",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - daemonCallStart),
+                           directRes ? "ok" : "error");
             if (plan.config.singleUseConnections) {
                 directClient.disconnect();
             }
             if (!directRes) {
-                co_return co_await yams::cli::detail::daemon_error_or_local_fallback_async(
-                    directRes.error(), "search", localFallback);
+                stopSpinner();
+                co_return directRes.error();
             }
             co_return render(directRes.value());
         }

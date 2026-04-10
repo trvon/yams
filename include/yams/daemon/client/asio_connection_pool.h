@@ -45,6 +45,7 @@ private:
     TransportOptions opts_;
     bool shared_{true};
     std::atomic<bool> shutdown_{false};
+    std::atomic<int64_t> last_cleanup_ns_{0};
     std::mutex mutex_;
     boost::asio::cancellation_signal shutdown_signal_; // Emitted on shutdown to cancel pending ops
 

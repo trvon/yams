@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/request_handler.h>
 
@@ -20,9 +21,9 @@ class StatusOnlyProcessor final : public RequestProcessor {
 public:
     boost::asio::awaitable<Response> process(const Request& request) override {
         if (!std::holds_alternative<StatusRequest>(request)) {
-            co_return Response{
-                std::in_place_type<ErrorResponse>,
-                ErrorResponse{yams::ErrorCode::InvalidArgument, "unexpected request type"}};
+            co_return Response{std::in_place_type<ErrorResponse>,
+                               yams::daemon::dispatch::makeErrorResponse(
+                                   yams::ErrorCode::InvalidArgument, "unexpected request type")};
         }
 
         StatusResponse response{};

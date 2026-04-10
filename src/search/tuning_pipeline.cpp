@@ -166,6 +166,18 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
     params.subPhraseScoringPenalty =
         lerpValue(params.subPhraseScoringPenalty, target.subPhraseScoringPenalty, kBlend);
 
+    // Graph signal weights
+    params.graphEntitySignalWeight =
+        lerpValue(params.graphEntitySignalWeight, target.graphEntitySignalWeight, kBlend);
+    params.graphStructuralSignalWeight =
+        lerpValue(params.graphStructuralSignalWeight, target.graphStructuralSignalWeight, kBlend);
+    params.graphCoverageSignalWeight =
+        lerpValue(params.graphCoverageSignalWeight, target.graphCoverageSignalWeight, kBlend);
+    params.graphPathSignalWeight =
+        lerpValue(params.graphPathSignalWeight, target.graphPathSignalWeight, kBlend);
+    params.graphCorroborationFloor =
+        lerpValue(params.graphCorroborationFloor, target.graphCorroborationFloor, kBlend);
+
     // Boolean gates: OR semantics (community query gets union of capabilities)
     params.enableSubPhraseRescoring =
         params.enableSubPhraseRescoring || target.enableSubPhraseRescoring;

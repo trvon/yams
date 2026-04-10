@@ -6553,6 +6553,29 @@ TEST_CASE("ServiceManager: Search load metrics", "[daemon][metrics][search]") {
         REQUIRE(finished.active == 0);
         REQUIRE(finished.queued == 0);
     }
+
+    SECTION("Failed search start keeps queued count until rejection") {
+        svc.onSearchRequestQueued();
+        const auto cap = svc.getSearchLoadMetrics().concurrencyLimit;
+        REQUIRE(svc.tryStartSearchRequest(cap));
+
+        svc.onSearchRequestQueued();
+        REQUIRE_FALSE(svc.tryStartSearchRequest(cap));
+
+        auto waiting = svc.getSearchLoadMetrics();
+        REQUIRE(waiting.active == 1);
+        REQUIRE(waiting.queued == 1);
+
+        svc.onSearchRequestRejected();
+        auto rejected = svc.getSearchLoadMetrics();
+        REQUIRE(rejected.active == 1);
+        REQUIRE(rejected.queued == 0);
+
+        svc.onSearchRequestFinished();
+        auto finished = svc.getSearchLoadMetrics();
+        REQUIRE(finished.active == 0);
+        REQUIRE(finished.queued == 0);
+    }
 }
 
 // =============================================================================

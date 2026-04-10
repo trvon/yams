@@ -171,13 +171,19 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
     params.kgMaxResults = static_cast<size_t>(std::lround(60.0 + (60.0 * graphRichness)));
     params.graphScoringBudgetMs = static_cast<int>(std::lround(8.0 + (6.0 * graphRichness)));
 
+    // Enable path enumeration and graph query expansion for rich KGs
+    params.graphEnablePathEnumeration = (graphRichness > 0.3F);
+    params.enableGraphQueryExpansion = (graphRichness > 0.3F);
+
     params.weights.normalize();
 
     std::ostringstream suffix;
     suffix << ", graph=on(symbol_density=" << stats.symbolDensity
            << ", kg_weight=" << params.weights.kg.value
            << ", graph_rerank_weight=" << params.graphRerankWeight
-           << ", graph_community_weight=" << params.graphCommunityWeight << ")";
+           << ", graph_community_weight=" << params.graphCommunityWeight
+           << ", path_enum=" << params.graphEnablePathEnumeration
+           << ", expansion=" << params.enableGraphQueryExpansion << ")";
     stateReason += suffix.str();
 }
 
@@ -526,12 +532,13 @@ TuningState SearchTuner::computeState(const storage::CorpusStats& stats, std::st
     if (isMinimal) {
         state = TuningState::MINIMAL;
         reason << "docCount=" << stats.docCount << " < 100";
-    } else if (isScientific && !isSmall) {
+    } else if (isScientific) {
         state = TuningState::SCIENTIFIC;
         reason << "prose_dominant (" << static_cast<int>(stats.proseRatio * 100)
-               << "%), benchmark_like (relative_path_depth=" << stats.pathRelativeDepthAvg
+               << "%), scientific (relative_path_depth=" << stats.pathRelativeDepthAvg
                << ", tag_coverage=" << static_cast<int>(stats.tagCoverage * 100)
-               << "%, native_symbol_density=" << stats.nativeSymbolDensity << ")";
+               << "%, native_symbol_density=" << stats.nativeSymbolDensity
+               << ", docs=" << stats.docCount << ")";
     } else if (isCode && isSmall) {
         state = TuningState::SMALL_CODE;
         reason << "code_dominant (" << static_cast<int>(stats.codeRatio * 100) << "%), small ("

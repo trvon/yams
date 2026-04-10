@@ -260,7 +260,7 @@ private:
     acquireBoundedAdmission(std::atomic<uint64_t>& activeCounter,
                             std::atomic<uint64_t>& rejectedCounter, uint32_t limit,
                             uint32_t maxWaitMs, std::atomic<uint64_t>* testOverride = nullptr);
-    SearchAdmissionGuard acquireSearchAdmission(uint32_t concurrencyCap);
+    boost::asio::awaitable<SearchAdmissionGuard> acquireSearchAdmission(uint32_t concurrencyCap);
     void recordRejected(std::atomic<uint64_t>& counter);
 
     IDaemonLifecycle* lifecycle_;
