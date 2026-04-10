@@ -16,6 +16,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [0.13.0](https://github.com/trvon/yams/compare/v0.12.1...v0.13.0) (2026-04-10)
+
+
+### Added
+
+* additional optimizations and improvements for package validation and ingestion speed ([e6e0b39](https://github.com/trvon/yams/commit/e6e0b39fd8ef462a4a8067578ed49c4e8eddc86a))
+* build improvements, docs updated and optimizations for cli latency ([8777a27](https://github.com/trvon/yams/commit/8777a27f3cf4c94255f4142840e1b32123c9b7c2))
+* checkpoint for updated unit test for daemon communication / protobuf errors. Expanding untested surface with optimizations for communication and ingestion. Additional work for ci apt / rpm install improvements, systemd configuration for installs and improved validation testing of packaging logic to reduce gpg errors. ([13be8fd](https://github.com/trvon/yams/commit/13be8fdfa0887d8cdceb4cf2764b62d6f6ef1905))
+* CLI request handling refactor for unified load and error handling. Continued refactor and improvement of search engine with scoped tuning ([48a955e](https://github.com/trvon/yams/commit/48a955e793deb5112ca36330e5c90e88a7b57e8e))
+* CorpusStats-driven tuning accuracy + per-query community detection. Fixes for clion meson detection ([473274d](https://github.com/trvon/yams/commit/473274dea0fd49cf035bda8e7928de42dbfe64a9))
+* Correctness fixes for flaky tests, improvements for linux build logic based on clion change. Improvement of tuning / governor daemon logic to simplify scaling logic ([2b2552e](https://github.com/trvon/yams/commit/2b2552e34ca379963fd3f017467d7335370e4908))
+* expanding mobile abi compiled support ([8da76c9](https://github.com/trvon/yams/commit/8da76c9c47c99efc123a667d1147f45bc7503fe6))
+* fixes for repair batching logic, hnsw rebuild and search refinements before graph building improvements land ([12e4b19](https://github.com/trvon/yams/commit/12e4b1943b19cb27aa34a51645836274fb381979))
+* graph expansion logic improvements for search testing, repair improvements for embeddings ([a99efd1](https://github.com/trvon/yams/commit/a99efd13c856d2bf53cfd7f0388a4ad95081836e))
+* improving repair logic and search engine metrics for tuning logic ([825d9aa](https://github.com/trvon/yams/commit/825d9aa66600af2f04228e2e447ca5e071d0e735))
+* Improving search speed for hybrid engine. Trying best to balance speed and precision ([c475f10](https://github.com/trvon/yams/commit/c475f101b07b8095f1ae9b5dc778ef0809ae5c9c))
+* imrpovements for repair and graph clustering logic and search usage ([ad8d7ac](https://github.com/trvon/yams/commit/ad8d7ac059c7c7624d6617751ba74cab9306859a))
+* ingestion optimizations and regression test updates ([e13ff15](https://github.com/trvon/yams/commit/e13ff15493be89cce7328b0b99b288e68d950a8d))
+* installation tests and build improvements. Test fixes related to optimizations for reranker ([883eb11](https://github.com/trvon/yams/commit/883eb1127ee9eefadffa4f865c0f8139e3def232))
+* mobile binding improvements ([3540000](https://github.com/trvon/yams/commit/35400002c901e8070b60a1db061c07d05776ac31))
+* optimizations for data returns and harden daemon status and normalize MCP/version responses ([9a1ed08](https://github.com/trvon/yams/commit/9a1ed082d4afd35ec58753510a8c30ef357f8901))
+* optimizations for multiclient usage, updated benchmarks and ci correctness improvements to improve test runs collection ([53326b6](https://github.com/trvon/yams/commit/53326b624ec1b747600bf1ccd7f3607d8f56cf4c))
+* profile for building mobile bindings ([09c8e0f](https://github.com/trvon/yams/commit/09c8e0f95986c1c5b230ace88d42c0fd73623d0b))
+* removing unnecessary abstraction and adding some optimizations for embeddings generation ([814672f](https://github.com/trvon/yams/commit/814672f4ddf6ba4c140af651f4f80f3e56aed061))
+* search / retrieval optimizations for performance and accuracy ([ce36736](https://github.com/trvon/yams/commit/ce36736e63074ea8078bb61a6bb34fa66d7f501c))
+* search improvements, UBSan meson option, CI quality job, and fix clang-tidy findings ([677f67e](https://github.com/trvon/yams/commit/677f67e799474cc645ccad2003b2c0e93de24237))
+* site update ([b6e7c7e](https://github.com/trvon/yams/commit/b6e7c7e90c393ed92248444b685dac808c3b7f77))
+* tuning improvements for graph influence ([e1d2db3](https://github.com/trvon/yams/commit/e1d2db3f4f879efa62f9bdde09a47763971ffb23))
+
+
+### Fixed
+
+* additional repair logic improvements to unify repair system. Search improvements and graph building optimizations for retrieval performance improvement ([96eb95f](https://github.com/trvon/yams/commit/96eb95f53572ffd41bcd7f297d5f59d6d9ced908))
+* address regressions in onnx runtime generation from previous commit. Addressing critical bugs ([fff1ca1](https://github.com/trvon/yams/commit/fff1ca19ac56eac4c9ee1834c8952be9d1b5d08d))
+* clang-tidy / infer fixes. Fix for test.yml builds ([a56bc5d](https://github.com/trvon/yams/commit/a56bc5d126166c49968189def7c53ee094ac9140))
+* cleaning up benchmark page and adding CmakeLists.txt ([f8b794d](https://github.com/trvon/yams/commit/f8b794d70ef50c1c12678d31f112796ea12701b1))
+* cleaning up object references ([f69c388](https://github.com/trvon/yams/commit/f69c388e4b8645e5b7462e6cc0d7ba78c40539bf))
+* fix issues with mobile bindings and improving abi alignment ([1962ff6](https://github.com/trvon/yams/commit/1962ff6a907745a8da1940c91ddc50a2175b3394))
+* fixing rpm builds ([9b6461e](https://github.com/trvon/yams/commit/9b6461e273bf0522e7014336922e4a6dc398a931))
+* fixing scaling logic of embedding generation that fallback to CPU ([120d98b](https://github.com/trvon/yams/commit/120d98bc77491e3f2a905c9028e0da7527be5507))
+* improvements for embedding generation (embedding gemma specific issue) and Dockerfile regression fix ([e09778b](https://github.com/trvon/yams/commit/e09778b7fe30a3a9596a06a77c53c9024f983cce))
+* improvements for embedding repair routing to hot model. Continued search / graph build retrieval improvements ([364a114](https://github.com/trvon/yams/commit/364a11476d1b8596e72720b9c29af2f715dcb241))
+* improvements for laoding handling in UX response ([3b5fb8f](https://github.com/trvon/yams/commit/3b5fb8fba8f1e859bea1dc499eb3ce12f560dfc6))
+* re-ranker embedding generation fix, test failures drift fix, search improvements for graph query expansion and gliner improvements for building graph ([e8a6296](https://github.com/trvon/yams/commit/e8a62967974e29a6ee1f8e1cfd5675443004d160))
+* release please fix, improvements for embedding generation (check if model is loading an query that). continue work on search retrieval improvement related to on going graph improvements ([3f3ba05](https://github.com/trvon/yams/commit/3f3ba0582db7acf9ec8670ce2659f113bfdb66c9))
+* repair fixes for embedding generations and stalls, mcp code mode improvements for smarter routing, test improvements and additional search / graph optimizations ([aee787d](https://github.com/trvon/yams/commit/aee787dbf464edc575cda52e9d83f7b3b143a3d9))
+* test and ci fixes and search improvements. Adding a router for tuning logic ([01c72ec](https://github.com/trvon/yams/commit/01c72ec8282085855bace3ad3e6817026acfdafc))
+* test fixes related to metadata optimizations and some search tuning checkpoints before refactor experiment ([d1225ab](https://github.com/trvon/yams/commit/d1225ab465aef5d11fa184e867d2cb4491e4ec10))
+* tree-diff benchmark regression accounting and stabilize subtree fast-path measurement ([e41ec38](https://github.com/trvon/yams/commit/e41ec383775421210d722db4413fe5f6577ca16d))
+* updating readme and linking benchmark pages ([1526545](https://github.com/trvon/yams/commit/1526545f797e466a82f5c0000db09124091584b0))
+* vector and embedding count fixes related to repair functionality. Improvements for search and tuning scope of candidates ([d25cc39](https://github.com/trvon/yams/commit/d25cc39e12b0d7bc53be7014e372ab38bcf596d7))
+
 ## [0.12.1](https://github.com/trvon/yams/compare/v0.11.0...v0.12.0) (2026-04-02)
 
 ### Added
@@ -69,4 +121,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **build:** centralize dependency discovery and trim Meson duplication ([0261b90](https://github.com/trvon/yams/commit/0261b90a7bb449dafefec0212532605e54f2517d))
 * **vector:** remove dead thread-local TurboQuant plumbing from vector_index_manager ([4ac90c7](https://github.com/trvon/yams/commit/4ac90c7573fc9da403182abff410d7f4120a7b94))
-

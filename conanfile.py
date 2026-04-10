@@ -8,7 +8,7 @@ from conan.tools.layout import basic_layout
 
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.12.0"  # x-release-please-version
+    version = "0.13.0"  # x-release-please-version
     license = "GPL-3.0-or-later"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"
