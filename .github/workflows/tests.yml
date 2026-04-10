@@ -11,7 +11,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Keep main-branch history intact so slower matrix lanes still publish evidence.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   warm:
@@ -422,6 +423,7 @@ jobs:
           conan --version
 
       - name: Configure and Build with Meson (Unix)
+        id: build_unix
         if: runner.os != 'Windows'
         shell: bash
         run: |
@@ -456,6 +458,7 @@ jobs:
           $ARCH_PREFIX meson compile -C builddir
 
       - name: Configure and Build with Meson (Windows)
+        id: build_windows
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -543,8 +546,8 @@ jobs:
           # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
           arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
 
-      - name: Upload test logs (artifacts)
-        if: ${{ steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure' }}
+      - name: Upload build and test logs (artifacts)
+        if: ${{ always() && (steps.build_unix.outcome == 'failure' || steps.build_windows.outcome == 'failure' || steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.suffix }}-${{ github.run_number }}
@@ -564,11 +567,11 @@ jobs:
           echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
           echo "[View artifacts for this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Enforce failure on protected branches
-        if: ${{ github.ref_protected && github.ref != 'refs/heads/main' && (steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
+      - name: Enforce test failure
+        if: ${{ always() && (steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
         shell: bash
         run: |
-          echo "Meson tests reported failures; enforcing job failure for protected branch." >&2
+          echo "Meson tests reported failures; enforcing job failure." >&2
           exit 1
 
       - name: Generate Coverage Report

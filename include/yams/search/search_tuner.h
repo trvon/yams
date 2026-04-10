@@ -237,6 +237,13 @@ struct TunedParams {
             {"graph_community_weight", graphCommunityWeight},
             {"kg_max_results", kgMaxResults},
             {"graph_scoring_budget_ms", graphScoringBudgetMs},
+            {"graph_enable_path_enumeration", graphEnablePathEnumeration},
+            {"enable_graph_query_expansion", enableGraphQueryExpansion},
+            {"graph_entity_signal_weight", graphEntitySignalWeight},
+            {"graph_structural_signal_weight", graphStructuralSignalWeight},
+            {"graph_coverage_signal_weight", graphCoverageSignalWeight},
+            {"graph_path_signal_weight", graphPathSignalWeight},
+            {"graph_corroboration_floor", graphCorroborationFloor},
             {"vector_only_threshold", vectorOnlyThreshold},
             {"vector_only_penalty", vectorOnlyPenalty},
             {"vector_only_near_miss_reserve", vectorOnlyNearMissReserve},
@@ -314,7 +321,7 @@ struct TunedParams {
             break;
 
         case TuningState::SCIENTIFIC:
-            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
+            params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Auto;
             // For scientific/benchmark corpora: balanced text + vector fusion.
             // WEIGHTED_RECIPROCAL avoids COMB_MNZ's mnzBoost penalty which demotes
             // documents found by only one component.

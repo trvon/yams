@@ -1099,7 +1099,7 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
                                                  .tags = std::move(job.tags),
                                                  .documentDbId = job.documentId,
                                                  .contentBytes = std::move(job.contentBytes),
-                                                 .skipEntityExtraction = true};
+                                                 .skipEntityExtraction = false};
         contexts.push_back(std::move(ctx));
     }
 

@@ -75,7 +75,8 @@ bool is_client_disconnect(const std::string& msg) {
 }
 // CLI priority requests use a dedicated thread pool to ensure responsiveness
 // even when the worker pool is saturated with heavy operations (e.g., ingestion).
-// Includes: retrieval operations, status/ping/shutdown for daemon health checks.
+// Search is intentionally excluded from that small pool by `is_heavy_request()` below so
+// sustained search traffic does not bottleneck on the CLI pool before reaching worker capacity.
 bool is_cli_priority_request(const Request& request) {
     // Retrieval operations expected to stay responsive for interactive use.
     if (std::holds_alternative<SearchRequest>(request) ||
@@ -97,7 +98,8 @@ bool is_cli_priority_request(const Request& request) {
 }
 
 bool is_heavy_request(const Request& request) {
-    return std::holds_alternative<GrepRequest>(request) ||
+    return std::holds_alternative<SearchRequest>(request) ||
+           std::holds_alternative<GrepRequest>(request) ||
            std::holds_alternative<ListRequest>(request);
 }
 bool stream_trace_enabled_local() {

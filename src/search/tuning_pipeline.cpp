@@ -6,6 +6,167 @@
 #include <algorithm>
 
 namespace yams::search {
+namespace {
+
+bool isCodeProfileState(TuningState state) {
+    return state == TuningState::SMALL_CODE || state == TuningState::LARGE_CODE;
+}
+
+QueryRouteContext makeQueryRouteContext(std::optional<TuningState> state) {
+    QueryRouteContext context;
+    if (!state.has_value()) {
+        return context;
+    }
+    context.corpusUsesCodeProfile = isCodeProfileState(*state);
+    context.corpusUsesScientificProfile = *state == TuningState::SCIENTIFIC;
+    context.corpusUsesMediaProfile = *state == TuningState::MEDIA;
+    return context;
+}
+
+std::optional<TuningState> tuningOverrideForCommunity(QueryCommunity community,
+                                                      std::optional<TuningState> globalState) {
+    if (!globalState.has_value()) {
+        return std::nullopt;
+    }
+
+    switch (community) {
+        case QueryCommunity::Code:
+            return isCodeProfileState(*globalState)
+                       ? std::nullopt
+                       : std::optional<TuningState>{TuningState::SMALL_CODE};
+        case QueryCommunity::Scientific:
+            return *globalState == TuningState::SCIENTIFIC
+                       ? std::nullopt
+                       : std::optional<TuningState>{TuningState::SCIENTIFIC};
+        case QueryCommunity::Media:
+            return *globalState == TuningState::MEDIA
+                       ? std::nullopt
+                       : std::optional<TuningState>{TuningState::MEDIA};
+    }
+
+    return std::nullopt;
+}
+
+SearchEngineConfig::NavigationZoomLevel
+effectiveZoomLevelForIntent(SearchEngineConfig::NavigationZoomLevel configured,
+                            QueryIntent intent) {
+    if (configured != SearchEngineConfig::NavigationZoomLevel::Auto) {
+        return configured;
+    }
+
+    switch (intent) {
+        case QueryIntent::Code:
+        case QueryIntent::Path:
+            return SearchEngineConfig::NavigationZoomLevel::Street;
+        case QueryIntent::Prose:
+        case QueryIntent::Mixed:
+            return SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+    }
+
+    return SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+}
+
+} // namespace
+
+TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
+    TunedParams params;
+    params.zoomLevel = config.zoomLevel;
+    params.rrfK = static_cast<int>(std::lround(config.rrfK));
+    params.weights.setAll(config.textWeight, config.vectorWeight, config.entityVectorWeight,
+                          config.pathTreeWeight, config.kgWeight, config.tagWeight,
+                          config.metadataWeight, TuningLayer::Default);
+    params.similarityThreshold =
+        TuningSlot<float>(config.similarityThreshold, TuningLayer::Default);
+    params.vectorBoostFactor = config.vectorBoostFactor;
+    params.fusionStrategy = config.fusionStrategy;
+    params.vectorOnlyThreshold = config.vectorOnlyThreshold;
+    params.vectorOnlyPenalty = config.vectorOnlyPenalty;
+    params.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
+    params.vectorOnlyNearMissSlack = config.vectorOnlyNearMissSlack;
+    params.vectorOnlyNearMissPenalty = config.vectorOnlyNearMissPenalty;
+    params.enablePathDedupInFusion = config.enablePathDedupInFusion;
+    params.lexicalFloorTopN = config.lexicalFloorTopN;
+    params.lexicalFloorBoost = config.lexicalFloorBoost;
+    params.enableLexicalTieBreak = config.enableLexicalTieBreak;
+    params.lexicalTieBreakEpsilon = config.lexicalTieBreakEpsilon;
+    params.semanticRescueSlots =
+        TuningSlot<size_t>(config.semanticRescueSlots, TuningLayer::Default);
+    params.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
+    params.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
+    params.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
+    params.enableAdaptiveVectorFallback = config.enableAdaptiveVectorFallback;
+    params.adaptiveVectorSkipMinTier1Hits = config.adaptiveVectorSkipMinTier1Hits;
+    params.adaptiveVectorSkipRequireTextSignal = config.adaptiveVectorSkipRequireTextSignal;
+    params.adaptiveVectorSkipMinTextHits = config.adaptiveVectorSkipMinTextHits;
+    params.adaptiveVectorSkipMinTopTextScore = config.adaptiveVectorSkipMinTopTextScore;
+    params.enableSubPhraseRescoring = config.enableSubPhraseRescoring;
+    params.subPhraseScoringPenalty = config.subPhraseScoringPenalty;
+    params.rerankTopK = config.rerankTopK;
+    params.rerankAnchoredMinRelativeScore = config.rerankAnchoredMinRelativeScore;
+    params.chunkAggregation = config.chunkAggregation;
+    params.enableGraphRerank = config.enableGraphRerank;
+    params.graphRerankTopN = config.graphRerankTopN;
+    params.graphRerankWeight = config.graphRerankWeight;
+    params.graphRerankMaxBoost = config.graphRerankMaxBoost;
+    params.graphRerankMinSignal = config.graphRerankMinSignal;
+    params.graphCommunityWeight = config.graphCommunityWeight;
+    params.kgMaxResults = config.kgMaxResults;
+    params.graphScoringBudgetMs = config.graphScoringBudgetMs;
+    params.graphEnablePathEnumeration = config.graphEnablePathEnumeration;
+    params.enableGraphQueryExpansion = config.enableGraphQueryExpansion;
+    params.graphEntitySignalWeight = config.graphEntitySignalWeight;
+    params.graphStructuralSignalWeight = config.graphStructuralSignalWeight;
+    params.graphCoverageSignalWeight = config.graphCoverageSignalWeight;
+    params.graphPathSignalWeight = config.graphPathSignalWeight;
+    params.graphCorroborationFloor = config.graphCorroborationFloor;
+    return params;
+}
+
+QueryPolicyResolution resolveQueryPolicy(std::string_view query,
+                                         const SearchEngineConfig& baseConfig,
+                                         const TunedParams& baseParams,
+                                         std::optional<TuningState> baselineState,
+                                         bool semanticOnly) {
+    QueryPolicyResolution resolution;
+    const QueryRouter queryRouter;
+    resolution.routeDecision = queryRouter.route(query, makeQueryRouteContext(baselineState));
+
+    resolution.zoomLevelInferredFromIntent =
+        baseConfig.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto;
+    resolution.effectiveZoomLevel =
+        effectiveZoomLevelForIntent(baseConfig.zoomLevel, resolution.routeDecision.intent.label);
+
+    TunedParams params = baseParams;
+    params.zoomLevel = resolution.effectiveZoomLevel;
+
+    applyZoomLayer(resolution.effectiveZoomLevel, params);
+    if (baseConfig.enableIntentAdaptiveWeighting) {
+        applyIntentLayer(resolution.routeDecision.intent.label, params);
+    }
+
+    if (resolution.routeDecision.community.has_value()) {
+        resolution.communityOverride =
+            tuningOverrideForCommunity(resolution.routeDecision.community->label, baselineState);
+        if (resolution.communityOverride.has_value() && baselineState.has_value()) {
+            applyCommunityLayer(resolution.communityOverride, *baselineState, params);
+        }
+    }
+
+    if (semanticOnly) {
+        applySemanticOnlyLayer(params);
+    }
+
+    params.weights.normalize();
+    resolution.config = baseConfig;
+    params.applyTo(resolution.config);
+    resolution.config.zoomLevel = resolution.effectiveZoomLevel;
+    applyZoomConfigExtras(resolution.effectiveZoomLevel, resolution.config);
+    if (semanticOnly) {
+        applySemanticOnlyConfigExtras(resolution.config);
+    }
+
+    return resolution;
+}
 
 // ---------------------------------------------------------------------------
 // Layer 4: Zoom

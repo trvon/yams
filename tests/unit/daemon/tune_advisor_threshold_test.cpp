@@ -865,6 +865,148 @@ TEST_CASE("Auto memory budget is profile-aware", "[daemon][governance][catch2]")
     CHECK(aggBudget == (kSystemMem * 75ull) / 100ull);
 }
 
+TEST_CASE("WorkCoordinator and CLI pool defaults are io-biased", "[daemon][governance][catch2]") {
+    EnvGuard workThreadsGuard("YAMS_WORK_COORDINATOR_THREADS", "0");
+    HardwareGuard hwGuard(16);
+
+    const auto efficientWorkers = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        return TuneAdvisor::workCoordinatorThreads();
+    }();
+    const auto balancedWorkers = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        return TuneAdvisor::workCoordinatorThreads();
+    }();
+    const auto aggressiveWorkers = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        return TuneAdvisor::workCoordinatorThreads();
+    }();
+
+    const auto efficientExpectedWorkers = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        return std::max(4u, TuneAdvisor::recommendedThreads(1.0));
+    }();
+    const auto balancedExpectedWorkers = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        return std::max(4u, TuneAdvisor::recommendedThreads(1.5));
+    }();
+    const auto aggressiveExpectedWorkers = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        return std::max(4u, TuneAdvisor::recommendedThreads(1.75));
+    }();
+
+    CHECK(efficientWorkers == efficientExpectedWorkers);
+    CHECK(balancedWorkers == balancedExpectedWorkers);
+    CHECK(aggressiveWorkers == aggressiveExpectedWorkers);
+    CHECK(efficientWorkers <= balancedWorkers);
+    CHECK(balancedWorkers <= aggressiveWorkers);
+
+    const auto efficientCliPool = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        return TuneAdvisor::cliRequestPoolThreads();
+    }();
+    const auto balancedCliPool = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        return TuneAdvisor::cliRequestPoolThreads();
+    }();
+    const auto aggressiveCliPool = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        return TuneAdvisor::cliRequestPoolThreads();
+    }();
+
+    CHECK(efficientCliPool == std::clamp<uint32_t>(efficientWorkers / 2, 2u, 5u));
+    CHECK(balancedCliPool == std::clamp<uint32_t>(balancedWorkers / 2, 2u, 5u));
+    CHECK(aggressiveCliPool == std::clamp<uint32_t>(aggressiveWorkers / 2, 2u, 5u));
+}
+
+TEST_CASE("Search concurrency limit has a balanced floor", "[daemon][governance][catch2]") {
+    EnvGuard searchOverrideGuard("YAMS_SEARCH_MAX_CONCURRENT", "0");
+    HardwareGuard hwGuard(10);
+
+    const auto efficientLimit = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        return TuneAdvisor::searchConcurrencyLimit();
+    }();
+    const auto balancedLimit = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        return TuneAdvisor::searchConcurrencyLimit();
+    }();
+    const auto aggressiveLimit = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        return TuneAdvisor::searchConcurrencyLimit();
+    }();
+
+    const auto efficientExpected = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        return std::max<uint32_t>(2, TuneAdvisor::recommendedThreads(0.5)) * 2;
+    }();
+    const auto balancedExpected = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        return std::max<uint32_t>(5u,
+                                  std::max<uint32_t>(2, TuneAdvisor::recommendedThreads(0.5)) * 2);
+    }();
+    const auto aggressiveExpected = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        return std::max<uint32_t>(6u,
+                                  std::max<uint32_t>(2, TuneAdvisor::recommendedThreads(0.5)) * 2);
+    }();
+
+    CHECK(efficientLimit == efficientExpected);
+    CHECK(balancedLimit == balancedExpected);
+    CHECK(aggressiveLimit == aggressiveExpected);
+}
+
+TEST_CASE("Read pool max connections follow centralized capacity model",
+          "[daemon][governance][catch2]") {
+    HardwareGuard hwGuard(16);
+
+    const auto efficientCap = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        return TuneAdvisor::readPoolMaxConnections(32);
+    }();
+    const auto balancedCap = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        return TuneAdvisor::readPoolMaxConnections(32);
+    }();
+    const auto aggressiveCap = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        return TuneAdvisor::readPoolMaxConnections(32);
+    }();
+
+    const auto efficientExpected = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        const auto derived = std::max<uint32_t>({4u, TuneAdvisor::workCoordinatorThreads(),
+                                                 TuneAdvisor::searchConcurrencyLimit(),
+                                                 TuneAdvisor::listInflightLimit()});
+        return std::min<uint32_t>(8u, derived);
+    }();
+    const auto balancedExpected = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        const auto derived = std::max<uint32_t>({4u, TuneAdvisor::workCoordinatorThreads(),
+                                                 TuneAdvisor::searchConcurrencyLimit(),
+                                                 TuneAdvisor::listInflightLimit()});
+        return std::min<uint32_t>(8u, derived);
+    }();
+    const auto aggressiveExpected = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        const auto derived = std::max<uint32_t>({4u, TuneAdvisor::workCoordinatorThreads(),
+                                                 TuneAdvisor::searchConcurrencyLimit(),
+                                                 TuneAdvisor::listInflightLimit()});
+        return std::min<uint32_t>(8u, derived);
+    }();
+
+    CHECK(efficientCap == efficientExpected);
+    CHECK(balancedCap == balancedExpected);
+    CHECK(aggressiveCap == aggressiveExpected);
+
+    const auto cappedConfiguredMax = [&]() {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        return TuneAdvisor::readPoolMaxConnections(6);
+    }();
+    CHECK(cappedConfiguredMax <= 6u);
+    CHECK(cappedConfiguredMax >= 1u);
+}
+
 // =============================================================================
 // computeCpuThrottleDelayMs Tests
 // =============================================================================

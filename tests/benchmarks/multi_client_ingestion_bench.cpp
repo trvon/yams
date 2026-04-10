@@ -36,6 +36,12 @@
 //   YAMS_BENCH_IDLE_PROBE_BASELINE_MS - Idle baseline sampling window (default: 1500)
 //   YAMS_BENCH_IDLE_PROBE_SAMPLE_MS   - Idle probe sampling interval (default: 50)
 //   YAMS_BENCH_IDLE_PROBE_DETECT_TIMEOUT_MS - Max wake detection window (default: 5000)
+//   YAMS_BENCH_MIXED_WRITERS      - Mixed-ops writer client count (default: 4)
+//   YAMS_BENCH_MIXED_SEARCHERS    - Mixed-ops search client count (default: 4)
+//   YAMS_BENCH_MIXED_LISTERS      - Mixed-ops list client count (default: 4)
+//   YAMS_BENCH_MIXED_STATUS       - Mixed-ops status/get client count (default: 4)
+//   YAMS_BENCH_MIXED_READER_OPS   - Mixed-ops ops per reader client (default: 200)
+//   YAMS_BENCH_MIXED_MAX_FAIL_RATE - Mixed-ops maximum tolerated fail rate (default: 0.0)
 
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_session.hpp>
@@ -128,6 +134,12 @@ struct BenchConfig {
     int idleProbeBaselineMs{1500};
     int idleProbeSampleMs{50};
     int idleProbeDetectTimeoutMs{5000};
+    int mixedWriterClients{4};
+    int mixedSearchClients{4};
+    int mixedListClients{4};
+    int mixedStatusClients{4};
+    int mixedOpsPerReader{200};
+    double mixedMaxFailRate{0.0};
 
     // --- Storage / corpus overrides ---
     // Point at an existing YAMS data directory (e.g. /Volumes/picaso/yams)
@@ -198,6 +210,18 @@ struct BenchConfig {
             cfg.idleProbeSampleMs = std::max(10, std::atoi(v));
         if (auto* v = std::getenv("YAMS_BENCH_IDLE_PROBE_DETECT_TIMEOUT_MS"))
             cfg.idleProbeDetectTimeoutMs = std::max(250, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_MIXED_WRITERS"))
+            cfg.mixedWriterClients = std::max(1, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_MIXED_SEARCHERS"))
+            cfg.mixedSearchClients = std::max(1, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_MIXED_LISTERS"))
+            cfg.mixedListClients = std::max(1, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_MIXED_STATUS"))
+            cfg.mixedStatusClients = std::max(1, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_MIXED_READER_OPS"))
+            cfg.mixedOpsPerReader = std::max(1, std::atoi(v));
+        if (auto* v = std::getenv("YAMS_BENCH_MIXED_MAX_FAIL_RATE"))
+            cfg.mixedMaxFailRate = std::max(0.0, std::stod(v));
         cfg.scalingMaxClients = std::max(cfg.scalingMaxClients, cfg.numClients * 2);
         cfg.cliProbeOpsPerCommand = std::max(cfg.cliProbeOpsPerCommand, cfg.stressRounds);
         if (cfg.cliSearchQuery.empty())
@@ -3572,14 +3596,14 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
     // throughput under realistic concurrent access patterns.
     auto cfg = BenchConfig::fromEnv();
 
-    constexpr int kTotalClients = 16;
-    constexpr int kWriterClients = 4;
-    constexpr int kSearchClients = 4;
-    constexpr int kListClients = 4;
-    constexpr int kStatusClients = 4;
+    const int kWriterClients = cfg.mixedWriterClients;
+    const int kSearchClients = cfg.mixedSearchClients;
+    const int kListClients = cfg.mixedListClients;
+    const int kStatusClients = cfg.mixedStatusClients;
+    const int kTotalClients = kWriterClients + kSearchClients + kListClients + kStatusClients;
 
     // Each reader client runs for a fixed number of operations
-    constexpr int kOpsPerReader = 200;
+    const int kOpsPerReader = cfg.mixedOpsPerReader;
 
     DaemonHarness harness(benchHarnessOptions());
     REQUIRE(harness.start(kStartTimeout));
@@ -3623,6 +3647,8 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
     std::mutex searchLatMutex, listLatMutex, statusLatMutex, getLatMutex, addLatMutex;
     std::vector<int64_t> searchLatencies, listLatencies, statusLatencies, getLatencies,
         addLatencies;
+    std::map<std::string, int> mixedErrorCategories;
+    std::map<std::string, std::string> mixedFailureSamples;
 
     std::atomic<int> searchOps{0}, listOps{0}, statusOps{0}, getOps{0}, addOps{0};
     std::atomic<int> searchFails{0}, listFails{0}, statusFails{0}, getFails{0}, addFails{0};
@@ -3642,6 +3668,8 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
             ccfg.autoStart = false;
             ccfg.requestTimeout = 30s;
             DaemonClient client(ccfg);
+            std::map<std::string, int> localErrorCategories;
+            std::map<std::string, std::string> localFailureSamples;
             while (!go.load())
                 std::this_thread::yield();
 
@@ -3662,6 +3690,24 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
                     addLatencies.push_back(latUs);
                 } else {
                     addFails.fetch_add(1);
+                    const auto bucket = classifyFailureMessage(res.error().message);
+                    const auto key = std::string("add:") + bucket;
+                    localErrorCategories[key] += 1;
+                    if (!res.error().message.empty() && !localFailureSamples.contains(key)) {
+                        localFailureSamples[key] = res.error().message;
+                    }
+                }
+            }
+
+            if (!localErrorCategories.empty()) {
+                std::lock_guard<std::mutex> lk(addLatMutex);
+                for (const auto& [key, count] : localErrorCategories) {
+                    mixedErrorCategories[key] += count;
+                }
+                for (const auto& [key, sample] : localFailureSamples) {
+                    if (!mixedFailureSamples.contains(key)) {
+                        mixedFailureSamples[key] = sample;
+                    }
                 }
             }
         });
@@ -3675,6 +3721,8 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
             ccfg.autoStart = false;
             ccfg.requestTimeout = 10s;
             DaemonClient client(ccfg);
+            std::map<std::string, int> localErrorCategories;
+            std::map<std::string, std::string> localFailureSamples;
             while (!go.load())
                 std::this_thread::yield();
 
@@ -3702,6 +3750,24 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
                     searchLatencies.push_back(latUs);
                 } else {
                     searchFails.fetch_add(1);
+                    const auto bucket = classifyFailureMessage(res.error().message);
+                    const auto key = std::string("search:") + bucket;
+                    localErrorCategories[key] += 1;
+                    if (!res.error().message.empty() && !localFailureSamples.contains(key)) {
+                        localFailureSamples[key] = res.error().message;
+                    }
+                }
+            }
+
+            if (!localErrorCategories.empty()) {
+                std::lock_guard<std::mutex> lk(searchLatMutex);
+                for (const auto& [key, count] : localErrorCategories) {
+                    mixedErrorCategories[key] += count;
+                }
+                for (const auto& [key, sample] : localFailureSamples) {
+                    if (!mixedFailureSamples.contains(key)) {
+                        mixedFailureSamples[key] = sample;
+                    }
                 }
             }
         });
@@ -3715,6 +3781,8 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
             ccfg.autoStart = false;
             ccfg.requestTimeout = 10s;
             DaemonClient client(ccfg);
+            std::map<std::string, int> localErrorCategories;
+            std::map<std::string, std::string> localFailureSamples;
             while (!go.load())
                 std::this_thread::yield();
 
@@ -3737,6 +3805,24 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
                     listLatencies.push_back(latUs);
                 } else {
                     listFails.fetch_add(1);
+                    const auto bucket = classifyFailureMessage(res.error().message);
+                    const auto key = std::string("list:") + bucket;
+                    localErrorCategories[key] += 1;
+                    if (!res.error().message.empty() && !localFailureSamples.contains(key)) {
+                        localFailureSamples[key] = res.error().message;
+                    }
+                }
+            }
+
+            if (!localErrorCategories.empty()) {
+                std::lock_guard<std::mutex> lk(listLatMutex);
+                for (const auto& [key, count] : localErrorCategories) {
+                    mixedErrorCategories[key] += count;
+                }
+                for (const auto& [key, sample] : localFailureSamples) {
+                    if (!mixedFailureSamples.contains(key)) {
+                        mixedFailureSamples[key] = sample;
+                    }
                 }
             }
         });
@@ -3751,6 +3837,8 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
             ccfg.requestTimeout = 10s;
             DaemonClient client(ccfg);
             std::mt19937 rng(static_cast<unsigned>(t * 997 + 13));
+            std::map<std::string, int> localErrorCategories;
+            std::map<std::string, std::string> localFailureSamples;
             while (!go.load())
                 std::this_thread::yield();
 
@@ -3769,6 +3857,12 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
                         statusLatencies.push_back(latUs);
                     } else {
                         statusFails.fetch_add(1);
+                        const auto bucket = classifyFailureMessage(res.error().message);
+                        const auto key = std::string("status:") + bucket;
+                        localErrorCategories[key] += 1;
+                        if (!res.error().message.empty() && !localFailureSamples.contains(key)) {
+                            localFailureSamples[key] = res.error().message;
+                        }
                     }
                 } else {
                     // Get (metadata) by hash
@@ -3801,6 +3895,24 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
                         getLatencies.push_back(latUs);
                     } else {
                         getFails.fetch_add(1);
+                        const auto bucket = classifyFailureMessage(res.error().message);
+                        const auto key = std::string("get:") + bucket;
+                        localErrorCategories[key] += 1;
+                        if (!res.error().message.empty() && !localFailureSamples.contains(key)) {
+                            localFailureSamples[key] = res.error().message;
+                        }
+                    }
+                }
+            }
+
+            if (!localErrorCategories.empty()) {
+                std::lock_guard<std::mutex> lk(statusLatMutex);
+                for (const auto& [key, count] : localErrorCategories) {
+                    mixedErrorCategories[key] += count;
+                }
+                for (const auto& [key, sample] : localFailureSamples) {
+                    if (!mixedFailureSamples.contains(key)) {
+                        mixedFailureSamples[key] = sample;
                     }
                 }
             }
@@ -3821,6 +3933,7 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
     // Drain
     bool drained = waitForDrain(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
     auto finalSnap = DaemonSnapshot::capture(monitorClient);
+    auto resourcePeaks = summarizeResourcePeaks(sampler.getSamples());
 
     // Compute stats
     auto searchStats = PercentileStats::compute(searchLatencies);
@@ -3834,15 +3947,18 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
     int totalFails = searchFails.load() + listFails.load() + statusFails.load() + getFails.load() +
                      addFails.load();
     double opsPerSec = static_cast<double>(totalOps) / globalElapsed;
+    double failRate = (totalOps > 0) ? (static_cast<double>(totalFails) / totalOps) : 0.0;
+    const std::string stressTier = !drained ? "failed" : (totalFails == 0 ? "clean" : "degraded");
 
     // Print summary
-    std::cout << "\n=== 16-Client Concurrent Mixed Ops ===\n";
+    std::cout << "\n=== " << kTotalClients << "-Client Concurrent Mixed Ops ===\n";
     std::cout << "  Layout: " << kWriterClients << " writers + " << kSearchClients << " searchers"
               << " + " << kListClients << " listers + " << kStatusClients << " status/get\n";
     std::cout << "  Wall time: " << std::fixed << std::setprecision(2) << globalElapsed << "s\n";
     std::cout << "  Total ops: " << totalOps << " (" << std::setprecision(0) << opsPerSec
               << " ops/s)"
-              << "  Failures: " << totalFails << "\n\n";
+              << "  Failures: " << totalFails << " (rate=" << std::setprecision(4) << failRate
+              << ")\n\n";
 
     std::cout << "  Op breakdown:\n";
     std::cout << "    Add:    " << addOps.load() << " ok, " << addFails.load() << " fail\n";
@@ -3850,6 +3966,13 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
     std::cout << "    List:   " << listOps.load() << " ok, " << listFails.load() << " fail\n";
     std::cout << "    Status: " << statusOps.load() << " ok, " << statusFails.load() << " fail\n";
     std::cout << "    Get:    " << getOps.load() << " ok, " << getFails.load() << " fail\n\n";
+    if (!mixedErrorCategories.empty()) {
+        std::cout << "  Failure categories:";
+        for (const auto& [key, count] : mixedErrorCategories) {
+            std::cout << " " << key << "=" << count;
+        }
+        std::cout << "\n\n";
+    }
 
     printPercentiles("Add latency   ", addStats);
     printPercentiles("Search latency", searchStats);
@@ -3858,6 +3981,8 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
     printPercentiles("Get latency   ", getStats);
 
     std::cout << "\n  Queue drained: " << (drained ? "yes" : "NO") << "\n";
+    std::cout << "  Peak DB read/write waiting: " << resourcePeaks.peakDbReadPoolWaiting << "/"
+              << resourcePeaks.peakDbWritePoolWaiting << "\n";
     std::cout << "  Final docs_total: " << finalSnap.documentsTotal << "\n";
     std::cout << "  Final memory: " << finalSnap.memoryUsageMb << " MB\n\n";
 
@@ -3868,6 +3993,7 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
     CHECK(statusOps.load() > 0);
     CHECK(getOps.load() > 0);
     CHECK(drained);
+    CHECK(failRate <= cfg.mixedMaxFailRate);
 
     // Emit JSONL
     json timeSeries = json::array();
@@ -3887,6 +4013,8 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
         {"doc_size_bytes", cfg.docSizeBytes},
         {"total_ops", totalOps},
         {"total_failures", totalFails},
+        {"fail_rate", failRate},
+        {"stress_tier", stressTier},
         {"elapsed_seconds", globalElapsed},
         {"ops_per_sec", opsPerSec},
         {"add",
@@ -3903,6 +4031,9 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
         {"get",
          json{{"ops", getOps.load()}, {"fails", getFails.load()}, {"latency", getStats.toJson()}}},
         {"daemon_snapshot_final", finalSnap.toJson()},
+        {"resource_peaks", resourcePeaks.toJson()},
+        {"error_categories", mixedErrorCategories},
+        {"failure_samples", mixedFailureSamples},
         {"time_series", timeSeries},
         {"tuning_profile", cfg.tuningProfile},
         {"drained", drained},

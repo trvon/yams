@@ -701,49 +701,6 @@ float filenamePathBoost(const std::string& query, const std::string& filePath,
     return 1.0f;
 }
 
-bool isCodeProfileState(TuningState state) {
-    return state == TuningState::SMALL_CODE || state == TuningState::LARGE_CODE;
-}
-
-QueryRouteContext makeQueryRouteContext(TuningState state) {
-    QueryRouteContext context;
-    context.corpusUsesCodeProfile = isCodeProfileState(state);
-    context.corpusUsesScientificProfile = state == TuningState::SCIENTIFIC;
-    context.corpusUsesMediaProfile = state == TuningState::MEDIA;
-    return context;
-}
-
-std::optional<TuningState> tuningOverrideForCommunity(QueryCommunity community,
-                                                      TuningState globalState) {
-    switch (community) {
-        case QueryCommunity::Code:
-            return isCodeProfileState(globalState)
-                       ? std::nullopt
-                       : std::optional<TuningState>{TuningState::SMALL_CODE};
-        case QueryCommunity::Scientific:
-            return globalState == TuningState::SCIENTIFIC
-                       ? std::nullopt
-                       : std::optional<TuningState>{TuningState::SCIENTIFIC};
-        case QueryCommunity::Media:
-            return globalState == TuningState::MEDIA
-                       ? std::nullopt
-                       : std::optional<TuningState>{TuningState::MEDIA};
-    }
-    return std::nullopt;
-}
-
-SearchEngineConfig::NavigationZoomLevel zoomLevelForIntent(QueryIntent intent) {
-    switch (intent) {
-        case QueryIntent::Code:
-        case QueryIntent::Path:
-            return SearchEngineConfig::NavigationZoomLevel::Street;
-        case QueryIntent::Prose:
-        case QueryIntent::Mixed:
-            return SearchEngineConfig::NavigationZoomLevel::Neighborhood;
-    }
-    return SearchEngineConfig::NavigationZoomLevel::Neighborhood;
-}
-
 double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent,
                               SearchEngineConfig::NavigationZoomLevel zoomLevel) {
     const double text = result.keywordScore.value_or(0.0);
@@ -1361,7 +1318,8 @@ private:
     Result<SearchResponse> searchInternal(const std::string& query, const SearchParams& params);
 
     Result<std::vector<ComponentResult>>
-    queryFullText(const std::string& query, const SearchEngineConfig& config, size_t limit,
+    queryFullText(const std::string& query, QueryIntent queryIntent,
+                  const SearchEngineConfig& config, size_t limit,
                   QueryExpansionStats* expansionStats = nullptr,
                   const std::vector<GraphExpansionTerm>* graphExpansionTerms = nullptr);
     Result<std::vector<ComponentResult>> queryPathTree(const std::string& query, size_t limit);
@@ -1532,11 +1490,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig = tuner_->getConfig();
     }
 
-    const QueryRouter queryRouter;
-    const QueryRouteContext routeContext =
-        tuner_ ? makeQueryRouteContext(tuner_->currentState()) : QueryRouteContext{};
+    std::optional<TuningState> baselineState;
+    TunedParams baseParams;
+    if (tuner_) {
+        baselineState = tuner_->currentState();
+        baseParams = tuner_->getParams();
+    } else {
+        baseParams = seedTunedParamsFromConfig(workingConfig);
+    }
+
     const auto routingStart = std::chrono::steady_clock::now();
-    const QueryRouteDecision routeDecision = queryRouter.route(query, routeContext);
+    QueryPolicyResolution policy =
+        resolveQueryPolicy(query, workingConfig, baseParams, baselineState, params.semanticOnly);
     response.componentTimingMicros["query_routing"] =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
                                                               routingStart)
@@ -1546,90 +1511,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             response.componentTimingMicros.at("query_routing");
     }
 
+    const QueryRouteDecision routeDecision = std::move(policy.routeDecision);
     const QueryIntent intent = routeDecision.intent.label;
-    const auto configuredZoomLevel = workingConfig.zoomLevel;
-    const auto effectiveZoomLevel =
-        configuredZoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto
-            ? zoomLevelForIntent(intent)
-            : configuredZoomLevel;
-    const bool zoomLevelInferredFromIntent =
-        configuredZoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto;
-    workingConfig.zoomLevel = effectiveZoomLevel;
-    // --- Layered tuning pipeline (layers 4-7) ---
-    // Get a mutable copy of the tuner's params (layers 0-3 baked in).
-    // When no tuner exists, initialize from the current working config so that
-    // explicitly configured values (e.g., from tests) are preserved.
-    TunedParams queryParams;
-    if (tuner_) {
-        queryParams = tuner_->getParams();
-    } else {
-        queryParams.weights.setAll(workingConfig.textWeight, workingConfig.vectorWeight,
-                                   workingConfig.entityVectorWeight, workingConfig.pathTreeWeight,
-                                   workingConfig.kgWeight, workingConfig.tagWeight,
-                                   workingConfig.metadataWeight, TuningLayer::Default);
-        queryParams.similarityThreshold.value = workingConfig.similarityThreshold;
-        queryParams.semanticRescueSlots.value = workingConfig.semanticRescueSlots;
-        queryParams.vectorBoostFactor = workingConfig.vectorBoostFactor;
-        queryParams.rrfK = static_cast<int>(std::lround(workingConfig.rrfK));
-        queryParams.fusionStrategy = workingConfig.fusionStrategy;
-        queryParams.enableGraphRerank = workingConfig.enableGraphRerank;
-        queryParams.graphRerankTopN = workingConfig.graphRerankTopN;
-        queryParams.graphRerankWeight = workingConfig.graphRerankWeight;
-        queryParams.graphRerankMaxBoost = workingConfig.graphRerankMaxBoost;
-        queryParams.graphRerankMinSignal = workingConfig.graphRerankMinSignal;
-        queryParams.graphCommunityWeight = workingConfig.graphCommunityWeight;
-        queryParams.kgMaxResults = workingConfig.kgMaxResults;
-        queryParams.graphScoringBudgetMs = workingConfig.graphScoringBudgetMs;
-        queryParams.vectorOnlyThreshold = workingConfig.vectorOnlyThreshold;
-        queryParams.vectorOnlyPenalty = workingConfig.vectorOnlyPenalty;
-        queryParams.vectorOnlyNearMissReserve = workingConfig.vectorOnlyNearMissReserve;
-        queryParams.vectorOnlyNearMissSlack = workingConfig.vectorOnlyNearMissSlack;
-        queryParams.vectorOnlyNearMissPenalty = workingConfig.vectorOnlyNearMissPenalty;
-        queryParams.rerankTopK = workingConfig.rerankTopK;
-        queryParams.lexicalFloorTopN = workingConfig.lexicalFloorTopN;
-        queryParams.lexicalFloorBoost = workingConfig.lexicalFloorBoost;
-        queryParams.enableLexicalTieBreak = workingConfig.enableLexicalTieBreak;
-        queryParams.lexicalTieBreakEpsilon = workingConfig.lexicalTieBreakEpsilon;
-    }
+    const auto effectiveZoomLevel = policy.effectiveZoomLevel;
+    const bool zoomLevelInferredFromIntent = policy.zoomLevelInferredFromIntent;
+    workingConfig = std::move(policy.config);
 
-    // Layer 4: Zoom policy
-    applyZoomLayer(effectiveZoomLevel, queryParams);
-    // Layer 5: Intent policy (guarded by config flag)
-    if (workingConfig.enableIntentAdaptiveWeighting) {
-        applyIntentLayer(intent, queryParams);
-    }
-
-    // Layer 6: Per-query community override (blend, not full swap)
-    std::optional<TuningState> communityOverride;
-    if (tuner_ && routeDecision.community.has_value()) {
-        communityOverride =
-            tuningOverrideForCommunity(routeDecision.community->label, tuner_->currentState());
-        if (communityOverride.has_value()) {
-            const std::string overrideState = tuningStateToString(*communityOverride);
-            response.debugStats["community_override"] = overrideState;
-            response.debugStats["trace_query_community"] =
-                queryCommunityToString(routeDecision.community->label);
-            response.debugStats["trace_query_community_reason"] = routeDecision.community->reason;
-            spdlog::debug("[Search] community override: global={} → {} (routing={}μs, query='{}')",
-                          tuningStateToString(tuner_->currentState()), overrideState,
-                          response.componentTimingMicros.at("query_routing"), query);
-            applyCommunityLayer(communityOverride, tuner_->currentState(), queryParams);
-        }
-    }
-
-    // Layer 7: Semantic-only mode
-    if (params.semanticOnly) {
-        applySemanticOnlyLayer(queryParams);
-    }
-
-    // Single normalization + apply to working config
-    queryParams.weights.normalize();
-    queryParams.applyTo(workingConfig);
-
-    // Config-only extras (fields not in TunedParams)
-    applyZoomConfigExtras(effectiveZoomLevel, workingConfig);
-    if (params.semanticOnly) {
-        applySemanticOnlyConfigExtras(workingConfig);
+    if (policy.communityOverride.has_value() && baselineState.has_value()) {
+        const std::string overrideState = tuningStateToString(*policy.communityOverride);
+        response.debugStats["community_override"] = overrideState;
+        spdlog::debug("[Search] community override: global={} → {} (routing={}μs, query='{}')",
+                      tuningStateToString(*baselineState), overrideState,
+                      response.componentTimingMicros.at("query_routing"), query);
     }
 
     // Long prose queries can miss the semantic tier entirely when the default threshold
@@ -2144,9 +2037,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // --- TIER 1: Text + Path (fast, high precision) ---
             textFuture = schedule(
                 "text", workingConfig.textWeight, stats_.textQueries, stats_.avgTextTimeMicros,
-                [this, &query, &workingConfig, &textExpansionStats, &graphExpansionTerms]() {
+                [this, &query, intent, &workingConfig, &textExpansionStats,
+                 &graphExpansionTerms]() {
                     YAMS_ZONE_SCOPED_N("component::text");
-                    return queryFullText(query, workingConfig, workingConfig.textMaxResults,
+                    return queryFullText(query, intent, workingConfig, workingConfig.textMaxResults,
                                          &textExpansionStats, &graphExpansionTerms);
                 });
 
@@ -2343,9 +2237,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // All components run in parallel
             textFuture = schedule(
                 "text", workingConfig.textWeight, stats_.textQueries, stats_.avgTextTimeMicros,
-                [this, &query, &workingConfig, &textExpansionStats, &graphExpansionTerms]() {
+                [this, &query, intent, &workingConfig, &textExpansionStats,
+                 &graphExpansionTerms]() {
                     YAMS_ZONE_SCOPED_N("component::text");
-                    return queryFullText(query, workingConfig, workingConfig.textMaxResults,
+                    return queryFullText(query, intent, workingConfig, workingConfig.textMaxResults,
                                          &textExpansionStats, &graphExpansionTerms);
                 });
 
@@ -2472,7 +2367,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         runSequential(
             [&]() {
-                return queryFullText(query, workingConfig, workingConfig.textMaxResults,
+                return queryFullText(query, intent, workingConfig, workingConfig.textMaxResults,
                                      &textExpansionStats, &graphExpansionTerms);
             },
             "text", workingConfig.textWeight, stats_.textQueries, stats_.avgTextTimeMicros);
@@ -5140,8 +5035,9 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
 }
 
 Result<std::vector<ComponentResult>>
-SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineConfig& config,
-                                  size_t limit, QueryExpansionStats* expansionStats,
+SearchEngine::Impl::queryFullText(const std::string& query, QueryIntent queryIntent,
+                                  const SearchEngineConfig& config, size_t limit,
+                                  QueryExpansionStats* expansionStats,
                                   const std::vector<GraphExpansionTerm>* graphExpansionTerms) {
     std::vector<ComponentResult> results;
     results.reserve(limit);
@@ -5151,8 +5047,6 @@ SearchEngine::Impl::queryFullText(const std::string& query, const SearchEngineCo
     }
 
     try {
-        const QueryRouter queryRouter;
-        const QueryIntent queryIntent = queryRouter.classifyIntent(query).label;
         float nonCodeFileMultiplier = 1.0f;
         if (config.enableIntentAdaptiveWeighting) {
             switch (queryIntent) {

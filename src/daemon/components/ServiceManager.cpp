@@ -1880,7 +1880,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 auto readCfg = dbPoolCfg;
                 readCfg.readOnly = true;
                 {
-                    constexpr size_t kMaxReadConnections = 4;
+                    const size_t kMaxReadConnections =
+                        yams::daemon::TuneAdvisor::readPoolMaxConnections(readCfg.maxConnections);
                     if (readCfg.maxConnections > kMaxReadConnections) {
                         readCfg.maxConnections = kMaxReadConnections;
                         spdlog::info("Read pool max capped to {} (I/O concurrency limit)",
@@ -1924,7 +1925,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         readConnectionPool_.reset();
                     }
                 } else {
-                    const size_t defaultPrewarm = std::min<size_t>(readCfg.maxConnections, 4);
+                    const size_t defaultPrewarm = std::min<size_t>(readCfg.maxConnections, 8);
                     prewarmReadPool(readConnectionPool_, readPoolPrewarmTarget(defaultPrewarm));
                     spdlog::info("Dual DB pool mode enabled (write/work + read-only)");
                 }

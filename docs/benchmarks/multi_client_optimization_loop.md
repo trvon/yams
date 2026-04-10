@@ -90,20 +90,29 @@ while using the richer v2 metrics when present.
 - Peak-load CLI probe failures should now be classified, not treated as opaque harness failures.
 - `timeout_under_load` is the only accepted CLI failure mode during the saturation window.
 - Post-stress CLI recovery must pass for `status` and `list` before a contention run is considered healthy.
+- In the current reduced contention scenario, `cli_search` now succeeds instead of timing out.
+- Fresh ASAN validation remains the conservative safety lane; current ASAN mixed-workload runs are clean through 48 total clients and first degrade at 56.
+
+## Mixed stress interpretation
+
+- The mixed-client benchmark is a **closed-loop** workload with fixed per-client op budgets.
+- Aggregate ops/s can rise at higher client counts even while the system is under *more* stress.
+- For scaling decisions, use the first appearance of **nonzero failures** and rising **p95/p99 latencies** as the primary boundary markers.
+- In the fresh Debug validation on the tuned defaults, **64 total mixed clients** is the clean tier and **68+** is the first degraded tier.
 
 ## Phase1 Daemon Scheduling Defaults
 
-For large-corpus mixed read stability, use `[tuning]` keys instead of ad-hoc env overrides:
+For large-corpus mixed read stability, prefer `[tuning]` keys over ad-hoc env overrides and keep the model hardware-aware:
 
 ```toml
 [tuning]
-cli_pool_threads = 2
 grep_inflight_limit = 1
 grep_admission_wait_ms = 20000
 ```
 
 Notes:
 
+- Read-path worker capacity, CLI request pool size, search concurrency, and read DB pool cap are now derived centrally in `TuneAdvisor`; avoid hard-coding machine-specific thread counts in docs or tests.
 - `grep_inflight_limit = 1` is the recommended phase1 default for lower variance and stable tails.
 - If your corpus is grep-heavy and stable, test `grep_inflight_limit = 2` for higher peak throughput.
 - Keep timeout knobs unchanged while validating scheduler changes.

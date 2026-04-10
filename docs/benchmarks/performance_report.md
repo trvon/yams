@@ -1,7 +1,7 @@
 # YAMS Performance Benchmark Report
 
 **Generated**: 2026-02-12
-**Last Updated**: 2026-04-08
+**Last Updated**: 2026-04-10
 **YAMS Version**: 0.12.0-dev
 **Build Configuration**: Debug (no TSAN) and Release
 
@@ -33,14 +33,15 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 | `IPC StreamingFramer_32x10` | 4,680 ops/s | **+4.9%** | 256 B chunks |
 | `IPC UnaryFramer_8KB` | 13,158 ops/s | **+9.5%** | 8 KB payload |
 
-**Multi-Client Baseline (Debug no-TSAN, M4, 2026-04-08)**:
+**Multi-Client Baseline (Debug no-TSAN, M4, 2026-04-10)**:
 
 | Benchmark | Throughput | Latency (p50) | Latency (p95) | Notes |
 |-----------|------------|---------------|---------------|-------|
 | Single client ingest | 83.2 docs/s | 11.2 ms | 11.3 ms | 100 docs, 2 KB (**+38.4%**) |
 | 4-client concurrent ingest | 244.0 docs/s | 11.2 ms | 11.3 ms | 400 total docs |
-| Mixed read/write (4 clients) | — | — | — | SIGSEGV (pre-existing) |
-| Connection contention (16 burst) | 1,368 ops/s | 11.2 ms | 12.0 ms | 0 failures (**+17.1%**) |
+| 32-client mixed read/write | 404.4 ops/s | Add 10.6 ms | Search 144.6 ms | 0 failures, drained cleanly |
+| 64-client mixed read/write | 244.8 ops/s | Add 127.3 ms | Search 557.3 ms | 0 failures, clean mixed scaling tier in fresh Debug lane |
+| Connection contention (32 burst) | 2,709.0 ops/s | 10.8 ms | 12.3 ms | 0 failures, 0 retry-after responses |
 
 **Previous Baseline (Release, M3, 2026-02-12)**:
 
@@ -75,7 +76,7 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 - API ingestion: 1 KB and 100 KB documents.
 - Metadata updates: single-update and 500-update batch workloads over 1,000 documents.
 - IPC framing: streaming frames with 256 B and 512 B chunks, plus 8 KB unary payloads.
-- Multi-client ingest: 2 KB documents across 1-client, 4-client, and 16-client contention scenarios.
+- Multi-client ingest: 2 KB documents across baseline, mixed-workload scaling, and contention scenarios.
 - Search benchmarks are intentionally excluded from the headline tables because dataset choice and cache state can dominate the reported numbers.
 
 ### Run Commands
@@ -143,10 +144,58 @@ meson compile -C build/debug yams_search_benchmarks
 |------|---------|------------|---------|---------|------------|
 | Baseline single client | 1 | 83.2 docs/s | 11.2 ms | 11.3 ms | **+38.4%** |
 | Concurrent pure ingest | 4 | 244.0 docs/s | 11.2 ms | 11.3 ms | ~flat |
-| Mixed read/write | 4 | — | — | — | no longer blocked by the old concurrent-ingest SIGSEGV; rerun canonical baseline before publishing replacement numbers |
-| Connection contention | 16 | 1,368 ops/s | 11.2 ms | 12.0 ms | **+17.1%**; current harness also requires post-stress CLI recovery and classifies peak-load CLI timeouts as `timeout_under_load` |
+| Mixed read/write | 16 | 200.2 ops/s | 15.9 ms | 82.6 ms | 0 failures |
+| Mixed read/write clean tier | 68 | 278.8 ops/s | 10.9 ms | 502.3 ms | 0 failures; 17/17/17/17 layout |
+| Connection contention | 32 burst | 1,524.8 ops/s | 11.5 ms | 38.6 ms | 0 failures; 0 retry-after responses |
 
-> Current harness status (Apr 2026): reduced ASAN contention runs now keep `status`/`list` CLI recovery green after load. Peak-load CLI failures are no longer opaque harness errors; they are classified explicitly, with `timeout_under_load` the only accepted failure mode during saturation.
+> Current harness status (Apr 2026): reduced ASAN contention runs now keep `status`/`list` CLI recovery green after load. Peak-load CLI failures are classified explicitly instead of surfacing as opaque harness errors.
+
+#### Current Scaling Validation
+
+**Scaling curve (local backend, 10 docs/client, 1 KB docs)**
+
+| Clients | Aggregate Throughput | Per-client Throughput | Efficiency | Memory | Failures |
+|---------|----------------------|-----------------------|------------|--------|----------|
+| 1 | 47.3 docs/s | 47.4 docs/s | 100.0% | 80.8 MB | 0 |
+| 2 | 95.3 docs/s | 47.7 docs/s | 100.7% | 83.1 MB | 0 |
+| 4 | 192.3 docs/s | 48.1 docs/s | 101.6% | 87.2 MB | 0 |
+| 8 | 380.1 docs/s | 47.6 docs/s | 100.4% | 88.8 MB | 0 |
+| 16 | 762.1 docs/s | 47.8 docs/s | 100.7% | 91.3 MB | 0 |
+| 32 | 1468.3 docs/s | 46.1 docs/s | 97.0% | 97.3 MB | 0 |
+| 64 | 2937.3 docs/s | 47.5 docs/s | 97.0% | 107.5 MB | 0 |
+| 80 | 3703.1 docs/s | 48.6 docs/s | 97.8% | 115.3 MB | 0 |
+
+**Mixed workload ramp (writers/search/list/status-get scaled together)**
+
+| Total Clients | Layout | Throughput | Failures | Notes |
+|---------------|--------|------------|----------|-------|
+| 32 | 8/8/8/8 | 404.4 ops/s | 0 | clean |
+| 48 | 12/12/12/12 | 370.9 ops/s | 0 | clean |
+| 56 | 14/14/14/14 | 344.2 ops/s | 0 | clean |
+| 60 | 15/15/15/15 | 379.2 ops/s | 0 | clean |
+| 64 | 16/16/16/16 | 244.8 ops/s | 0 | clean |
+| 68 | 17/17/17/17 | 276.8 ops/s | 1 | first technical failure point in fresh Debug lane |
+| 72 | 18/18/18/18 | 123.6 ops/s | 85 | degraded |
+| 80 | 20/20/20/20 | 201.9 ops/s | 42 | degraded |
+
+Practical interpretation:
+
+- Clean sustained mixed-workload support is validated through **64 total clients** in the fresh Debug lane.
+- The first technical mixed-workload failure point is **68 total clients** in the fresh Debug lane.
+- Runs above that may still complete, but should be treated as a **degraded / noisy tier** rather than a clean supported tier.
+
+Methodology note:
+
+- The mixed ramp is a **closed-loop** workload: each reader executes a fixed op budget and each writer ingests a fixed document budget.
+- Because of that, aggregate ops/s is **not guaranteed to decline monotonically** as client count rises.
+- A higher-client run can show higher aggregate throughput while still being *more stressed*, as reflected by failures and much worse tail latency.
+- For scaling conclusions, treat **failures and p95/p99 latency** as the primary stress signals, with aggregate ops/s as secondary context.
+
+Safety note:
+
+- The ASAN validation lane is intentionally more conservative than the Debug lane.
+- Current ASAN mixed-workload validation is clean through **48 total clients** and first degrades at **56**.
+- Use Debug numbers for published throughput tables and ASAN numbers for bug/regression boundaries.
 
 #### Search Benchmarks
 

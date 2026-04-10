@@ -106,7 +106,7 @@ TEST_CASE("TunedParams: LARGE_PROSE parameters", "[unit][search_tuner][params]")
 TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SCIENTIFIC);
 
-    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Map);
+    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto);
     CHECK(params.rrfK == 12);
     CHECK(params.weights.text.value == Approx(0.60f));
     CHECK(params.weights.vector.value == Approx(0.35f));
@@ -755,6 +755,140 @@ TEST_CASE("SearchTuner: adaptive observation keeps KG floor and cools flapping",
 
 #include <yams/search/tuning_pipeline.h>
 
+TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
+          "[unit][search_tuner][policy]") {
+    SearchEngineConfig config;
+    config.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
+    config.textWeight = 0.21f;
+    config.vectorWeight = 0.22f;
+    config.entityVectorWeight = 0.03f;
+    config.pathTreeWeight = 0.04f;
+    config.kgWeight = 0.15f;
+    config.tagWeight = 0.05f;
+    config.metadataWeight = 0.30f;
+    config.similarityThreshold = 0.47f;
+    config.vectorBoostFactor = 1.35f;
+    config.rrfK = 17.0f;
+    config.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
+    config.vectorOnlyThreshold = 0.81f;
+    config.vectorOnlyPenalty = 0.66f;
+    config.vectorOnlyNearMissReserve = 3;
+    config.vectorOnlyNearMissSlack = 0.07f;
+    config.vectorOnlyNearMissPenalty = 0.44f;
+    config.enablePathDedupInFusion = true;
+    config.lexicalFloorTopN = 9;
+    config.lexicalFloorBoost = 0.23f;
+    config.enableLexicalTieBreak = true;
+    config.lexicalTieBreakEpsilon = 0.015f;
+    config.semanticRescueSlots = 4;
+    config.semanticRescueMinVectorScore = 0.73f;
+    config.fusionEvidenceRescueSlots = 2;
+    config.fusionEvidenceRescueMinScore = 0.021f;
+    config.enableAdaptiveVectorFallback = true;
+    config.adaptiveVectorSkipMinTier1Hits = 7;
+    config.adaptiveVectorSkipRequireTextSignal = false;
+    config.adaptiveVectorSkipMinTextHits = 5;
+    config.adaptiveVectorSkipMinTopTextScore = 0.42f;
+    config.enableSubPhraseRescoring = true;
+    config.subPhraseScoringPenalty = 0.61f;
+    config.rerankTopK = 11;
+    config.rerankAnchoredMinRelativeScore = 0.29f;
+    config.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
+    config.enableGraphRerank = true;
+    config.graphRerankTopN = 33;
+    config.graphRerankWeight = 0.17f;
+    config.graphRerankMaxBoost = 0.27f;
+    config.graphRerankMinSignal = 0.013f;
+    config.graphCommunityWeight = 0.19f;
+    config.kgMaxResults = 77;
+    config.graphScoringBudgetMs = 18;
+    config.graphEnablePathEnumeration = true;
+    config.enableGraphQueryExpansion = true;
+    config.graphEntitySignalWeight = 0.31f;
+    config.graphStructuralSignalWeight = 0.18f;
+    config.graphCoverageSignalWeight = 0.22f;
+    config.graphPathSignalWeight = 0.14f;
+    config.graphCorroborationFloor = 0.39f;
+
+    const auto params = seedTunedParamsFromConfig(config);
+    SearchEngineConfig roundTrip;
+    params.applyTo(roundTrip);
+
+    CHECK(roundTrip.zoomLevel == config.zoomLevel);
+    CHECK(roundTrip.textWeight == Approx(config.textWeight));
+    CHECK(roundTrip.vectorWeight == Approx(config.vectorWeight));
+    CHECK(roundTrip.entityVectorWeight == Approx(config.entityVectorWeight));
+    CHECK(roundTrip.pathTreeWeight == Approx(config.pathTreeWeight));
+    CHECK(roundTrip.kgWeight == Approx(config.kgWeight));
+    CHECK(roundTrip.tagWeight == Approx(config.tagWeight));
+    CHECK(roundTrip.metadataWeight == Approx(config.metadataWeight));
+    CHECK(roundTrip.similarityThreshold == Approx(config.similarityThreshold));
+    CHECK(roundTrip.vectorBoostFactor == Approx(config.vectorBoostFactor));
+    CHECK(roundTrip.rrfK == Approx(config.rrfK));
+    CHECK(roundTrip.fusionStrategy == config.fusionStrategy);
+    CHECK(roundTrip.semanticRescueSlots == config.semanticRescueSlots);
+    CHECK(roundTrip.semanticRescueMinVectorScore == Approx(config.semanticRescueMinVectorScore));
+    CHECK(roundTrip.fusionEvidenceRescueSlots == config.fusionEvidenceRescueSlots);
+    CHECK(roundTrip.fusionEvidenceRescueMinScore == Approx(config.fusionEvidenceRescueMinScore));
+    CHECK(roundTrip.enableSubPhraseRescoring == config.enableSubPhraseRescoring);
+    CHECK(roundTrip.subPhraseScoringPenalty == Approx(config.subPhraseScoringPenalty));
+    CHECK(roundTrip.chunkAggregation == config.chunkAggregation);
+    CHECK(roundTrip.graphEnablePathEnumeration == config.graphEnablePathEnumeration);
+    CHECK(roundTrip.enableGraphQueryExpansion == config.enableGraphQueryExpansion);
+    CHECK(roundTrip.graphEntitySignalWeight == Approx(config.graphEntitySignalWeight));
+    CHECK(roundTrip.graphStructuralSignalWeight == Approx(config.graphStructuralSignalWeight));
+    CHECK(roundTrip.graphCoverageSignalWeight == Approx(config.graphCoverageSignalWeight));
+    CHECK(roundTrip.graphPathSignalWeight == Approx(config.graphPathSignalWeight));
+    CHECK(roundTrip.graphCorroborationFloor == Approx(config.graphCorroborationFloor));
+}
+
+TEST_CASE("resolveQueryPolicy preserves no-tuner config fields unaffected by query layers",
+          "[unit][search_tuner][policy]") {
+    SearchEngineConfig config;
+    config.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+    config.enableIntentAdaptiveWeighting = false;
+    config.textWeight = 0.50f;
+    config.vectorWeight = 0.30f;
+    config.entityVectorWeight = 0.00f;
+    config.pathTreeWeight = 0.00f;
+    config.kgWeight = 0.10f;
+    config.tagWeight = 0.05f;
+    config.metadataWeight = 0.05f;
+    config.semanticRescueMinVectorScore = 0.73f;
+    config.fusionEvidenceRescueSlots = 2;
+    config.fusionEvidenceRescueMinScore = 0.021f;
+    config.enableSubPhraseRescoring = true;
+    config.subPhraseScoringPenalty = 0.61f;
+    config.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
+    config.graphEnablePathEnumeration = true;
+    config.enableGraphQueryExpansion = true;
+    config.graphEntitySignalWeight = 0.31f;
+    config.graphStructuralSignalWeight = 0.18f;
+    config.graphCoverageSignalWeight = 0.22f;
+    config.graphPathSignalWeight = 0.14f;
+    config.graphCorroborationFloor = 0.39f;
+
+    const auto resolution = resolveQueryPolicy(
+        "documents and files", config, seedTunedParamsFromConfig(config), std::nullopt, false);
+
+    CHECK(resolution.routeDecision.intent.label == QueryIntent::Prose);
+    CHECK_FALSE(resolution.communityOverride.has_value());
+    CHECK(resolution.config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
+    CHECK(resolution.config.semanticRescueMinVectorScore == Approx(0.73f));
+    CHECK(resolution.config.fusionEvidenceRescueSlots == 2);
+    CHECK(resolution.config.fusionEvidenceRescueMinScore == Approx(0.021f));
+    CHECK(resolution.config.enableSubPhraseRescoring == true);
+    CHECK(resolution.config.subPhraseScoringPenalty == Approx(0.61f));
+    CHECK(resolution.config.chunkAggregation == SearchEngineConfig::ChunkAggregation::SUM);
+    CHECK(resolution.config.graphEnablePathEnumeration == true);
+    CHECK(resolution.config.enableGraphQueryExpansion == true);
+    CHECK(resolution.config.graphEntitySignalWeight == Approx(0.31f));
+    CHECK(resolution.config.graphStructuralSignalWeight == Approx(0.18f));
+    CHECK(resolution.config.graphCoverageSignalWeight == Approx(0.22f));
+    CHECK(resolution.config.graphPathSignalWeight == Approx(0.14f));
+    CHECK(resolution.config.graphCorroborationFloor == Approx(0.39f));
+}
+
 TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
           "[unit][search_tuner][community]") {
     auto params = getTunedParams(TuningState::MIXED_PRECISION);
@@ -1076,4 +1210,17 @@ TEST_CASE("Graph signal weights propagate to SearchEngineConfig",
     CHECK(config.graphEntitySignalWeight == Approx(0.50f));
     CHECK(config.graphStructuralSignalWeight == Approx(0.15f));
     CHECK(config.graphCorroborationFloor == Approx(0.25f));
+}
+
+TEST_CASE("TunedParams: toJson includes graph signal fields",
+          "[unit][search_tuner][serialization]") {
+    auto p = getTunedParams(TuningState::SCIENTIFIC);
+    auto j = p.toJson();
+    CHECK(j.at("graph_entity_signal_weight").get<float>() == Approx(0.50f));
+    CHECK(j.at("graph_corroboration_floor").get<float>() == Approx(0.25f));
+    CHECK(j.at("graph_enable_path_enumeration").get<bool>() == false);
+    CHECK(j.at("enable_graph_query_expansion").get<bool>() == false);
+    CHECK(j.at("graph_structural_signal_weight").get<float>() == Approx(0.15f));
+    CHECK(j.at("graph_coverage_signal_weight").get<float>() == Approx(0.15f));
+    CHECK(j.at("graph_path_signal_weight").get<float>() == Approx(0.10f));
 }

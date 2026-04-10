@@ -799,7 +799,8 @@ public:
     }
 
     // WorkCoordinator threads (override, env, or derived).
-    // Default: profile-aware, host-aware thread capacity with a small safety floor.
+    // Default: slightly I/O-biased relative to the general CPU budget because metadata and
+    // retrieval paths frequently block on SQLite/disk work even when CPU usage is moderate.
     // Environment: YAMS_WORK_COORDINATOR_THREADS
     static uint32_t workCoordinatorThreads() {
         uint32_t ov = workCoordinatorThreadsOverride_.load(std::memory_order_relaxed);
@@ -814,7 +815,7 @@ public:
                 ignoreInvalidEnvParseFailure();
             }
         }
-        return std::max(2u, recommendedThreads(1.0));
+        return defaultReadPathCapacityModel(hardwareConcurrency()).workerThreads;
     }
     static void setWorkCoordinatorThreads(uint32_t n) {
         workCoordinatorThreadsOverride_.store(std::clamp<uint32_t>(n, 1u, 512u),
@@ -823,20 +824,7 @@ public:
 
     // Recommended thread count based on CPU budget. backgroundFactor in (0,1].
     static uint32_t recommendedThreads(double backgroundFactor = 1.0, uint32_t hardMax = 0) {
-        unsigned hw = hardwareConcurrency();
-        double budget = static_cast<double>(cpuBudgetPercent()) / 100.0;
-        if (backgroundFactor <= 0.0)
-            backgroundFactor = 0.5;
-        double eff = std::clamp(budget * backgroundFactor, 0.1, 1.0);
-        uint32_t budgetCap =
-            static_cast<uint32_t>(std::max(1.0, std::floor(eff * static_cast<double>(hw))));
-        uint32_t cap = std::min(budgetCap, daemonThreadCapacity(hw));
-        uint32_t absMax = maxThreadsOverall();
-        if (absMax > 0)
-            cap = std::min(cap, absMax);
-        if (hardMax > 0)
-            cap = std::min(cap, hardMax);
-        return std::max(1u, cap);
+        return recommendedThreadsForHw(hardwareConcurrency(), backgroundFactor, hardMax);
     }
 
 #ifdef YAMS_TESTING
@@ -1512,11 +1500,14 @@ public:
                 ignoreInvalidEnvParseFailure();
             }
         }
-        auto derived = std::max<uint32_t>(2, recommendedThreads(0.5));
-        return derived * 2;
+        return defaultReadPathCapacityModel(hardwareConcurrency()).searchConcurrencyLimit;
     }
     static void setSearchConcurrencyLimit(uint32_t v) {
         searchConcurrencyOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    static uint32_t readPoolMaxConnections(uint32_t configuredMax) {
+        return defaultReadPoolMaxConnectionsForHw(hardwareConcurrency(), configuredMax);
     }
 
     // Dedicated daemon-side list admission controls.
@@ -1587,15 +1578,7 @@ public:
         uint32_t ov = cliRequestPoolThreadsOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 1;
-            case Profile::Aggressive:
-                return 4;
-            case Profile::Balanced:
-            default:
-                return 2;
-        }
+        return defaultReadPathCapacityModel(hardwareConcurrency()).cliRequestPoolThreads;
     }
     static void setCliRequestPoolThreads(uint32_t v) {
         cliRequestPoolThreadsOverride_.store(std::clamp<uint32_t>(v, 1u, 64u),
@@ -3649,6 +3632,70 @@ public:
     }
 
 private:
+    struct ReadPathCapacityModel {
+        uint32_t workerThreads{4};
+        uint32_t cliRequestPoolThreads{2};
+        uint32_t searchConcurrencyLimit{4};
+    };
+
+    static double workCoordinatorIoBias() {
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 1.0;
+            case Profile::Aggressive:
+                return 1.75;
+            case Profile::Balanced:
+            default:
+                return 1.5;
+        }
+    }
+
+    static uint32_t recommendedThreadsForHw(unsigned hw, double backgroundFactor,
+                                            uint32_t hardMax = 0) {
+        double budget = static_cast<double>(cpuBudgetPercent()) / 100.0;
+        if (backgroundFactor <= 0.0)
+            backgroundFactor = 0.5;
+        double eff = std::clamp(budget * backgroundFactor, 0.1, 1.0);
+        uint32_t budgetCap =
+            static_cast<uint32_t>(std::max(1.0, std::floor(eff * static_cast<double>(hw))));
+        uint32_t cap = std::min(budgetCap, daemonThreadCapacity(hw));
+        uint32_t absMax = maxThreadsOverall();
+        if (absMax > 0)
+            cap = std::min(cap, absMax);
+        if (hardMax > 0)
+            cap = std::min(cap, hardMax);
+        return std::max(1u, cap);
+    }
+
+    static ReadPathCapacityModel defaultReadPathCapacityModel(unsigned hw) {
+        ReadPathCapacityModel model;
+        model.workerThreads = std::max(4u, recommendedThreadsForHw(hw, workCoordinatorIoBias()));
+        model.cliRequestPoolThreads = std::clamp<uint32_t>(model.workerThreads / 2u, 2u, 5u);
+
+        auto derived = std::max<uint32_t>(2u, recommendedThreadsForHw(hw, 0.5)) * 2u;
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                model.searchConcurrencyLimit = derived;
+                break;
+            case Profile::Aggressive:
+                model.searchConcurrencyLimit = std::max<uint32_t>(6u, derived);
+                break;
+            case Profile::Balanced:
+            default:
+                model.searchConcurrencyLimit = std::max<uint32_t>(5u, derived);
+                break;
+        }
+        return model;
+    }
+
+    static uint32_t defaultReadPoolMaxConnectionsForHw(unsigned hw, uint32_t configuredMax) {
+        const auto model = defaultReadPathCapacityModel(hw);
+        uint32_t derived = std::max<uint32_t>(
+            {4u, model.workerThreads, model.searchConcurrencyLimit, listInflightLimit()});
+        const uint32_t capped = std::clamp<uint32_t>(derived, 4u, 8u);
+        return std::min(capped, std::max<uint32_t>(1u, configuredMax));
+    }
+
     /// Detect system memory (cross-platform). Returns bytes.
     /// Implementation uses platform-specific APIs:
     ///   Windows: GlobalMemoryStatusEx

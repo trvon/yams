@@ -686,8 +686,8 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 mainActiveConnections_.fetch_add(1, std::memory_order_relaxed);
             }
 
-            spdlog::info("SocketServer: [conn={}] accepted {} connection, active={} total={}",
-                         conn_token, loopLabel, current, totalConnections_.load());
+            spdlog::debug("SocketServer: [conn={}] accepted {} connection, active={} total={}",
+                          conn_token, loopLabel, current, totalConnections_.load());
 
             if (state_) {
                 state_->stats.activeConnections.store(current);

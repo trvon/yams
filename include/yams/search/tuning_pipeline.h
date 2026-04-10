@@ -8,8 +8,29 @@
 #include <yams/search/search_tuner.h>
 
 #include <optional>
+#include <string_view>
 
 namespace yams::search {
+
+struct QueryPolicyResolution {
+    QueryRouteDecision routeDecision;
+    SearchEngineConfig config;
+    SearchEngineConfig::NavigationZoomLevel effectiveZoomLevel =
+        SearchEngineConfig::NavigationZoomLevel::Auto;
+    bool zoomLevelInferredFromIntent = false;
+    std::optional<TuningState> communityOverride;
+};
+
+/// Seed TunedParams from an existing SearchEngineConfig so the layered tuning pipeline can
+/// safely operate even when no SearchTuner is installed.
+[[nodiscard]] TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config);
+
+/// Resolve per-query routing and layered tuning into a final SearchEngineConfig.
+[[nodiscard]] QueryPolicyResolution resolveQueryPolicy(std::string_view query,
+                                                       const SearchEngineConfig& baseConfig,
+                                                       const TunedParams& baseParams,
+                                                       std::optional<TuningState> baselineState,
+                                                       bool semanticOnly);
 
 /// Layer 4: Zoom policy — scales component weights based on zoom level.
 /// Operates on TunedParams slots via scaleBy() (respects pinned values).
