@@ -51,16 +51,18 @@ void set_current_thread_name(const std::string& name) {
 
 yams::Result<void> validate_socket_path_preflight(const std::filesystem::path& socketPath) {
 #ifndef _WIN32
-    std::filesystem::path effectivePath = socketPath;
-    if (!effectivePath.is_absolute()) {
+    std::optional<std::filesystem::path> absolutePath;
+    const std::filesystem::path* effectivePath = &socketPath;
+    if (!socketPath.is_absolute()) {
         std::error_code ec;
-        auto abs = std::filesystem::absolute(effectivePath, ec);
+        auto abs = std::filesystem::absolute(socketPath, ec);
         if (!ec) {
-            effectivePath = abs;
+            absolutePath = std::move(abs);
+            effectivePath = &*absolutePath;
         }
     }
 
-    const auto sp = effectivePath.string();
+    const auto sp = effectivePath->string();
     if (sp.size() >= sizeof(sockaddr_un::sun_path)) {
         return yams::Error{yams::ErrorCode::InvalidArgument,
                            std::string("Socket path too long for AF_UNIX (") +

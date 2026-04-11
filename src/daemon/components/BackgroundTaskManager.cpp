@@ -207,7 +207,7 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                                 }
                             }
 
-                            PostIngestQueue::Task task{h, mime};
+                            PostIngestQueue::Task task{h, std::move(mime)};
 
                             if (postIngest->tryEnqueue(std::move(task))) {
                                 ++enqueued;

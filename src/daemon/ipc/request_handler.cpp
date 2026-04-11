@@ -255,7 +255,10 @@ RequestHandler::handle_request(std::vector<uint8_t> request_data, yams::compat::
             errorMsg.requestId = message.requestId;
             errorMsg.payload = Response(error);
             auto errorEncoded = ProtoSerializer::encode_payload(errorMsg);
-            co_return errorEncoded ? errorEncoded.value() : std::vector<uint8_t>{};
+            if (!errorEncoded) {
+                co_return std::vector<uint8_t>{};
+            }
+            co_return std::move(errorEncoded.value());
         }
         co_return encoded.value();
 
@@ -1456,9 +1459,8 @@ RequestHandler::stream_chunks_stub(boost::asio::local::stream_protocol::socket& 
             fsm->on_stream_next(false);
 
         // Emit a single final empty chunk
-        Response finalResponse = headerResponse; // empty payloads
         auto chunk_result =
-            co_await write_chunk(socket, finalResponse, request_id, true, true, fsm);
+            co_await write_chunk(socket, std::move(headerResponse), request_id, true, true, fsm);
         if (!chunk_result)
             co_return chunk_result.error();
 
@@ -1824,8 +1826,10 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
     // This prevents the SIGSEGV when a concurrent request coroutine restarts drain
     // after a previous drain cleared queues on write failure.
     if (connection_closing_.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lock(rr_mutex_);
-        writer_running_ = false;
+        {
+            std::lock_guard<std::mutex> guard(rr_mutex_);
+            writer_running_ = false;
+        }
         co_return;
     }
 
@@ -1948,29 +1952,29 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
                 spdlog::warn("[DRAIN] req_id={} write error: {}", rid, ec.message());
                 // Mark connection as broken to prevent new drain cycles on dead socket
                 connection_closing_.store(true, std::memory_order_release);
-                std::lock_guard<std::mutex> lock(rr_mutex_);
-                // Socket writes failed. This connection is effectively broken, so drop any
-                // remaining queued frames/bytes to avoid stranding rr_queues_ (which can
-                // permanently exhaust caps because future enqueues for non-empty queues do not
-                // re-activate rr_active_).
                 size_t dropped_bytes = 0;
-                for (auto& [qid, q] : rr_queues_) {
-                    for (auto& item : q) {
-                        dropped_bytes += item.data.size();
+                {
+                    std::lock_guard<std::mutex> guard(rr_mutex_);
+                    // Socket writes failed. This connection is effectively broken, so drop any
+                    // remaining queued frames/bytes to avoid stranding rr_queues_ (which can
+                    // permanently exhaust caps because future enqueues for non-empty queues do not
+                    // re-activate rr_active_).
+                    for (auto& [qid, q] : rr_queues_) {
+                        for (auto& item : q) {
+                            dropped_bytes += item.data.size();
+                        }
                     }
-                }
-                if (dropped_bytes > 0) {
                     // total_queued_bytes_ should already equal dropped_bytes here, but reset
                     // defensively and keep metrics consistent.
                     total_queued_bytes_ = 0;
+                    rr_queues_.clear();
+                    rr_active_.clear();
+                    writer_running_ = false;
+                }
+                if (dropped_bytes > 0) {
                     MuxMetricsRegistry::instance().addQueuedBytes(
                         -static_cast<int64_t>(dropped_bytes));
-                } else {
-                    total_queued_bytes_ = 0;
                 }
-                rr_queues_.clear();
-                rr_active_.clear();
-                writer_running_ = false;
                 co_return;
             }
             spdlog::debug("[DRAIN] req_id={} wrote {} bytes successfully", rid, frame.data.size());
@@ -2181,10 +2185,10 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     repairConfig.cancelRequested = &requestContext->canceled;
                 }
 
-                auto progress = [emitEvent, modelName](size_t current, size_t total,
-                                                       const std::string& details) mutable {
+                auto progress = [emitEvent, &modelName](size_t current, size_t total,
+                                                        const std::string& details) mutable {
                     EmbeddingEvent ev;
-                    ev.modelName = modelName;
+                    ev.modelName.append(modelName.data(), modelName.size());
                     ev.processed = current;
                     ev.total = total;
                     ev.phase = "working";

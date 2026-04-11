@@ -750,20 +750,18 @@ public:
         if (hw <= 1u)
             return 0u;
 
-        uint32_t reserve = 1u;
         switch (tuningProfile()) {
             case Profile::Efficient:
-                reserve = std::max<uint32_t>(2u, static_cast<uint32_t>(std::ceil(hw * 0.25)));
-                break;
+                return std::min(std::max<uint32_t>(2u, static_cast<uint32_t>(std::ceil(hw * 0.25))),
+                                hw - 1u);
             case Profile::Aggressive:
-                reserve = std::max<uint32_t>(1u, static_cast<uint32_t>(std::ceil(hw * 0.10)));
-                break;
+                return std::min(std::max<uint32_t>(1u, static_cast<uint32_t>(std::ceil(hw * 0.10))),
+                                hw - 1u);
             case Profile::Balanced:
             default:
-                reserve = std::max<uint32_t>(2u, static_cast<uint32_t>(std::ceil(hw * 0.15)));
-                break;
+                return std::min(std::max<uint32_t>(2u, static_cast<uint32_t>(std::ceil(hw * 0.15))),
+                                hw - 1u);
         }
-        return std::min(reserve, hw - 1u);
     }
 
     static uint32_t daemonThreadCapacity(unsigned hw) {

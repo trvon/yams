@@ -56,9 +56,9 @@ struct EmbeddingRepairConfig {
  * @return Result containing repair statistics or error
  */
 Result<EmbeddingRepairStats>
-repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
-                        std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
-                        std::shared_ptr<daemon::IModelProvider> modelProvider,
+repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
+                        const std::shared_ptr<metadata::IMetadataRepository>& metadataRepo,
+                        const std::shared_ptr<daemon::IModelProvider>& modelProvider,
                         const std::string& modelName, const EmbeddingRepairConfig& config,
                         const std::vector<std::string>& documentHashes = {},
                         EmbeddingRepairProgressCallback progressCallback = nullptr,
@@ -77,9 +77,9 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
  * @return Result containing repair statistics or error
  */
 Result<EmbeddingRepairStats>
-repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
-                        std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
-                        std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator,
+repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
+                        const std::shared_ptr<metadata::IMetadataRepository>& metadataRepo,
+                        const std::shared_ptr<vector::EmbeddingGenerator>& embeddingGenerator,
                         const EmbeddingRepairConfig& config,
                         const std::vector<std::string>& documentHashes = {},
                         EmbeddingRepairProgressCallback progressCallback = nullptr,

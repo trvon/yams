@@ -163,9 +163,9 @@ private:
 } // namespace
 
 Result<EmbeddingRepairStats>
-repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
-                        std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
-                        std::shared_ptr<daemon::IModelProvider> modelProvider,
+repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
+                        const std::shared_ptr<metadata::IMetadataRepository>& metadataRepo,
+                        const std::shared_ptr<daemon::IModelProvider>& modelProvider,
                         const std::string& modelName, const EmbeddingRepairConfig& config,
                         const std::vector<std::string>& documentHashes,
                         EmbeddingRepairProgressCallback progressCallback,
@@ -602,9 +602,9 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
 
 // CLI overload - wraps the daemon version but extracts model info from EmbeddingGenerator
 Result<EmbeddingRepairStats>
-repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
-                        std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
-                        std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator,
+repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
+                        const std::shared_ptr<metadata::IMetadataRepository>& metadataRepo,
+                        const std::shared_ptr<vector::EmbeddingGenerator>& embeddingGenerator,
                         const EmbeddingRepairConfig& config,
                         const std::vector<std::string>& documentHashes,
                         EmbeddingRepairProgressCallback progressCallback,
@@ -725,6 +725,7 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
     };
 
     auto provider = std::make_shared<GeneratorModelProvider>(embeddingGenerator);
+    std::shared_ptr<daemon::IModelProvider> modelProvider = provider;
 
     // Use a placeholder model name since EmbeddingGenerator doesn't expose it
     std::string modelName = "default";
@@ -732,7 +733,7 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
         modelName = env;
     }
 
-    return repairMissingEmbeddings(contentStore, metadataRepo, provider, modelName, config,
+    return repairMissingEmbeddings(contentStore, metadataRepo, modelProvider, modelName, config,
                                    documentHashes, progressCallback, extractors);
 }
 

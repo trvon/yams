@@ -706,6 +706,7 @@ if catch2_dep.found()
       'unit/daemon/frame_reader_catch2_test.cpp',
       'unit/daemon/dispatch_response_mapper_catch2_test.cpp',
       'unit/daemon/request_handler_admission_reuse_catch2_test.cpp',
+      'unit/daemon/request_handler_repair_cancel_catch2_test.cpp',
       'unit/daemon/request_handler_status_unary_catch2_test.cpp',
     ),
     include_directories: incs,

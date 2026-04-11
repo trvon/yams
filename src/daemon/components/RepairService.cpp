@@ -311,7 +311,7 @@ void RepairService::start() {
             try {
                 if (!shutdownState->running.load(std::memory_order_acquire))
                     co_return;
-                co_await self->backgroundLoop(shutdownState);
+                co_await self->backgroundLoop(shutdownState.get());
             } catch (const std::exception& e) {
                 spdlog::error("RepairService coroutine exception: {}", e.what());
             }
@@ -431,11 +431,10 @@ void RepairService::onDocumentAdded(const DocumentAddedEvent& event) {
                             alreadyExtracted = true;
                     }
                     if (!alreadyExtracted) {
-                        GraphComponent::EntityExtractionJob j;
-                        j.documentHash = event.hash;
-                        j.filePath = event.path;
-                        j.language = it->second;
-                        (void)gc->submitEntityExtraction(std::move(j));
+                        GraphComponent::EntityExtractionJob job{.documentHash = event.hash,
+                                                                .filePath = event.path};
+                        job.language.append(it->second.data(), it->second.size());
+                        (void)gc->submitEntityExtraction(std::move(job));
                     }
                 }
             }
@@ -476,8 +475,7 @@ void RepairService::enqueueEmbeddingRepair(const std::vector<std::string>& hashe
 // Background Loop (ported from RepairCoordinator::runAsync)
 // ============================================================================
 
-boost::asio::awaitable<void>
-RepairService::backgroundLoop(std::shared_ptr<ShutdownState> shutdownState) {
+boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdownState) {
     using namespace std::chrono_literals;
     auto ex = co_await boost::asio::this_coro::executor;
     boost::asio::steady_timer timer(ex);
@@ -666,10 +664,9 @@ RepairService::backgroundLoop(std::shared_ptr<ShutdownState> shutdownState) {
                 missingEmbeddings, static_cast<uint32_t>(shutdownState->config.maxBatch), true,
                 std::string{},     std::vector<InternalEventBus::EmbedPreparedDoc>{},     nullptr};
             job.updateSemanticGraph = false;
-            const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                    "embed_jobs", embedCap);
+                    "embed_jobs", TuneAdvisor::embedChannelCapacity());
             bool queued = co_await queueWithBackoff(embedQ, std::move(job), timer, running_,
                                                     "embed", missingEmbeddings.size(), 50, 1000);
             if (queued) {
@@ -918,9 +915,8 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
         return result;
 
     const bool checkEmbeddings = !vectorsDisabledByEnv();
-    auto customExtractors = services_
-                                ? services_->getContentExtractors()
-                                : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
+    static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
+    const auto& customExtractors = services_ ? services_->getContentExtractors() : kEmptyExtractors;
 
     std::vector<MissingWorkFlags> flags(batch.size());
     std::vector<std::exception_ptr> errors(batch.size());
@@ -1412,9 +1408,8 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
         }
     }
     if (keepGoing && doOptimize) {
-        keepGoing = runOp("optimize", [&] {
-            return optimizeDatabase(request.dryRun, request.verbose, progress);
-        });
+        (void)runOp("optimize",
+                    [&] { return optimizeDatabase(request.dryRun, request.verbose, progress); });
     }
 
     response.success = errors.empty();
@@ -1509,7 +1504,7 @@ RepairService::detectStuckDocuments(int32_t maxRetries) {
 }
 
 boost::asio::awaitable<RepairOperationResult>
-RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, ProgressFn progress,
+RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const ProgressFn& progress,
                                           std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "stuck_docs";
@@ -1610,7 +1605,7 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, ProgressFn p
 }
 
 RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& req,
-                                                           ProgressFn progress) {
+                                                           const ProgressFn& progress) {
     RepairOperationResult result;
     result.operation = "stuck_docs";
 
@@ -1818,7 +1813,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         return result;
     }
 
-    for (const auto& [id, mimeType] : toRepair) {
+    for (auto& [id, mimeType] : toRepair) {
         auto docResult = meta->getDocument(id);
         if (!(docResult && docResult.value())) {
             result.failed++;
@@ -1828,7 +1823,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         auto doc = *docResult.value();
         const bool oldWasText = detector.isTextMimeType(doc.mimeType);
         const bool newIsText = detector.isTextMimeType(mimeType);
-        doc.mimeType = mimeType;
+        doc.mimeType = std::move(mimeType);
 
         if (meta->updateDocument(doc)) {
             if (oldWasText && !newIsText) {
@@ -1890,7 +1885,7 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         return url;
     };
 
-    for (auto doc : docsResult.value()) {
+    for (auto& doc : docsResult.value()) {
         std::string sourceUrl;
         if (is_url(doc.filePath))
             sourceUrl = doc.filePath;
@@ -1936,7 +1931,7 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
 }
 
 RepairOperationResult RepairService::applySemanticDedupe(const RepairRequest& req,
-                                                         ProgressFn progress) {
+                                                         const ProgressFn& progress) {
     RepairOperationResult result;
     result.operation = "dedupe";
 
@@ -2102,7 +2097,7 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
 }
 
 RepairOperationResult RepairService::repairKnowledgeGraph(const RepairRequest& req,
-                                                          ProgressFn progress) {
+                                                          const ProgressFn& progress) {
     RepairOperationResult result;
     result.operation = "graph";
 
@@ -2393,7 +2388,7 @@ RepairService::repairLegacyPathNodesInPlace(bool dryRun, bool verbose, ProgressF
 }
 
 RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun, bool verbose,
-                                                                    ProgressFn progress) {
+                                                                    const ProgressFn& progress) {
     (void)verbose;
     KgCleanupStats stats;
     auto meta = services_ ? services_->getMetadataRepo() : nullptr;
@@ -2533,7 +2528,7 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
 }
 
 RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbose,
-                                                         ProgressFn progress) {
+                                                         const ProgressFn& progress) {
     RepairOperationResult result;
     result.operation = "chunks";
 
@@ -2718,7 +2713,7 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
 }
 
 RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool verbose,
-                                                           ProgressFn progress) {
+                                                           const ProgressFn& progress) {
     RepairOperationResult result;
     result.operation = "block_refs";
 
@@ -2732,7 +2727,7 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
     }
 
     auto repairResult = integrity::RepairManager::repairBlockReferences(
-        objectsPath, refsDbPath, dryRun, [progress](uint64_t processed, uint64_t total) {
+        objectsPath, refsDbPath, dryRun, [&progress](uint64_t processed, uint64_t total) {
             if (!progress)
                 return;
             RepairEvent ev;
@@ -2760,7 +2755,7 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
 }
 
 RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
-                                                      ProgressFn progress) {
+                                                      const ProgressFn& progress) {
     RepairOperationResult result;
     result.operation = "fts5";
 
@@ -2792,9 +2787,8 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
         }
     }
 
-    auto customExtractors = services_
-                                ? services_->getContentExtractors()
-                                : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
+    static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
+    const auto& customExtractors = services_ ? services_->getContentExtractors() : kEmptyExtractors;
 
     // Pre-load all FTS5 rowids so the incremental skip check below is O(1)
     // per document instead of one SQL round-trip each.
@@ -2903,8 +2897,10 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                                                                metadata::ExtractionStatus::Success);
                     result.succeeded++;
                 } else {
-                    std::string failMsg = !contentResult ? contentResult.error().message
-                                                         : (!ir ? ir.error().message : "unknown");
+                    static const std::string kUnknownFailure = "unknown";
+                    const std::string& failMsg = !contentResult
+                                                     ? contentResult.error().message
+                                                     : (!ir ? ir.error().message : kUnknownFailure);
                     (void)meta->updateDocumentExtractionStatus(
                         d.id, false, metadata::ExtractionStatus::Failed, failMsg);
                     result.failed++;
@@ -2928,7 +2924,7 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
 }
 
 boost::asio::awaitable<RepairOperationResult>
-RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, ProgressFn progress,
+RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const ProgressFn& progress,
                                               std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "embeddings";
@@ -3112,7 +3108,7 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, Progress
 }
 
 RepairOperationResult RepairService::generateMissingEmbeddings(const RepairRequest& req,
-                                                               ProgressFn progress,
+                                                               const ProgressFn& progress,
                                                                std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "embeddings";

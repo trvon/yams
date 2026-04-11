@@ -119,7 +119,7 @@ private:
     };
 
     // ── Background loop (absorbs RepairCoordinator::runAsync) ──
-    boost::asio::awaitable<void> backgroundLoop(std::shared_ptr<ShutdownState> shutdownState);
+    boost::asio::awaitable<void> backgroundLoop(ShutdownState* shutdownState);
     boost::asio::awaitable<void> spawnInitialScan();
     boost::asio::awaitable<void> processPathTreeRepair();
     void performVectorCleanup();
@@ -149,22 +149,27 @@ private:
     RepairOperationResult repairMimeTypes(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult repairDownloads(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult rebuildPathTree(bool dryRun, bool verbose, ProgressFn progress);
-    RepairOperationResult cleanOrphanedChunks(bool dryRun, bool verbose, ProgressFn progress);
-    RepairOperationResult repairBlockReferences(bool dryRun, bool verbose, ProgressFn progress);
-    RepairOperationResult repairKnowledgeGraph(const RepairRequest& req, ProgressFn progress);
-    RepairOperationResult applySemanticDedupe(const RepairRequest& req, ProgressFn progress);
-    RepairOperationResult rebuildFts5Index(const RepairRequest& req, ProgressFn progress);
-    RepairOperationResult generateMissingEmbeddings(const RepairRequest& req, ProgressFn progress,
+    RepairOperationResult cleanOrphanedChunks(bool dryRun, bool verbose,
+                                              const ProgressFn& progress);
+    RepairOperationResult repairBlockReferences(bool dryRun, bool verbose,
+                                                const ProgressFn& progress);
+    RepairOperationResult repairKnowledgeGraph(const RepairRequest& req,
+                                               const ProgressFn& progress);
+    RepairOperationResult applySemanticDedupe(const RepairRequest& req, const ProgressFn& progress);
+    RepairOperationResult rebuildFts5Index(const RepairRequest& req, const ProgressFn& progress);
+    RepairOperationResult generateMissingEmbeddings(const RepairRequest& req,
+                                                    const ProgressFn& progress,
                                                     std::atomic<bool>* cancelRequested = nullptr);
     boost::asio::awaitable<RepairOperationResult>
-    generateMissingEmbeddingsAsync(const RepairRequest& req, ProgressFn progress,
+    generateMissingEmbeddingsAsync(const RepairRequest& req, const ProgressFn& progress,
                                    std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult optimizeDatabase(bool dryRun, bool verbose, ProgressFn progress);
 
     // ── NEW: stuck document recovery ──
-    RepairOperationResult recoverStuckDocuments(const RepairRequest& req, ProgressFn progress);
+    RepairOperationResult recoverStuckDocuments(const RepairRequest& req,
+                                                const ProgressFn& progress);
     boost::asio::awaitable<RepairOperationResult>
-    recoverStuckDocumentsAsync(const RepairRequest& req, ProgressFn progress,
+    recoverStuckDocumentsAsync(const RepairRequest& req, const ProgressFn& progress,
                                std::atomic<bool>* cancelRequested = nullptr);
 
     struct StuckDocumentInfo {
@@ -187,7 +192,7 @@ private:
         uint64_t errors{0};
         std::vector<std::string> issues;
     };
-    KgCleanupStats cleanOrphanedKgEntries(bool dryRun, bool verbose, ProgressFn progress);
+    KgCleanupStats cleanOrphanedKgEntries(bool dryRun, bool verbose, const ProgressFn& progress);
 
     struct PathNodeMigrationStats {
         uint64_t nodesScanned{0};
