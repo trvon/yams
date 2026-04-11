@@ -19,10 +19,14 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RepairService.h>
+#include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/metadata/connection_pool.h>
+
+#include <boost/asio/use_future.hpp>
 
 using namespace yams;
 using namespace yams::daemon;
@@ -76,6 +80,13 @@ std::optional<RepairOperationResult> findOperationResult(const RepairResponse& r
     return std::nullopt;
 }
 
+Response dispatchRequest(RequestDispatcher& dispatcher, const Request& req) {
+    boost::asio::io_context ioc;
+    auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(req), boost::asio::use_future);
+    ioc.run();
+    return fut.get();
+}
+
 bool waitForCondition(std::chrono::milliseconds timeout, const std::function<bool()>& predicate) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -86,6 +97,18 @@ bool waitForCondition(std::chrono::milliseconds timeout, const std::function<boo
     }
     return predicate();
 }
+
+struct TuneAdvisorRepairGuard {
+    uint32_t workCoordinatorThreads{TuneAdvisor::workCoordinatorThreads()};
+    uint32_t postIngestQueueMax{TuneAdvisor::postIngestQueueMax()};
+    uint32_t embedChannelCapacity{TuneAdvisor::embedChannelCapacity()};
+
+    ~TuneAdvisorRepairGuard() {
+        TuneAdvisor::setWorkCoordinatorThreads(workCoordinatorThreads);
+        TuneAdvisor::setPostIngestQueueMax(postIngestQueueMax);
+        TuneAdvisor::setEmbedChannelCapacity(embedChannelCapacity);
+    }
+};
 
 class SelectiveFailingModelProvider : public IModelProvider {
 public:
@@ -618,6 +641,137 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(contentRes.value().has_value());
     CHECK_FALSE(contentRes.value()->contentText.empty());
 
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(
+    ServiceManagerFixture,
+    "RepairService: async auto-repair backoff keeps list responsive when embed queue is full",
+    "[daemon][repair][regression][list][async-backoff]") {
+    TuneAdvisorRepairGuard tuneGuard;
+    TuneAdvisor::setWorkCoordinatorThreads(1);
+    TuneAdvisor::setPostIngestQueueMax(256);
+    TuneAdvisor::setEmbedChannelCapacity(256);
+
+    auto embedChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
+                                                                                       256);
+    REQUIRE(embedChannel != nullptr);
+    drainQueue(embedChannel);
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+
+    auto repoPath = testDir_ / "auto_repair_list_responsive.db";
+    metadata::ConnectionPoolConfig poolCfg{};
+    auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+    REQUIRE(pool->initialize().has_value());
+    auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+    sm->__test_setMetadataRepo(repo);
+    state_.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    state_.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    const std::string hash = std::string(64, 'b');
+    const std::string path = (config_.dataDir / "auto-repair-list.txt").string();
+
+    metadata::DocumentInfo doc{};
+    doc.fileName = "auto-repair-list.txt";
+    doc.filePath = path;
+    doc.fileExtension = "txt";
+    doc.fileSize = 24;
+    doc.sha256Hash = hash;
+    doc.mimeType = "text/plain";
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+
+    auto idRes = repo->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+
+    metadata::DocumentContent content{};
+    content.documentId = idRes.value();
+    content.contentText = "warm auto repair content";
+    content.contentLength = static_cast<int64_t>(content.contentText.size());
+    content.extractionMethod = "test";
+    content.language = "en";
+    REQUIRE(repo->insertContent(content).has_value());
+    REQUIRE(repo->updateDocumentExtractionStatus(idRes.value(), true,
+                                                 metadata::ExtractionStatus::Success)
+                .has_value());
+
+    RequestDispatcher dispatcher(nullptr, sm.get(), &state_);
+
+    RepairService::Config repairCfg;
+    repairCfg.enable = true;
+    repairCfg.dataDir = config_.dataDir;
+    repairCfg.maxBatch = 1;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 1; }, repairCfg);
+    repair.start();
+
+    InternalEventBus::EmbedJob filler;
+    filler.hashes = {std::string(64, 'f')};
+    filler.batchSize = 1;
+    filler.skipExisting = true;
+    std::size_t filled = 0;
+    while (embedChannel->try_push(filler)) {
+        ++filled;
+    }
+    REQUIRE(filled > 0);
+
+    std::atomic<bool> repairStarted{false};
+    RepairRequest req;
+    req.repairEmbeddings = true;
+    req.foreground = false;
+
+    auto repairFuture = boost::asio::co_spawn(
+        sm->getWorkerExecutor(),
+        repair.executeRepairAsync(req,
+                                  [&](const RepairEvent& ev) {
+                                      if (ev.operation == "embeddings" && ev.phase == "repairing") {
+                                          repairStarted.store(true, std::memory_order_release);
+                                      }
+                                  }),
+        boost::asio::use_future);
+
+    REQUIRE(waitForCondition(std::chrono::seconds(2),
+                             [&]() { return repairStarted.load(std::memory_order_acquire); }));
+
+    std::jthread releaseSlot([embedChannel]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        InternalEventBus::EmbedJob drained;
+        (void)embedChannel->try_pop(drained);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    ListRequest listReq;
+    listReq.limit = 1;
+    listReq.recent = false;
+    listReq.recentCount = 0;
+    listReq.namePattern = path;
+
+    const auto listStart = std::chrono::steady_clock::now();
+    auto listResp = dispatchRequest(dispatcher, Request{listReq});
+    const auto listMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - listStart)
+                            .count();
+
+    REQUIRE(std::holds_alternative<ListResponse>(listResp));
+    const auto& response = std::get<ListResponse>(listResp);
+    REQUIRE(response.items.size() == 1);
+    CHECK(response.items.front().path == path);
+    CHECK(listMs < 200);
+
+    REQUIRE(repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto repairResp = repairFuture.get();
+    REQUIRE(repairResp.success);
+    const auto op = findOperationResult(repairResp, "embeddings");
+    REQUIRE(op.has_value());
+    CHECK(op->succeeded == 1);
+    CHECK(op->failed == 0);
+
+    repair.stop();
+    drainQueue(embedChannel);
     sm->shutdown();
 }
 

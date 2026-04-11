@@ -220,27 +220,36 @@ bool canExtractDocument(
 
 // Template helper: queue job with exponential backoff when full
 template <typename JobT>
-boost::asio::awaitable<bool> queueWithBackoff(std::shared_ptr<SpscQueue<JobT>> queue, JobT&& job,
-                                              boost::asio::steady_timer& timer,
-                                              std::atomic<bool>& running,
-                                              const std::string& jobTypeName, size_t jobSize,
-                                              int initialDelayMs = 50, int maxDelayMs = 1000) {
+boost::asio::awaitable<bool>
+queueWithBackoff(std::shared_ptr<SpscQueue<JobT>> queue, JobT&& job,
+                 boost::asio::steady_timer& timer, std::atomic<bool>& running,
+                 const std::string& jobTypeName, size_t jobSize, int initialDelayMs = 50,
+                 int maxDelayMs = 1000, std::function<bool()> shouldStop = {}) {
+    const auto queueStart = std::chrono::steady_clock::now();
+    uint64_t totalWaitMs = 0;
     int retries = 0;
-    while (!queue->try_push(std::move(job))) {
-        if (!running.load(std::memory_order_relaxed))
+    while (!queue->try_push(std::forward<JobT>(job))) {
+        if (!running.load(std::memory_order_relaxed) || (shouldStop && shouldStop()))
             co_return false;
-        int delayMs = std::min(initialDelayMs * (1 << retries), maxDelayMs);
+        const int cappedRetries = std::min(retries, 5);
+        const int delayMs = std::min(initialDelayMs * (1 << cappedRetries), maxDelayMs);
+        totalWaitMs += static_cast<uint64_t>(delayMs);
+        const auto queued = queue ? queue->size_approx() : 0;
+        const auto capacity = queue ? queue->capacity() : 0;
+        spdlog::warn("RepairService: {} queue full, retry={} sleep_ms={} queued={} capacity={} "
+                     "batch_size={}",
+                     jobTypeName, retries + 1, delayMs, queued, capacity, jobSize);
         timer.expires_after(std::chrono::milliseconds(delayMs));
         co_await timer.async_wait(boost::asio::use_awaitable);
         retries++;
-        if (retries == 1) {
-            spdlog::debug("RepairService: {} queue full, waiting (batch size={})", jobTypeName,
-                          jobSize);
-        }
     }
     if (retries > 0) {
-        spdlog::debug("RepairService: queued {} job after {} retries ({} docs)", jobTypeName,
-                      retries, jobSize);
+        const auto pushLatencyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - queueStart)
+                                       .count();
+        spdlog::info("RepairService: queued {} job after {} retries (batch_size={} wait_ms={} "
+                     "push_latency_ms={})",
+                     jobTypeName, retries, jobSize, totalWaitMs, pushLatencyMs);
     }
     co_return true;
 }
@@ -1186,6 +1195,225 @@ finalize:
     response.errors = std::move(errors);
     response.operationResults = std::move(results);
     return response;
+}
+
+boost::asio::awaitable<RepairResponse>
+RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progress,
+                                  std::atomic<bool>* cancelRequested) {
+    std::unique_lock<std::mutex> lock(repairMutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        RepairResponse busy;
+        busy.success = false;
+        busy.errors.push_back(
+            "Repair is already in progress. Please wait for the current run to finish.");
+        spdlog::info("[RepairService] executeRepairAsync rejected: repair already in progress");
+        co_return busy;
+    }
+
+    repairInProgress_.store(true, std::memory_order_release);
+    if (state_) {
+        state_->stats.repairInProgress.store(true, std::memory_order_relaxed);
+    }
+    {
+        std::lock_guard<std::mutex> lk(activeRepairMutex_);
+        ++activeRepairExecutions_;
+    }
+    struct InProgressGuard {
+        RepairService* self;
+        std::atomic<bool>& flag;
+        std::atomic<bool>* statsFlag;
+        ~InProgressGuard() {
+            flag.store(false, std::memory_order_release);
+            if (statsFlag) {
+                statsFlag->store(false, std::memory_order_relaxed);
+            }
+            if (self) {
+                std::lock_guard<std::mutex> lk(self->activeRepairMutex_);
+                if (self->activeRepairExecutions_ > 0) {
+                    --self->activeRepairExecutions_;
+                }
+                self->activeRepairCv_.notify_all();
+            }
+        }
+    } inProgressGuard{this, repairInProgress_, state_ ? &state_->stats.repairInProgress : nullptr};
+
+    RepairResponse response;
+    std::vector<RepairOperationResult> results;
+    std::vector<std::string> errors;
+    auto isCanceled = [&]() {
+        return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
+    };
+
+    auto emitCancel = [&](const std::string& operation) {
+        if (!progress) {
+            return;
+        }
+        RepairEvent ev;
+        ev.phase = "error";
+        ev.operation = operation;
+        ev.message = "Repair canceled";
+        progress(ev);
+    };
+
+    auto runOp = [&](const std::string& name, auto&& fn) {
+        if (isCanceled()) {
+            emitCancel(name);
+            errors.push_back("Repair canceled");
+            return false;
+        }
+        if (progress) {
+            RepairEvent ev;
+            ev.phase = "repairing";
+            ev.operation = name;
+            ev.message = "Starting " + name + "...";
+            progress(ev);
+        }
+        auto result = fn();
+        results.push_back(result);
+        response.totalOperations++;
+        response.totalSucceeded += result.succeeded;
+        response.totalFailed += result.failed;
+        response.totalSkipped += result.skipped;
+        if (result.failed > 0 && !result.message.empty()) {
+            errors.push_back(name + ": " + result.message);
+        }
+        if (progress) {
+            RepairEvent ev;
+            ev.phase = "completed";
+            ev.operation = name;
+            ev.processed = result.processed;
+            ev.succeeded = result.succeeded;
+            ev.failed = result.failed;
+            ev.skipped = result.skipped;
+            ev.message = std::move(result.message);
+            progress(ev);
+        }
+        if (isCanceled()) {
+            emitCancel(name);
+            errors.push_back("Repair canceled");
+            return false;
+        }
+        return true;
+    };
+
+    auto runAsyncOp = [&](const std::string& name, auto&& fn) -> boost::asio::awaitable<bool> {
+        if (isCanceled()) {
+            emitCancel(name);
+            errors.push_back("Repair canceled");
+            co_return false;
+        }
+        if (progress) {
+            RepairEvent ev;
+            ev.phase = "repairing";
+            ev.operation = name;
+            ev.message = "Starting " + name + "...";
+            progress(ev);
+        }
+        auto result = co_await fn();
+        results.push_back(result);
+        response.totalOperations++;
+        response.totalSucceeded += result.succeeded;
+        response.totalFailed += result.failed;
+        response.totalSkipped += result.skipped;
+        if (result.failed > 0 && !result.message.empty()) {
+            errors.push_back(name + ": " + result.message);
+        }
+        if (progress) {
+            RepairEvent ev;
+            ev.phase = "completed";
+            ev.operation = name;
+            ev.processed = result.processed;
+            ev.succeeded = result.succeeded;
+            ev.failed = result.failed;
+            ev.skipped = result.skipped;
+            ev.message = std::move(result.message);
+            progress(ev);
+        }
+        if (isCanceled()) {
+            emitCancel(name);
+            errors.push_back("Repair canceled");
+            co_return false;
+        }
+        co_return true;
+    };
+
+    const bool doOrphans = request.repairOrphans || request.repairAll;
+    const bool doMime = request.repairMime || request.repairAll;
+    const bool doDownloads = request.repairDownloads || request.repairAll;
+    const bool doPathTree = request.repairPathTree || request.repairAll;
+    const bool doChunks = request.repairChunks || request.repairAll;
+    const bool doBlockRefs = request.repairBlockRefs || request.repairAll;
+    const bool doFts5 = request.repairFts5 || request.repairAll;
+    const bool doEmbeddings = request.repairEmbeddings || request.repairAll;
+    const bool doStuckDocs = request.repairStuckDocs || request.repairAll;
+    const bool doGraph = request.repairGraph || request.repairAll;
+    const bool doDedupe = request.repairDedupe || request.repairAll;
+    const bool doOptimize = request.optimizeDb || request.repairAll;
+
+    bool keepGoing = true;
+
+    if (keepGoing && doStuckDocs) {
+        keepGoing = runOp("stuck_docs", [&] { return recoverStuckDocuments(request, progress); });
+    }
+    if (keepGoing && doOrphans) {
+        keepGoing = runOp("orphans", [&] {
+            return cleanOrphanedMetadata(request.dryRun, request.verbose, progress);
+        });
+    }
+    if (keepGoing && doMime) {
+        keepGoing = runOp(
+            "mime", [&] { return repairMimeTypes(request.dryRun, request.verbose, progress); });
+    }
+    if (keepGoing && doDownloads) {
+        keepGoing = runOp("downloads", [&] {
+            return repairDownloads(request.dryRun, request.verbose, progress);
+        });
+    }
+    if (keepGoing && doPathTree) {
+        keepGoing = runOp("path_tree", [&] {
+            return rebuildPathTree(request.dryRun, request.verbose, progress);
+        });
+    }
+    if (keepGoing && doDedupe) {
+        keepGoing = runOp("dedupe", [&] { return applySemanticDedupe(request, progress); });
+    }
+    if (keepGoing && doChunks) {
+        keepGoing = runOp("chunks", [&] {
+            return cleanOrphanedChunks(request.dryRun, request.verbose, progress);
+        });
+    }
+    if (keepGoing && doBlockRefs) {
+        keepGoing = runOp("block_refs", [&] {
+            return repairBlockReferences(request.dryRun, request.verbose, progress);
+        });
+    }
+    if (keepGoing && doGraph) {
+        keepGoing = runOp("graph", [&] { return repairKnowledgeGraph(request, progress); });
+    }
+    if (keepGoing && doFts5) {
+        keepGoing = runOp("fts5", [&] { return rebuildFts5Index(request, progress); });
+    }
+    if (keepGoing && doEmbeddings) {
+        if (request.foreground) {
+            keepGoing = runOp("embeddings", [&] {
+                return generateMissingEmbeddings(request, progress, cancelRequested);
+            });
+        } else {
+            keepGoing = co_await runAsyncOp("embeddings", [&]() {
+                return generateMissingEmbeddingsAsync(request, progress, cancelRequested);
+            });
+        }
+    }
+    if (keepGoing && doOptimize) {
+        keepGoing = runOp("optimize", [&] {
+            return optimizeDatabase(request.dryRun, request.verbose, progress);
+        });
+    }
+
+    response.success = errors.empty();
+    response.errors = std::move(errors);
+    response.operationResults = std::move(results);
+    co_return response;
 }
 
 // ============================================================================
@@ -2589,6 +2817,190 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                      std::to_string(result.failed) + " failed, " + std::to_string(result.skipped) +
                      " skipped";
     return result;
+}
+
+boost::asio::awaitable<RepairOperationResult>
+RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, ProgressFn progress,
+                                              std::atomic<bool>* cancelRequested) {
+    RepairOperationResult result;
+    result.operation = "embeddings";
+
+    auto isCanceled = [&]() {
+        return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
+    };
+
+    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    if (!meta) {
+        result.message = "Metadata not available";
+        co_return result;
+    }
+
+    if (progress) {
+        RepairEvent ev;
+        ev.phase = "repairing";
+        ev.operation = "embeddings";
+        ev.message = "Scanning metadata candidates for missing embeddings";
+        progress(ev);
+    }
+
+    metadata::DocumentQueryOptions queryOpts;
+    if (!req.force) {
+        queryOpts.hasEmbedding = false;
+    }
+    auto docs = meta->queryDocumentsForGrepCandidates(queryOpts);
+    if (!docs) {
+        result.message = "Failed to query";
+        co_return result;
+    }
+
+    auto isEmbeddable = [&req](const std::string& m) -> bool {
+        if (m.rfind("text/", 0) == 0)
+            return true;
+        if (m == "application/json" || m == "application/xml" || m == "application/x-yaml" ||
+            m == "application/yaml")
+            return true;
+        for (const auto& inc : req.includeMime) {
+            if (!inc.empty() && (m == inc || m.rfind(inc, 0) == 0))
+                return true;
+        }
+        return false;
+    };
+
+    std::vector<std::string> hashes;
+    size_t eligibleByMime = 0;
+    size_t eligibleByExtractedText = 0;
+    std::vector<std::string> excludedSamples;
+    for (const auto& d : docs.value()) {
+        const bool hasExtractedText = d.contentExtracted;
+        if (isEmbeddable(d.mimeType)) {
+            ++eligibleByMime;
+            hashes.push_back(d.sha256Hash);
+        } else if (hasExtractedText) {
+            ++eligibleByExtractedText;
+            hashes.push_back(d.sha256Hash);
+        } else if (excludedSamples.size() < 8) {
+            excludedSamples.push_back(d.filePath + " mime=" + d.mimeType +
+                                      " extracted=" + std::string(d.contentExtracted ? "1" : "0"));
+        }
+    }
+
+    spdlog::info("RepairService::generateMissingEmbeddingsAsync candidates: scanned={} eligible={} "
+                 "eligible_by_mime={} eligible_by_extracted_text={} excluded_samples=[{}] "
+                 "force={} missing_only_query={}",
+                 docs.value().size(), hashes.size(), eligibleByMime, eligibleByExtractedText,
+                 excludedSamples.size(), req.force ? 1 : 0, req.force ? 0 : 1);
+
+    if (progress) {
+        RepairEvent ev;
+        ev.phase = "repairing";
+        ev.operation = "embeddings";
+        ev.total = hashes.size();
+        ev.message =
+            "Found " + std::to_string(hashes.size()) + " eligible documents missing embeddings";
+        progress(ev);
+    }
+
+    result.processed = hashes.size();
+    result.skipped = 0;
+
+    if (hashes.empty()) {
+        result.message = "No eligible documents";
+        co_return result;
+    }
+
+    if (req.dryRun) {
+        result.skipped += hashes.size();
+        result.message = "Would generate embeddings for " + std::to_string(hashes.size()) + " docs";
+        co_return result;
+    }
+
+    std::string modelName = req.embeddingModel;
+    if (modelName.empty() && services_) {
+        try {
+            modelName = services_->resolvePreferredModel();
+        } catch (...) {
+        }
+    }
+    if (modelName.empty() && services_) {
+        try {
+            modelName = services_->getEmbeddingModelName();
+        } catch (...) {
+        }
+    }
+    if (isCanceled()) {
+        result.failed = hashes.size();
+        result.message = "Repair canceled";
+        co_return result;
+    }
+
+    const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
+    auto embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+        "embed_jobs", embedCap);
+    const std::size_t batchSize = std::max<std::size_t>(1u, cfg_.maxBatch);
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    for (std::size_t i = 0; i < hashes.size(); i += batchSize) {
+        if (isCanceled()) {
+            result.failed += (hashes.size() - i);
+            result.message = "Repair canceled";
+            co_return result;
+        }
+
+        const std::size_t end = std::min(i + batchSize, hashes.size());
+        std::vector<std::string> batch(hashes.begin() + static_cast<std::ptrdiff_t>(i),
+                                       hashes.begin() + static_cast<std::ptrdiff_t>(end));
+        const std::size_t batchIndex = (i / batchSize) + 1;
+        const std::size_t totalBatches = (hashes.size() + batchSize - 1) / batchSize;
+
+        if (meta) {
+            (void)meta->batchUpdateDocumentRepairStatuses(batch,
+                                                          metadata::RepairStatus::Processing);
+        }
+
+        InternalEventBus::EmbedJob job{batch,
+                                       static_cast<uint32_t>(batch.size()),
+                                       !req.force,
+                                       modelName,
+                                       std::vector<InternalEventBus::EmbedPreparedDoc>{},
+                                       nullptr};
+        job.updateSemanticGraph = false;
+
+        const std::string jobLabel =
+            "embed batch " + std::to_string(batchIndex) + "/" + std::to_string(totalBatches);
+        const bool queued = co_await queueWithBackoff(embedQ, std::move(job), timer, running_,
+                                                      jobLabel, batch.size(), 50, 1000, isCanceled);
+        if (!queued) {
+            result.failed += batch.size();
+            if (meta) {
+                (void)meta->batchUpdateDocumentRepairStatuses(batch,
+                                                              metadata::RepairStatus::Pending);
+            }
+            InternalEventBus::instance().incEmbedDropped(batch.size());
+            continue;
+        }
+
+        InternalEventBus::instance().incEmbedQueued(batch.size());
+        TuningManager::notifyWakeup();
+        result.succeeded += batch.size();
+        result.processed = result.succeeded + result.failed + result.skipped;
+
+        if (progress) {
+            RepairEvent ev;
+            ev.phase = "repairing";
+            ev.operation = "embeddings";
+            ev.processed = std::min(end, hashes.size());
+            ev.total = hashes.size();
+            ev.succeeded = result.succeeded;
+            ev.failed = result.failed;
+            ev.skipped = result.skipped;
+            ev.message = "queued daemon embed batch " + std::to_string(batchIndex) + "/" +
+                         std::to_string(totalBatches);
+            progress(ev);
+        }
+    }
+
+    result.message = "Queued " + std::to_string(result.succeeded) + " docs for embedding";
+    co_return result;
 }
 
 RepairOperationResult RepairService::generateMissingEmbeddings(const RepairRequest& req,

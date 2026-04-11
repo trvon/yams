@@ -622,7 +622,8 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 
     auto effective_timeout = timeout;
     if (cli_one_shot_shutdown_enabled()) {
-        effective_timeout = std::max(effective_timeout, std::chrono::milliseconds(100));
+        // One-shot CLI callers should not block on a stuck read loop for the full request timeout.
+        effective_timeout = std::min(effective_timeout, std::chrono::milliseconds(100));
     }
 
     for (auto& weak : connection_pool_) {

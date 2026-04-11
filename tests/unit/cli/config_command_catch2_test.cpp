@@ -345,6 +345,12 @@ TEST_CASE("ConfigCommand - path-tree enable and mode update config",
 TEST_CASE("ConfigCommand - grammar auto download flags update config",
           "[cli][config][grammar][catch2]") {
     ConfigCommandFixture fixture;
+    auto normalizedPathString = [](const fs::path& path) {
+        auto normalized = path.lexically_normal().generic_string();
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return normalized;
+    };
 
     const int enableRc = fixture.runCommand({"yams", "config", "grammar", "auto-enable"});
     REQUIRE(enableRc == 0);
@@ -356,8 +362,15 @@ TEST_CASE("ConfigCommand - grammar auto download flags update config",
     CaptureStdout pathCapture;
     const int pathRc = fixture.runCommand({"yams", "config", "grammar", "path"});
     REQUIRE(pathRc == 0);
-    CHECK(pathCapture.str().find((fixture.testDataHome / "grammars").string()) !=
-          std::string::npos);
+    auto outputPath = pathCapture.str();
+    outputPath.erase(std::remove(outputPath.begin(), outputPath.end(), '\r'), outputPath.end());
+    outputPath.erase(std::remove(outputPath.begin(), outputPath.end(), '\n'), outputPath.end());
+    const bool containsExpectedPath =
+        pathCapture.str().find((fixture.testDataHome / "grammars").string()) != std::string::npos;
+    const bool matchesNormalizedPath = normalizedPathString(fs::path(outputPath)) ==
+                                       normalizedPathString(fixture.testDataHome / "grammars");
+    const bool pathMatched = containsExpectedPath || matchesNormalizedPath;
+    CHECK(pathMatched);
 
     const int disableRc = fixture.runCommand({"yams", "config", "grammar", "auto-disable"});
     REQUIRE(disableRc == 0);

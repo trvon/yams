@@ -86,12 +86,18 @@ TEST_CASE_METHOD(CommandIntegrationFixture, "findMagicNumbersFile respects searc
     auto canonicalLocal = fs::canonical(localMagic, ec);
     CHECK(canonicalFound == canonicalLocal);
 #elif defined(_WIN32)
-    // Windows: case-insensitive path comparison
-    auto foundStr = foundPath.string();
-    auto localStr = localMagic.string();
-    std::transform(foundStr.begin(), foundStr.end(), foundStr.begin(), ::tolower);
-    std::transform(localStr.begin(), localStr.end(), localStr.begin(), ::tolower);
-    CHECK(foundStr == localStr);
+    auto normalizedPathString = [](const fs::path& path) {
+        std::error_code ec;
+        auto resolved = fs::weakly_canonical(path, ec);
+        if (ec) {
+            resolved = path.lexically_normal();
+        }
+        auto normalized = resolved.generic_string();
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return normalized;
+    };
+    CHECK(normalizedPathString(foundPath) == normalizedPathString(localMagic));
 #else
     // Linux: direct comparison
     CHECK(foundPath == localMagic);

@@ -7,6 +7,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "../../../common/test_helpers_catch2.h"
+
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/vector/vector_database.h>
@@ -138,6 +140,10 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
     }
 
     SECTION("initializeOnce prepares persisted search index for warm vectors") {
+        yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
+        yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+        yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+
         auto warmDeps = makeDeps();
         warmDeps.getEmbeddingDimension = []() { return static_cast<size_t>(64); };
         VectorSystemManager warmMgr(warmDeps);
@@ -185,6 +191,10 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
     }
 
     SECTION("initializeOnce does not block on rebuilding missing persisted search index") {
+        yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
+        yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+        yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+
         auto warmDeps = makeDeps();
         warmDeps.getEmbeddingDimension = []() { return static_cast<size_t>(64); };
         VectorSystemManager warmMgr(warmDeps);

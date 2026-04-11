@@ -830,4 +830,80 @@ TEST_CASE("CoreML denylist prevents repeated fallback attempts", "[daemon][onnx]
     OnnxModelSession::clearCoreMLDenylist();
 }
 
+TEST_CASE("CoreML denylisted sessions clamp CPU fallback resources",
+          "[daemon][onnx][coreml][catch2]") {
+    auto saveEnv = [](const char* name) -> std::optional<std::string> {
+        if (const char* value = std::getenv(name)) {
+            return std::string(value);
+        }
+        return std::nullopt;
+    };
+    auto restoreEnv = [](const char* name, const std::optional<std::string>& value) {
+        if (value.has_value()) {
+            setenv(name, value->c_str(), 1);
+        } else {
+            unsetenv(name);
+        }
+    };
+
+    const auto savedTestMode = saveEnv("YAMS_TEST_MODE");
+    const auto savedMockMode = saveEnv("YAMS_USE_MOCK_PROVIDER");
+    const auto savedSkipLoading = saveEnv("YAMS_SKIP_MODEL_LOADING");
+    const auto savedIntra = saveEnv("YAMS_ONNX_INTRA_OP_THREADS");
+    const auto savedInter = saveEnv("YAMS_ONNX_INTER_OP_THREADS");
+    const auto savedSpinning = saveEnv("YAMS_ONNX_ALLOW_SPINNING");
+    const auto savedOptLevel = saveEnv("YAMS_ONNX_OPT_LEVEL");
+    const auto savedEmbedDocCap = TuneAdvisor::getEmbedDocCap();
+
+    unsetenv("YAMS_TEST_MODE");
+    unsetenv("YAMS_USE_MOCK_PROVIDER");
+    unsetenv("YAMS_SKIP_MODEL_LOADING");
+    unsetenv("YAMS_ONNX_INTRA_OP_THREADS");
+    unsetenv("YAMS_ONNX_INTER_OP_THREADS");
+    unsetenv("YAMS_ONNX_ALLOW_SPINNING");
+    unsetenv("YAMS_ONNX_OPT_LEVEL");
+
+    TuneAdvisor::setEmbedDocCap(0);
+    OnnxModelSession::clearCoreMLDenylist();
+    OnnxModelSession::denylistCoreML("embeddinggemma-300m");
+
+    OnnxTextConfig config;
+    config.enable_gpu = true;
+    config.num_threads = 8;
+    config.inter_op_threads = 4;
+
+    try {
+        OnnxModelSession session("/tmp/coreml-fallback-test.onnx", "embeddinggemma-300m", config);
+        CHECK(session.getExecutionProvider() == "cpu");
+
+        const auto [intraThreads, interThreads] = session.getThreading();
+        CHECK(intraThreads == 2);
+        CHECK(interThreads == 1);
+        CHECK(session.getLearnedBatchLimit() == 4);
+        CHECK(TuneAdvisor::getEmbedDocCap() == 4);
+    } catch (const std::exception& e) {
+        restoreEnv("YAMS_TEST_MODE", savedTestMode);
+        restoreEnv("YAMS_USE_MOCK_PROVIDER", savedMockMode);
+        restoreEnv("YAMS_SKIP_MODEL_LOADING", savedSkipLoading);
+        restoreEnv("YAMS_ONNX_INTRA_OP_THREADS", savedIntra);
+        restoreEnv("YAMS_ONNX_INTER_OP_THREADS", savedInter);
+        restoreEnv("YAMS_ONNX_ALLOW_SPINNING", savedSpinning);
+        restoreEnv("YAMS_ONNX_OPT_LEVEL", savedOptLevel);
+        TuneAdvisor::setEmbedDocCap(savedEmbedDocCap);
+        OnnxModelSession::clearCoreMLDenylist();
+        SKIP(std::string("ONNX runtime unavailable for constructor-only fallback test: ") +
+             e.what());
+    }
+
+    restoreEnv("YAMS_TEST_MODE", savedTestMode);
+    restoreEnv("YAMS_USE_MOCK_PROVIDER", savedMockMode);
+    restoreEnv("YAMS_SKIP_MODEL_LOADING", savedSkipLoading);
+    restoreEnv("YAMS_ONNX_INTRA_OP_THREADS", savedIntra);
+    restoreEnv("YAMS_ONNX_INTER_OP_THREADS", savedInter);
+    restoreEnv("YAMS_ONNX_ALLOW_SPINNING", savedSpinning);
+    restoreEnv("YAMS_ONNX_OPT_LEVEL", savedOptLevel);
+    TuneAdvisor::setEmbedDocCap(savedEmbedDocCap);
+    OnnxModelSession::clearCoreMLDenylist();
+}
+
 } // namespace yams::daemon::test

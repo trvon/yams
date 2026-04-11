@@ -703,15 +703,23 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                     return true;
                 };
 
-                auto runPlan = [&](const std::string& tier, const RepairRequest& req) {
-                    if (!repair::RepairPlanBuilder::hasWork(req))
-                        return;
+                auto runPlan = [&](const std::string& tier,
+                                   const RepairRequest& req) -> boost::asio::awaitable<void> {
+                    if (!repair::RepairPlanBuilder::hasWork(req)) {
+                        co_return;
+                    }
                     spdlog::info("[AutoRepair] tick {}: executing", tier);
-                    auto resp = rs->executeRepair(req, nullptr);
+                    RepairResponse resp;
+                    if (!req.foreground && req.repairEmbeddings) {
+                        resp = co_await rs->executeRepairAsync(req, nullptr);
+                    } else {
+                        resp = rs->executeRepair(req, nullptr);
+                    }
                     if (!resp.success && !resp.errors.empty()) {
                         spdlog::warn("[AutoRepair] {} completed with errors: {}", tier,
                                      resp.errors.front());
                     }
+                    co_return;
                 };
 
                 if (fastInterval.count() > 0 && now >= nextFast) {
@@ -726,7 +734,7 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                         opts.scanDocuments = false;
                         auto health = probe.probe(opts);
                         auto req = repair::RepairPlanBuilder::buildFast(health);
-                        runPlan("fast", req);
+                        co_await runPlan("fast", req);
                         nextFast = now + fastInterval;
                     } else {
                         nextFast = now + retryDelay;
@@ -749,7 +757,7 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                             spdlog::debug("[AutoRepair] health issue: {}", issue);
                         }
                         auto req = repair::RepairPlanBuilder::buildWarm(health, 3);
-                        runPlan("warm", req);
+                        co_await runPlan("warm", req);
                         nextWarm = now + warmInterval;
                     } else {
                         nextWarm = now + retryDelay;
@@ -759,7 +767,7 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                 if (coldInterval.count() > 0 && now >= nextCold) {
                     if (canRunAuto()) {
                         auto req = repair::RepairPlanBuilder::buildCold();
-                        runPlan("cold", req);
+                        co_await runPlan("cold", req);
                         nextCold = now + coldInterval;
                     } else {
                         nextCold = now + retryDelay;

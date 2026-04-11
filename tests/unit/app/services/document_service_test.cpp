@@ -202,6 +202,20 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
 
     SECTION("List bare directory returns descendants") {
         namespace fs = std::filesystem;
+        auto normalizedPathString = [](const fs::path& path) {
+            std::error_code ec;
+            auto resolved = fs::weakly_canonical(path, ec);
+            if (ec) {
+                resolved = path.lexically_normal();
+            }
+            auto normalized = resolved.generic_string();
+#ifdef _WIN32
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+            return normalized;
+        };
+
         fs::create_directories(fixture.testDir_ / "nested" / "deep");
         std::ofstream(fixture.testDir_ / "nested" / "deep" / "descendant.txt")
             << "descendant content";
@@ -213,7 +227,7 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         REQUIRE(nestedStore);
 
         const auto expectedPath =
-            fs::weakly_canonical(fixture.testDir_ / "nested" / "deep" / "descendant.txt").string();
+            normalizedPathString(fixture.testDir_ / "nested" / "deep" / "descendant.txt");
 
         ListDocumentsRequest request;
         request.pattern = (fixture.testDir_ / "nested").string();
@@ -224,7 +238,7 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         REQUIRE(result);
         bool foundDescendant = false;
         for (const auto& doc : result.value().documents) {
-            if (doc.path == expectedPath) {
+            if (normalizedPathString(doc.path) == expectedPath) {
                 foundDescendant = true;
                 break;
             }

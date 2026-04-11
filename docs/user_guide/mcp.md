@@ -180,6 +180,8 @@ Supports multi-step pipelines where each step can reference the previous result 
 
 This returns ranked snapshot suggestions plus a few supporting search hits for each snapshot. Hosts can call it before a model turn to implement advisory proactive retrieval without leaving MCP's normal `tools/call` flow.
 
+When `session` scoping is used, `suggest_context` also suppresses the most recently served snapshot set for the same normalized query so long-running sessions do not keep re-suggesting the same context on every turn.
+
 **Semantic dedupe inspection example:**
 ```json
 {

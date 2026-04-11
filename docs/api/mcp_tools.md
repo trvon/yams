@@ -146,6 +146,10 @@ Suggest relevant memory snapshots for a draft topic or query by grouping existin
 }
 ```
 
+**Behavior note:**
+
+When `session` scoping is enabled, `suggest_context` suppresses the most recently served snapshot set for the same normalized query. This keeps long-running sessions from immediately re-suggesting identical context on back-to-back calls.
+
 **Response:**
 ```json
 {

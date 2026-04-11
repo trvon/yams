@@ -144,6 +144,112 @@ bool containsNormalizedToken(std::string_view haystack, std::string_view needle)
     return paddedHaystack.find(paddedNeedle) != std::string::npos;
 }
 
+#if !defined(YAMS_WASI)
+struct SuggestContextSuppressionState {
+    std::unordered_set<std::string> snapshotIds;
+    std::unordered_set<std::string> resultIds;
+};
+
+SuggestContextSuppressionState
+loadSuggestContextSuppressionState(metadata::MetadataRepository& repo, std::string_view sessionName,
+                                   std::string_view normalizedQuery) {
+    SuggestContextSuppressionState state;
+    if (sessionName.empty() || normalizedQuery.empty()) {
+        return state;
+    }
+
+    auto recent = repo.getRecentFeedbackEvents(25);
+    if (!recent) {
+        return state;
+    }
+
+    for (const auto& event : recent.value()) {
+        if (event.eventType != "suggest_context_served") {
+            continue;
+        }
+
+        auto payload = nlohmann::json::parse(event.payloadJson, nullptr, false);
+        if (payload.is_discarded() || !payload.is_object()) {
+            continue;
+        }
+
+        if (payload.value("session_name", std::string{}) != sessionName) {
+            continue;
+        }
+
+        const auto payloadQuery = normalizedTokenString(
+            payload.value("normalized_query", payload.value("query", std::string{})));
+        if (payloadQuery != normalizedQuery) {
+            continue;
+        }
+
+        if (auto it = payload.find("snapshot_ids"); it != payload.end() && it->is_array()) {
+            for (const auto& snapshotId : *it) {
+                if (snapshotId.is_string()) {
+                    state.snapshotIds.insert(snapshotId.get<std::string>());
+                }
+            }
+        }
+        if (auto it = payload.find("served_result_ids"); it != payload.end() && it->is_array()) {
+            for (const auto& resultId : *it) {
+                if (resultId.is_string()) {
+                    state.resultIds.insert(resultId.get<std::string>());
+                }
+            }
+        }
+        break;
+    }
+
+    return state;
+}
+
+void recordSuggestContextServed(
+    metadata::MetadataRepository& repo, const MCPSuggestContextRequest& req,
+    std::string_view normalizedQuery,
+    const std::vector<MCPSuggestContextResponse::Suggestion>& suggestions) {
+    if (req.sessionName.empty() || normalizedQuery.empty() || suggestions.empty()) {
+        return;
+    }
+
+    std::unordered_set<std::string> snapshotIds;
+    std::unordered_set<std::string> resultIds;
+    nlohmann::json snapshotArray = nlohmann::json::array();
+    nlohmann::json resultArray = nlohmann::json::array();
+
+    for (const auto& suggestion : suggestions) {
+        if (!suggestion.snapshotId.empty() && snapshotIds.insert(suggestion.snapshotId).second) {
+            snapshotArray.push_back(suggestion.snapshotId);
+        }
+        for (const auto& supporting : suggestion.supportingResults) {
+            if (!supporting.id.empty() && resultIds.insert(supporting.id).second) {
+                resultArray.push_back(supporting.id);
+            }
+        }
+    }
+
+    if (snapshotArray.empty() && resultArray.empty()) {
+        return;
+    }
+
+    metadata::FeedbackEvent event;
+    event.eventId = yams::core::generateUUID();
+    event.traceId = yams::core::generateUUID();
+    event.createdAt =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    event.source = "mcp";
+    event.eventType = "suggest_context_served";
+    event.payloadJson = nlohmann::json{{"query", req.query},
+                                       {"normalized_query", normalizedQuery},
+                                       {"session_name", req.sessionName},
+                                       {"use_session", req.useSession},
+                                       {"global_search", req.globalSearch},
+                                       {"snapshot_ids", std::move(snapshotArray)},
+                                       {"served_result_ids", std::move(resultArray)}}
+                            .dump();
+    (void)repo.insertFeedbackEvent(event);
+}
+#endif
+
 static bool envTruthy(const char* val) {
     if (!val || !*val)
         return false;
@@ -5728,18 +5834,68 @@ void MCPServer::initializeToolRegistry() {
     MCPSuggestContextResponse response;
     response.query = req.query;
 
+    std::shared_ptr<metadata::ConnectionPool> suggestContextPool;
+    std::unique_ptr<metadata::MetadataRepository> suggestContextRepo;
+    auto ensureSuggestContextRepo = [&](bool required) -> Result<metadata::MetadataRepository*> {
+        if (suggestContextRepo) {
+            return suggestContextRepo.get();
+        }
+
+        const auto dataDir = !daemon_client_config_.dataDir.empty() ? daemon_client_config_.dataDir
+                                                                    : yams::config::get_data_dir();
+        metadata::ConnectionPoolConfig poolConfig;
+        poolConfig.minConnections = 1;
+        poolConfig.maxConnections = 2;
+        poolConfig.readOnly = false;
+        suggestContextPool =
+            std::make_shared<metadata::ConnectionPool>((dataDir / "yams.db").string(), poolConfig);
+        auto init = suggestContextPool->initialize();
+        if (!init) {
+            if (!required) {
+                suggestContextPool.reset();
+                return static_cast<metadata::MetadataRepository*>(nullptr);
+            }
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to initialize metadata pool: " + init.error().message};
+        }
+
+        suggestContextRepo = std::make_unique<metadata::MetadataRepository>(*suggestContextPool);
+        return suggestContextRepo.get();
+    };
+
+    const auto suppressionQuery = query;
+
     if (!testSuggestContextOverrides_.empty()) {
+        SuggestContextSuppressionState suppression;
+        if (!req.sessionName.empty()) {
+            auto repoResult = ensureSuggestContextRepo(false);
+            if (repoResult && repoResult.value() != nullptr) {
+                suppression = loadSuggestContextSuppressionState(*repoResult.value(),
+                                                                 req.sessionName, suppressionQuery);
+            }
+        }
+
         for (const auto& overrideEntry : testSuggestContextOverrides_) {
+            if (suppression.snapshotIds.contains(overrideEntry.snapshotId)) {
+                continue;
+            }
+
             MCPSuggestContextResponse::Suggestion suggestion;
             suggestion.snapshotId = overrideEntry.snapshotId;
             suggestion.label = overrideEntry.label;
             suggestion.directoryPath = overrideEntry.directoryPath;
-            suggestion.supportingResultCount = overrideEntry.supportingResults.size();
             for (const auto& supporting : overrideEntry.supportingResults) {
+                if (suppression.resultIds.contains(supporting.id)) {
+                    continue;
+                }
                 suggestion.score += supporting.score;
                 suggestion.supportingResults.push_back(MCPSuggestContextResponse::SupportingResult{
                     supporting.id, supporting.hash, supporting.title, supporting.path,
                     supporting.score, supporting.snippet});
+            }
+            suggestion.supportingResultCount = suggestion.supportingResults.size();
+            if (suggestion.supportingResultCount == 0) {
+                continue;
             }
             response.suggestions.push_back(std::move(suggestion));
         }
@@ -5749,6 +5905,14 @@ void MCPServer::initializeToolRegistry() {
             response.suggestions.resize(req.limit);
         }
         response.total = response.suggestions.size();
+
+        if (!req.sessionName.empty()) {
+            auto repoResult = ensureSuggestContextRepo(false);
+            if (repoResult && repoResult.value() != nullptr) {
+                recordSuggestContextServed(*repoResult.value(), req, suppressionQuery,
+                                           response.suggestions);
+            }
+        }
         co_return response;
     }
 
@@ -5783,22 +5947,22 @@ void MCPServer::initializeToolRegistry() {
     std::unordered_map<std::string, metadata::DocumentInfo> docsByHash;
     std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
         metadataById;
-    if (!hashes.empty()) {
-        const auto dataDir = !daemon_client_config_.dataDir.empty() ? daemon_client_config_.dataDir
-                                                                    : yams::config::get_data_dir();
-        metadata::ConnectionPoolConfig poolConfig;
-        poolConfig.minConnections = 1;
-        poolConfig.maxConnections = 2;
-        poolConfig.readOnly = true;
-        auto pool =
-            std::make_shared<metadata::ConnectionPool>((dataDir / "yams.db").string(), poolConfig);
-        auto init = pool->initialize();
-        if (!init) {
-            co_return Error{ErrorCode::DatabaseError,
-                            "Failed to initialize metadata pool: " + init.error().message};
+    SuggestContextSuppressionState suppression;
+    if (!hashes.empty() || !req.sessionName.empty()) {
+        auto repoResult = ensureSuggestContextRepo(!hashes.empty());
+        if (!repoResult) {
+            co_return repoResult.error();
         }
-        metadata::MetadataRepository repo(*pool);
-        auto docsResult = repo.batchGetDocumentsByHash(hashes);
+        auto* repo = repoResult.value();
+        if (repo != nullptr && !req.sessionName.empty()) {
+            suppression =
+                loadSuggestContextSuppressionState(*repo, req.sessionName, suppressionQuery);
+        }
+        if (repo == nullptr || hashes.empty()) {
+            goto suggest_context_metadata_loaded;
+        }
+
+        auto docsResult = repo->batchGetDocumentsByHash(hashes);
         if (!docsResult) {
             co_return Error{ErrorCode::DatabaseError,
                             "Failed to load documents for suggest_context: " +
@@ -5812,7 +5976,7 @@ void MCPServer::initializeToolRegistry() {
             (void)hash;
             docIds.push_back(doc.id);
         }
-        auto mdResult = repo.getMetadataForDocuments(docIds);
+        auto mdResult = repo->getMetadataForDocuments(docIds);
         if (!mdResult) {
             co_return Error{ErrorCode::DatabaseError,
                             "Failed to load metadata for suggest_context: " +
@@ -5821,8 +5985,14 @@ void MCPServer::initializeToolRegistry() {
         metadataById = std::move(mdResult.value());
     }
 
+suggest_context_metadata_loaded:
+
     std::unordered_map<std::string, SnapshotAccumulator> accumulators;
     for (const auto& result : searchResult.value().results) {
+        if (suppression.resultIds.contains(result.id)) {
+            continue;
+        }
+
         std::string snapshotId;
         std::string snapshotLabel;
         std::string directoryPath;
@@ -5852,6 +6022,9 @@ void MCPServer::initializeToolRegistry() {
         }
 
         if (snapshotId.empty()) {
+            continue;
+        }
+        if (suppression.snapshotIds.contains(snapshotId)) {
             continue;
         }
 
@@ -5910,6 +6083,10 @@ void MCPServer::initializeToolRegistry() {
 
     response.total = suggestions.size();
     response.suggestions = std::move(suggestions);
+    if (suggestContextRepo) {
+        recordSuggestContextServed(*suggestContextRepo, req, suppressionQuery,
+                                   response.suggestions);
+    }
     co_return response;
 #endif
         }

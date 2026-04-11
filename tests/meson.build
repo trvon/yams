@@ -2759,14 +2759,16 @@ if catch2_dep.found()
       is_parallel: true
     )
 
-    test('gpu_provider_coreml', catch2_gpu_provider_exe,
-      suite: ['catch2', 'unit', 'daemon', 'gpu'],
-      env: {
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      },
-      timeout: 30,
-      is_parallel: true
-    )
+    if host_machine.system() == 'darwin'
+      test('gpu_provider_coreml', catch2_gpu_provider_exe,
+        suite: ['catch2', 'unit', 'daemon', 'gpu'],
+        env: {
+          'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        },
+        timeout: 30,
+        is_parallel: true
+      )
+    endif
   endif
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
@@ -2803,6 +2805,7 @@ if catch2_dep.found()
 
   test('streaming_processor', catch2_streaming_processor_exe,
     suite: ['catch2', 'unit', 'daemon', 'streaming', 'yams-3s4'],
+    args: ['--allow-running-no-tests'],  # Skips entirely on Windows
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
@@ -2863,6 +2866,7 @@ if catch2_dep.found()
 
   test('embedding_recovery', catch2_embedding_recovery_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    args: ['--allow-running-no-tests'],  # Skips entirely on Windows
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120,
     is_parallel: false
@@ -2893,6 +2897,7 @@ if catch2_dep.found()
 
   test('writer_drain_cleanup', catch2_writer_drain_cleanup_exe,
     suite: ['catch2', 'unit', 'daemon', 'ipc', 'mux'],
+    args: ['--allow-running-no-tests'],  # Skips entirely on Windows
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -2932,9 +2937,7 @@ if catch2_dep.found()
 #Disable ABI plugins to avoid TSAN + ONNX memory pressure causing SIGKILL
       'YAMS_DISABLE_ABI_PLUGINS': '1',
     },
-    timeout: 120,
-#Test skips on Windows(Unix domain sockets not supported)
-    should_fail: host_machine.system() == 'windows'
+    timeout: 120
   )
 
   test('tune_advisor_threshold', catch2_tune_advisor_threshold_exe,

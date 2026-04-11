@@ -92,6 +92,9 @@ public:
     // ── On-demand repair (from RPC) ──
     RepairResponse executeRepair(const RepairRequest& request, ProgressFn progress,
                                  std::atomic<bool>* cancelRequested = nullptr);
+    boost::asio::awaitable<RepairResponse>
+    executeRepairAsync(const RepairRequest& request, ProgressFn progress,
+                       std::atomic<bool>* cancelRequested = nullptr);
 
     /// Returns true if an on-demand repair RPC is currently executing.
     bool isRepairInProgress() const noexcept {
@@ -153,6 +156,9 @@ private:
     RepairOperationResult rebuildFts5Index(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult generateMissingEmbeddings(const RepairRequest& req, ProgressFn progress,
                                                     std::atomic<bool>* cancelRequested = nullptr);
+    boost::asio::awaitable<RepairOperationResult>
+    generateMissingEmbeddingsAsync(const RepairRequest& req, ProgressFn progress,
+                                   std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult optimizeDatabase(bool dryRun, bool verbose, ProgressFn progress);
 
     // ── NEW: stuck document recovery ──
