@@ -322,6 +322,11 @@ private:
                const std::string& message, uint64_t request_id = 0,
                std::optional<ErrorResponse::RetryInfo> retry = std::nullopt);
 
+    [[nodiscard]] boost::asio::awaitable<Result<bool>>
+    maybe_write_canceled_stream_response(boost::asio::local::stream_protocol::socket& socket,
+                                         uint64_t request_id, std::function<void()> abort_stream,
+                                         ConnectionFsm* fsm);
+
     std::shared_ptr<RequestProcessor> processor_;
     std::shared_ptr<RequestProcessor> dispatcherAdapter_; // Cached adapter for dispatcher_
     RequestDispatcher* dispatcher_ = nullptr;             // Alternative to processor_
@@ -353,6 +358,9 @@ private:
 
     std::mutex ctx_mtx_;
     std::unordered_map<uint64_t, std::shared_ptr<RequestContext>> contexts_;
+
+    std::shared_ptr<RequestContext> find_request_context(uint64_t request_id);
+    bool is_request_canceled(uint64_t request_id);
 
     // Queue a frame for fair writing; must be called on write strand when present
     Result<bool> enqueue_frame_sync(uint64_t request_id, std::vector<uint8_t> frame, bool last,

@@ -101,11 +101,13 @@ bool waitForCondition(std::chrono::milliseconds timeout, const std::function<boo
 struct TuneAdvisorRepairGuard {
     uint32_t workCoordinatorThreads{TuneAdvisor::workCoordinatorThreads()};
     uint32_t postIngestQueueMax{TuneAdvisor::postIngestQueueMax()};
+    uint32_t postIngestRpcQueueMax{TuneAdvisor::postIngestRpcQueueMax()};
     uint32_t embedChannelCapacity{TuneAdvisor::embedChannelCapacity()};
 
     ~TuneAdvisorRepairGuard() {
         TuneAdvisor::setWorkCoordinatorThreads(workCoordinatorThreads);
         TuneAdvisor::setPostIngestQueueMax(postIngestQueueMax);
+        TuneAdvisor::setPostIngestRpcQueueMax(postIngestRpcQueueMax);
         TuneAdvisor::setEmbedChannelCapacity(embedChannelCapacity);
     }
 };
@@ -736,7 +738,7 @@ TEST_CASE_METHOD(
     REQUIRE(waitForCondition(std::chrono::seconds(2),
                              [&]() { return repairStarted.load(std::memory_order_acquire); }));
 
-    std::jthread releaseSlot([embedChannel]() {
+    std::thread releaseSlot([embedChannel]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         InternalEventBus::EmbedJob drained;
         (void)embedChannel->try_pop(drained);
@@ -764,6 +766,9 @@ TEST_CASE_METHOD(
 
     REQUIRE(repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
     const auto repairResp = repairFuture.get();
+    if (releaseSlot.joinable()) {
+        releaseSlot.join();
+    }
     REQUIRE(repairResp.success);
     const auto op = findOperationResult(repairResp, "embeddings");
     REQUIRE(op.has_value());
@@ -772,6 +777,139 @@ TEST_CASE_METHOD(
 
     repair.stop();
     drainQueue(embedChannel);
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: async stuck-doc backoff keeps list responsive when post-ingest "
+                 "RPC queue is full",
+                 "[daemon][repair][regression][list][stuck-docs][async-backoff]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    TuneAdvisorRepairGuard tuneGuard;
+    TuneAdvisor::setWorkCoordinatorThreads(1);
+    TuneAdvisor::setPostIngestRpcQueueMax(256);
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    REQUIRE(meta != nullptr);
+
+    auto piq = sm->getPostIngestQueue();
+    for (int i = 0; i < 200 && piq == nullptr; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        piq = sm->getPostIngestQueue();
+    }
+    REQUIRE(piq != nullptr);
+    for (int i = 0; i < 200 && !piq->started(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(piq->started());
+    piq->pauseAll();
+
+    auto postIngestRpc =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest_rpc", 256);
+    REQUIRE(postIngestRpc != nullptr);
+    drainQueue(postIngestRpc);
+
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.maxRetries = 3;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 1; }, cfg);
+    repair.start();
+
+    metadata::DocumentInfo doc{};
+    doc.fileName = "stuck-list.txt";
+    doc.filePath = (config_.dataDir / "stuck-list.txt").string();
+    doc.fileExtension = "txt";
+    doc.fileSize = 18;
+    doc.sha256Hash = std::string(64, 's');
+    doc.mimeType = "text/plain";
+    doc.setCreatedTime(1);
+    doc.setModifiedTime(1);
+    doc.setIndexedTime(1);
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    const int64_t docId = idRes.value();
+    REQUIRE(meta->updateDocumentExtractionStatus(docId, false, metadata::ExtractionStatus::Failed,
+                                                 "stuck list test")
+                .has_value());
+    REQUIRE(
+        meta->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, metadata::RepairStatus::Pending)
+            .has_value());
+
+    InternalEventBus::PostIngestTask filler;
+    filler.hash = std::string(64, 'f');
+    filler.mime = "text/plain";
+    std::size_t filled = 0;
+    while (postIngestRpc->try_push(filler)) {
+        ++filled;
+    }
+    REQUIRE(filled > 0);
+
+    RepairRequest req;
+    req.repairStuckDocs = true;
+    req.foreground = false;
+    req.maxRetries = 3;
+
+    auto repairFuture = boost::asio::co_spawn(
+        sm->getWorkerExecutor(), repair.executeRepairAsync(req, nullptr), boost::asio::use_future);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    REQUIRE(repairFuture.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
+
+    std::thread releaseSlot([postIngestRpc]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        InternalEventBus::PostIngestTask drained;
+        (void)postIngestRpc->try_pop(drained);
+    });
+
+    RequestDispatcher dispatcher(nullptr, sm.get(), &state_);
+    ListRequest listReq;
+    listReq.limit = 1;
+    listReq.recent = false;
+    listReq.recentCount = 0;
+    listReq.namePattern = doc.filePath;
+
+    const auto listStart = std::chrono::steady_clock::now();
+    auto listResp = dispatchRequest(dispatcher, Request{listReq});
+    const auto listMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - listStart)
+                            .count();
+
+    REQUIRE(std::holds_alternative<ListResponse>(listResp));
+    const auto& response = std::get<ListResponse>(listResp);
+    REQUIRE(response.items.size() == 1);
+    CHECK(response.items.front().path == doc.filePath);
+    CHECK(listMs < 200);
+
+    REQUIRE(repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto repairResp = repairFuture.get();
+    if (releaseSlot.joinable()) {
+        releaseSlot.join();
+    }
+    REQUIRE(repairResp.success);
+    const auto op = findOperationResult(repairResp, "stuck_docs");
+    REQUIRE(op.has_value());
+    CHECK(op->succeeded == 1);
+    CHECK(op->failed == 0);
+
+    drainQueue(postIngestRpc);
+    piq->resumeAll();
+    repair.stop();
     sm->shutdown();
 }
 

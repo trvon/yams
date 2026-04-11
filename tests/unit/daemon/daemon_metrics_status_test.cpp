@@ -2798,7 +2798,8 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         REQUIRE(std::holds_alternative<ErrorResponse>(resp));
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::ResourceExhausted);
-        CHECK(err.message == "Ingestion queue is full. Please try again later.");
+        CHECK((err.message == "Ingestion queue is full. Please try again later." ||
+               err.message == "Ingestion queue is full; retry shortly"));
     }
 
     SECTION("add document queues async work while daemon is initializing") {
@@ -2873,7 +2874,8 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         REQUIRE(std::holds_alternative<ErrorResponse>(resp));
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::ResourceExhausted);
-        CHECK(err.message == "Ingestion queue is full. Please try again later.");
+        CHECK((err.message == "Ingestion queue is full. Please try again later." ||
+               err.message == "Ingestion queue is full; retry shortly"));
     }
 
     SECTION("add document clears async hash when daemon-initializing hashing fails") {
@@ -3111,7 +3113,8 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         REQUIRE(std::holds_alternative<ErrorResponse>(resp));
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::ResourceExhausted);
-        CHECK(err.message == "Ingestion queue is full. Please try again later.");
+        CHECK((err.message == "Ingestion queue is full. Please try again later." ||
+               err.message == "Ingestion queue is full; retry shortly"));
     }
 
     SECTION("add document clears async hash when hashing fails on ready path") {
@@ -3281,6 +3284,10 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("file history reports invalid filepath when current directory is missing") {
+#ifdef _WIN32
+        SKIP("Windows keeps the current working directory locked, so missing-cwd simulation is "
+             "unreliable");
+#endif
         auto repo = std::make_shared<StubPruneMetadataRepository>();
         svc.__test_setMetadataRepo(repo);
 
@@ -5380,21 +5387,37 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         auto homeDir = makeTempDir("yams_plugin_home_");
         auto homeText = homeDir.string();
         EnvGuard homeGuard("HOME", homeText.c_str());
+#ifdef _WIN32
+        EnvGuard localAppDataGuard("LOCALAPPDATA", homeText.c_str());
+#endif
 
         auto [state, lifecycleFsm, svc] = makeReadyService();
         StubLifecycle lifecycle;
         RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
 
+#ifdef _WIN32
+        auto abiDir = homeDir / "yams" / "plugins";
+#else
         auto abiDir = homeDir / ".local" / "lib" / "yams" / "plugins";
+#endif
         std::filesystem::create_directories(abiDir);
 
-        auto fakePlugin = abiDir / "yams_default_scan.so";
+        auto fakePlugin = abiDir /
+#ifdef _WIN32
+                          "yams_default_scan.dll";
+#else
+                          "yams_default_scan.so";
+#endif
         {
             std::ofstream out(fakePlugin, std::ios::binary);
             out << "not a valid plugin";
         }
 
+#ifdef _WIN32
+        auto externalDir = homeDir / "yams" / "external-plugins";
+#else
         auto externalDir = homeDir / ".local" / "lib" / "yams" / "external-plugins";
+#endif
         std::filesystem::create_directories(externalDir);
         auto externalPluginDir =
             createMockExternalPlugin(externalDir, "dispatcher_external_default");

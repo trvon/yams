@@ -1482,6 +1482,7 @@ if catch2_dep.found()
       'unit/common/test_utils_catch2_test.cpp',
       'unit/common/utf8_utils_catch2_test.cpp',
       'unit/cli/add_command_stdin_catch2_test.cpp',
+      'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/cli_option_isolation_catch2_test.cpp',
       'unit/cli/config_command_catch2_test.cpp',
       'unit/cli/delete_command_catch2_test.cpp',
@@ -2812,6 +2813,7 @@ if catch2_dep.found()
 
   test('in_process_transport', catch2_in_process_transport_exe,
     suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess'],
+    args: ['--allow-running-no-tests'],  # Skips entirely on Windows
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
@@ -3080,17 +3082,13 @@ if catch2_dep.found()
     timeout: 180
   )
 
-#CLI submodule tests - all tests pass but Windows has a cleanup crash(0xC0000005)
-#during process exit due to global destructor issues with daemon client state.
-#Using should_fail : true until the cleanup issue is fixed.
   test('cli_submodule', catch2_cli_submodule_exe,
     suite: ['catch2', 'unit', 'cli', 'yams-cli'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'TSAN_OPTIONS': _test_tsan_options,
     },
-    timeout: 300,  # Tests take ~200s
-    should_fail: host_machine.system() == 'windows'
+    timeout: 300  # Tests take ~200s
   )
 
 #Vector test suite(requires enable - vector - tests)

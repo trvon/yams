@@ -183,6 +183,17 @@ RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
 
 RequestHandler::~RequestHandler() {}
 
+std::shared_ptr<RequestContext> RequestHandler::find_request_context(uint64_t request_id) {
+    std::lock_guard<std::mutex> lk(ctx_mtx_);
+    auto it = contexts_.find(request_id);
+    return it != contexts_.end() ? it->second : nullptr;
+}
+
+bool RequestHandler::is_request_canceled(uint64_t request_id) {
+    auto context = find_request_context(request_id);
+    return context && context->canceled.load(std::memory_order_relaxed);
+}
+
 boost::asio::awaitable<std::vector<uint8_t>>
 RequestHandler::handle_request(std::vector<uint8_t> request_data, yams::compat::stop_token token) {
     (void)token; // unused
@@ -2069,14 +2080,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         auto contentExtractors = sm->getContentExtractors();
         auto req = std::get<EmbedDocumentsRequest>(request);
 
-        std::shared_ptr<RequestContext> requestContext;
-        {
-            std::lock_guard<std::mutex> lk(ctx_mtx_);
-            auto it = contexts_.find(request_id);
-            if (it != contexts_.end()) {
-                requestContext = it->second;
-            }
-        }
+        auto requestContext = find_request_context(request_id);
 
         auto emitEvent = [state](EmbeddingEvent event) {
             if (!state)
@@ -2238,23 +2242,23 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
         const auto wait_timeout = config_.stream_chunk_timeout;
         while (true) {
-            {
-                std::lock_guard<std::mutex> lk(ctx_mtx_);
-                auto it = contexts_.find(request_id);
-                if (it != contexts_.end() && it->second->canceled.load(std::memory_order_relaxed)) {
-                    {
-                        std::lock_guard<std::mutex> lk2(state->mu);
-                        state->aborted = true;
-                        state->queued.clear();
-                    }
-                    auto err = yams::daemon::dispatch::makeErrorResponse(
-                        ErrorCode::OperationCancelled, "Request canceled");
-                    (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
-                                               /*last_chunk=*/true, /*flush=*/true, fsm);
-                    if (producer.joinable())
-                        producer.detach();
-                    co_return Result<void>();
-                }
+            auto cancel_result = co_await maybe_write_canceled_stream_response(
+                socket, request_id,
+                [state]() {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    state->aborted = true;
+                    state->queued.clear();
+                },
+                fsm);
+            if (!cancel_result) {
+                if (producer.joinable())
+                    producer.detach();
+                co_return cancel_result.error();
+            }
+            if (cancel_result.value()) {
+                if (producer.joinable())
+                    producer.detach();
+                co_return Result<void>();
             }
 
             Response next;
@@ -2361,14 +2365,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             co_return Result<void>();
         }
 
-        std::shared_ptr<RequestContext> requestContext;
-        {
-            std::lock_guard<std::mutex> lk(ctx_mtx_);
-            auto it = contexts_.find(request_id);
-            if (it != contexts_.end()) {
-                requestContext = it->second;
-            }
-        }
+        auto requestContext = find_request_context(request_id);
 
         // Producer runs the synchronous repair logic and pushes events into a queue.
         // We use a separate thread so the streaming loop can write chunks concurrently.
@@ -2431,23 +2428,23 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         const auto wait_timeout = config_.stream_chunk_timeout;
         while (true) {
             // Honor cancellation
-            {
-                std::lock_guard<std::mutex> lk(ctx_mtx_);
-                auto it = contexts_.find(request_id);
-                if (it != contexts_.end() && it->second->canceled.load(std::memory_order_relaxed)) {
-                    {
-                        std::lock_guard<std::mutex> lk2(state->mu);
-                        state->aborted = true;
-                        state->queued.clear();
-                    }
-                    auto err = yams::daemon::dispatch::makeErrorResponse(
-                        ErrorCode::OperationCancelled, "Request canceled");
-                    (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
-                                               /*last_chunk=*/true, /*flush=*/true, fsm);
-                    if (producer.joinable())
-                        producer.detach();
-                    co_return Result<void>();
-                }
+            auto cancel_result = co_await maybe_write_canceled_stream_response(
+                socket, request_id,
+                [state]() {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    state->aborted = true;
+                    state->queued.clear();
+                },
+                fsm);
+            if (!cancel_result) {
+                if (producer.joinable())
+                    producer.detach();
+                co_return cancel_result.error();
+            }
+            if (cancel_result.value()) {
+                if (producer.joinable())
+                    producer.detach();
+                co_return Result<void>();
             }
 
             Response next;
@@ -2542,12 +2539,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     while (!last_chunk_received) {
         if (stream_trace)
             spdlog::info("[STREAM] req_id={} preparing chunk #{}", request_id, chunk_count + 1);
-        {
-            std::lock_guard<std::mutex> lk(ctx_mtx_);
-            auto it = contexts_.find(request_id);
-            if (it != contexts_.end() && it->second->canceled.load(std::memory_order_relaxed)) {
-                co_return Error{ErrorCode::OperationCancelled, "Request canceled"};
-            }
+        if (is_request_canceled(request_id)) {
+            co_return Error{ErrorCode::OperationCancelled, "Request canceled"};
         }
         RequestProcessor::ResponseChunk chunk_result{};
         if (stream_trace)
@@ -2825,6 +2818,25 @@ RequestHandler::send_error(boost::asio::local::stream_protocol::socket& socket, 
     error_msg.payload = Response{error};
 
     co_return co_await write_message(socket, error_msg);
+}
+
+boost::asio::awaitable<Result<bool>> RequestHandler::maybe_write_canceled_stream_response(
+    boost::asio::local::stream_protocol::socket& socket, uint64_t request_id,
+    std::function<void()> abort_stream, ConnectionFsm* fsm) {
+    if (!is_request_canceled(request_id)) {
+        co_return false;
+    }
+    if (abort_stream) {
+        abort_stream();
+    }
+    auto err = yams::daemon::dispatch::makeErrorResponse(ErrorCode::OperationCancelled,
+                                                         "Request canceled");
+    auto write_result = co_await write_chunk(socket, Response{std::move(err)}, request_id,
+                                             /*last_chunk=*/true, /*flush=*/true, fsm);
+    if (!write_result) {
+        co_return write_result.error();
+    }
+    co_return true;
 }
 
 boost::asio::awaitable<Result<void>> RequestHandler::send_error_response(

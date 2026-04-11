@@ -260,6 +260,11 @@ Result<void> YamsDaemon::start() {
     modelPreloadSkipped_ = false;
     repairBusySince_ = {};
     repairReadySince_ = {};
+    runLoopStarted_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(stop_mutex_);
+        stopCompleted_ = false;
+    }
     state_.stats.startTime = std::chrono::steady_clock::now();
 
     // Starting -> Initializing (ensure ordering so HealthyEvent can promote to Ready)
@@ -621,6 +626,7 @@ Result<void> YamsDaemon::start() {
 
 void YamsDaemon::runLoop() {
     set_current_thread_name("yams-daemon-main");
+    runLoopStarted_.store(true, std::memory_order_release);
 
     if (serviceManager_) {
         spdlog::info("Triggering deferred service initialization...");
@@ -692,7 +698,7 @@ void YamsDaemon::runLoop() {
                 }
             } else if (snapshot.state == ServiceManagerState::Failed) {
                 spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
-                lifecycleFsm_.dispatch(FailureEvent{snapshot.lastError});
+                lifecycleFsm_.dispatch(FailureEvent{std::move(snapshot.lastError)});
             } else {
                 spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
                              static_cast<int>(snapshot.state));
@@ -981,7 +987,7 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
                 }
             } else if (snapshot.state == ServiceManagerState::Failed) {
                 spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
-                lifecycleFsm_.dispatch(FailureEvent{snapshot.lastError});
+                lifecycleFsm_.dispatch(FailureEvent{std::move(snapshot.lastError)});
             } else {
                 spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
                              static_cast<int>(snapshot.state));
@@ -1006,6 +1012,15 @@ Result<void> YamsDaemon::stop() {
         }
         return Error{ErrorCode::InvalidState, "Daemon not running"};
     }
+
+    struct StopCompletionGuard {
+        YamsDaemon* daemon;
+        ~StopCompletionGuard() {
+            std::lock_guard<std::mutex> lock(daemon->stop_mutex_);
+            daemon->stopCompleted_ = true;
+            daemon->stop_cv_.notify_all();
+        }
+    } stopCompletionGuard{this};
 
     spdlog::info("Stopping YAMS daemon...");
 
@@ -1042,21 +1057,22 @@ Result<void> YamsDaemon::stop() {
 
     // Stop metrics (uses WorkCoordinator strand + timers)
     // Keep the object alive (RequestDispatcher holds a raw pointer).
+    std::shared_ptr<DaemonMetrics> metricsHandle;
     {
-        std::shared_ptr<DaemonMetrics> m;
-        {
-            std::lock_guard<std::mutex> lk(metricsMutex_);
-            m = metrics_;
-        }
-        if (m) {
-            spdlog::debug("Stopping metrics polling...");
-            m->stopPolling();
-            spdlog::debug("Metrics polling stopped");
-        }
+        std::lock_guard<std::mutex> lk(metricsMutex_);
+        metricsHandle = metrics_;
+    }
+    if (metricsHandle) {
+        spdlog::debug("Stopping metrics polling...");
+        metricsHandle->stopPolling();
+        spdlog::debug("Metrics polling stopped");
     }
 
     // Stop socket server before ServiceManager tears down the WorkCoordinator
     if (socketServer_) {
+        if (metricsHandle) {
+            metricsHandle->setSocketServer(nullptr);
+        }
         spdlog::debug("Stopping socket server...");
         auto stopResult = socketServer_->stop();
         if (!stopResult) {
@@ -1091,6 +1107,7 @@ Result<void> YamsDaemon::stop() {
         std::lock_guard<std::mutex> lk(metricsMutex_);
         metrics_.reset();
     }
+    metricsHandle.reset();
 
     // Stop ServiceManager (this will stop WorkCoordinator's io_context in Phase 4)
     if (serviceManager_) {
@@ -1120,6 +1137,11 @@ Result<void> YamsDaemon::stop() {
 
     spdlog::info("YAMS daemon stopped.");
     return Result<void>();
+}
+
+bool YamsDaemon::waitForStopCompletion(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(stop_mutex_);
+    return stop_cv_.wait_for(lock, timeout, [&] { return stopCompleted_; });
 }
 
 // run() method removed; loop is inlined in start()
@@ -1183,7 +1205,6 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
 #ifdef _WIN32
             if (auto xdg = getXDGStateHome(); !xdg.empty()) {
                 auto logDir = xdg / "yams";
-                std::error_code ec;
                 yams::common::ensureDirectories(logDir);
                 if (canWriteToDirectory(logDir))
                     return logDir / "daemon.log";
@@ -1194,7 +1215,6 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
                 return fs::path("/var/log/yams-daemon.log");
             if (auto xdg = getXDGStateHome(); !xdg.empty()) {
                 auto logDir = xdg / "yams";
-                std::error_code ec;
                 yams::common::ensureDirectories(logDir);
                 if (canWriteToDirectory(logDir))
                     return logDir / "daemon.log";
@@ -1259,13 +1279,21 @@ std::shared_ptr<yams::vector::EmbeddingGenerator> YamsDaemon::_test_getEmbedding
 namespace yams::daemon {
 
 void YamsDaemon::reloadTuningConfig() {
+    std::filesystem::path configFilePath;
+    TuningConfig currentTuning;
+    {
+        std::lock_guard<std::mutex> lock(configMutex_);
+        configFilePath = config_.configFilePath;
+        currentTuning = config_.tuning;
+    }
+
     try {
-        if (config_.configFilePath.empty()) {
+        if (configFilePath.empty()) {
             spdlog::info("[Reload] No config file path recorded; skipping reload");
             return;
         }
-        if (!std::filesystem::exists(config_.configFilePath)) {
-            spdlog::warn("[Reload] Config file missing: {}", config_.configFilePath.string());
+        if (!std::filesystem::exists(configFilePath)) {
+            spdlog::warn("[Reload] Config file missing: {}", configFilePath.string());
             return;
         }
     } catch (const std::exception& e) {
@@ -1274,7 +1302,7 @@ void YamsDaemon::reloadTuningConfig() {
     }
     try {
         yams::config::ConfigMigrator migrator;
-        auto parsed = migrator.parseTomlConfig(config_.configFilePath.string());
+        auto parsed = migrator.parseTomlConfig(configFilePath.string());
         if (!parsed) {
             spdlog::warn("[Reload] Failed to parse config: {}", parsed.error().message);
             return;
@@ -1311,7 +1339,7 @@ void YamsDaemon::reloadTuningConfig() {
         if (auto v = as_int("grep_admission_wait_ms")) {
             TuneAdvisor::setGrepAdmissionWaitMs(static_cast<uint32_t>(*v));
         }
-        TuningConfig tc = config_.tuning; // start from current
+        TuningConfig tc = currentTuning; // preserve unspecified values from the live config
         if (auto v = as_int("target_cpu_percent"))
             tc.targetCpuPercent = static_cast<uint32_t>(*v);
         if (auto v = as_int("post_ingest_capacity"))
@@ -1328,7 +1356,10 @@ void YamsDaemon::reloadTuningConfig() {
             tc.controlIntervalMs = static_cast<uint32_t>(*v);
         if (auto v = as_int("hold_ms"))
             tc.holdMs = static_cast<uint32_t>(*v);
-        config_.tuning = tc;
+        {
+            std::lock_guard<std::mutex> lock(configMutex_);
+            config_.tuning = tc;
+        }
         if (serviceManager_) {
             serviceManager_->setTuningConfig(tc);
         }

@@ -163,6 +163,9 @@ private:
 
     // ── NEW: stuck document recovery ──
     RepairOperationResult recoverStuckDocuments(const RepairRequest& req, ProgressFn progress);
+    boost::asio::awaitable<RepairOperationResult>
+    recoverStuckDocumentsAsync(const RepairRequest& req, ProgressFn progress,
+                               std::atomic<bool>* cancelRequested = nullptr);
 
     struct StuckDocumentInfo {
         enum Category { FailedExtraction, GhostSuccess, StalledPending, StalledProcessing };

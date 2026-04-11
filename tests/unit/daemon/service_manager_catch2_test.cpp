@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <memory>
 
+#include "../../common/test_helpers_catch2.h"
+
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
@@ -25,6 +27,7 @@ namespace yams::daemon::test {
 
 // Test fixture for ServiceManager tests
 struct ServiceManagerFixture {
+    yams::test::ScopedEnvVar disableWatcher_{"YAMS_DISABLE_SESSION_WATCHER", std::string("1")};
     DaemonConfig config_;
     StateComponent state_;
     DaemonLifecycleFsm lifecycleFsm_;

@@ -1061,7 +1061,6 @@ int main(int argc, char* argv[]) {
         try {
             auto fallback = yams::daemon::YamsDaemon::resolveSystemPath(
                 yams::daemon::YamsDaemon::PathType::LogFile);
-            std::error_code ec;
             yams::common::ensureDirectories(fallback.parent_path());
             auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                 fallback.string(), max_size, max_files);

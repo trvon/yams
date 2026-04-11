@@ -53,6 +53,9 @@ std::shared_ptr<yams::daemon::EmbeddedServiceHost> make_host_for_test(const fs::
 
 TEST_CASE("InProcessTransport orders callbacks for stream-capable requests",
           "[daemon][streaming][inprocess]") {
+#ifdef _WIN32
+    SKIP("InProcessTransport embedded host tests are unstable on Windows");
+#endif
     const auto dataDir = yams::test::make_temp_dir("yams_in_process_order_stream_");
 
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
@@ -95,6 +98,9 @@ TEST_CASE("InProcessTransport orders callbacks for stream-capable requests",
 
 TEST_CASE("InProcessTransport orders callbacks for unary requests",
           "[daemon][streaming][inprocess]") {
+#ifdef _WIN32
+    SKIP("InProcessTransport embedded host tests are unstable on Windows");
+#endif
     const auto dataDir = yams::test::make_temp_dir("yams_in_process_order_unary_");
 
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());

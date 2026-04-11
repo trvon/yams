@@ -709,12 +709,9 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                         co_return;
                     }
                     spdlog::info("[AutoRepair] tick {}: executing", tier);
-                    RepairResponse resp;
-                    if (!req.foreground && req.repairEmbeddings) {
-                        resp = co_await rs->executeRepairAsync(req, nullptr);
-                    } else {
-                        resp = rs->executeRepair(req, nullptr);
-                    }
+                    RepairResponse resp = !req.foreground
+                                              ? co_await rs->executeRepairAsync(req, nullptr)
+                                              : rs->executeRepair(req, nullptr);
                     if (!resp.success && !resp.errors.empty()) {
                         spdlog::warn("[AutoRepair] {} completed with errors: {}", tier,
                                      resp.errors.front());

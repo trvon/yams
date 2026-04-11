@@ -19,6 +19,7 @@ using nlohmann::json;
 
 #include <yams/compat/unistd.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/metadata/document_metadata.h>
@@ -143,6 +144,18 @@ struct DaemonFixture {
         }
         return false;
     }
+
+    static bool waitForCondition(std::chrono::milliseconds timeout,
+                                 const std::function<bool()>& predicate) {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (predicate()) {
+                return true;
+            }
+            std::this_thread::sleep_for(10ms);
+        }
+        return predicate();
+    }
 };
 
 #ifdef _WIN32
@@ -157,6 +170,95 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon creation and destruction", "[daemon][lif
     daemon_ = std::make_unique<YamsDaemon>(config_);
     REQUIRE(daemon_ != nullptr);
     REQUIRE_FALSE(daemon_->isRunning());
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload preserves unspecified values",
+                 "[daemon][tuning][reload]") {
+    SKIP_ON_WINDOWS();
+
+    const auto configPath = runtime_root_ / "config.toml";
+    {
+        std::ofstream out(configPath);
+        REQUIRE(out.is_open());
+        out << "[tuning]\n";
+        out << "target_cpu_percent = 321\n";
+        out << "post_ingest_capacity = 111\n";
+        out << "control_interval_ms = 222\n";
+    }
+
+    config_.configFilePath = configPath;
+    config_.tuning.postIngestThreadsMin = 5;
+    config_.tuning.holdMs = 777;
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    REQUIRE(daemon_ != nullptr);
+
+    daemon_->reloadTuningConfig();
+
+    CHECK(daemon_->config_.tuning.targetCpuPercent == 321u);
+    CHECK(daemon_->config_.tuning.postIngestCapacity == 111u);
+    CHECK(daemon_->config_.tuning.controlIntervalMs == 222u);
+    CHECK(daemon_->config_.tuning.postIngestThreadsMin == 5u);
+    CHECK(daemon_->config_.tuning.holdMs == 777u);
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Lifecycle shutdown waits for owner-thread stop",
+                 "[daemon][lifecycle][shutdown-request]") {
+    SKIP_ON_WINDOWS();
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+
+    auto startResult = daemon_->start();
+    if (!startResult && isSocketPermissionDenied(startResult.error())) {
+        SKIP("UNIX domain sockets not permitted");
+    }
+    REQUIRE(startResult);
+
+    startRunLoop();
+    REQUIRE(waitForCondition(
+        2s, [&] { return daemon_->runLoopStarted_.load(std::memory_order_acquire); }));
+
+    DaemonLifecycleAdapter lifecycle(daemon_.get());
+    lifecycle.requestShutdown(true, true);
+
+    REQUIRE(waitForCondition(2s, [&] {
+        return daemon_->stopRequested_.load(std::memory_order_acquire) &&
+               daemon_->shutdownThreadActive_.load(std::memory_order_acquire);
+    }));
+
+    std::this_thread::sleep_for(100ms);
+    CHECK(daemon_->shutdownThreadActive_.load(std::memory_order_acquire));
+
+    stopRunLoop();
+    auto stopResult = daemon_->stop();
+    REQUIRE(stopResult);
+
+    REQUIRE(waitForCondition(
+        2s, [&] { return !daemon_->shutdownThreadActive_.load(std::memory_order_acquire); }));
+    daemon_->reapCompletedShutdownThread();
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Lifecycle shutdown falls back to direct stop without run loop",
+                 "[daemon][lifecycle][shutdown-request][fallback]") {
+    SKIP_ON_WINDOWS();
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+
+    auto startResult = daemon_->start();
+    if (!startResult && isSocketPermissionDenied(startResult.error())) {
+        SKIP("UNIX domain sockets not permitted");
+    }
+    REQUIRE(startResult);
+    REQUIRE_FALSE(daemon_->runLoopStarted_.load(std::memory_order_acquire));
+
+    DaemonLifecycleAdapter lifecycle(daemon_.get());
+    lifecycle.requestShutdown(true, true);
+
+    REQUIRE(waitForCondition(2s, [&] {
+        return !daemon_->isRunning() &&
+               !daemon_->shutdownThreadActive_.load(std::memory_order_acquire);
+    }));
+    daemon_->reapCompletedShutdownThread();
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Daemon start and stop", "[daemon][lifecycle]") {

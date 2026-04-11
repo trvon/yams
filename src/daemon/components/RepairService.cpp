@@ -1353,7 +1353,14 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
     bool keepGoing = true;
 
     if (keepGoing && doStuckDocs) {
-        keepGoing = runOp("stuck_docs", [&] { return recoverStuckDocuments(request, progress); });
+        if (request.foreground) {
+            keepGoing =
+                runOp("stuck_docs", [&] { return recoverStuckDocuments(request, progress); });
+        } else {
+            keepGoing = co_await runAsyncOp("stuck_docs", [&]() {
+                return recoverStuckDocumentsAsync(request, progress, cancelRequested);
+            });
+        }
     }
     if (keepGoing && doOrphans) {
         keepGoing = runOp("orphans", [&] {
@@ -1499,6 +1506,107 @@ RepairService::detectStuckDocuments(int32_t maxRetries) {
     }
 
     return stuck;
+}
+
+boost::asio::awaitable<RepairOperationResult>
+RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, ProgressFn progress,
+                                          std::atomic<bool>* cancelRequested) {
+    RepairOperationResult result;
+    result.operation = "stuck_docs";
+
+    auto isCanceled = [&]() {
+        return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
+    };
+
+    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    if (!meta) {
+        result.message = "Metadata repository not available";
+        co_return result;
+    }
+
+    auto stuckDocs = detectStuckDocuments(req.maxRetries);
+    result.processed = stuckDocs.size();
+
+    if (stuckDocs.empty()) {
+        result.message = "No stuck documents found";
+        co_return result;
+    }
+
+    spdlog::info("RepairService: found {} stuck documents", stuckDocs.size());
+
+    if (req.dryRun) {
+        result.message = "Would recover " + std::to_string(stuckDocs.size()) + " stuck documents";
+        result.skipped = stuckDocs.size();
+        co_return result;
+    }
+
+    const std::size_t rpcCapacity = static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
+    const bool useRpcChannel = (rpcCapacity > 0);
+    auto postIngestChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            useRpcChannel ? "post_ingest_rpc" : "post_ingest",
+            useRpcChannel ? rpcCapacity : std::size_t(4096));
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    for (std::size_t i = 0; i < stuckDocs.size(); ++i) {
+        if (isCanceled()) {
+            result.failed += (stuckDocs.size() - i);
+            result.message = "Repair canceled";
+            co_return result;
+        }
+
+        const auto& s = stuckDocs[i];
+        InternalEventBus::PostIngestTask task;
+        task.hash = s.hash;
+        task.mime = "";
+
+        const std::string jobLabel =
+            std::string(useRpcChannel ? "post_ingest_rpc" : "post_ingest") + " stuck-doc " +
+            std::to_string(i + 1) + "/" + std::to_string(stuckDocs.size());
+        const bool pushed = co_await queueWithBackoff(postIngestChannel, std::move(task), timer,
+                                                      running_, jobLabel, 1, 500, 500, isCanceled);
+        if (pushed) {
+            TuningManager::notifyWakeup();
+            auto docRes = meta->getDocument(s.docId);
+            if (docRes && docRes.value().has_value()) {
+                auto doc = docRes.value().value();
+                doc.repairAttempts = s.repairAttempts + 1;
+                doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now());
+                (void)meta->updateDocument(doc);
+            }
+
+            (void)meta->updateDocumentExtractionStatus(s.docId, false,
+                                                       metadata::ExtractionStatus::Pending,
+                                                       "RepairService: recovery attempt");
+            (void)meta->batchUpdateDocumentRepairStatuses({s.hash},
+                                                          metadata::RepairStatus::Pending);
+            ++result.succeeded;
+        } else {
+            ++result.failed;
+            spdlog::warn("RepairService: PostIngest channel full after retries, could not "
+                         "re-enqueue {} (consider increasing YAMS_POST_INGEST_RPC_QUEUE_MAX)",
+                         s.hash.substr(0, 12));
+        }
+
+        if (progress && ((i + 1) % 10 == 0 || i + 1 == stuckDocs.size())) {
+            RepairEvent ev;
+            ev.phase = "repairing";
+            ev.operation = "stuck_docs";
+            ev.processed = i + 1;
+            ev.total = stuckDocs.size();
+            ev.succeeded = result.succeeded;
+            ev.failed = result.failed;
+            progress(ev);
+        }
+    }
+
+    result.message = "Recovered " + std::to_string(result.succeeded) + " stuck documents";
+    if (result.failed > 0) {
+        result.message += " (" + std::to_string(result.failed) +
+                          " could not be enqueued - re-run repair to retry)";
+    }
+    co_return result;
 }
 
 RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& req,

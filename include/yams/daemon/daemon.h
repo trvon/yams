@@ -103,6 +103,7 @@ public:
     // Lifecycle management
     Result<void> start();
     Result<void> stop();
+    bool waitForStopCompletion(std::chrono::milliseconds timeout);
     /// Run the daemon main loop on the calling thread. Call after start().
     /// Returns when stopRequested_ becomes true or requestStop() is called.
     void runLoop();
@@ -145,6 +146,8 @@ public:
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
     // Accessed from multiple threads (runLoop + request handling/shutdown). Guard with mutex.
     mutable std::mutex metricsMutex_;
+    // Protects mutable config fields updated after startup (currently tuning reload state).
+    mutable std::mutex configMutex_;
     std::shared_ptr<DaemonMetrics> metrics_;
     // Integrated socket server (replaces external yams-socket-server)
     std::unique_ptr<SocketServer> socketServer_;
@@ -159,9 +162,11 @@ public:
     std::atomic<bool> running_{false};
     std::atomic<bool> stopRequested_{false};
     std::atomic<bool> reloadRequested_{false};
+    std::atomic<bool> runLoopStarted_{false};
     // Note: daemonThread_ removed - main loop runs on calling thread via runLoop()
     std::mutex stop_mutex_;
     std::condition_variable stop_cv_;
+    bool stopCompleted_{true};
 
     std::promise<void> asyncInitStartedPromise_;
     std::shared_future<void> asyncInitStartedFuture_;

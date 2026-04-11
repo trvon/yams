@@ -628,13 +628,18 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.activeConnections = state_->stats.activeConnections.load();
         out.maxConnections = state_->stats.maxConnections.load();
         out.connectionSlotsFree = state_->stats.connectionSlotsFree.load();
-        // Compute oldestConnectionAge on-demand from SocketServer (requires lock, but cached)
-        out.oldestConnectionAge = socketServer_ ? socketServer_->oldestConnectionAgeSeconds() : 0;
-        out.forcedCloseCount = state_->stats.forcedCloseCount.load();
-        if (socketServer_) {
-            out.proxyActiveConnections = socketServer_->proxyActiveConnections();
-            out.proxySocketPath = socketServer_->proxySocketPath().string();
+        // Snapshot SocketServer-derived metrics under the same lock used by setSocketServer() so
+        // stop/reset cannot race with these raw-pointer reads.
+        {
+            std::shared_lock lock(cacheMutex_);
+            out.oldestConnectionAge =
+                socketServer_ ? socketServer_->oldestConnectionAgeSeconds() : 0;
+            if (socketServer_) {
+                out.proxyActiveConnections = socketServer_->proxyActiveConnections();
+                out.proxySocketPath = socketServer_->proxySocketPath().string();
+            }
         }
+        out.forcedCloseCount = state_->stats.forcedCloseCount.load();
         out.ipcTasksPending = state_->stats.ipcTasksPending.load();
         out.ipcTasksActive = state_->stats.ipcTasksActive.load();
         out.repairRunning = state_->stats.repairRunning.load(std::memory_order_relaxed);

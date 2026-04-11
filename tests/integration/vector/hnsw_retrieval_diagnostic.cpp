@@ -14,8 +14,8 @@
 
 #include <spdlog/spdlog.h>
 
-#include "tests/integration/daemon/test_daemon_harness.h"
 #include "tests/integration/daemon/test_async_helpers.h"
+#include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
@@ -134,8 +134,14 @@ public:
         opts.configureModelPool = true;
         opts.modelPoolLazyLoading = false;
 
-        // Set plugin directory to builddir/plugins
+        // Resolve plugin directory relative to either the repo root or an existing builddir cwd.
         opts.pluginDir = fs::current_path() / "builddir" / "plugins";
+        if (!fs::exists(*opts.pluginDir)) {
+            fs::path directBuildPlugins = fs::current_path() / "plugins";
+            if (fs::exists(directBuildPlugins)) {
+                opts.pluginDir = std::move(directBuildPlugins);
+            }
+        }
         opts.preloadModels = {"all-MiniLM-L6-v2"};
 
         // Configure ONNX plugin
@@ -166,8 +172,7 @@ public:
             if (!modelsRoot.empty()) {
                 onnxConfig["models_root"] = modelsRoot.string();
             } else {
-                spdlog::warn("No ONNX models_root found (set YAMS_MODELS_ROOT). Semantic "
-                             "diagnostics will be skipped if embeddings are unavailable.");
+                SKIP("No ONNX models_root found; skipping semantic retrieval diagnostic");
             }
         }
         opts.pluginConfigs["onnx_plugin"] = onnxConfig.dump();

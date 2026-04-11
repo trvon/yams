@@ -44,6 +44,7 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
     daemon_->spawnShutdownThread([d = daemon_, graceful, inTestMode]() {
         std::atomic<bool> shutdownComplete{false};
         std::thread watchdog;
+        int timeoutMs = 15000;
         auto finalizeWatchdog = [&]() {
             shutdownComplete.store(true, std::memory_order_release);
             if (watchdog.joinable()) {
@@ -53,19 +54,19 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
         try {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-            if (!inTestMode) {
-                int timeoutMs = 15000;
-                if (const char* env = std::getenv("YAMS_SHUTDOWN_FORCE_EXIT_MS")) {
-                    try {
-                        int parsed = std::stoi(env);
-                        if (parsed <= 0) {
-                            timeoutMs = 0;
-                        } else {
-                            timeoutMs = std::max(parsed, 1000);
-                        }
-                    } catch (...) {
+            if (const char* env = std::getenv("YAMS_SHUTDOWN_FORCE_EXIT_MS")) {
+                try {
+                    int parsed = std::stoi(env);
+                    if (parsed <= 0) {
+                        timeoutMs = 0;
+                    } else {
+                        timeoutMs = std::max(parsed, 1000);
                     }
+                } catch (...) {
                 }
+            }
+
+            if (!inTestMode) {
                 if (timeoutMs > 0) {
                     watchdog = std::thread([timeoutMs, &shutdownComplete]() {
                         auto deadline =
@@ -91,26 +92,46 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
 
             // NOLINTBEGIN(bugprone-empty-catch): logger may be unavailable during shutdown
             try {
-                spdlog::info("Initiating daemon shutdown sequence...");
+                spdlog::info("Initiating daemon shutdown request...");
             } catch (...) {
             }
-            auto result = d->stop();
-            finalizeWatchdog();
-            if (!result) {
-                const bool alreadyStopped =
-                    result.error().code == ErrorCode::InvalidState && !d->isRunning();
-                if (alreadyStopped) {
+
+            d->requestStop();
+
+            bool shutdownSucceeded = false;
+            if (d->runLoopStarted_.load(std::memory_order_acquire)) {
+                const auto waitTimeout =
+                    std::chrono::milliseconds(timeoutMs > 0 ? timeoutMs : 15000);
+                shutdownSucceeded = d->waitForStopCompletion(waitTimeout);
+                if (!shutdownSucceeded) {
                     try {
-                        spdlog::debug("Daemon shutdown request observed daemon already stopping");
-                    } catch (...) {
-                    }
-                } else {
-                    try {
-                        spdlog::error("Daemon shutdown encountered error: {}",
-                                      result.error().message);
+                        spdlog::error("Timed out waiting for daemon stop completion after shutdown "
+                                      "request");
                     } catch (...) {
                     }
                 }
+            } else {
+                auto result = d->stop();
+                if (!result) {
+                    const bool alreadyStopped =
+                        result.error().code == ErrorCode::InvalidState && !d->isRunning();
+                    shutdownSucceeded = alreadyStopped;
+                    if (!alreadyStopped) {
+                        try {
+                            spdlog::error("Daemon shutdown encountered error: {}",
+                                          result.error().message);
+                        } catch (...) {
+                        }
+                    }
+                } else {
+                    shutdownSucceeded = true;
+                }
+            }
+
+            finalizeWatchdog();
+
+            if (!shutdownSucceeded) {
+                return;
             }
         } catch (const std::exception& e) {
             finalizeWatchdog();
@@ -125,8 +146,6 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
             } catch (...) {
             }
         }
-
-        d->requestStop();
 
         if (!inTestMode) {
             try {
