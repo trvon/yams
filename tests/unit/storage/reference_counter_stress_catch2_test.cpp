@@ -314,6 +314,52 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter high load batc
     CHECK(successCount.load() == numThreads * batchesPerThread * 2);
 }
 
+TEST_CASE_METHOD(ReferenceCounterStressFixture,
+                 "ReferenceCounter transaction isActive concurrent observer",
+                 "[storage][refcount][stress][transaction][tsan][catch2]") {
+    constexpr int iterations = 200;
+
+    std::atomic<int> activeTrue{0};
+    std::atomic<int> activeFalse{0};
+
+    for (int i = 0; i < iterations; ++i) {
+        auto txn = refCounter->beginTransaction();
+        REQUIRE(txn != nullptr);
+        txn->increment(generateHash(10'000 + i), 4096);
+
+        std::atomic<bool> stopObserver{false};
+        std::thread observer([&]() {
+            while (!stopObserver.load(std::memory_order_relaxed)) {
+                if (txn->isActive()) {
+                    activeTrue.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    activeFalse.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+
+            if (txn->isActive()) {
+                activeTrue.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                activeFalse.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+
+        if ((i % 2) == 0) {
+            auto commitResult = txn->commit();
+            REQUIRE(commitResult.has_value());
+        } else {
+            txn->rollback();
+        }
+
+        stopObserver.store(true, std::memory_order_relaxed);
+        observer.join();
+        CHECK_FALSE(txn->isActive());
+    }
+
+    CHECK(activeTrue.load() > 0);
+    CHECK(activeFalse.load() > 0);
+}
+
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter reproduce getStats crash",
                  "[storage][refcount][stress][regression][catch2]") {
     // This test reproduces the exact crash scenario from the bug report

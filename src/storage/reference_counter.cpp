@@ -706,19 +706,22 @@ ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id
 }
 
 ReferenceCounter::Transaction::~Transaction() {
-    if (active_ && !committed_) {
-        try {
-            rollback();
-        } catch (...) {
-            // Suppress exceptions in destructor
-        }
+    try {
+        rollback();
+    } catch (...) {
+        // Suppress exceptions in destructor
     }
 }
 
 // Move constructor
 ReferenceCounter::Transaction::Transaction(Transaction&& other) noexcept
-    : counter_(other.counter_), transactionId_(other.transactionId_), active_(other.active_),
-      committed_(other.committed_), operations_(std::move(other.operations_)) {
+    : counter_(nullptr), transactionId_(0), active_(false), committed_(false) {
+    std::lock_guard<std::mutex> lock(other.stateMutex_);
+    counter_ = other.counter_;
+    transactionId_ = other.transactionId_;
+    active_ = other.active_;
+    committed_ = other.committed_;
+    operations_ = std::move(other.operations_);
     other.active_ = false;
     other.counter_ = nullptr;
 }
@@ -727,13 +730,12 @@ ReferenceCounter::Transaction::Transaction(Transaction&& other) noexcept
 ReferenceCounter::Transaction&
 ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
     if (this != &other) {
-        if (active_ && !committed_) {
-            try {
-                rollback();
-            } catch (...) {
-            }
+        try {
+            rollback();
+        } catch (...) {
         }
 
+        std::scoped_lock lock(stateMutex_, other.stateMutex_);
         counter_ = other.counter_;
         transactionId_ = other.transactionId_;
         active_ = other.active_;
@@ -749,6 +751,7 @@ ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
 // Increment in transaction with both compressed and uncompressed sizes
 void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t compressedSize,
                                               size_t uncompressedSize) {
+    std::lock_guard<std::mutex> lock(stateMutex_);
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
@@ -765,6 +768,7 @@ void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t
 
 // Decrement in transaction
 void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
+    std::lock_guard<std::mutex> lock(stateMutex_);
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
@@ -781,6 +785,7 @@ void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
 
 // Commit transaction
 Result<void> ReferenceCounter::Transaction::commit() {
+    std::lock_guard<std::mutex> stateLock(stateMutex_);
     if (!active_) {
         return Result<void>(ErrorCode::TransactionFailed);
     }
@@ -865,6 +870,7 @@ Result<void> ReferenceCounter::Transaction::commit() {
 
 // Rollback transaction
 void ReferenceCounter::Transaction::rollback() {
+    std::lock_guard<std::mutex> stateLock(stateMutex_);
     if (!active_) {
         return;
     }
@@ -896,6 +902,11 @@ void ReferenceCounter::Transaction::rollback() {
         // Force inactive state even if update failed
         active_ = false;
     }
+}
+
+bool ReferenceCounter::Transaction::isActive() const {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    return active_;
 }
 
 // Update statistics

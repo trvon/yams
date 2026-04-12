@@ -988,7 +988,7 @@ private:
     //   - total_ms: attempt total latency
     template <typename T>
     Result<T> executeQueryOnPool(ConnectionPool& pool, std::string_view route,
-                                 std::function<Result<T>(Database&)> func) {
+                                 const std::function<Result<T>(Database&)>& func) {
         // Retry lock errors with exponential backoff.
         // IMPORTANT: std::this_thread::sleep_for() blocks the calling worker thread,
         // so aggressive retries cause system-wide starvation when all WorkCoordinator
@@ -1119,21 +1119,23 @@ private:
         return Error{ErrorCode::DatabaseError, "executeQueryOnPool: unexpected retry loop exit"};
     }
 
-    template <typename T> Result<T> executeReadQuery(std::function<Result<T>(Database&)> func) {
+    template <typename T>
+    Result<T> executeReadQuery(const std::function<Result<T>(Database&)>& func) {
         ConnectionPool& readPool = (readPool_ != nullptr) ? *readPool_ : pool_;
         if (current_metadata_op().empty()) {
             MetadataOpScope opScope("read_query");
-            return executeQueryOnPool<T>(readPool, "read", std::move(func));
+            return executeQueryOnPool<T>(readPool, "read", func);
         }
-        return executeQueryOnPool<T>(readPool, "read", std::move(func));
+        return executeQueryOnPool<T>(readPool, "read", func);
     }
 
-    template <typename T> Result<T> executeWriteQuery(std::function<Result<T>(Database&)> func) {
+    template <typename T>
+    Result<T> executeWriteQuery(const std::function<Result<T>(Database&)>& func) {
         if (current_metadata_op().empty()) {
             MetadataOpScope opScope("write_query");
-            return executeQueryOnPool<T>(pool_, "write", std::move(func));
+            return executeQueryOnPool<T>(pool_, "write", func);
         }
-        return executeQueryOnPool<T>(pool_, "write", std::move(func));
+        return executeQueryOnPool<T>(pool_, "write", func);
     }
 
     /// Best-effort write: single attempt with no retries. If the database is locked,
@@ -1141,7 +1143,7 @@ private:
     /// non-critical telemetry like feedback events where write contention would
     /// otherwise starve worker threads under concurrent load.
     template <typename T>
-    Result<T> executeBestEffortWrite(std::function<Result<T>(Database&)> func) {
+    Result<T> executeBestEffortWrite(const std::function<Result<T>(Database&)>& func) {
         const bool hasExistingOp = !current_metadata_op().empty();
         std::string_view prevOp{};
         if (!hasExistingOp) {

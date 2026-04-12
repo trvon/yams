@@ -168,7 +168,6 @@ namespace detail {
 template <HasEntityTraits Entity, std::size_t... Is>
 Result<void> bindColumnsImpl(Statement& stmt, const Entity& e, std::index_sequence<Is...>,
                              int startIndex = 1) {
-    const auto& cols = EntityTraits<Entity>::columns;
     int idx = startIndex;
     Result<void> result;
 
@@ -178,7 +177,7 @@ Result<void> bindColumnsImpl(Statement& stmt, const Entity& e, std::index_sequen
          if (!result.has_value())
              return; // Short-circuit if error
          using Col = std::tuple_element_t<Is, typename EntityTraits<Entity>::columns_tuple>;
-         const auto& col = std::get<Is>(cols);
+         const auto& col = std::get<Is>(EntityTraits<Entity>::columns);
          if constexpr (Col::kAutoIncrement && Col::kIsPrimaryKey) {
              // Skip auto-increment primary keys
              return;

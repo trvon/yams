@@ -827,8 +827,10 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                 snapshot->metadata.count("git_commit") ? snapshot->metadata.at("git_commit") : "";
             std::string gitBranch =
                 snapshot->metadata.count("git_branch") ? snapshot->metadata.at("git_branch") : "";
-            std::string gitRemote =
-                snapshot->metadata.count("git_remote") ? snapshot->metadata.at("git_remote") : "";
+            std::string gitRemote;
+            if (auto it = snapshot->metadata.find("git_remote"); it != snapshot->metadata.end()) {
+                gitRemote.append(it->second);
+            }
 
             auto snapStmtResult = db.prepare(R"(
                 INSERT INTO tree_snapshots (
@@ -2180,7 +2182,7 @@ MetadataRepository::getSemanticDuplicateGroupsForDocuments(std::span<const int64
                 if (!hasRow)
                     break;
                 auto group = mapSemanticDuplicateGroupRow(groupStmt);
-                groupsById.emplace(group.id, SemanticDuplicateGroupDetail{group, {}});
+                groupsById.emplace(group.id, SemanticDuplicateGroupDetail{std::move(group), {}});
             }
 
             if (groupsById.empty()) {
@@ -3543,7 +3545,8 @@ void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequenc
         return;
     }
 
-    // Add term to the index
+    // Serialize use of the raw sqlite-backed SymSpell instance with initialization/shutdown.
+    std::lock_guard<std::mutex> lock(symspellInitMutex_);
     if (symspellIndex_) {
         symspellIndex_->addTerm(term, frequency);
     }
@@ -5396,7 +5399,7 @@ MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
             }
 
             if (query.typeFilter.has_value()) {
-                stmt.bind(paramIdx++, changeTypeToString(*query.typeFilter));
+                stmt.bind(paramIdx, changeTypeToString(*query.typeFilter));
             }
 
             std::vector<TreeChangeRecord> results;
@@ -6276,7 +6279,7 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
             }
             // Bind N for matchAll HAVING
             if (matchAll) {
-                auto b = stmt.bind(paramIndex++, static_cast<int64_t>(uniqueTags.size()));
+                auto b = stmt.bind(paramIndex, static_cast<int64_t>(uniqueTags.size()));
                 if (!b)
                     return b.error();
             }

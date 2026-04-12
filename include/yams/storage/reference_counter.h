@@ -229,7 +229,7 @@ public:
         // Transaction control
         Result<void> commit() override;
         void rollback() override;
-        bool isActive() const override { return active_; }
+        bool isActive() const override;
 
         // Get transaction ID
         int64_t getId() const { return transactionId_; }
@@ -241,6 +241,7 @@ public:
         int64_t transactionId_;
         bool active_;
         bool committed_;
+        mutable std::mutex stateMutex_;
 
         // Track operations for potential rollback
         struct Operation {

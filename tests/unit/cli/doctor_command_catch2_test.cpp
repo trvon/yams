@@ -5,6 +5,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <sqlite3.h>
+
 #include <yams/cli/yams_cli.h>
 
 #include <algorithm>
@@ -284,4 +286,32 @@ TEST_CASE("DoctorCommand - plugin missing target fails cleanly without full doct
     CHECK(output.find("Plugin Doctor: definitely-not-a-real-plugin") != std::string::npos);
     CHECK(output.find("Not found as path or name in default dirs") != std::string::npos);
     CHECK(output.find("Collecting system information") == std::string::npos);
+}
+
+TEST_CASE("DoctorCommand - reports non-vec0 vector schema with fix hint",
+          "[cli][doctor][vec0][catch2]") {
+    CliTestHelper helper;
+
+    const fs::path dataDir = helper.tempDir / "data";
+    fs::create_directories(dataDir);
+    const fs::path dbPath = dataDir / "vectors.db";
+
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(dbPath.string().c_str(), &db) == SQLITE_OK);
+    char* err = nullptr;
+    REQUIRE(sqlite3_exec(db,
+                         "CREATE TABLE doc_embeddings(rowid INTEGER PRIMARY KEY, embedding BLOB)",
+                         nullptr, nullptr, &err) == SQLITE_OK);
+    if (err) {
+        sqlite3_free(err);
+    }
+    sqlite3_close(db);
+
+    CaptureStdout capture;
+    const int rc = helper.runCommand({"yams", "doctor"});
+    const std::string output = capture.str();
+
+    CHECK(rc == 0);
+    CHECK(output.find("doc_embeddings table not using vec0 virtual table") != std::string::npos);
+    CHECK(output.find("yams doctor --recreate-vectors --stop-daemon") != std::string::npos);
 }
