@@ -127,6 +127,8 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
     SqliteVecBackend::Config backend_cfg;
     backend_cfg.embedding_dim = cfg.dim;
     backend_cfg.search_engine = engine;
+    backend_cfg.quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
+    backend_cfg.quantized_hnsw_rerank_factor = 2;
 
     SqliteVecBackend backend(backend_cfg);
     auto init = backend.initialize(":memory:");
@@ -192,7 +194,17 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
 
     const double total_us = std::accumulate(latencies_us.begin(), latencies_us.end(), 0.0);
     EngineResult out;
-    out.name = engine == VectorSearchEngine::HnswCosine ? "hnsw-cosine" : "vec0-l2";
+    switch (engine) {
+        case VectorSearchEngine::HnswCosine:
+            out.name = "hnsw-cosine";
+            break;
+        case VectorSearchEngine::HnswQuantizedL2:
+            out.name = "hnsw-q-l2";
+            break;
+        case VectorSearchEngine::Vec0L2:
+            out.name = "vec0-l2";
+            break;
+    }
     out.build_ms = std::chrono::duration<double, std::milli>(build_end - build_start).count();
     out.mean_us = total_us / static_cast<double>(latencies_us.size());
     out.p95_us = percentile(latencies_us, 0.95);
@@ -236,9 +248,12 @@ int main(int argc, char* argv[]) {
 
         const auto hnsw =
             runEngine(VectorSearchEngine::HnswCosine, cfg, corpus, queries, ground_truth);
+        const auto qhnsw =
+            runEngine(VectorSearchEngine::HnswQuantizedL2, cfg, corpus, queries, ground_truth);
         const auto vec0 = runEngine(VectorSearchEngine::Vec0L2, cfg, corpus, queries, ground_truth);
 
         printResult(hnsw, cfg.k);
+        printResult(qhnsw, cfg.k);
         printResult(vec0, cfg.k);
         return 0;
     } catch (const std::exception& e) {

@@ -229,8 +229,6 @@ const uint8_t* findObject(std::span<const uint8_t> data, int objNum) {
     // Search forward (objects are typically near the start)
     auto it = std::search(data.begin(), data.end(), needle.begin(), needle.end());
     if (it == data.end()) {
-        // Try with different whitespace
-        len = std::snprintf(pattern, sizeof(pattern), "%d 0 obj", objNum);
         it = std::search(data.begin(), data.end(), needle.begin(), needle.end());
     }
 

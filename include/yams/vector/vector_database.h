@@ -18,13 +18,22 @@ enum class EmbeddingLevel { CHUNK, DOCUMENT };
 
 enum class VectorSearchEngine {
     HnswCosine,
+    HnswQuantizedL2,
     Vec0L2,
+};
+
+enum class QuantizedHnswMode {
+    LVQ8,
+    LVQ4,
+    RaBitQ,
 };
 
 inline const char* vectorSearchEngineName(VectorSearchEngine engine) {
     switch (engine) {
         case VectorSearchEngine::HnswCosine:
             return "hnsw_cosine";
+        case VectorSearchEngine::HnswQuantizedL2:
+            return "hnsw_quantized_l2";
         case VectorSearchEngine::Vec0L2:
             return "vec0_l2";
     }
@@ -35,8 +44,36 @@ inline std::optional<VectorSearchEngine> parseVectorSearchEngine(std::string_vie
     if (raw == "hnsw" || raw == "hnsw_cosine" || raw == "cosine") {
         return VectorSearchEngine::HnswCosine;
     }
+    if (raw == "hnsw_quantized_l2" || raw == "hnsw_quantized" || raw == "quantized") {
+        return VectorSearchEngine::HnswQuantizedL2;
+    }
     if (raw == "vec0" || raw == "vec0_l2" || raw == "l2") {
         return VectorSearchEngine::Vec0L2;
+    }
+    return std::nullopt;
+}
+
+inline const char* quantizedHnswModeName(QuantizedHnswMode mode) {
+    switch (mode) {
+        case QuantizedHnswMode::LVQ8:
+            return "lvq8";
+        case QuantizedHnswMode::LVQ4:
+            return "lvq4";
+        case QuantizedHnswMode::RaBitQ:
+            return "rabitq";
+    }
+    return "unknown";
+}
+
+inline std::optional<QuantizedHnswMode> parseQuantizedHnswMode(std::string_view raw) {
+    if (raw == "lvq8" || raw == "8bit") {
+        return QuantizedHnswMode::LVQ8;
+    }
+    if (raw == "lvq4" || raw == "4bit") {
+        return QuantizedHnswMode::LVQ4;
+    }
+    if (raw == "rabitq" || raw == "binary") {
+        return QuantizedHnswMode::RaBitQ;
     }
     return std::nullopt;
 }
@@ -72,6 +109,8 @@ struct VectorDatabaseConfig {
     float default_similarity_threshold = 0.35f;
     bool use_in_memory = false; // For testing
     VectorSearchEngine search_engine = VectorSearchEngine::HnswCosine;
+    QuantizedHnswMode quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
+    size_t quantized_hnsw_rerank_factor = 2;
 
     // TurboQuant compression settings (arXiv:2504.19874 approximation)
     // Storage: V2.2 schema persists quantized sidecar; HNSW still uses decoded floats.

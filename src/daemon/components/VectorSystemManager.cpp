@@ -275,6 +275,48 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         } catch (...) {
         }
     }
+
+    auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
+    if (!cfgPath.empty()) {
+        try {
+            auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("vector_database.search_engine");
+                it != kv.end() && !it->second.empty()) {
+                std::string normalized(it->second);
+                std::transform(
+                    normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+                        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    });
+                if (auto parsed = vector::parseVectorSearchEngine(normalized)) {
+                    cfg.search_engine = *parsed;
+                    spdlog::info("[VectorInit] search engine configured as {} from {}",
+                                 vector::vectorSearchEngineName(cfg.search_engine),
+                                 cfgPath.string());
+                }
+            }
+            if (auto it = kv.find("vector_database.quantized_hnsw_mode");
+                it != kv.end() && !it->second.empty()) {
+                std::string normalized(it->second);
+                std::transform(
+                    normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+                        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    });
+                if (auto parsed = vector::parseQuantizedHnswMode(normalized)) {
+                    cfg.quantized_hnsw_mode = *parsed;
+                    spdlog::info("[VectorInit] quantized HNSW mode configured as {} from {}",
+                                 vector::quantizedHnswModeName(cfg.quantized_hnsw_mode),
+                                 cfgPath.string());
+                }
+            }
+            if (auto it = kv.find("vector_database.quantized_hnsw_rerank_factor");
+                it != kv.end() && !it->second.empty()) {
+                cfg.quantized_hnsw_rerank_factor =
+                    std::max<size_t>(1, static_cast<size_t>(std::stoull(it->second)));
+            }
+        } catch (...) {
+        }
+    }
+
     if (const char* env = std::getenv("YAMS_VECTOR_SEARCH_ENGINE")) {
         std::string normalized(env);
         std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
@@ -289,13 +331,39 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                          env, vector::vectorSearchEngineName(cfg.search_engine));
         }
     }
+    if (const char* env = std::getenv("YAMS_VECTOR_QUANTIZED_MODE")) {
+        std::string normalized(env);
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        });
+        if (auto parsed = vector::parseQuantizedHnswMode(normalized)) {
+            cfg.quantized_hnsw_mode = *parsed;
+            spdlog::info("[VectorInit] quantized HNSW mode overridden to {} via env",
+                         vector::quantizedHnswModeName(cfg.quantized_hnsw_mode));
+        } else {
+            spdlog::warn("[VectorInit] invalid YAMS_VECTOR_QUANTIZED_MODE='{}'; using default {}",
+                         env, vector::quantizedHnswModeName(cfg.quantized_hnsw_mode));
+        }
+    }
+    if (const char* env = std::getenv("YAMS_VECTOR_QUANTIZED_RERANK_FACTOR")) {
+        try {
+            cfg.quantized_hnsw_rerank_factor =
+                std::max<size_t>(1, static_cast<size_t>(std::stoull(env)));
+            spdlog::info("[VectorInit] quantized HNSW rerank factor overridden to {} via env",
+                         cfg.quantized_hnsw_rerank_factor);
+        } catch (...) {
+        }
+    }
 
     // Log start
     auto tid = std::this_thread::get_id();
-    spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={} engine={}",
+    spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={} engine={} "
+                 "qmode={} qrerank={}",
                  static_cast<long long>(::getpid()), static_cast<const void*>(&tid),
                  cfg.database_path, exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no",
-                 cfg.embedding_dim, vector::vectorSearchEngineName(cfg.search_engine));
+                 cfg.embedding_dim, vector::vectorSearchEngineName(cfg.search_engine),
+                 vector::quantizedHnswModeName(cfg.quantized_hnsw_mode),
+                 cfg.quantized_hnsw_rerank_factor);
 
     // Cross-process advisory lock
 #ifdef _WIN32

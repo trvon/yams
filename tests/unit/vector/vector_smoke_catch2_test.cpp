@@ -120,6 +120,40 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with vec0 en
     CHECK(results[0].chunk_id == "vec0_hash_001");
 }
 
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with quantized HNSW engine",
+                 "[vector][smoke][qhnsw][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+    config.search_engine = VectorSearchEngine::HnswQuantizedL2;
+    config.quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
+    config.quantized_hnsw_rerank_factor = 2;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initialize());
+
+    std::vector<float> embedding = {1.0f, 0.0f, 0.0f, 0.0f};
+    VectorRecord rec;
+    rec.chunk_id = "qhnsw_hash_001";
+    rec.document_hash = "qhnsw_doc_001";
+    rec.embedding = embedding;
+    rec.content = "Quantized HNSW test content";
+    rec.start_offset = 0;
+    rec.end_offset = 27;
+    REQUIRE(db.insertVector(rec));
+    REQUIRE(db.prepareSearchIndex());
+
+    VectorSearchParams params;
+    params.k = 1;
+    auto results = db.search(embedding, params);
+    REQUIRE(results.size() == 1);
+    CHECK(results[0].chunk_id == "qhnsw_hash_001");
+}
+
 TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke get vector count", "[vector][smoke][catch2]") {
     skipIfNeeded();
 

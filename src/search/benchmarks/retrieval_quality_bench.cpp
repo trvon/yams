@@ -1784,6 +1784,9 @@ struct OptimizationRunResult {
     double keywordEvalMs = 0.0;
     std::string searchEngine =
         yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
+    std::string quantizedHnswMode =
+        yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8);
+    std::size_t quantizedHnswRerankFactor = 2;
     std::uintmax_t vectorsDbBytes = 0;
     std::uintmax_t vectorsWalBytes = 0;
     std::uintmax_t persistedHnswNodes = 0;
@@ -1806,6 +1809,9 @@ struct BenchCacheMetadata {
     bool graphRerankRequested = false;
     std::string searchEngine =
         yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
+    std::string quantizedHnswMode =
+        yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8);
+    std::size_t quantizedHnswRerankFactor = 2;
     int expectedDocs = 0;
     int expectedQueries = 0;
     std::uintmax_t corpusFingerprint = 0;
@@ -1833,6 +1839,9 @@ struct PersistedHnswState {
     bool reusable(yams::vector::VectorSearchEngine engine) const {
         if (engine == yams::vector::VectorSearchEngine::Vec0L2) {
             return vec0Tables > 0 && vec0Rows > 0;
+        }
+        if (engine == yams::vector::VectorSearchEngine::HnswQuantizedL2) {
+            return false;
         }
         return nodeRows > 0 && metaRows > 0;
     }
@@ -1867,6 +1876,31 @@ static yams::vector::VectorSearchEngine benchmarkVectorSearchEngine() {
             yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine));
     }
     return yams::vector::VectorSearchEngine::HnswCosine;
+}
+
+static yams::vector::QuantizedHnswMode benchmarkQuantizedHnswMode() {
+    if (const char* raw = std::getenv("YAMS_VECTOR_QUANTIZED_MODE"); raw && *raw) {
+        std::string normalized(raw);
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        });
+        if (auto parsed = yams::vector::parseQuantizedHnswMode(normalized)) {
+            return *parsed;
+        }
+        spdlog::warn("[Bench] Invalid YAMS_VECTOR_QUANTIZED_MODE='{}'; using default {}", raw,
+                     yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8));
+    }
+    return yams::vector::QuantizedHnswMode::LVQ8;
+}
+
+static std::size_t benchmarkQuantizedHnswRerankFactor() {
+    if (const char* raw = std::getenv("YAMS_VECTOR_QUANTIZED_RERANK_FACTOR"); raw && *raw) {
+        try {
+            return std::max<std::size_t>(1, static_cast<std::size_t>(std::stoull(raw)));
+        } catch (...) {
+        }
+    }
+    return 2;
 }
 
 static bool benchUseStreamingSearch() {
@@ -2049,6 +2083,8 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
         {"require_kg_ready", metadata.requireKgReady},
         {"graph_rerank_requested", metadata.graphRerankRequested},
         {"search_engine", metadata.searchEngine},
+        {"quantized_hnsw_mode", metadata.quantizedHnswMode},
+        {"quantized_hnsw_rerank_factor", std::to_string(metadata.quantizedHnswRerankFactor)},
         {"expected_docs", metadata.expectedDocs},
         {"expected_queries", metadata.expectedQueries},
         {"corpus_fingerprint", std::to_string(metadata.corpusFingerprint)},
@@ -2083,6 +2119,11 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
     metadata.searchEngine =
         j.value("search_engine", std::string(yams::vector::vectorSearchEngineName(
                                      yams::vector::VectorSearchEngine::HnswCosine)));
+    metadata.quantizedHnswMode = j.value(
+        "quantized_hnsw_mode",
+        std::string(yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8)));
+    metadata.quantizedHnswRerankFactor =
+        static_cast<std::size_t>(j.value("quantized_hnsw_rerank_factor", 2));
     metadata.expectedDocs = j.value("expected_docs", 0);
     metadata.expectedQueries = j.value("expected_queries", 0);
     metadata.status = j.value("status", std::string("priming"));
@@ -2230,6 +2271,12 @@ static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCac
     if (expected.searchEngine != actual.searchEngine) {
         return mismatch("search_engine mismatch");
     }
+    if (expected.quantizedHnswMode != actual.quantizedHnswMode) {
+        return mismatch("quantized_hnsw_mode mismatch");
+    }
+    if (expected.quantizedHnswRerankFactor != actual.quantizedHnswRerankFactor) {
+        return mismatch("quantized_hnsw_rerank_factor mismatch");
+    }
     if (expected.expectedDocs != actual.expectedDocs) {
         return mismatch("expected_docs mismatch");
     }
@@ -2247,6 +2294,8 @@ static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCac
     const bool reusableIndex = expectedEngine == yams::vector::VectorSearchEngine::Vec0L2
                                    ? (actual.vectorIndexReady && actual.persistedVec0Tables > 0 &&
                                       actual.persistedVec0Rows > 0)
+                               : expectedEngine == yams::vector::VectorSearchEngine::HnswQuantizedL2
+                                   ? true
                                    : (actual.vectorIndexReady && actual.persistedHnswNodes > 0 &&
                                       actual.persistedHnswMetaRows > 0);
     if (!expected.vectorsDisabled && actual.status == "primed" && !reusableIndex) {
@@ -2323,6 +2372,9 @@ static BenchCacheMetadata currentBenchCacheMetadata(const BenchCacheMetadata& ba
         std::max(metadata.vectorCount, static_cast<std::uintmax_t>(getCount("vector_count")));
     metadata.searchEngine =
         std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
+    metadata.quantizedHnswMode =
+        std::string(yams::vector::quantizedHnswModeName(benchmarkQuantizedHnswMode()));
+    metadata.quantizedHnswRerankFactor = benchmarkQuantizedHnswRerankFactor();
 
     const auto persistedHnsw = inspectPersistedHnswState(dataDir);
     metadata.vectorIndexReady = persistedHnsw.reusable(benchmarkVectorSearchEngine());
@@ -3820,6 +3872,8 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     j["hybrid_eval_ms"] = result.hybridEvalMs;
     j["keyword_eval_ms"] = result.keywordEvalMs;
     j["search_engine"] = result.searchEngine;
+    j["quantized_hnsw_mode"] = result.quantizedHnswMode;
+    j["quantized_hnsw_rerank_factor"] = result.quantizedHnswRerankFactor;
     j["vectors_db_bytes"] = result.vectorsDbBytes;
     j["vectors_wal_bytes"] = result.vectorsWalBytes;
     j["persisted_hnsw_nodes"] = result.persistedHnswNodes;
@@ -7017,6 +7071,9 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
         }
         result.searchEngine =
             std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
+        result.quantizedHnswMode =
+            std::string(yams::vector::quantizedHnswModeName(benchmarkQuantizedHnswMode()));
+        result.quantizedHnswRerankFactor = benchmarkQuantizedHnswRerankFactor();
         if (g_fixture && g_fixture->harness) {
             const auto persisted = inspectPersistedHnswState(g_fixture->harness->dataDir());
             result.vectorsDbBytes = persisted.vectorsDbBytes;

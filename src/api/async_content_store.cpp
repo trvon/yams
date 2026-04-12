@@ -79,7 +79,7 @@ std::future<Result<StoreResult>> AsyncContentStore::storeAsync(const std::filesy
                                                                ProgressCallback progress) {
     return pImpl->runAsync(
         [store = pImpl->store, path, metadata, progress = std::move(progress)]() {
-            return store->store(path, metadata, progress);
+            return store->store(path, metadata, std::move(progress));
         });
 }
 
@@ -88,7 +88,7 @@ AsyncContentStore::retrieveAsync(const std::string& hash, const std::filesystem:
                                  ProgressCallback progress) {
     return pImpl->runAsync(
         [store = pImpl->store, hash, outputPath, progress = std::move(progress)]() {
-            return store->retrieve(hash, outputPath, progress);
+            return store->retrieve(hash, outputPath, std::move(progress));
         });
 }
 
@@ -99,7 +99,7 @@ AsyncContentStore::storeStreamAsync(std::istream& stream, const ContentMetadata&
     // In production, would need to ensure stream lifetime
     return pImpl->runAsync(
         [store = pImpl->store, &stream, metadata, progress = std::move(progress)]() {
-            return store->storeStream(stream, metadata, progress);
+            return store->storeStream(stream, metadata, std::move(progress));
         });
 }
 
@@ -107,7 +107,7 @@ std::future<Result<RetrieveResult>>
 AsyncContentStore::retrieveStreamAsync(const std::string& hash, std::ostream& output,
                                        ProgressCallback progress) {
     return pImpl->runAsync([store = pImpl->store, hash, &output, progress = std::move(progress)]() {
-        return store->retrieveStream(hash, output, progress);
+        return store->retrieveStream(hash, output, std::move(progress));
     });
 }
 

@@ -40,6 +40,8 @@ public:
         backend_config.turboquant_bits = config_.turboquant_bits;
         backend_config.turboquant_seed = config_.turboquant_seed;
         backend_config.search_engine = config_.search_engine;
+        backend_config.quantized_hnsw_mode = config_.quantized_hnsw_mode;
+        backend_config.quantized_hnsw_rerank_factor = config_.quantized_hnsw_rerank_factor;
         backend_ = std::make_unique<SqliteVecBackend>(backend_config);
     }
 

@@ -530,6 +530,40 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 search engine b
     sqlite3_finalize(stmt);
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend quantized HNSW search engine basic",
+                 "[vector][backend][search][qhnsw][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::HnswQuantizedL2;
+    config.quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
+    config.quantized_hnsw_rerank_factor = 2;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    for (int i = 0; i < 12; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        REQUIRE(backend.insertVector(createVectorRecord("qhnsw_" + std::to_string(i), emb))
+                    .has_value());
+    }
+
+    auto build = backend.buildIndex();
+    if (!build.has_value()) {
+        INFO(build.error().message);
+    }
+    REQUIRE(build.has_value());
+
+    auto query = createEmbedding(64, 1.0f);
+    auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+    if (!searchResult.has_value()) {
+        INFO(searchResult.error().message);
+    }
+    REQUIRE(searchResult.has_value());
+    REQUIRE(searchResult.value().size() == 5);
+    CHECK(searchResult.value()[0].chunk_id == "chunk_qhnsw_0");
+}
+
 TEST_CASE_METHOD(SqliteVecBackendFixture,
                  "SqliteVecBackend searchSimilar with similarity_threshold",
                  "[vector][backend][search][catch2]") {
@@ -620,6 +654,47 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
             backend.insertVector(createVectorRecord("vec0_docB_" + std::to_string(i), emb, "doc_B"))
                 .has_value());
     }
+
+    auto query = createEmbedding(64, 1.0f);
+    auto filterResult = backend.searchSimilar(query, 10, 0.0f, "doc_A", {});
+    if (!filterResult.has_value()) {
+        INFO(filterResult.error().message);
+    }
+    REQUIRE(filterResult.has_value());
+    REQUIRE_FALSE(filterResult.value().empty());
+    for (const auto& r : filterResult.value()) {
+        CHECK(r.document_hash == "doc_A");
+    }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend quantized HNSW preserves filtered search semantics",
+                 "[vector][backend][search][filter][qhnsw][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::HnswQuantizedL2;
+    config.quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    for (int i = 0; i < 6; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        REQUIRE(
+            backend
+                .insertVector(createVectorRecord("qhnsw_docA_" + std::to_string(i), emb, "doc_A"))
+                .has_value());
+    }
+    for (int i = 0; i < 6; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 20));
+        REQUIRE(
+            backend
+                .insertVector(createVectorRecord("qhnsw_docB_" + std::to_string(i), emb, "doc_B"))
+                .has_value());
+    }
+
+    REQUIRE(backend.buildIndex().has_value());
 
     auto query = createEmbedding(64, 1.0f);
     auto filterResult = backend.searchSimilar(query, 10, 0.0f, "doc_A", {});
