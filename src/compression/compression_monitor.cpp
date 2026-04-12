@@ -53,30 +53,31 @@ public:
     }
 
     void checkMetrics() {
-        if (!config_.enableMonitoring) {
+        const auto state = configSnapshot();
+        if (!state.config.enableMonitoring) {
             return;
         }
 
         // Take snapshot
-        MetricsSnapshot snapshot;
-        snapshot.timestamp = std::chrono::system_clock::now();
-        snapshot.stats = getCurrentStatsInternal();
-        snapshot.cpuUsage = 0.0;
-        snapshot.memoryUsage = 0;
-        snapshot.activeThreads = 0;
+        MetricsSnapshot metricsSnapshot;
+        metricsSnapshot.timestamp = std::chrono::system_clock::now();
+        metricsSnapshot.stats = getCurrentStatsInternal();
+        metricsSnapshot.cpuUsage = 0.0;
+        metricsSnapshot.memoryUsage = 0;
+        metricsSnapshot.activeThreads = 0;
 
         // Collect custom metrics if available
-        if (metricCollector_) {
-            metricCollector_(snapshot);
+        if (state.metricCollector) {
+            state.metricCollector(metricsSnapshot);
         }
 
         // Store in history
         {
             std::lock_guard lock(historyMutex_);
-            history_.push_back(snapshot);
+            history_.push_back(metricsSnapshot);
 
             // Prune old history
-            auto cutoff = snapshot.timestamp - config_.historyRetention;
+            auto cutoff = metricsSnapshot.timestamp - state.config.historyRetention;
             history_.erase(std::ranges::remove_if(
                                history_, [&](const auto& s) { return s.timestamp < cutoff; })
                                .begin(),
@@ -84,12 +85,16 @@ public:
         }
 
         // Check for alerts
-        if (config_.enableAlerts) {
-            checkAlerts(snapshot.stats);
+        if (state.config.enableAlerts) {
+            checkAlerts(metricsSnapshot.stats, state.config);
         }
     }
 
     void checkAlgorithmHealth(CompressionAlgorithm algo) {
+        checkAlgorithmHealth(algo, configSnapshot().config);
+    }
+
+    void checkAlgorithmHealth(CompressionAlgorithm algo, const MonitorConfig& cfg) {
         auto stats = getCurrentStatsInternal();
 
         auto it = stats.algorithmStats.find(algo);
@@ -101,13 +106,13 @@ public:
 
         // Check compression ratio
         double ratio = algoStats.averageRatio();
-        if (ratio > 0 && ratio < config_.compressionRatioThreshold) {
+        if (ratio > 0 && ratio < cfg.compressionRatioThreshold) {
             triggerAlert(
                 Alert{.type = AlertType::LowCompressionRatio,
                       .algorithm = algo,
                       .message = fmt::format("Low compression ratio for {}", algorithmName(algo)),
                       .value = ratio,
-                      .threshold = config_.compressionRatioThreshold,
+                      .threshold = cfg.compressionRatioThreshold,
                       .timestamp = std::chrono::system_clock::now()});
         }
 
@@ -118,26 +123,26 @@ public:
 
         if (totalOps > 0) {
             double errorRate = static_cast<double>(totalErrors) / static_cast<double>(totalOps);
-            if (errorRate > config_.errorRateThreshold) {
+            if (errorRate > cfg.errorRateThreshold) {
                 triggerAlert(
                     Alert{.type = AlertType::HighErrorRate,
                           .algorithm = algo,
                           .message = fmt::format("High error rate for {}", algorithmName(algo)),
                           .value = errorRate,
-                          .threshold = config_.errorRateThreshold,
+                          .threshold = cfg.errorRateThreshold,
                           .timestamp = std::chrono::system_clock::now()});
             }
         }
 
         // Check performance
         double throughput = algoStats.compressionThroughputMBps();
-        if (throughput > 0 && throughput < config_.performanceThreshold) {
+        if (throughput > 0 && throughput < cfg.performanceThreshold) {
             triggerAlert(Alert{
                 .type = AlertType::SlowPerformance,
                 .algorithm = algo,
                 .message = fmt::format("Slow compression performance for {}", algorithmName(algo)),
                 .value = throughput,
-                .threshold = config_.performanceThreshold,
+                .threshold = cfg.performanceThreshold,
                 .timestamp = std::chrono::system_clock::now()});
         }
     }
@@ -182,6 +187,7 @@ public:
 
     std::string exportReport() const {
         std::ostringstream oss;
+        const auto snapshot = configSnapshot();
 
         auto stats = getCurrentStatsInternal();
         oss << stats.formatReport() << "\n";
@@ -189,9 +195,15 @@ public:
         // Add monitoring information
         oss << "=== Monitoring Status ===\n";
         oss << "Status: " << (running_.load() ? "Active" : "Stopped") << "\n";
-        oss << "Interval: " << config_.metricsInterval.count() << " seconds\n";
-        oss << "History entries: " << history_.size() << "\n";
-        oss << "Active alerts: " << activeAlerts_.size() << "\n\n";
+        oss << "Interval: " << snapshot.config.metricsInterval.count() << " seconds\n";
+        {
+            std::lock_guard lock(historyMutex_);
+            oss << "History entries: " << history_.size() << "\n";
+        }
+        {
+            std::lock_guard lock(alertsMutex_);
+            oss << "Active alerts: " << activeAlerts_.size() << "\n\n";
+        }
 
         // Add alerts
         if (!activeAlerts_.empty()) {
@@ -283,31 +295,42 @@ private:
     // Reference to global stats (would be injected in production)
     CompressionStats& globalStats_{getGlobalStats()};
 
+    struct ConfigSnapshot {
+        MonitorConfig config;
+        std::function<void(MetricsSnapshot&)> metricCollector;
+    };
+
+    ConfigSnapshot configSnapshot() const {
+        std::lock_guard lock(configMutex_);
+        return ConfigSnapshot{config_, metricCollector_};
+    }
+
     void monitorLoop() {
         while (running_.load()) {
             checkMetrics();
 
             // Wait for interval or shutdown
             std::unique_lock lock(cvMutex_);
-            cv_.wait_for(lock, config_.metricsInterval, [this] { return !running_.load(); });
+            const auto interval = configSnapshot().config.metricsInterval;
+            cv_.wait_for(lock, interval, [this] { return !running_.load(); });
         }
     }
 
-    void checkAlerts(const CompressionStats& stats) {
+    void checkAlerts(const CompressionStats& stats, const MonitorConfig& cfg) {
         // Check overall compression ratio
         double ratio = stats.overallCompressionRatio();
-        if (ratio > 0 && ratio < config_.compressionRatioThreshold) {
+        if (ratio > 0 && ratio < cfg.compressionRatioThreshold) {
             triggerAlert(Alert{.type = AlertType::LowCompressionRatio,
                                .algorithm = CompressionAlgorithm::None,
                                .message = "Overall compression ratio below threshold",
                                .value = ratio,
-                               .threshold = config_.compressionRatioThreshold,
+                               .threshold = cfg.compressionRatioThreshold,
                                .timestamp = std::chrono::system_clock::now()});
         }
 
         // Check each algorithm
         for (const auto& [algo, _] : stats.algorithmStats) {
-            checkAlgorithmHealth(algo);
+            checkAlgorithmHealth(algo, cfg);
         }
 
         // Check resource usage

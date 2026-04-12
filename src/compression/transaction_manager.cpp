@@ -100,10 +100,11 @@ public:
             return Error{ErrorCode::InvalidState, "Transaction manager already running"};
         }
 
+        const auto cfg = configSnapshot();
         running_.store(true);
 
         // Start cleanup thread if transaction log is enabled
-        if (config_.enableTransactionLog) {
+        if (cfg.enableTransactionLog) {
             cleanupThread_ = std::thread([this] { cleanupLoop(); });
         }
 
@@ -132,6 +133,7 @@ public:
     Result<TransactionId> beginTransaction(TransactionOperation operation,
                                            IsolationLevel isolation) {
         std::unique_lock lock(txMutex_);
+        const auto cfg = configSnapshot();
 
         // Check transaction limit
         size_t activeCount = static_cast<size_t>(
@@ -139,7 +141,7 @@ public:
                 return pair.second.state == TransactionState::Active;
             }));
 
-        if (activeCount >= config_.maxConcurrentTransactions) {
+        if (activeCount >= cfg.maxConcurrentTransactions) {
             return Error{ErrorCode::ResourceExhausted, "Maximum concurrent transactions reached"};
         }
 
@@ -456,7 +458,7 @@ public:
         config_ = config;
     }
 
-    const TransactionConfig& config() const {
+    TransactionConfig configSnapshot() const {
         std::lock_guard lock(configMutex_);
         return config_;
     }
@@ -533,12 +535,13 @@ public:
             }
         }
 
+        const auto cfg = configSnapshot();
         oss << "\nConfiguration:\n";
         oss << fmt::format("  Default Isolation: {}\n",
-                           transaction_utils::isolationLevelName(config_.defaultIsolation));
-        oss << fmt::format("  Transaction Timeout: {}s\n", config_.transactionTimeout.count());
-        oss << fmt::format("  Max Concurrent: {}\n", config_.maxConcurrentTransactions);
-        oss << fmt::format("  Auto Rollback: {}\n", config_.enableAutoRollback);
+                           transaction_utils::isolationLevelName(cfg.defaultIsolation));
+        oss << fmt::format("  Transaction Timeout: {}s\n", cfg.transactionTimeout.count());
+        oss << fmt::format("  Max Concurrent: {}\n", cfg.maxConcurrentTransactions);
+        oss << fmt::format("  Auto Rollback: {}\n", cfg.enableAutoRollback);
 
         return oss.str();
     }
@@ -581,9 +584,13 @@ private:
                 break;
             }
 
+            lock.unlock();
+
             // Clean old transaction log entries
-            auto cutoffTime = std::chrono::steady_clock::now() -
-                              std::chrono::hours(24 * config_.logRetentionDays);
+            const auto cfg = configSnapshot();
+            std::unique_lock txLock(txMutex_);
+            auto cutoffTime =
+                std::chrono::steady_clock::now() - std::chrono::hours(24 * cfg.logRetentionDays);
 
             transactionLog_.erase(std::remove_if(transactionLog_.begin(), transactionLog_.end(),
                                                  [cutoffTime](const TransactionRecord& record) {
@@ -597,7 +604,7 @@ private:
             for (auto& [txId, record] : transactions_) {
                 if (record.state == TransactionState::Active) {
                     auto elapsed = now - record.startTime;
-                    if (elapsed > config_.transactionTimeout) {
+                    if (elapsed > cfg.transactionTimeout) {
                         spdlog::warn(
                             "Transaction {} timed out after {}s", txId,
                             std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
@@ -610,9 +617,10 @@ private:
                         stats_[TransactionState::Active]--;
                         stats_[TransactionState::Aborted]++;
 
-                        lock.unlock();
-                        notifyCallbacks(record);
-                        lock.lock();
+                        auto callbackRecord = record;
+                        txLock.unlock();
+                        notifyCallbacks(callbackRecord);
+                        txLock.lock();
                     }
                 }
             }
@@ -640,7 +648,7 @@ private:
         spdlog::debug("Performing rollback for transaction {}", record.id);
 
         // For now, just log the rollback
-        if (errorHandler_ && config_.enableAutoRollback) {
+        if (errorHandler_ && configSnapshot().enableAutoRollback) {
             CompressionError error;
             error.code = ErrorCode::TransactionAborted;
             error.severity = ErrorSeverity::Warning;
@@ -752,7 +760,9 @@ void TransactionManager::updateConfig(const TransactionConfig& config) {
 }
 
 const TransactionConfig& TransactionManager::config() const noexcept {
-    return pImpl->config();
+    static thread_local TransactionConfig snapshot;
+    snapshot = pImpl->configSnapshot();
+    return snapshot;
 }
 
 bool TransactionManager::isRunning() const noexcept {

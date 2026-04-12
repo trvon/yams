@@ -365,7 +365,7 @@ private:
                           cfg_.client_config.requestTimeout.count());
         }
 
-        return Lease(this, entry, client_ptr, waited, captured_id);
+        return Lease(this, std::move(entry), client_ptr, waited, captured_id);
     }
 
     void pruning_loop() {
@@ -858,9 +858,12 @@ inline Result<void> ensure_socket_daemon_ready(
     const yams::daemon::ClientConfig& cfg,
     std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
     const auto start = std::chrono::steady_clock::now();
-    auto effectiveSocket = cfg.socketPath.empty()
-                               ? yams::daemon::DaemonClient::resolveSocketPathConfigFirst()
-                               : cfg.socketPath;
+    std::optional<std::filesystem::path> resolvedSocket;
+    const std::filesystem::path* effectiveSocket = &cfg.socketPath;
+    if (cfg.socketPath.empty()) {
+        resolvedSocket = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+        effectiveSocket = &*resolvedSocket;
+    }
 
     // When the caller explicitly pins a daemon socket and disables auto-start, trust that target
     // and let the actual request path surface any connect failure. This avoids an extra ping per
@@ -872,13 +875,13 @@ inline Result<void> ensure_socket_daemon_ready(
         return Result<void>();
     }
 
-    if (!yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+    if (!yams::daemon::DaemonClient::isDaemonRunning(*effectiveSocket)) {
         if (!cfg.autoStart) {
             return Error{ErrorCode::NotInitialized, "Daemon is not running"};
         }
 
         yams::daemon::ClientConfig startCfg;
-        startCfg.socketPath = effectiveSocket;
+        startCfg.socketPath = *effectiveSocket;
         startCfg.dataDir = cfg.dataDir;
         if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
             cli_perf_trace("daemon_ready.start_failed",
@@ -900,7 +903,7 @@ inline Result<void> ensure_socket_daemon_ready(
     const auto deadline = std::chrono::steady_clock::now() + readyTimeout;
     auto sleepFor = std::chrono::milliseconds(50);
     while (std::chrono::steady_clock::now() < deadline) {
-        if (yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+        if (yams::daemon::DaemonClient::isDaemonRunning(*effectiveSocket)) {
             cli_perf_trace("daemon_ready.success",
                            std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::steady_clock::now() - start));
@@ -932,7 +935,7 @@ inline bool cli_one_shot_enabled() {
 }
 
 inline yams::daemon::ClientConfig
-build_cli_daemon_client_config(boost::asio::any_io_executor executor,
+build_cli_daemon_client_config(const boost::asio::any_io_executor& executor,
                                const std::filesystem::path& explicitDataDir,
                                const CliDaemonRequestOptions& options = {}) {
     yams::daemon::ClientConfig cfg;
@@ -963,7 +966,7 @@ build_cli_daemon_client_config(boost::asio::any_io_executor executor,
 }
 
 inline Result<CliPreparedRetrieval>
-prepare_cli_retrieval(boost::asio::any_io_executor executor,
+prepare_cli_retrieval(const boost::asio::any_io_executor& executor,
                       const std::filesystem::path& explicitDataDir,
                       const CliDaemonRequestOptions& options = {}) {
     CliPreparedRetrieval prepared;

@@ -172,7 +172,7 @@ public:
         config_ = config;
     }
 
-    const ErrorHandlingConfig& config() const {
+    ErrorHandlingConfig configSnapshot() const {
         std::lock_guard lock(configMutex_);
         return config_;
     }
@@ -254,7 +254,7 @@ private:
     }
 
     RecoveryResult executeRecovery(const CompressionError& error,
-                                   std::function<Result<void>()> retryFunction) {
+                                   const std::function<Result<void>()>& retryFunction) {
         auto start = std::chrono::steady_clock::now();
         RecoveryResult result;
         result.success = false;
@@ -305,13 +305,13 @@ private:
     }
 
     RecoveryResult executeRetryStrategy([[maybe_unused]] const CompressionError& error,
-                                        std::function<Result<void>()> retryFunction) {
+                                        const std::function<Result<void>()>& retryFunction) {
         RecoveryResult result;
         result.strategyUsed = RecoveryStrategy::Retry;
         result.success = false;
         result.attemptsUsed = 0;
 
-        auto cfg = config();
+        auto cfg = configSnapshot();
         auto delay = cfg.retryDelay;
 
         for (size_t attempt = 1; attempt <= cfg.maxRetryAttempts; ++attempt) {
@@ -354,13 +354,13 @@ private:
 
     RecoveryResult
     executeFallbackStrategy(const CompressionError& error,
-                            [[maybe_unused]] std::function<Result<void>()> retryFunction) {
+                            [[maybe_unused]] const std::function<Result<void>()>& retryFunction) {
         RecoveryResult result;
         result.strategyUsed = RecoveryStrategy::Fallback;
         result.success = false;
         result.attemptsUsed = 1;
 
-        auto cfg = config();
+        auto cfg = configSnapshot();
         if (!cfg.enableFallbackAlgorithms) {
             result.message = "Fallback algorithms disabled in configuration";
             return result;
@@ -382,7 +382,7 @@ private:
         result.strategyUsed = RecoveryStrategy::Uncompressed;
         result.attemptsUsed = 1;
 
-        auto cfg = config();
+        auto cfg = configSnapshot();
         if (!cfg.enableUncompressedFallback) {
             result.success = false;
             result.message = "Uncompressed fallback disabled in configuration";
@@ -400,9 +400,9 @@ private:
         return result;
     }
 
-    RecoveryResult
-    executeAlternativeStrategy(const CompressionError& error,
-                               [[maybe_unused]] std::function<Result<void>()> retryFunction) {
+    RecoveryResult executeAlternativeStrategy(
+        const CompressionError& error,
+        [[maybe_unused]] const std::function<Result<void>()>& retryFunction) {
         RecoveryResult result;
         result.strategyUsed = RecoveryStrategy::Alternative;
         result.success = false;
@@ -454,7 +454,9 @@ void CompressionErrorHandler::updateConfig(const ErrorHandlingConfig& config) {
 }
 
 const ErrorHandlingConfig& CompressionErrorHandler::config() const noexcept {
-    return pImpl->config();
+    static thread_local ErrorHandlingConfig snapshot;
+    snapshot = pImpl->configSnapshot();
+    return snapshot;
 }
 
 std::unordered_map<ErrorCode, size_t> CompressionErrorHandler::getErrorStats() const {

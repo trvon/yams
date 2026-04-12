@@ -148,6 +148,7 @@ public:
             return Error{ErrorCode::InvalidState, "Recovery manager already running"};
         }
 
+        const auto cfg = configSnapshot();
         running_.store(true);
 
         // Reset stopped-state reservations when starting fresh
@@ -157,11 +158,11 @@ public:
         }
 
         // Start worker threads
-        for (size_t i = 0; i < config_.threadPoolSize; ++i) {
+        for (size_t i = 0; i < cfg.threadPoolSize; ++i) {
             workers_.emplace_back([this] { workerLoop(); });
         }
 
-        spdlog::info("Recovery manager started with {} worker threads", config_.threadPoolSize);
+        spdlog::info("Recovery manager started with {} worker threads", cfg.threadPoolSize);
 
         return {};
     }
@@ -191,6 +192,7 @@ public:
     std::future<RecoveryOperationResult> submitRecovery(RecoveryRequest request) {
         auto promise = std::make_shared<std::promise<RecoveryOperationResult>>();
         auto future = promise->get_future();
+        const auto cfg = configSnapshot();
 
         {
             std::lock_guard lock(queueMutex_);
@@ -198,7 +200,7 @@ public:
             // futures. Simulate queue occupancy so tests can observe "queue is full" behavior
             // without requiring worker threads.
             if (!running_.load()) {
-                if (stoppedQueueReservations_ >= config_.maxQueueSize) {
+                if (stoppedQueueReservations_ >= cfg.maxQueueSize) {
                     RecoveryOperationResult result;
                     result.status = RecoveryStatus::Failed;
                     result.operationPerformed = request.operation;
@@ -216,7 +218,7 @@ public:
                 return future;
             }
 
-            if (recoveryQueue_.size() >= config_.maxQueueSize) {
+            if (recoveryQueue_.size() >= cfg.maxQueueSize) {
                 RecoveryOperationResult result;
                 result.status = RecoveryStatus::Failed;
                 result.operationPerformed = request.operation;
@@ -371,7 +373,7 @@ public:
         config_ = config;
     }
 
-    const RecoveryConfig& config() const {
+    RecoveryConfig configSnapshot() const {
         std::lock_guard lock(configMutex_);
         return config_;
     }
@@ -830,7 +832,9 @@ void RecoveryManager::updateConfig(const RecoveryConfig& config) {
 }
 
 const RecoveryConfig& RecoveryManager::config() const noexcept {
-    return pImpl->config();
+    static thread_local RecoveryConfig snapshot;
+    snapshot = pImpl->configSnapshot();
+    return snapshot;
 }
 
 std::unordered_map<RecoveryOperation, size_t> RecoveryManager::getRecoveryStats() const {
