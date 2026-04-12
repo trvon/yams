@@ -127,10 +127,9 @@ boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(Reques
     co_return std::move(*result);
 }
 
-boost::asio::awaitable<Result<void>>
-InProcessTransport::send_request_streaming(Request request, HeaderCallback onHeader,
-                                           ChunkCallback onChunk, ErrorCallback onError,
-                                           CompleteCallback onComplete) {
+boost::asio::awaitable<Result<void>> InProcessTransport::send_request_streaming(
+    Request request, const HeaderCallback& onHeader, const ChunkCallback& onChunk,
+    const ErrorCallback& onError, const CompleteCallback& onComplete) {
     if (!host_) {
         co_return Error{ErrorCode::NotInitialized, "Embedded service host unavailable"};
     }
@@ -147,10 +146,8 @@ InProcessTransport::send_request_streaming(Request request, HeaderCallback onHea
 
     boost::asio::co_spawn(
         host_->getExecutor(),
-        [dispatcher, request = std::move(request), onHeader = std::move(onHeader),
-         onChunk = std::move(onChunk), onError = std::move(onError),
-         onComplete = std::move(onComplete), result, timer,
-         callerExec]() mutable -> boost::asio::awaitable<void> {
+        [dispatcher, request = std::move(request), onHeader, onChunk, onError, onComplete, result,
+         timer, callerExec]() mutable -> boost::asio::awaitable<void> {
             try {
                 auto adapter = std::make_shared<DispatcherAdapter>(dispatcher);
                 RequestHandler::Config cfg;

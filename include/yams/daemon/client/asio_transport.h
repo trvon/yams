@@ -35,8 +35,9 @@ public:
     using CompleteCallback = IClientTransport::CompleteCallback;
 
     boost::asio::awaitable<Result<void>>
-    send_request_streaming(Request req, HeaderCallback onHeader, ChunkCallback onChunk,
-                           ErrorCallback onError, CompleteCallback onComplete) override;
+    send_request_streaming(Request req, const HeaderCallback& onHeader,
+                           const ChunkCallback& onChunk, const ErrorCallback& onError,
+                           const CompleteCallback& onComplete) override;
 
 public:
     // Toggle FSM metrics and snapshot logging for transport observability
@@ -70,8 +71,8 @@ private:
     // Unified receive loop for both non-chunked and chunked responses
     boost::asio::awaitable<Result<void>>
     receive_frames(boost::asio::local::stream_protocol::socket& socket, MessageFramer& framer,
-                   HeaderCallback onHeader, ChunkCallback onChunk, ErrorCallback onError,
-                   CompleteCallback onComplete);
+                   const HeaderCallback& onHeader, const ChunkCallback& onChunk,
+                   const ErrorCallback& onError, const CompleteCallback& onComplete);
 
     Options opts_;
     ConnectionFsm fsm_;

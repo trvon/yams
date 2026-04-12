@@ -251,3 +251,58 @@ TEST_CASE_METHOD(HnswPersistenceFixture,
         CHECK(backend.hasReusablePersistedSearchIndex().value() == true);
     }
 }
+
+TEST_CASE_METHOD(HnswPersistenceFixture,
+                 "SqliteVecBackend persisted HNSW preserves document filters after reopen",
+                 "[vector][hnsw][persistence][filter][catch2]") {
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    config.hnsw_ef_search = 32;
+
+    const std::string dbPath = createTempDbPath();
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(64).has_value());
+
+        for (int i = 0; i < 12; ++i) {
+            auto rec =
+                createRecord("filter_a_" + std::to_string(i), createEmbedding(64, 10.0f + i));
+            rec.document_hash = "doc_filter_a";
+            REQUIRE(backend.insertVector(rec).has_value());
+        }
+        for (int i = 0; i < 12; ++i) {
+            auto rec =
+                createRecord("filter_b_" + std::to_string(i), createEmbedding(64, 100.0f + i));
+            rec.document_hash = "doc_filter_b";
+            REQUIRE(backend.insertVector(rec).has_value());
+        }
+
+        REQUIRE(backend.optimize().has_value());
+        CHECK(backend.hasReusablePersistedSearchIndex().value() == true);
+    }
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+
+        auto query = createEmbedding(64, 13.0f);
+
+        auto unfiltered = backend.searchSimilar(query, 10, -2.0f, std::nullopt, {});
+        REQUIRE(unfiltered.has_value());
+        REQUIRE_FALSE(unfiltered.value().empty());
+
+        auto filtered = backend.searchSimilar(query, 10, -2.0f, "doc_filter_a", {});
+        REQUIRE(filtered.has_value());
+        REQUIRE_FALSE(filtered.value().empty());
+        CHECK(backend.testingLastHnswMaintenanceMode() !=
+              SqliteVecBackend::HnswMaintenanceMode::BruteForceFallback);
+
+        for (const auto& rec : filtered.value()) {
+            CHECK(rec.document_hash == "doc_filter_a");
+        }
+
+        CHECK(filtered.value().size() <= unfiltered.value().size());
+    }
+}

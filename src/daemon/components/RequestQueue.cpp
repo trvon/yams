@@ -273,17 +273,12 @@ void RequestQueue::check_watermarks() {
     float util = utilization_percent();
     const bool governor_backpressured = !ResourceGovernor::instance().canAdmitWork();
     bool was_backpressured = backpressured_.load(std::memory_order_relaxed);
-    bool now_backpressured = was_backpressured;
-
     const bool at_or_above_high = util >= static_cast<float>(config_.high_watermark_percent);
     const bool above_low = util > static_cast<float>(config_.low_watermark_percent);
 
     // Unified backpressure with queue hysteresis + governor admission control.
-    if (governor_backpressured || at_or_above_high || (was_backpressured && above_low)) {
-        now_backpressured = true;
-    } else {
-        now_backpressured = false;
-    }
+    const bool now_backpressured =
+        governor_backpressured || at_or_above_high || (was_backpressured && above_low);
 
     if (!was_backpressured && now_backpressured) {
         metrics_.backpressure_activations.fetch_add(1, std::memory_order_relaxed);

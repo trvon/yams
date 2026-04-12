@@ -523,10 +523,9 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
                                                          "Request timeout waiting for response")};
 }
 
-boost::asio::awaitable<Result<void>>
-AsioTransportAdapter::send_request_streaming(Request req, HeaderCallback onHeader,
-                                             ChunkCallback onChunk, ErrorCallback onError,
-                                             CompleteCallback onComplete) {
+boost::asio::awaitable<Result<void>> AsioTransportAdapter::send_request_streaming(
+    Request req, const HeaderCallback& onHeader, const ChunkCallback& onChunk,
+    const ErrorCallback& onError, const CompleteCallback& onComplete) {
     Request ownedReq = std::move(req);
 
     // Check cancellation before proceeding
@@ -625,7 +624,7 @@ AsioTransportAdapter::send_request_streaming(Request req, HeaderCallback onHeade
         {
             AsioConnection::Handler h;
             h.streaming.emplace(onHeaderWithActivity, onChunkWithActivity, onError, onComplete);
-            h.streaming->done_promise = done_promise;
+            h.streaming->done_promise = std::move(done_promise);
             conn->handlers.emplace(msg.requestId, std::move(h));
         }
 

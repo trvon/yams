@@ -837,9 +837,9 @@ public:
             std::vector<std::pair<size_t, float>> result_pairs;
             std::visit(
                 [&](auto& index) {
-                    result_pairs =
-                        index.search_with_filter(std::span<const float>(normalized_query), search_k,
-                                                 config_.hnsw_ef_search, std::move(hnsw_filter));
+                    result_pairs = index.search_read_mostly_with_filter(
+                        std::span<const float>(normalized_query), search_k, config_.hnsw_ef_search,
+                        std::move(hnsw_filter));
                 },
                 hnsw_index_);
 

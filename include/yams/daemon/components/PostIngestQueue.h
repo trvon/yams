@@ -388,7 +388,7 @@ private:
     void processKnowledgeGraphBatch(std::vector<InternalEventBus::KgJob>&& jobs);
     void processSymbolExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& language,
-                                      std::shared_ptr<std::vector<std::byte>> contentBytes);
+                                      std::vector<std::byte>* contentBytes);
     void processSymbolExtractionBatch(std::vector<InternalEventBus::SymbolExtractionJob>&& jobs);
     void processEntityExtractionBatch(std::vector<InternalEventBus::EntityExtractionJob>&& jobs);
     void processTitleExtractionBatch(std::vector<InternalEventBus::TitleExtractionJob>&& jobs);
@@ -403,7 +403,7 @@ private:
                                  std::shared_ptr<std::vector<std::byte>> contentBytes);
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension,
-                                      std::shared_ptr<std::vector<std::byte>> contentBytes);
+                                      std::vector<std::byte>* contentBytes);
     void dispatchToTitleChannel(const std::string& hash, int64_t docId,
                                 const std::string& textSnippet, const std::string& fallbackTitle,
                                 const std::string& filePath, const std::string& language,

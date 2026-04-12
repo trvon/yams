@@ -21,8 +21,9 @@ public:
     virtual boost::asio::awaitable<Result<Response>> send_request(Request req) = 0;
 
     virtual boost::asio::awaitable<Result<void>>
-    send_request_streaming(Request req, HeaderCallback onHeader, ChunkCallback onChunk,
-                           ErrorCallback onError, CompleteCallback onComplete) = 0;
+    send_request_streaming(Request req, const HeaderCallback& onHeader,
+                           const ChunkCallback& onChunk, const ErrorCallback& onError,
+                           const CompleteCallback& onComplete) = 0;
 };
 
 } // namespace yams::daemon

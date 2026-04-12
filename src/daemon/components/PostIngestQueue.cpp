@@ -132,7 +132,7 @@ std::vector<TextSegmentWindow> buildBodyClaimSegments(std::string_view textSnipp
         if (cleaned.size() < 24) {
             return;
         }
-        segments.push_back({cleaned, segStart, segEnd});
+        segments.push_back({std::move(cleaned), segStart, segEnd});
     };
 
     std::size_t sentenceStart = start;
@@ -736,7 +736,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         const std::size_t base = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
         return adaptiveExtractionBatchSize(base);
     };
-    cfg.highPriorityChannel = rpcChannel;
+    cfg.highPriorityChannel = std::move(rpcChannel);
     cfg.highPriorityMaxPerBatchFn = [this]() -> std::size_t {
         const std::size_t baseBatchSz =
             std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
@@ -765,7 +765,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     // across hundreds of documents and significantly reducing throughput.
     cfg.enableCpuThrottling = false;
 
-    co_await pressureLimitedPoll(channel, std::move(cfg));
+    co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
 void PostIngestQueue::enqueue(Task t) {
@@ -1192,7 +1192,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         processKnowledgeGraphBatch(std::move(jobs));
     };
 
-    co_await pressureLimitedPoll(channel, std::move(cfg));
+    co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
 boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
@@ -1226,7 +1226,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         processSymbolExtractionBatch(std::move(jobs));
     };
 
-    co_await pressureLimitedPoll(channel, std::move(cfg));
+    co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
 void PostIngestQueue::processSymbolExtractionBatch(
@@ -1319,9 +1319,11 @@ void PostIngestQueue::dispatchToSymbolChannel(
     }
 }
 
-void PostIngestQueue::processSymbolExtractionStage(
-    const std::string& hash, [[maybe_unused]] int64_t docId, const std::string& filePath,
-    const std::string& language, std::shared_ptr<std::vector<std::byte>> contentBytes) {
+void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
+                                                   [[maybe_unused]] int64_t docId,
+                                                   const std::string& filePath,
+                                                   const std::string& language,
+                                                   std::vector<std::byte>* contentBytes) {
     // Legacy single-item handler (kept for now); metrics are owned by the poller layer.
     if (!graphComponent_) {
         spdlog::warn("[PostIngestQueue] Symbol extraction skipped for {} - no graphComponent",
@@ -1343,7 +1345,7 @@ void PostIngestQueue::processSymbolExtractionStage(
 
         std::vector<std::byte> bytes;
         if (contentBytes) {
-            bytes = *contentBytes;
+            bytes = std::move(*contentBytes);
         } else if (store_) {
             auto contentResult = store_->retrieveBytes(hash);
             if (contentResult) {
@@ -1429,7 +1431,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         processEntityExtractionBatch(std::move(jobs));
     };
 
-    co_await pressureLimitedPoll(channel, std::move(cfg));
+    co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
 void PostIngestQueue::processEntityExtractionBatch(
@@ -1439,13 +1441,14 @@ void PostIngestQueue::processEntityExtractionBatch(
     }
     for (auto& job : jobs) {
         processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
-                                     std::move(job.contentBytes));
+                                     job.contentBytes.get());
     }
 }
 
-void PostIngestQueue::processEntityExtractionStage(
-    const std::string& hash, int64_t /*docId*/, const std::string& filePath,
-    const std::string& extension, std::shared_ptr<std::vector<std::byte>> contentBytes) {
+void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t /*docId*/,
+                                                   const std::string& filePath,
+                                                   const std::string& extension,
+                                                   std::vector<std::byte>* contentBytes) {
     spdlog::info("[PostIngestQueue] Entity extraction starting for {} ({}) ext={}", filePath,
                  hash.substr(0, 12), extension);
 
@@ -1540,8 +1543,11 @@ void PostIngestQueue::processEntityExtractionStage(
                         metadata::KGNode versionNode = node;
                         std::string baseKey = node.nodeKey;
                         versionNode.nodeKey = baseKey + "@snap:" + snapshotId;
-                        std::string baseType = node.type.has_value() ? node.type.value() : "entity";
-                        versionNode.type = baseType + "_version";
+                        if (node.type.has_value()) {
+                            versionNode.type = *node.type + "_version";
+                        } else {
+                            versionNode.type = "entity_version";
+                        }
 
                         nlohmann::json props = nlohmann::json::object();
                         if (node.properties.has_value()) {
@@ -1779,7 +1785,7 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         processTitleExtractionBatch(std::move(jobs));
     };
 
-    co_await pressureLimitedPoll(channel, std::move(cfg));
+    co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
 void PostIngestQueue::processTitleExtractionBatch(
@@ -2012,7 +2018,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                     segmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
 
                     DeferredEdge segmentOfEdge;
-                    segmentOfEdge.srcNodeKey = segmentNodeKey;
+                    segmentOfEdge.srcNodeKey = std::move(segmentNodeKey);
                     segmentOfEdge.dstNodeKey = targetNodeKey;
                     segmentOfEdge.relation = "segment_of";
                     segmentOfEdge.weight = confidence;

@@ -507,7 +507,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         return false;
     }();
 
-    const resource::GpuInfo gpuInfo = resource::detectGpu();
+    const auto& gpuInfo = resource::detectGpu();
     const bool coremlUnified =
         gpuInfo.detected && gpuInfo.provider == "coreml" && gpuInfo.unifiedMemory;
     std::size_t coremlUnifiedCap = 1;
@@ -658,7 +658,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                     continue;
                 }
                 if (pending.modelName.empty() && !defaultModel.empty()) {
-                    pending.modelName = defaultModel;
+                    pending.modelName.append(defaultModel);
                 }
                 auto& bucket = grouped[pending.modelName];
                 if (bucket.hashes.empty()) {
@@ -1296,7 +1296,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
     auto strategy = chunkPolicy.strategy;
-    auto ccfg = chunkPolicy.config;
+    const auto& ccfg = chunkPolicy.config;
     const bool chunkCfgOverridden = chunkPolicy.overridden;
 
     if (timingEnabled && chunkCfgOverridden) {
@@ -1408,8 +1408,12 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         result.chunks.reserve(chunks.size());
         for (std::size_t i = 0; i < chunks.size(); ++i) {
             auto& c = chunks[i];
-            std::string chunkId =
-                c.chunk_id.empty() ? yams::vector::utils::generateChunkId(doc.hash, i) : c.chunk_id;
+            std::string chunkId;
+            if (c.chunk_id.empty()) {
+                chunkId = yams::vector::utils::generateChunkId(doc.hash, i);
+            } else {
+                chunkId = std::move(c.chunk_id);
+            }
             result.chunkChars += static_cast<uint64_t>(c.content.size());
             result.chunks.push_back({docIdx, std::move(chunkId), std::move(c.content),
                                      c.start_offset, c.end_offset, false});

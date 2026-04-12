@@ -157,7 +157,7 @@ Error makeNotReadyErrorFromStatus(const StatusResponse& status, std::string_view
         message += ", try again shortly";
     }
 
-    return Error{ErrorCode::InvalidState, message};
+    return Error{ErrorCode::InvalidState, std::move(message)};
 }
 
 Error makeErrorFromResponse(const ErrorResponse& response) {
@@ -347,7 +347,7 @@ std::filesystem::path resolveDataDirCached() {
         if (!env_overrides_data_dir()) {
             const auto cachePath = cache_data_dir_path();
             if (auto cached = read_cached_data_dir(cachePath)) {
-                g_cachedDataDir = *cached;
+                g_cachedDataDir = std::move(*cached);
                 return;
             }
         }
@@ -527,7 +527,7 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
                     spdlog::info(
                         "DaemonClient: falling back to live daemon socket '{}' instead of '{}'",
                         liveSocket->string(), daemonSock.string());
-                    daemonSock = *liveSocket;
+                    daemonSock = std::move(*liveSocket);
                 }
             }
 
@@ -611,14 +611,19 @@ void DaemonClient::setBodyTimeout(std::chrono::milliseconds timeout) {
 // New: lightweight readiness probe that sends a real Ping and waits briefly
 static bool pingDaemonSync(const std::filesystem::path& socketPath) {
     try {
-        auto path = socketPath.empty() ? DaemonClient::resolveSocketPathConfigFirst() : socketPath;
-        if (path.empty())
+        std::optional<std::filesystem::path> resolvedPath;
+        const std::filesystem::path* path = &socketPath;
+        if (socketPath.empty()) {
+            resolvedPath = DaemonClient::resolveSocketPathConfigFirst();
+            path = &*resolvedPath;
+        }
+        if (path->empty())
             return false;
 
         constexpr auto kProbeTimeout = std::chrono::milliseconds(1000);
 
         TransportOptions opts;
-        opts.socketPath = path;
+        opts.socketPath = *path;
         opts.requestTimeout = kProbeTimeout;
         opts.headerTimeout = kProbeTimeout;
         opts.bodyTimeout = kProbeTimeout;
@@ -633,7 +638,7 @@ static bool pingDaemonSync(const std::filesystem::path& socketPath) {
             adapter.send_request(Request{std::in_place_type<PingRequest>, ping}),
             kProbeTimeout + std::chrono::milliseconds(250));
         if (!response) {
-            spdlog::debug("DaemonClient::pingDaemonSync probe failed for '{}': {}", path.string(),
+            spdlog::debug("DaemonClient::pingDaemonSync probe failed for '{}': {}", path->string(),
                           response.error().message);
             return false;
         }
@@ -644,10 +649,10 @@ static bool pingDaemonSync(const std::filesystem::path& socketPath) {
 
         if (const auto* err = std::get_if<ErrorResponse>(&response.value())) {
             spdlog::debug("DaemonClient::pingDaemonSync probe error response for '{}': {}",
-                          path.string(), err->message);
+                          path->string(), err->message);
         } else {
             spdlog::debug("DaemonClient::pingDaemonSync probe got unexpected response for '{}'",
-                          path.string());
+                          path->string());
         }
         return false;
     } catch (const std::exception& e) {
@@ -766,7 +771,7 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
             if (!host) {
                 co_return host.error();
             }
-            impl->embeddedHost_ = host.value();
+            impl->embeddedHost_ = std::move(host.value());
         }
         impl->explicitly_disconnected_ = false;
         co_return Result<void>();
@@ -1138,7 +1143,7 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
             if (!host) {
                 co_return host.error();
             }
-            impl->embeddedHost_ = host.value();
+            impl->embeddedHost_ = std::move(host.value());
         }
         InProcessTransport transport(impl->embeddedHost_);
         auto r = co_await transport.send_request(std::move(ownedReq));
@@ -1159,10 +1164,6 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     if (requires_single_use_connection(ownedReq)) {
         opts.poolEnabled = false;
     }
-    // Force single-use connection for long maintenance ops (e.g., prune)
-    if (requires_single_use_connection(ownedReq)) {
-        opts.poolEnabled = false;
-    }
     AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(std::move(ownedReq));
 
@@ -1170,7 +1171,7 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
         const auto fallbackSocket = deriveMainSocketFromProxy(opts.socketPath);
         if (!fallbackSocket.empty()) {
             Request retryReq = req;
-            auto retryOpts = opts;
+            auto retryOpts = std::move(opts);
             retryOpts.socketPath = fallbackSocket;
             spdlog::debug("DaemonClient: retrying request on main socket {}",
                           fallbackSocket.string());
@@ -1209,7 +1210,7 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
             if (!host) {
                 co_return host.error();
             }
-            impl->embeddedHost_ = host.value();
+            impl->embeddedHost_ = std::move(host.value());
         }
         InProcessTransport transport(impl->embeddedHost_);
         auto r = co_await transport.send_request(std::move(req));
@@ -1229,14 +1230,14 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     if (requires_single_use_connection(req)) {
         opts.poolEnabled = false;
     }
-    Request retryReq = req;
+    Request retryReq = std::move(req);
     AsioTransportAdapter adapter(opts);
-    auto r = co_await adapter.send_request(std::move(req));
+    auto r = co_await adapter.send_request(Request{retryReq});
 
     if (!r && isProxySocketPath(opts.socketPath) && shouldRetryViaMainSocket(r.error())) {
         const auto fallbackSocket = deriveMainSocketFromProxy(opts.socketPath);
         if (!fallbackSocket.empty()) {
-            auto retryOpts = opts;
+            auto retryOpts = std::move(opts);
             retryOpts.socketPath = fallbackSocket;
             spdlog::debug("DaemonClient: retrying move request on main socket {}",
                           fallbackSocket.string());
@@ -1738,7 +1739,7 @@ DaemonClient::sendRequestStreaming(const Request& req,
             if (!host) {
                 co_return host.error();
             }
-            impl->embeddedHost_ = host.value();
+            impl->embeddedHost_ = std::move(host.value());
         }
         InProcessTransport transport(impl->embeddedHost_);
         auto res = co_await transport.send_request_streaming(std::move(ownedReq), onHeader, onChunk,
@@ -1769,7 +1770,7 @@ DaemonClient::sendRequestStreaming(const Request& req,
         const auto fallbackSocket = deriveMainSocketFromProxy(opts.socketPath);
         if (!fallbackSocket.empty()) {
             Request retryReq = req;
-            auto retryOpts = opts;
+            auto retryOpts = std::move(opts);
             retryOpts.socketPath = fallbackSocket;
             spdlog::debug("DaemonClient: retrying streaming request on main socket {}",
                           fallbackSocket.string());
@@ -2030,7 +2031,7 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
         co_return *handler->value;
     if (handler->initResp.has_value()) {
         // Download to memory, reconstruct BatchEmbeddingResponse
-        auto ir = *handler->initResp;
+        const auto& ir = *handler->initResp;
         // Fetch bytes
         std::string data;
         data.reserve(static_cast<size_t>(ir.totalSize));
@@ -2082,7 +2083,9 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
             co_return Error{ErrorCode::InvalidData, "Downloaded size mismatch"};
         BatchEmbeddingResponse out;
         out.dimensions = dim;
-        out.modelUsed = ir.metadata.count("model") ? ir.metadata.at("model") : std::string{};
+        if (auto it = ir.metadata.find("model"); it != ir.metadata.end()) {
+            out.modelUsed.append(it->second);
+        }
         out.processingTimeMs = 0;
         out.successCount = count;
         out.failureCount = 0;
@@ -2359,15 +2362,20 @@ std::filesystem::path DaemonClient::resolveSocketPathConfigFirst() {
 }
 
 bool DaemonClient::isDaemonRunning(const std::filesystem::path& socketPath) {
-    auto path = socketPath.empty() ? resolveSocketPathConfigFirst() : socketPath;
+    std::optional<std::filesystem::path> resolvedPath;
+    const std::filesystem::path* path = &socketPath;
+    if (socketPath.empty()) {
+        resolvedPath = resolveSocketPathConfigFirst();
+        path = &*resolvedPath;
+    }
     // Lightweight readiness probe using real Ping via Asio transport
-    if (pingDaemonSync(path)) {
+    if (pingDaemonSync(*path)) {
         return true;
     }
 
     if (socketPath.empty()) {
-        if (auto liveSocket = client::discoverLiveDaemonSocket(path);
-            liveSocket && !liveSocket->empty() && *liveSocket != path) {
+        if (auto liveSocket = client::discoverLiveDaemonSocket(*path);
+            liveSocket && !liveSocket->empty() && *liveSocket != *path) {
             return pingDaemonSync(*liveSocket);
         }
     }

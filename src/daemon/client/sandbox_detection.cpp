@@ -94,14 +94,18 @@ ClientTransportMode resolve_transport_mode(const ClientConfig& config) {
         return ClientTransportMode::InProcess;
     }
 
-    const auto socketPath = config.socketPath.empty() ? DaemonClient::resolveSocketPathConfigFirst()
-                                                      : config.socketPath;
+    std::optional<std::filesystem::path> resolvedSocketPath;
+    const std::filesystem::path* socketPath = &config.socketPath;
+    if (config.socketPath.empty()) {
+        resolvedSocketPath = DaemonClient::resolveSocketPathConfigFirst();
+        socketPath = &*resolvedSocketPath;
+    }
     std::error_code ec;
-    if (socketPath.empty() || !std::filesystem::exists(socketPath, ec)) {
+    if (socketPath->empty() || !std::filesystem::exists(*socketPath, ec)) {
         return ClientTransportMode::InProcess;
     }
 
-    if (!DaemonClient::isDaemonRunning(socketPath)) {
+    if (!DaemonClient::isDaemonRunning(*socketPath)) {
         return ClientTransportMode::InProcess;
     }
 

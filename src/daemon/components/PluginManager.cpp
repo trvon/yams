@@ -42,7 +42,7 @@ std::string adjustOnnxConfigJson(const std::string& configJson, std::size_t defa
     if (!configJson.empty()) {
         auto parsed = nlohmann::json::parse(configJson, nullptr, false);
         if (!parsed.is_discarded() && parsed.is_object()) {
-            cfgJson = parsed;
+            cfgJson = std::move(parsed);
         }
     }
 
@@ -450,8 +450,8 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
                     spdlog::warn("[PluginManager] no active plugin host for loading");
                     continue;
                 }
-                auto path = desc.path;
-                auto pluginName = desc.name;
+                const auto& path = desc.path;
+                const auto& pluginName = desc.name;
 
                 if (!scheduledPluginNames.insert(pluginName).second) {
                     spdlog::info(
@@ -505,9 +505,10 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
                 try {
                     auto res = host->load(path, configJson);
                     if (res) {
+                        auto loaded = std::move(res.value());
                         ++loadedCount;
-                        spdlog::info("[PluginManager] loaded: '{}'", res.value().name);
-                        pluginHostFsm_.dispatch(PluginLoadedEvent{res.value().name});
+                        spdlog::info("[PluginManager] loaded: '{}'", loaded.name);
+                        pluginHostFsm_.dispatch(PluginLoadedEvent{std::move(loaded.name)});
                     } else {
                         spdlog::warn("[PluginManager] load failed: {}", res.error().message);
                         pluginHostFsm_.dispatch(PluginLoadFailedEvent{res.error().message});
@@ -600,7 +601,8 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
                                                  }
                                                  return s;
                                              }());
-                                pluginHostFsm_.dispatch(PluginLoadedEvent{loadResult.value().name});
+                                auto loaded = std::move(loadResult.value());
+                                pluginHostFsm_.dispatch(PluginLoadedEvent{std::move(loaded.name)});
                             } else {
                                 spdlog::warn("[PluginManager] external plugin load failed: {}",
                                              loadResult.error().message);
@@ -723,7 +725,7 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                     spdlog::info("[PluginManager] Provider ready: model='{}', dim={}", modelName,
                                  dimension);
                     embeddingFsm_.dispatch(ModelLoadedEvent{modelName, dimension});
-                    embeddingModelName_ = modelName;
+                    embeddingModelName_ = std::move(modelName);
                 }
 
                 if (deps_.lifecycleFsm) {
@@ -1028,8 +1030,12 @@ size_t PluginManager::getEmbeddingDimension() const {
         return 0;
 
     try {
-        std::string modelName =
-            deps_.resolvePreferredModel ? deps_.resolvePreferredModel() : embeddingModelName_;
+        std::string preferredModel;
+        if (deps_.resolvePreferredModel) {
+            preferredModel = deps_.resolvePreferredModel();
+        }
+        const std::string& modelName =
+            preferredModel.empty() ? embeddingModelName_ : preferredModel;
         if (modelName.empty())
             return 0;
         return modelProvider_->getEmbeddingDim(modelName);

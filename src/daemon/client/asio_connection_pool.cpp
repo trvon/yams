@@ -795,12 +795,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
         co_return;
     }
 
-    auto executor = conn->opts.executor.has_value()
-                        ? *conn->opts.executor
-                        : GlobalIOContext::instance().get_io_context().get_executor();
     auto weak_pool = weak_from_this();
     conn->read_loop_future = co_spawn(
-        executor,
+        conn->opts.executor.has_value()
+            ? *conn->opts.executor
+            : GlobalIOContext::instance().get_io_context().get_executor(),
         [conn, weak_pool]() -> awaitable<void> {
             co_await boost::asio::post(conn->strand, use_awaitable);
             MessageFramer framer;

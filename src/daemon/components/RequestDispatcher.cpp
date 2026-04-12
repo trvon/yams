@@ -297,7 +297,7 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
         if (!contentStoreReady) {
             std::string error_detail = "Content store not available. Please try again shortly.";
             if (serviceManager_) {
-                std::string cs_error = serviceManager_->getContentStoreError();
+                const auto& cs_error = serviceManager_->getContentStoreError();
                 if (!cs_error.empty()) {
                     error_detail += " Details: " + cs_error;
                 }

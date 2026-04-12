@@ -14,8 +14,9 @@ public:
 
     boost::asio::awaitable<Result<Response>> send_request(Request request) override;
     boost::asio::awaitable<Result<void>>
-    send_request_streaming(Request request, HeaderCallback onHeader, ChunkCallback onChunk,
-                           ErrorCallback onError, CompleteCallback onComplete) override;
+    send_request_streaming(Request request, const HeaderCallback& onHeader,
+                           const ChunkCallback& onChunk, const ErrorCallback& onError,
+                           const CompleteCallback& onComplete) override;
 
 private:
     std::shared_ptr<EmbeddedServiceHost> host_;
