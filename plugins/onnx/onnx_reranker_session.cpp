@@ -7,9 +7,9 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <fmt/ranges.h>
 #include "ort_cxx_api_wrapper.h"
 #include "ort_runtime_loader.h"
+#include <fmt/ranges.h>
 
 #include <algorithm>
 #include <cctype>
@@ -201,6 +201,7 @@ public:
     }
 
     Result<void> loadModel() {
+        std::lock_guard<std::recursive_mutex> lock(inferMutex_);
         if (testMode_) {
             maxSequenceLength_ = config_.max_sequence_length;
             isLoaded_ = true;
@@ -259,7 +260,7 @@ public:
             return computeMockScore(query, document);
         }
 
-        std::lock_guard<std::mutex> lock(inferMutex_);
+        std::lock_guard<std::recursive_mutex> lock(inferMutex_);
 
         if (!isLoaded_) {
             if (auto r = loadModel(); !r)
@@ -280,7 +281,7 @@ public:
             return scores;
         }
 
-        std::lock_guard<std::mutex> lock(inferMutex_);
+        std::lock_guard<std::recursive_mutex> lock(inferMutex_);
 
         if (!isLoaded_) {
             if (auto r = loadModel(); !r)
@@ -290,9 +291,15 @@ public:
         return runOnnxBatch(query, documents);
     }
 
-    bool isValid() const { return testMode_ ? isLoaded_ : (isLoaded_ && session_ != nullptr); }
+    bool isValid() const {
+        std::lock_guard<std::recursive_mutex> lock(inferMutex_);
+        return testMode_ ? isLoaded_ : (isLoaded_ && session_ != nullptr);
+    }
 
-    size_t getMaxSequenceLength() const { return maxSequenceLength_; }
+    size_t getMaxSequenceLength() const {
+        std::lock_guard<std::recursive_mutex> lock(inferMutex_);
+        return maxSequenceLength_;
+    }
 
 private:
     // Tokenize a (query, document) pair for cross-encoder
@@ -786,7 +793,7 @@ private:
     size_t maxSequenceLength_ = 512;
     bool isLoaded_ = false;
     bool testMode_ = false;
-    std::mutex inferMutex_;
+    mutable std::recursive_mutex inferMutex_;
 
     // Special token IDs (read from config.json; defaults are BERT-style)
     // XLM-RoBERTa: bos=0 (<s>), eos=2 (</s>), pad=1 (<pad>)

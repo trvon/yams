@@ -143,8 +143,9 @@ public:
 
     // Submit texts for embedding.  Blocks until the coalesced batch completes
     // and returns only this caller's slice of the result.
-    yams::Result<std::vector<std::vector<float>>>
-    submit(const std::string& modelId, std::vector<std::string> texts, InferFn inferFn) {
+    yams::Result<std::vector<std::vector<float>>> submit(const std::string& modelId,
+                                                         const std::vector<std::string>& texts,
+                                                         const InferFn& inferFn) {
         if (!cfg_.enabled || texts.empty()) {
             return inferFn(modelId, texts);
         }
@@ -244,7 +245,7 @@ private:
         }
     };
 
-    void dispatch(std::unique_ptr<PendingBatch> batch, InferFn& inferFn) {
+    void dispatch(std::unique_ptr<PendingBatch> batch, const InferFn& inferFn) {
         auto result = inferFn(batch->modelId, batch->allTexts);
         for (auto& req : batch->requests) {
             try {
@@ -436,9 +437,10 @@ struct ProviderCtx {
                     }
                 };
                 auto apply_async_loading = [&](const std::string& value) {
-                    std::string v = value;
-                    for (auto& c : v)
-                        c = static_cast<char>(std::tolower(c));
+                    std::string v;
+                    v.reserve(value.size());
+                    for (unsigned char c : value)
+                        v.push_back(static_cast<char>(std::tolower(c)));
                     if (v == "1" || v == "true" || v == "yes" || v == "on")
                         cfg.asyncLoading = true;
                     if (v == "0" || v == "false" || v == "no" || v == "off")
@@ -478,13 +480,14 @@ struct ProviderCtx {
 
                     if (section == "embeddings") {
                         if (key == "preferred_model" && preferredModel.empty())
-                            preferredModel = value;
+                            preferredModel = std::move(value);
                         else if (key == "num_threads")
                             apply_num_threads(value);
                         else if (key == "keep_model_hot") {
-                            std::string v = value;
-                            for (auto& c : v)
-                                c = static_cast<char>(std::tolower(c));
+                            std::string v;
+                            v.reserve(value.size());
+                            for (unsigned char c : value)
+                                v.push_back(static_cast<char>(std::tolower(c)));
                             keepModelHot = !(v == "false" || v == "0" || v == "no" || v == "off");
                         }
                     }
@@ -531,9 +534,9 @@ struct ProviderCtx {
                     if (section == "plugins.onnx" && key == "async_load")
                         apply_async_loading(value);
                     if (section == "plugins.onnx" && key == "reranker_model")
-                        rerankerModel = value;
+                        rerankerModel = std::move(value);
                     if (section == "plugins.onnx" && key == "reranker_model_path")
-                        rerankerModelPath = value;
+                        rerankerModelPath = std::move(value);
                     // New: explicit models table entries [plugins.onnx.models.NAME]
                     if (section.rfind("plugins.onnx.models.", 0) == 0 && key == "task") {
                         // Section name encodes model_id; mark for preload as hot
@@ -739,10 +742,10 @@ struct ProviderCtx {
         configuredHotPoolSize = cfg.hotPoolSize;
         gpuEnabled = cfg.enableGPU;
         if (!rerankerModel.empty()) {
-            rerankerModelName = rerankerModel;
+            rerankerModelName = std::move(rerankerModel);
         }
         if (!rerankerModelPath.empty()) {
-            this->rerankerModelPath = rerankerModelPath;
+            this->rerankerModelPath = std::move(rerankerModelPath);
         }
         spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}, gpuEnabled={}, "
                      "async_load={}",
@@ -1772,15 +1775,19 @@ struct ProviderSingleton {
 
             // Report the actual execution provider used by a session (not a platform guess)
             std::string ep = "cpu";
-            if (c->ready) {
+            if (c->ready && c->pool) {
                 try {
                     auto h = c->pool->acquireModel(model_id, std::chrono::milliseconds(500));
                     if (h) {
-                        ep = h.value()->getExecutionProvider();
-                        auto [intraThreads, interThreads] = h.value()->getThreading();
+                        auto* session = h.value().operator->();
+                        if (!session) {
+                            return YAMS_ERR_INTERNAL;
+                        }
+                        ep = session->getExecutionProvider();
+                        auto [intraThreads, interThreads] = session->getThreading();
                         j["intra_threads"] = intraThreads;
                         j["inter_threads"] = interThreads;
-                        j["learned_batch_cap"] = h.value()->getLearnedBatchLimit();
+                        j["learned_batch_cap"] = session->getLearnedBatchLimit();
                         {
                             std::lock_guard<std::mutex> lk(c->mu);
                             c->actualExecutionProvider = ep;
@@ -1796,12 +1803,16 @@ struct ProviderSingleton {
             }
             j["execution_provider"] = ep;
             size_t dim = 0;
-            if (c->ready) {
+            if (c->ready && c->pool) {
                 auto h = c->pool->acquireModel(model_id, std::chrono::seconds(2));
                 if (h) {
-                    dim = h.value()->getEmbeddingDim();
+                    auto* session = h.value().operator->();
+                    if (!session) {
+                        return YAMS_ERR_INTERNAL;
+                    }
+                    dim = session->getEmbeddingDim();
                     try {
-                        const auto& info = h.value()->getInfo();
+                        const auto& info = session->getInfo();
                         if (!info.path.empty())
                             j["path"] = info.path;
                     } catch (...) {
@@ -1973,7 +1984,6 @@ struct ProviderSingleton {
                                 fs::path modelPath = fs::path(modelsRoot) / modelName;
                                 fs::path onnxPath = modelPath / "model.onnx";
                                 if (tryInitReranker(onnxPath, modelName)) {
-                                    initialized = true;
                                     break;
                                 }
                             }
@@ -2237,7 +2247,7 @@ extern "C" const char* yams_onnx_get_health_json_cstr() {
                 }
                 models[modelId] = m;
             }
-            j["models"] = models;
+            j["models"] = std::move(models);
         }
     }
 

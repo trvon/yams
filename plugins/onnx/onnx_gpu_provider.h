@@ -193,10 +193,17 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
             opts.AppendExecutionProvider("CoreML", coreml_opts);
             static std::atomic<bool> logged_coreml{false};
             if (!logged_coreml.exchange(true)) {
-                spdlog::info("[ONNX] CoreML execution provider enabled "
-                             "(compute={}, format={}, cache={})",
-                             coreml_opts["MLComputeUnits"], coreml_opts["ModelFormat"],
-                             cacheDir.empty() ? "(none)" : cacheDir);
+                if (cacheDir.empty()) {
+                    spdlog::info("[ONNX] CoreML execution provider enabled "
+                                 "(compute={}, format={}, cache={})",
+                                 coreml_opts["MLComputeUnits"], coreml_opts["ModelFormat"],
+                                 "(none)");
+                } else {
+                    spdlog::info("[ONNX] CoreML execution provider enabled "
+                                 "(compute={}, format={}, cache={})",
+                                 coreml_opts["MLComputeUnits"], coreml_opts["ModelFormat"],
+                                 cacheDir);
+                }
             } else {
                 spdlog::debug("[ONNX] CoreML execution provider attached (pooled session)");
             }

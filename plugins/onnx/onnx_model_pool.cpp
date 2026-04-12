@@ -608,6 +608,7 @@ public:
     }
 
     Result<void> loadModel() {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
         if (test_mode_) {
             // In test mode, pretend loading succeeded
             // Derive embeddingDim_/maxSequenceLength_/pooling/normalize from nearby configs when
@@ -890,6 +891,7 @@ public:
     }
 
     Result<std::vector<float>> generateEmbedding(const std::string& text) {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
         if (test_mode_) {
             // Representative mock: deterministic per-text embedding derived from tokens.
             // - Uses same preprocessing (tokenize/truncate/pad + attention mask)
@@ -986,6 +988,7 @@ public:
     // Public batch API that uses the optimized batched ONNX path
     Result<std::vector<std::vector<float>>>
     generateBatchEmbeddings(const std::vector<std::string>& texts) {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
         if (test_mode_) {
             std::vector<std::vector<float>> res;
             res.reserve(texts.size());
@@ -1005,9 +1008,13 @@ public:
         return withCoreMLFallback([&]() { return runOnnxBatch(texts); });
     }
 
-    bool isValid() const { return test_mode_ ? isLoaded_ : (isLoaded_ && session_ != nullptr); }
+    bool isValid() const {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
+        return test_mode_ ? isLoaded_ : (isLoaded_ && session_ != nullptr);
+    }
 
     std::pair<int, int> getThreading() const {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
         return {configuredIntraThreads_, configuredInterThreads_};
     }
 
@@ -1043,6 +1050,7 @@ public:
     }
 
     void applyCoreMLFreeDimensionOverrides(Ort::SessionOptions& options) {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
         if (!shouldApplyCoreMLFreeDimensionOverrides()) {
             return;
         }
@@ -1074,6 +1082,7 @@ public:
     }
 
     Result<void> reinitializeSessionOnCpu() {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
         if (!supportsCpuFallbackForCurrentModel()) {
             return Error{ErrorCode::InternalError, "CPU fallback is not enabled for this model"};
         }
@@ -1193,6 +1202,7 @@ public:
     }
 
     Result<void> setThreading(int intraThreads, int interThreads) {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
         auto valid = [](int value) { return value == -1 || (value >= 1 && value <= 64); };
         if (!valid(intraThreads) || !valid(interThreads)) {
             return Error{ErrorCode::InvalidArgument,
@@ -1222,9 +1232,18 @@ public:
         return Result<void>();
     }
 
-    size_t getEmbeddingDim() const { return embeddingDim_; }
-    size_t getMaxSequenceLength() const { return maxSequenceLength_; }
-    const std::string& getExecutionProvider() const { return actualExecutionProvider_; }
+    size_t getEmbeddingDim() const {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
+        return embeddingDim_;
+    }
+    size_t getMaxSequenceLength() const {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
+        return maxSequenceLength_;
+    }
+    std::string getExecutionProvider() const {
+        std::lock_guard<std::recursive_mutex> lock(stateMutex_);
+        return actualExecutionProvider_;
+    }
 
 private:
     void appendGpuExecutionProvider() {
@@ -1968,6 +1987,7 @@ private:
     // better GPU memory placement). Falls back to Session::Run() if unavailable.
     std::unique_ptr<Ort::IoBinding> ioBinding_;
     bool useIoBinding_ = false;
+    mutable std::recursive_mutex stateMutex_;
 
     void parseModelConfigHints() {
         try {
@@ -2237,7 +2257,7 @@ OnnxModelPool::~OnnxModelPool() {
 Result<void> OnnxModelPool::initialize() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-    if (initialized_) {
+    if (initialized_.load(std::memory_order_acquire)) {
         return Result<void>();
     }
 
@@ -2321,7 +2341,7 @@ Result<void> OnnxModelPool::initialize() {
         TuneAdvisor::setOnnxStartupMode(false);
     }
 
-    initialized_ = true;
+    initialized_.store(true, std::memory_order_release);
     return Result<void>();
 }
 
@@ -2380,7 +2400,7 @@ void OnnxModelPool::shutdown() {
         }
 
         models_.clear();
-        initialized_ = false;
+        initialized_.store(false, std::memory_order_release);
     } catch (const std::exception& e) {
         try {
             spdlog::warn("ONNX model pool shutdown exception: {}", e.what());
@@ -2396,7 +2416,7 @@ void OnnxModelPool::shutdown() {
 
 Result<OnnxModelPool::ModelHandle> OnnxModelPool::acquireModel(const std::string& modelName,
                                                                std::chrono::milliseconds timeout) {
-    if (!initialized_) {
+    if (!initialized_.load(std::memory_order_acquire)) {
         if (auto result = initialize(); !result) {
             return result.error();
         }
@@ -2438,10 +2458,14 @@ Result<OnnxModelPool::ModelHandle> OnnxModelPool::acquireModel(const std::string
                 if (it->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
                     return Error{ErrorCode::OperationInProgress, "Model loading in background"};
                 }
-                auto res = it->second.get();
+                const auto loadOk = static_cast<bool>(it->second.get());
+                std::optional<Error> loadError;
+                if (!loadOk) {
+                    loadError = it->second.get().error();
+                }
                 loadingFutures_.erase(it);
-                if (!res) {
-                    return res.error();
+                if (loadError) {
+                    return std::move(*loadError);
                 }
             }
         }
@@ -2726,7 +2750,7 @@ Result<void> OnnxModelPool::loadModelSync(const std::string& modelName) {
         entry.name = modelName;
         entry.path = modelPath;
         entry.lastAccess = std::chrono::steady_clock::now();
-        entry.pool = pool;
+        entry.pool = std::move(pool);
 
         // Update cached model count for non-blocking status queries
         loadedModelCount_.fetch_add(1, std::memory_order_relaxed);

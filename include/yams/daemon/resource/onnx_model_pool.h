@@ -271,7 +271,7 @@ private:
     std::shared_ptr<Ort::SessionOptions> sessionOptions_;
     bool runtimeGpuEnabled_ = false;
 
-    bool initialized_ = false;
+    std::atomic<bool> initialized_{false};
     std::atomic<bool> shutdown_{false}; // Guard against double-shutdown
 
     // Background preload thread (must be joined before destruction)

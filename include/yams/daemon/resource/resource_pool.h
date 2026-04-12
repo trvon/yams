@@ -96,7 +96,8 @@ public:
     public:
         Handle() = default;
 
-        Handle(PooledResourcePtr resource, ResourcePool* pool) : resource_(resource), pool_(pool) {}
+        Handle(PooledResourcePtr resource, ResourcePool* pool)
+            : resource_(std::move(resource)), pool_(pool) {}
 
         ~Handle() {
             if (resource_ && pool_) {
@@ -201,7 +202,7 @@ public:
                 available_.pop();
 
                 // Validate if configured
-                if (config_.validateOnAcquire && validator_) {
+                if (resource && config_.validateOnAcquire && validator_) {
                     if (!validator_(**resource)) {
                         // Resource is invalid, create a new one
                         totalResources_--;
