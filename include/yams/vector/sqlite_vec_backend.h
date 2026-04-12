@@ -54,6 +54,7 @@ public:
             false; ///< Store quantized sidecar only; reconstruct floats on read
         uint8_t turboquant_bits = 4;
         uint64_t turboquant_seed = 42;
+        VectorSearchEngine search_engine = VectorSearchEngine::HnswCosine;
     };
 
     SqliteVecBackend();

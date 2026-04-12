@@ -649,6 +649,28 @@ public:
     /// Get raw SQLite handle (for migration/testing only)
     sqlite3* dbHandle() const { return db_; }
 
+    bool usesVec0SearchEngine() const {
+        return config_.search_engine == VectorSearchEngine::Vec0L2;
+    }
+
+    std::string vec0TableName(size_t dim) const {
+        return "vectors_" + std::to_string(dim) + "_vec0";
+    }
+
+    void markVec0DimDirtyUnlocked(size_t dim) {
+        if (dim == 0) {
+            return;
+        }
+        vec0_dirty_dims_.insert(dim);
+        vec0_ready_dims_.erase(dim);
+    }
+
+    void markVec0DimsDirtyUnlocked(const std::unordered_set<size_t>& dims) {
+        for (size_t dim : dims) {
+            markVec0DimDirtyUnlocked(dim);
+        }
+    }
+
     Result<void> initialize(const std::string& db_path) {
         std::unique_lock lock(mutex_);
 
@@ -811,6 +833,8 @@ public:
         background_seed_running_.store(false, std::memory_order_release);
         background_seed_scheduled_.store(false, std::memory_order_release);
         query_dim_counts_.clear();
+        vec0_ready_dims_.clear();
+        vec0_dirty_dims_.clear();
         trace_vector_db_lifetime("close.end", this, db_path_, db_);
     }
 
@@ -899,7 +923,11 @@ public:
         }
 
         int64_t rowid = rowid_result.value();
-        query_dim_counts_[record.embedding.size()] += 1;
+        const size_t record_dim = record.embedding.size();
+        query_dim_counts_[record_dim] += 1;
+        if (usesVec0SearchEngine()) {
+            markVec0DimDirtyUnlocked(record_dim);
+        }
 
         // Skip HNSW insertion for zero-norm vectors (they become dead-ends in the graph)
         if (isZeroNormEmbedding(record.embedding)) {
@@ -920,11 +948,10 @@ public:
             return Result<void>{};
         }
         ensureHnswLoadedUnlocked();
-        size_t dim = record.embedding.size();
-        if (auto* hnsw = getOrCreateHnswForDim(dim)) {
+        if (auto* hnsw = getOrCreateHnswForDim(record_dim)) {
             std::span<const float> embedding_span(record.embedding.data(), record.embedding.size());
             hnsw->insert(static_cast<size_t>(rowid), embedding_span);
-            hnsw_dirty_[dim] = true;
+            hnsw_dirty_[record_dim] = true;
             pending_inserts_++;
 
             if (pending_inserts_ >= hnswCheckpointThreshold(config_.checkpoint_threshold)) {
@@ -954,6 +981,7 @@ public:
         std::vector<int64_t> rowids(records.size(), -1);
         std::vector<std::optional<size_t>> old_dims(records.size(), std::nullopt);
         std::vector<std::optional<int64_t>> old_rowids(records.size(), std::nullopt);
+        std::unordered_set<size_t> vec0_affected_dims;
 
         std::vector<size_t> unique_indices;
         unique_indices.reserve(records.size());
@@ -988,8 +1016,12 @@ public:
 
                 auto old_record = getVectorByChunkIdUnlocked(record.chunk_id);
                 if (old_record) {
-                    old_dims[idx] = old_record->embedding.size();
+                    old_dims[idx] = !old_record->embedding.empty() ? old_record->embedding.size()
+                                                                   : old_record->embedding_dim;
                     old_rowids[idx] = *existing_rowid;
+                    if (old_dims[idx]) {
+                        vec0_affected_dims.insert(*old_dims[idx]);
+                    }
                 }
 
                 if (stmt_delete_by_chunk_id_) {
@@ -1005,6 +1037,11 @@ public:
                     return rowid_result.error();
                 }
                 rowids[idx] = rowid_result.value();
+                size_t new_dim =
+                    !record.embedding.empty() ? record.embedding.size() : record.embedding_dim;
+                if (new_dim > 0) {
+                    vec0_affected_dims.insert(new_dim);
+                }
                 ++updated_existing;
                 continue;
             }
@@ -1015,7 +1052,16 @@ public:
                 return rowid_result.error();
             }
             rowids[idx] = rowid_result.value();
+            size_t new_dim =
+                !record.embedding.empty() ? record.embedding.size() : record.embedding_dim;
+            if (new_dim > 0) {
+                vec0_affected_dims.insert(new_dim);
+            }
             ++inserted_count;
+        }
+
+        if (usesVec0SearchEngine()) {
+            markVec0DimsDirtyUnlocked(vec0_affected_dims);
         }
 
         // Commit transaction with retry
@@ -1245,6 +1291,12 @@ public:
             }
         }
         query_dim_counts_[new_dim] += 1;
+        if (usesVec0SearchEngine()) {
+            if (old_dim) {
+                markVec0DimDirtyUnlocked(*old_dim);
+            }
+            markVec0DimDirtyUnlocked(new_dim);
+        }
 
         // Skip HNSW insertion for zero-norm vectors
         if (isZeroNormEmbedding(record.embedding)) {
@@ -1313,6 +1365,9 @@ public:
             if (dimIt != query_dim_counts_.end() && dimIt->second > 0) {
                 --dimIt->second;
             }
+            if (usesVec0SearchEngine()) {
+                markVec0DimDirtyUnlocked(*dim);
+            }
         }
 
         // Delete from SQLite
@@ -1371,6 +1426,13 @@ public:
                 --dimIt->second;
             }
         }
+        if (usesVec0SearchEngine()) {
+            std::unordered_set<size_t> affected_dims;
+            for (const auto& [_, dim] : rowid_dims) {
+                affected_dims.insert(dim);
+            }
+            markVec0DimsDirtyUnlocked(affected_dims);
+        }
 
         // Delete from SQLite
         if (stmt_delete_by_doc_) {
@@ -1426,6 +1488,29 @@ public:
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        if (usesVec0SearchEngine()) {
+            const size_t query_dim = query_embedding.size();
+
+            if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
+                spdlog::debug("[vec0] filtered search falling back to exact cosine scan");
+                return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
+                                                document_hash, candidate_hashes, metadata_filters);
+            }
+
+            {
+                lock.unlock();
+                std::unique_lock write_lock(mutex_);
+                auto ready = ensureVec0ReadyUnlocked(query_dim);
+                write_lock.unlock();
+                lock.lock();
+                if (!ready) {
+                    return ready.error();
+                }
+            }
+
+            return vec0SearchUnlocked(query_embedding, k, similarity_threshold);
         }
 
         // Ensure HNSW is loaded when an existing persisted/catch-up path is available.
@@ -1626,6 +1711,30 @@ public:
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        if (usesVec0SearchEngine()) {
+            {
+                lock.unlock();
+                std::unique_lock write_lock(mutex_);
+                auto ready = ensureVec0ReadyUnlocked(query_dim);
+                write_lock.unlock();
+                lock.lock();
+                if (!ready) {
+                    return ready.error();
+                }
+            }
+
+            std::vector<std::vector<VectorRecord>> results;
+            results.reserve(query_embeddings.size());
+            for (const auto& query_embedding : query_embeddings) {
+                auto result = vec0SearchUnlocked(query_embedding, k, similarity_threshold);
+                if (!result) {
+                    return result.error();
+                }
+                results.push_back(std::move(result.value()));
+            }
+            return results;
         }
 
         // Ensure HNSW is loaded when an existing persisted/catch-up path is available.
@@ -1876,10 +1985,21 @@ public:
         }
 
         const auto start = std::chrono::steady_clock::now();
+        if (usesVec0SearchEngine()) {
+            auto result = rebuildVec0IndicesUnlocked();
+            if (!result) {
+                return result;
+            }
+            const auto durMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count();
+            spdlog::info("[vec0] buildIndex completed in {} ms", durMs);
+            return Result<void>{};
+        }
+
         spdlog::info("[HNSW] buildIndex starting (loaded={} stale={} dims={})", hnsw_loaded_,
                      hnsw_needs_rebuild_, hnsw_indices_.size());
 
-        // Rebuild HNSW from scratch
         rebuildHnswUnlocked();
 
         const auto durMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1897,6 +2017,14 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
+        if (usesVec0SearchEngine()) {
+            auto rebuild = rebuildVec0IndicesUnlocked();
+            if (!rebuild) {
+                return rebuild;
+            }
+            return warmVec0IndicesUnlocked();
+        }
+
         ensureHnswLoadedUnlocked();
         return Result<void>{};
     }
@@ -1906,6 +2034,10 @@ public:
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        if (usesVec0SearchEngine()) {
+            return Result<bool>(false);
         }
 
         const auto persistedDims = discoverPersistedHnswDimsUnlocked();
@@ -1938,6 +2070,16 @@ public:
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        if (usesVec0SearchEngine()) {
+            if (!vec0_dirty_dims_.empty()) {
+                auto rebuild = rebuildVec0IndicesUnlocked();
+                if (!rebuild) {
+                    return rebuild;
+                }
+            }
+            return Result<void>{};
         }
 
         size_t totalVectors = 0;
@@ -2987,6 +3129,212 @@ private:
         return dims;
     }
 
+    Result<void> ensureVec0TableUnlocked(size_t dim) {
+        const std::string sql = "CREATE VIRTUAL TABLE IF NOT EXISTS \"" + vec0TableName(dim) +
+                                "\" USING vec0(embedding float[" + std::to_string(dim) + "])";
+        char* err_msg = nullptr;
+        int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            spdlog::warn("[vec0] Failed to create aux table for dim {}: {}", dim, err);
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to create vec0 table for dim " + std::to_string(dim) + ": " + err};
+        }
+        return Result<void>{};
+    }
+
+    std::vector<std::pair<size_t, std::vector<float>>> queryVectorsForDimUnlocked(size_t dim) {
+        std::vector<std::pair<size_t, std::vector<float>>> rows;
+        const char* sql =
+            "SELECT rowid, embedding, quantized_format, quantized_bits, quantized_seed, "
+            "quantized_packed_codes FROM vectors "
+            "WHERE (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
+            "THEN LENGTH(embedding) / 4 ELSE embedding_dim END) = ? ORDER BY rowid";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return rows;
+        }
+
+        std::unique_ptr<TurboQuantMSE> tq;
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            TurboQuantConfig cfg;
+            cfg.dimension = dim;
+            cfg.bits_per_channel = config_.turboquant_bits;
+            cfg.seed = config_.turboquant_seed;
+            tq = std::make_unique<TurboQuantMSE>(cfg);
+            auto scales = loadTurboQuantPerCoordScales(db_, dim, config_.turboquant_bits,
+                                                       config_.turboquant_seed);
+            if (!scales.empty()) {
+                tq->setPerCoordScales(std::move(scales));
+            }
+        }
+
+        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            size_t rowid = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
+            const void* blob = sqlite3_column_blob(stmt, 1);
+            int blob_size = sqlite3_column_bytes(stmt, 1);
+
+            std::vector<float> embedding;
+            if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
+                embedding.resize(static_cast<size_t>(blob_size) / sizeof(float));
+                std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
+            } else if (tq) {
+                auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 2));
+                if (fmt == VectorRecord::QuantizedFormat::TURBOquant_1) {
+                    const void* qblob = sqlite3_column_blob(stmt, 5);
+                    int qblob_size = sqlite3_column_bytes(stmt, 5);
+                    if (qblob && qblob_size > 0) {
+                        std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
+                        std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
+                        embedding = vector_utils::packedDequantizeVector(packed, dim, tq.get());
+                    }
+                }
+            }
+
+            if (embedding.empty() || !isFiniteEmbedding(embedding)) {
+                continue;
+            }
+            rows.emplace_back(rowid, std::move(embedding));
+        }
+
+        sqlite3_finalize(stmt);
+        return rows;
+    }
+
+    Result<void> rebuildVec0DimUnlocked(size_t dim) {
+        auto table_result = ensureVec0TableUnlocked(dim);
+        if (!table_result) {
+            return table_result;
+        }
+
+        const std::string delete_sql = "DELETE FROM \"" + vec0TableName(dim) + "\"";
+        char* err_msg = nullptr;
+        int rc = sqlite3_exec(db_, delete_sql.c_str(), nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            spdlog::warn("[vec0] Failed to clear aux table for dim {}: {}", dim, err);
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to clear vec0 table for dim " + std::to_string(dim) + ": " + err};
+        }
+
+        auto rows = queryVectorsForDimUnlocked(dim);
+        if (rows.empty()) {
+            vec0_dirty_dims_.erase(dim);
+            vec0_ready_dims_.insert(dim);
+            return Result<void>{};
+        }
+
+        sqlite3_stmt* stmt = nullptr;
+        const std::string insert_sql =
+            "INSERT INTO \"" + vec0TableName(dim) + "\" (rowid, embedding) VALUES (?, ?)";
+        rc = sqlite3_prepare_v2(db_, insert_sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            spdlog::warn("[vec0] Failed to prepare aux insert for dim {}: {}", dim,
+                         sqlite3_errmsg(db_));
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to prepare vec0 insert for dim " + std::to_string(dim)};
+        }
+
+        for (const auto& [rowid, embedding] : rows) {
+            sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(rowid));
+            sqlite3_bind_blob(stmt, 2, embedding.data(),
+                              static_cast<int>(embedding.size() * sizeof(float)), SQLITE_TRANSIENT);
+            rc = stepWithRetry(stmt);
+            if (rc != SQLITE_DONE) {
+                std::string err = sqlite3_errmsg(db_);
+                sqlite3_finalize(stmt);
+                spdlog::warn("[vec0] Failed to populate aux table for dim {} rowid {}: {}", dim,
+                             rowid, err);
+                return Error{ErrorCode::DatabaseError, "Failed to populate vec0 table for dim " +
+                                                           std::to_string(dim) + ": " + err};
+            }
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+        }
+        sqlite3_finalize(stmt);
+
+        vec0_dirty_dims_.erase(dim);
+        vec0_ready_dims_.insert(dim);
+        return Result<void>{};
+    }
+
+    Result<void> rebuildVec0IndicesUnlocked(std::optional<size_t> focus_dim = std::nullopt) {
+        auto dims = queryVectorDimsUnlocked();
+        std::unordered_set<size_t> available_dims(dims.begin(), dims.end());
+
+        if (focus_dim) {
+            if (!available_dims.contains(*focus_dim)) {
+                vec0_dirty_dims_.erase(*focus_dim);
+                vec0_ready_dims_.erase(*focus_dim);
+                return Result<void>{};
+            }
+            dims = {*focus_dim};
+        }
+
+        for (size_t dim : dims) {
+            auto result = rebuildVec0DimUnlocked(dim);
+            if (!result) {
+                return result;
+            }
+        }
+
+        return Result<void>{};
+    }
+
+    Result<void> ensureVec0ReadyUnlocked(size_t dim) {
+        if (vec0_ready_dims_.contains(dim) && !vec0_dirty_dims_.contains(dim)) {
+            return Result<void>{};
+        }
+        return rebuildVec0IndicesUnlocked(dim);
+    }
+
+    Result<void> warmVec0DimUnlocked(size_t dim) {
+        auto ready = ensureVec0ReadyUnlocked(dim);
+        if (!ready) {
+            return ready;
+        }
+
+        auto count_it = query_dim_counts_.find(dim);
+        if (count_it == query_dim_counts_.end() || count_it->second == 0) {
+            return Result<void>{};
+        }
+
+        sqlite3_stmt* stmt = nullptr;
+        const std::string sql = "SELECT rowid FROM \"" + vec0TableName(dim) +
+                                "\" WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance";
+        int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to prepare vec0 warm query for dim " + std::to_string(dim)};
+        }
+
+        std::vector<float> zero_query(dim, 0.0f);
+        sqlite3_bind_blob(stmt, 1, zero_query.data(),
+                          static_cast<int>(zero_query.size() * sizeof(float)), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, 1);
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to warm vec0 query path for dim " + std::to_string(dim)};
+        }
+        return Result<void>{};
+    }
+
+    Result<void> warmVec0IndicesUnlocked() {
+        auto dims = queryVectorDimsUnlocked();
+        for (size_t dim : dims) {
+            auto result = warmVec0DimUnlocked(dim);
+            if (!result) {
+                return result;
+            }
+        }
+        return Result<void>{};
+    }
+
     bool hasPersistedHnswNodesUnlocked(size_t dim) {
         std::string sql =
             "SELECT EXISTS(SELECT 1 FROM \"" + hnswTablePrefix(dim) + "_hnsw_nodes\" LIMIT 1)";
@@ -3412,6 +3760,65 @@ ORDER BY rowid
         records.reserve(count);
         for (size_t i = 0; i < count; ++i) {
             records.push_back(std::move(scored_results[i].second));
+        }
+
+        return records;
+    }
+
+    Result<std::vector<VectorRecord>> vec0SearchUnlocked(const std::vector<float>& query_embedding,
+                                                         size_t k, float similarity_threshold) {
+        if (!db_ || query_embedding.empty() || k == 0) {
+            return std::vector<VectorRecord>{};
+        }
+
+        const size_t query_dim = query_embedding.size();
+
+        sqlite3_stmt* stmt = nullptr;
+        const std::string sql = "SELECT rowid, distance FROM \"" + vec0TableName(query_dim) +
+                                "\" WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance";
+        int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            spdlog::warn("[vec0] Failed to prepare search query for dim {}: {}", query_dim,
+                         sqlite3_errmsg(db_));
+            return Error{ErrorCode::DatabaseError, "Failed to prepare vec0 search query: " +
+                                                       std::string(sqlite3_errmsg(db_))};
+        }
+
+        sqlite3_bind_blob(stmt, 1, query_embedding.data(),
+                          static_cast<int>(query_embedding.size() * sizeof(float)),
+                          SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(k));
+
+        std::vector<VectorRecord> records;
+        records.reserve(k);
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            const auto node_id = sqlite3_column_int64(stmt, 0);
+            auto record_opt = getVectorByRowidUnlocked(node_id);
+            if (!record_opt) {
+                continue;
+            }
+
+            float similarity = static_cast<float>(
+                VectorDatabase::computeCosineSimilarity(query_embedding, record_opt->embedding));
+            if (similarity < similarity_threshold) {
+                continue;
+            }
+
+            record_opt->relevance_score = similarity;
+            records.push_back(std::move(*record_opt));
+            if (records.size() >= k) {
+                rc = SQLITE_DONE;
+                break;
+            }
+        }
+        sqlite3_finalize(stmt);
+
+        if (rc != SQLITE_DONE) {
+            spdlog::warn("[vec0] Search iteration failed for dim {} rc={} err={}", query_dim, rc,
+                         sqlite3_errmsg(db_));
+            return Error{ErrorCode::DatabaseError,
+                         "vec0 search iteration failed rc=" + std::to_string(rc) + ": " +
+                             std::string(sqlite3_errmsg(db_))};
         }
 
         return records;
@@ -4059,6 +4466,8 @@ ORDER BY rowid
     HnswMaintenanceMode last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
     std::size_t last_hnsw_added_count_ = 0;
     std::size_t last_hnsw_removed_count_ = 0;
+    std::unordered_set<size_t> vec0_ready_dims_;
+    std::unordered_set<size_t> vec0_dirty_dims_;
 
     // Helper to get table prefix for dimension-specific HNSW tables
     std::string hnswTablePrefix(size_t dim) const { return "vectors_" + std::to_string(dim); }

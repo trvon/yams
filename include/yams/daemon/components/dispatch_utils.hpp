@@ -86,10 +86,11 @@ offload_to_worker(ServiceManager* sm, Fn&& fn) {
                     }
                     // Post completion back to the handler's associated executor
                     auto completion_executor = boost::asio::get_associated_executor(handler);
-                    boost::asio::post(completion_executor, [handler = std::move(handler), ep,
-                                                            result = std::move(result)]() mutable {
-                        std::move(handler)(ep, std::move(result));
-                    });
+                    boost::asio::post(completion_executor,
+                                      [handler = std::move(handler), ep = std::move(ep),
+                                       result = std::move(result)]() mutable {
+                                          std::move(handler)(ep, std::move(result));
+                                      });
                 });
         },
         boost::asio::use_awaitable, std::forward<Fn>(fn));

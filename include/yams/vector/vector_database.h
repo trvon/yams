@@ -15,6 +15,11 @@ namespace yams::vector {
 
 enum class EmbeddingLevel { CHUNK, DOCUMENT };
 
+enum class VectorSearchEngine {
+    HnswCosine,
+    Vec0L2,
+};
+
 /**
  * Type of entity embedding content
  */
@@ -45,6 +50,7 @@ struct VectorDatabaseConfig {
     size_t max_batch_size = 1000;
     float default_similarity_threshold = 0.35f;
     bool use_in_memory = false; // For testing
+    VectorSearchEngine search_engine = VectorSearchEngine::HnswCosine;
 
     // TurboQuant compression settings (arXiv:2504.19874 approximation)
     // Storage: V2.2 schema persists quantized sidecar; HNSW still uses decoded floats.

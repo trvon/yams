@@ -184,7 +184,7 @@ public:
 
         const float* data = outputs[0].GetTensorData<float>();
         ColbertEmbeddings result;
-        result.token_ids = trimmedTokens;
+        result.token_ids = std::move(trimmedTokens);
         result.token_embeddings.resize(seqLen);
         for (size_t i = 0; i < seqLen; ++i) {
             result.token_embeddings[i].assign(data + i * dim, data + (i + 1) * dim);

@@ -105,7 +105,7 @@ inline void copyAliasIfMissing(json& j, std::string_view canonicalKey, std::stri
         return;
     }
     if (const auto it = j.find(aliasKey); it != j.end()) {
-        j[canonicalKey] = *it;
+        j.emplace(std::string(canonicalKey), it.value());
     }
 }
 
@@ -1716,7 +1716,7 @@ public:
                     ann["openWorldHint"] = desc.annotations->openWorldHint.value();
                 }
             }
-            tool["annotations"] = ann;
+            tool["annotations"] = std::move(ann);
             return tool;
         });
         return json{{"tools", std::move(tools)}};

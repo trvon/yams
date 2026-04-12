@@ -776,21 +776,23 @@ public:
             return 256ull * 1024ull * 1024ull;
         }
 
-        uint32_t budgetPercent = 60u;
         switch (tuningProfile()) {
             case Profile::Efficient:
-                budgetPercent = 45u;
-                break;
+                return std::clamp((systemMem * 45ull) / 100ull, 256ull * 1024ull * 1024ull,
+                                  systemMem > 256ull * 1024ull * 1024ull
+                                      ? (systemMem - 256ull * 1024ull * 1024ull)
+                                      : 256ull * 1024ull * 1024ull);
             case Profile::Aggressive:
-                budgetPercent = 75u;
-                break;
+                return std::clamp((systemMem * 75ull) / 100ull, 256ull * 1024ull * 1024ull,
+                                  systemMem > 256ull * 1024ull * 1024ull
+                                      ? (systemMem - 256ull * 1024ull * 1024ull)
+                                      : 256ull * 1024ull * 1024ull);
             case Profile::Balanced:
             default:
-                budgetPercent = 60u;
                 break;
         }
 
-        const uint64_t budget = (systemMem * budgetPercent) / 100ull;
+        const uint64_t budget = (systemMem * 60ull) / 100ull;
         const uint64_t minBudget = 256ull * 1024ull * 1024ull;
         const uint64_t maxBudget = (systemMem > minBudget) ? (systemMem - minBudget) : minBudget;
         return std::clamp<uint64_t>(budget, minBudget, maxBudget);
@@ -1225,19 +1227,16 @@ public:
         uint32_t ov = poolCooldownMsOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        uint32_t def = 500;
         switch (tuningProfile()) {
             case Profile::Efficient:
-                def = 750;
-                break;
+                return 750;
             case Profile::Aggressive:
-                def = 250;
-                break;
+                return 250;
             case Profile::Balanced:
             default:
-                def = 500;
                 break;
         }
+        uint32_t def = 500;
         if (const char* s = std::getenv("YAMS_POOL_COOLDOWN_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));

@@ -21,9 +21,9 @@
 
 #include <sqlite3.h>
 #include <yams/vector/sqlite_vec_backend.h>
-#include <yams/vector/vector_schema_migration.h>
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_index_manager.h>
+#include <yams/vector/vector_schema_migration.h>
 
 using namespace yams::vector;
 using Catch::Matchers::WithinAbs;
@@ -487,6 +487,9 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar basic"
     // Search with first vector's embedding
     auto query = createEmbedding(64, 1.0f);
     auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+    if (!searchResult.has_value()) {
+        INFO(searchResult.error().message);
+    }
     REQUIRE(searchResult.has_value());
 
     auto& results = searchResult.value();
@@ -494,6 +497,37 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar basic"
 
     // First result should be exact match (same seed)
     CHECK(results[0].chunk_id == "chunk_search_0");
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 search engine basic",
+                 "[vector][backend][search][vec0][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::Vec0L2;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    for (int i = 0; i < 10; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        REQUIRE(
+            backend.insertVector(createVectorRecord("vec0_" + std::to_string(i), emb)).has_value());
+    }
+
+    auto query = createEmbedding(64, 1.0f);
+    auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+    REQUIRE(searchResult.has_value());
+    REQUIRE(searchResult.value().size() == 5);
+    CHECK(searchResult.value()[0].chunk_id == "chunk_vec0_0");
+
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(backend.getDbHandle(),
+                               "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1", -1,
+                               &stmt, nullptr) == SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, "vectors_64_vec0", -1, SQLITE_TRANSIENT);
+    CHECK(sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture,
@@ -559,6 +593,42 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
 
     auto& results = filterResult.value();
     for (const auto& r : results) {
+        CHECK(r.document_hash == "doc_A");
+    }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend vec0 search engine preserves filtered search semantics",
+                 "[vector][backend][search][filter][vec0][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::Vec0L2;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    for (int i = 0; i < 5; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        REQUIRE(
+            backend.insertVector(createVectorRecord("vec0_docA_" + std::to_string(i), emb, "doc_A"))
+                .has_value());
+    }
+    for (int i = 0; i < 5; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 10));
+        REQUIRE(
+            backend.insertVector(createVectorRecord("vec0_docB_" + std::to_string(i), emb, "doc_B"))
+                .has_value());
+    }
+
+    auto query = createEmbedding(64, 1.0f);
+    auto filterResult = backend.searchSimilar(query, 10, 0.0f, "doc_A", {});
+    if (!filterResult.has_value()) {
+        INFO(filterResult.error().message);
+    }
+    REQUIRE(filterResult.has_value());
+    REQUIRE_FALSE(filterResult.value().empty());
+    for (const auto& r : filterResult.value()) {
         CHECK(r.document_hash == "doc_A");
     }
 }

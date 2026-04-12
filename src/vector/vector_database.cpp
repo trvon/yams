@@ -39,6 +39,7 @@ public:
         backend_config.quantized_primary_storage = config_.quantized_primary_storage;
         backend_config.turboquant_bits = config_.turboquant_bits;
         backend_config.turboquant_seed = config_.turboquant_seed;
+        backend_config.search_engine = config_.search_engine;
         backend_ = std::make_unique<SqliteVecBackend>(backend_config);
     }
 

@@ -89,6 +89,37 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search basic",
     CHECK(results[0].chunk_id == "test_hash_001");
 }
 
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with vec0 engine",
+                 "[vector][smoke][vec0][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+    config.search_engine = VectorSearchEngine::Vec0L2;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initialize());
+
+    std::vector<float> embedding = {1.0f, 0.0f, 0.0f, 0.0f};
+    VectorRecord rec;
+    rec.chunk_id = "vec0_hash_001";
+    rec.document_hash = "vec0_doc_001";
+    rec.embedding = embedding;
+    rec.content = "Vec0 test content";
+    rec.start_offset = 0;
+    rec.end_offset = 17;
+    REQUIRE(db.insertVector(rec));
+
+    VectorSearchParams params;
+    params.k = 1;
+    auto results = db.search(embedding, params);
+    REQUIRE(results.size() == 1);
+    CHECK(results[0].chunk_id == "vec0_hash_001");
+}
+
 TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke get vector count", "[vector][smoke][catch2]") {
     skipIfNeeded();
 

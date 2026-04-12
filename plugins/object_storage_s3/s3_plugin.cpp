@@ -120,12 +120,12 @@ public:
         auto parsedUrl = parseS3Url(cfg.url);
         if (!parsedUrl)
             return parsedUrl.error();
-        s3_ = parsedUrl.value();
+        s3_ = std::move(parsedUrl.value());
 
         // Resolve endpoint
         auto it = config_.credentials.find("endpoint");
         if (it != config_.credentials.end()) {
-            endpointHost_ = it->second;
+            endpointHost_.append(it->second);
         } else {
             endpointHost_ = "s3.amazonaws.com";
         }

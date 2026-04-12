@@ -898,11 +898,10 @@ struct Table {
 };
 
 // Render a simple table with borders
-inline void render_table(std::ostream& os, const Table& table, int term_width = -1) {
+inline void render_table(std::ostream& os, const Table& table,
+                         [[maybe_unused]] int term_width = -1) {
     if (table.rows.empty())
         return;
-    if (term_width <= 0)
-        term_width = terminal_width();
 
     size_t num_cols =
         table.has_header ? table.headers.size() : (!table.rows.empty() ? table.rows[0].size() : 0);
@@ -1139,7 +1138,7 @@ inline Severity classify_utilization(double fraction, double warn = 0.75, double
 // Example output: "######░░░░ 60% (600/1000)"
 inline std::string
 progress_with_stats(double fraction, int bar_width = 10,
-                    std::optional<std::pair<uint64_t, uint64_t>> ratio = std::nullopt,
+                    const std::optional<std::pair<uint64_t, uint64_t>>& ratio = std::nullopt,
                     std::string_view unit = "") {
     double f = std::clamp(fraction, 0.0, 1.0);
     std::ostringstream oss;

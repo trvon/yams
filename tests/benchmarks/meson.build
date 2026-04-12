@@ -93,6 +93,19 @@ turboquant_bench = executable('turboquant_bench', files('turboquant_bench.cpp'),
 
 alias_target('bench_turboquant', turboquant_bench)
 
+vector_backend_engine_compare = executable('vector_backend_engine_compare',
+  files('vector_backend_engine_compare.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_vector_backend_engine_compare', vector_backend_engine_compare)
+
 # Authoritative compressed ANN decision benchmark (real YAMS data, ceiling vs graph vs reranker)
 compressed_ann_decision_bench = executable('compressed_ann_decision_bench',
   files('compressed_ann_decision_bench.cpp'),

@@ -298,8 +298,12 @@ public:
         if (is_unigram_) {
             // SentencePiece/Unigram tokenization
             // Add ▁ prefix for word-initial position
-            std::string to_encode = add_prefix ? (std::string(SPIECE_UNDERLINE) + text) : text;
-            encode_unigram(to_encode, ids);
+            if (add_prefix) {
+                std::string prefixed = std::string(SPIECE_UNDERLINE) + text;
+                encode_unigram(prefixed, ids);
+            } else {
+                encode_unigram(text, ids);
+            }
         } else {
             // WordPiece tokenization
             encode_wordpiece(text, ids);

@@ -116,9 +116,13 @@ inline TrustStoreLoadResult loadTrustStore(const std::filesystem::path& trustFil
     }
 
     const auto trustNorm = normalizePath(trustFile);
-    const auto canonicalNorm =
-        canonicalTrustFile.empty() ? trustNorm : normalizePath(canonicalTrustFile);
-    if (trustNorm != canonicalNorm || legacyTrustFile.empty()) {
+    std::optional<std::filesystem::path> canonicalNormStorage;
+    const std::filesystem::path* canonicalNorm = &trustNorm;
+    if (!canonicalTrustFile.empty()) {
+        canonicalNormStorage = normalizePath(canonicalTrustFile);
+        canonicalNorm = &*canonicalNormStorage;
+    }
+    if (trustNorm != *canonicalNorm || legacyTrustFile.empty()) {
         return result;
     }
 
