@@ -137,8 +137,7 @@ static std::string compute_cpp_scope(std::string_view content, TSNode node) {
 template <size_t N, typename... Args> constexpr auto makeList(Args... args) -> ConstList<N> {
     ConstList<N> result;
     result.count = sizeof...(args);
-    size_t i = 0;
-    ((result.items[i++] = args), ...);
+    result.items = {args...};
     return result;
 }
 
@@ -1100,12 +1099,8 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
     // This allows cross-file relationships to be resolved later
     for (const auto& [caller, callees] : call_sites) {
         for (const auto& callee : callees) {
-            SymbolRelation rel;
-            rel.src_symbol = caller;
-            rel.dst_symbol = callee;
-            rel.kind = "calls";
-            rel.weight = 1.0;
-            result.relations.push_back(std::move(rel));
+            result.relations.push_back(SymbolRelation{
+                .src_symbol = caller, .dst_symbol = callee, .kind = "calls", .weight = 1.0});
         }
     }
 
@@ -1266,8 +1261,8 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
                             if (!base_name.empty() && !class_name.empty() &&
                                 base_name != class_name) {
                                 SymbolRelation rel;
-                                rel.src_symbol = class_name;
-                                rel.dst_symbol = base_name;
+                                rel.src_symbol.append(class_name);
+                                rel.dst_symbol = std::move(base_name);
                                 rel.kind = "inherits";
                                 rel.weight = 1.0;
                                 result.relations.push_back(std::move(rel));
@@ -1314,8 +1309,8 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
                             if (!base_name.empty() && !class_name.empty() &&
                                 base_name != class_name) {
                                 SymbolRelation rel;
-                                rel.src_symbol = class_name;
-                                rel.dst_symbol = base_name;
+                                rel.src_symbol.append(class_name);
+                                rel.dst_symbol = std::move(base_name);
                                 rel.kind = "inherits";
                                 rel.weight = 1.0;
                                 result.relations.push_back(std::move(rel));
@@ -1352,8 +1347,8 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
                     std::string base_name = ctx.extractNodeText(superclass);
                     if (!base_name.empty() && !class_name.empty()) {
                         SymbolRelation rel;
-                        rel.src_symbol = class_name;
-                        rel.dst_symbol = base_name;
+                        rel.src_symbol.append(class_name);
+                        rel.dst_symbol = std::move(base_name);
                         rel.kind = "inherits";
                         rel.weight = 1.0;
                         result.relations.push_back(std::move(rel));
@@ -1371,8 +1366,8 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
                             std::string iface_name = ctx.extractNodeText(child);
                             if (!iface_name.empty() && !class_name.empty()) {
                                 SymbolRelation rel;
-                                rel.src_symbol = class_name;
-                                rel.dst_symbol = iface_name;
+                                rel.src_symbol.append(class_name);
+                                rel.dst_symbol = std::move(iface_name);
                                 rel.kind = "implements";
                                 rel.weight = 1.0;
                                 result.relations.push_back(std::move(rel));
@@ -1422,8 +1417,8 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
                                         std::string base_name = ctx.extractNodeText(echild);
                                         if (!base_name.empty() && !class_name.empty()) {
                                             SymbolRelation rel;
-                                            rel.src_symbol = class_name;
-                                            rel.dst_symbol = base_name;
+                                            rel.src_symbol.append(class_name);
+                                            rel.dst_symbol = std::move(base_name);
                                             rel.kind = "inherits";
                                             rel.weight = 1.0;
                                             result.relations.push_back(std::move(rel));
@@ -1468,8 +1463,8 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
 
                 if (!trait_name.empty() && !type_name.empty()) {
                     SymbolRelation rel;
-                    rel.src_symbol = type_name;
-                    rel.dst_symbol = trait_name;
+                    rel.src_symbol = std::move(type_name);
+                    rel.dst_symbol = std::move(trait_name);
                     rel.kind = "implements";
                     rel.weight = 1.0;
                     result.relations.push_back(std::move(rel));
@@ -1514,8 +1509,8 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
                                 std::string base_name = ctx.extractNodeText(hchild);
                                 if (!base_name.empty() && !class_name.empty()) {
                                     SymbolRelation rel;
-                                    rel.src_symbol = class_name;
-                                    rel.dst_symbol = base_name;
+                                    rel.src_symbol.append(class_name);
+                                    rel.dst_symbol = std::move(base_name);
                                     rel.kind = "inherits";
                                     rel.weight = 1.0;
                                     result.relations.push_back(std::move(rel));

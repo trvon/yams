@@ -275,13 +275,27 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         } catch (...) {
         }
     }
+    if (const char* env = std::getenv("YAMS_VECTOR_SEARCH_ENGINE")) {
+        std::string normalized(env);
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        });
+        if (auto parsed = vector::parseVectorSearchEngine(normalized)) {
+            cfg.search_engine = *parsed;
+            spdlog::info("[VectorInit] search engine overridden to {} via env",
+                         vector::vectorSearchEngineName(cfg.search_engine));
+        } else {
+            spdlog::warn("[VectorInit] invalid YAMS_VECTOR_SEARCH_ENGINE='{}'; using default {}",
+                         env, vector::vectorSearchEngineName(cfg.search_engine));
+        }
+    }
 
     // Log start
     auto tid = std::this_thread::get_id();
-    spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={}",
+    spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={} engine={}",
                  static_cast<long long>(::getpid()), static_cast<const void*>(&tid),
                  cfg.database_path, exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no",
-                 cfg.embedding_dim);
+                 cfg.embedding_dim, vector::vectorSearchEngineName(cfg.search_engine));
 
     // Cross-process advisory lock
 #ifdef _WIN32

@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -19,6 +20,26 @@ enum class VectorSearchEngine {
     HnswCosine,
     Vec0L2,
 };
+
+inline const char* vectorSearchEngineName(VectorSearchEngine engine) {
+    switch (engine) {
+        case VectorSearchEngine::HnswCosine:
+            return "hnsw_cosine";
+        case VectorSearchEngine::Vec0L2:
+            return "vec0_l2";
+    }
+    return "unknown";
+}
+
+inline std::optional<VectorSearchEngine> parseVectorSearchEngine(std::string_view raw) {
+    if (raw == "hnsw" || raw == "hnsw_cosine" || raw == "cosine") {
+        return VectorSearchEngine::HnswCosine;
+    }
+    if (raw == "vec0" || raw == "vec0_l2" || raw == "l2") {
+        return VectorSearchEngine::Vec0L2;
+    }
+    return std::nullopt;
+}
 
 /**
  * Type of entity embedding content

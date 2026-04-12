@@ -115,9 +115,8 @@ void appendDirectoryCandidates(std::vector<fs::path>& out, const fs::path& dir) 
         if (ec || !entry.is_regular_file(ec)) {
             continue;
         }
-        const fs::path candidate = entry.path();
-        if (looksLikeRuntimeLibrary(candidate)) {
-            appendCandidate(out, candidate);
+        if (looksLikeRuntimeLibrary(entry.path())) {
+            appendCandidate(out, entry.path());
         }
     }
 }

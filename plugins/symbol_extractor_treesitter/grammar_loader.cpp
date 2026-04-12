@@ -320,8 +320,8 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         return tl::unexpected(fmt::format("Language '{}' auto-download not supported", language));
     }
 
-    auto grammar_path =
-        GrammarLoader{}.getGrammarSearchPaths()[0]; // Use primary user path (XDG or ~/.local/share)
+    auto grammar_paths = GrammarLoader{}.getGrammarSearchPaths();
+    const auto& grammar_path = grammar_paths[0]; // Use primary user path (XDG or ~/.local/share)
     std::filesystem::create_directories(grammar_path);
 
     // Create temp directory for build

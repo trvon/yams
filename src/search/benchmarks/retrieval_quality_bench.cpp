@@ -57,6 +57,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/search/internal_benchmark.h>
+#include <yams/vector/vector_database.h>
 
 #include <algorithm>
 #include <cctype>
@@ -1781,6 +1782,14 @@ struct OptimizationRunResult {
     double objectiveScore = 0.0;
     double hybridEvalMs = 0.0;
     double keywordEvalMs = 0.0;
+    std::string searchEngine =
+        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
+    std::uintmax_t vectorsDbBytes = 0;
+    std::uintmax_t vectorsWalBytes = 0;
+    std::uintmax_t persistedHnswNodes = 0;
+    std::uintmax_t persistedHnswMetaRows = 0;
+    std::uintmax_t persistedVec0Tables = 0;
+    std::uintmax_t persistedVec0Rows = 0;
     bool success = false;
     std::string errorMessage;
 };
@@ -1795,6 +1804,8 @@ struct BenchCacheMetadata {
     bool vectorsDisabled = false;
     bool requireKgReady = false;
     bool graphRerankRequested = false;
+    std::string searchEngine =
+        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
     int expectedDocs = 0;
     int expectedQueries = 0;
     std::uintmax_t corpusFingerprint = 0;
@@ -1802,17 +1813,34 @@ struct BenchCacheMetadata {
     int embeddedDocs = 0;
     std::uintmax_t vectorCount = 0;
     bool vectorIndexReady = false;
+    std::uintmax_t vectorsDbBytes = 0;
+    std::uintmax_t vectorsWalBytes = 0;
     std::uintmax_t persistedHnswNodes = 0;
     std::uintmax_t persistedHnswMetaRows = 0;
+    std::uintmax_t persistedVec0Tables = 0;
+    std::uintmax_t persistedVec0Rows = 0;
 };
 
 struct PersistedHnswState {
     bool vectorsDbPresent = false;
+    std::uintmax_t vectorsDbBytes = 0;
+    std::uintmax_t vectorsWalBytes = 0;
     std::uintmax_t nodeRows = 0;
     std::uintmax_t metaRows = 0;
+    std::uintmax_t vec0Tables = 0;
+    std::uintmax_t vec0Rows = 0;
 
-    bool reusable() const { return nodeRows > 0 && metaRows > 0; }
+    bool reusable(yams::vector::VectorSearchEngine engine) const {
+        if (engine == yams::vector::VectorSearchEngine::Vec0L2) {
+            return vec0Tables > 0 && vec0Rows > 0;
+        }
+        return nodeRows > 0 && metaRows > 0;
+    }
 };
+
+static std::string g_benchmark_search_engine =
+    yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
+static PersistedHnswState g_final_vector_index_state;
 
 static bool envTruthy(const char* value) {
     if (!value) {
@@ -1823,6 +1851,22 @@ static bool envTruthy(const char* value) {
         return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     });
     return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+static yams::vector::VectorSearchEngine benchmarkVectorSearchEngine() {
+    if (const char* raw = std::getenv("YAMS_VECTOR_SEARCH_ENGINE"); raw && *raw) {
+        std::string normalized(raw);
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        });
+        if (auto parsed = yams::vector::parseVectorSearchEngine(normalized)) {
+            return *parsed;
+        }
+        spdlog::warn(
+            "[Bench] Invalid YAMS_VECTOR_SEARCH_ENGINE='{}'; using default {}", raw,
+            yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine));
+    }
+    return yams::vector::VectorSearchEngine::HnswCosine;
 }
 
 static bool benchUseStreamingSearch() {
@@ -1911,6 +1955,20 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
     }
 
     state.vectorsDbPresent = true;
+    std::error_code sizeEc;
+    state.vectorsDbBytes = fs::file_size(vectorsDbPath, sizeEc);
+    if (sizeEc) {
+        state.vectorsDbBytes = 0;
+        sizeEc.clear();
+    }
+    const fs::path walPath = vectorsDbPath.string() + "-wal";
+    if (fs::exists(walPath)) {
+        state.vectorsWalBytes = fs::file_size(walPath, sizeEc);
+        if (sizeEc) {
+            state.vectorsWalBytes = 0;
+            sizeEc.clear();
+        }
+    }
 
     sqlite3* db = nullptr;
     if (sqlite3_open_v2(vectorsDbPath.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) !=
@@ -1932,9 +1990,11 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
     };
 
     sqlite3_stmt* stmt = nullptr;
-    const char* tableSql = "SELECT name FROM sqlite_master WHERE type='table' AND "
-                           "(name='vectors_hnsw_meta' OR name='vectors_hnsw_nodes' OR "
-                           " name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes')";
+    const char* tableSql =
+        "SELECT name FROM sqlite_master WHERE type='table' AND "
+        "(name='vectors_hnsw_meta' OR name='vectors_hnsw_nodes' OR "
+        " name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
+        " name LIKE 'vectors_%_vec0')";
     if (sqlite3_prepare_v2(db, tableSql, -1, &stmt, nullptr) != SQLITE_OK) {
         spdlog::warn("[Bench] Failed to inspect persisted HNSW tables in {}: {}",
                      vectorsDbPath.string(), sqlite3_errmsg(db));
@@ -1964,6 +2024,9 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
                 state.nodeRows += count;
             } else if (table.find("_hnsw_meta") != std::string::npos) {
                 state.metaRows += count;
+            } else if (table.find("_vec0") != std::string::npos) {
+                state.vec0Tables += 1;
+                state.vec0Rows += count;
             }
         }
         sqlite3_finalize(stmt);
@@ -1985,6 +2048,7 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
         {"vectors_disabled", metadata.vectorsDisabled},
         {"require_kg_ready", metadata.requireKgReady},
         {"graph_rerank_requested", metadata.graphRerankRequested},
+        {"search_engine", metadata.searchEngine},
         {"expected_docs", metadata.expectedDocs},
         {"expected_queries", metadata.expectedQueries},
         {"corpus_fingerprint", std::to_string(metadata.corpusFingerprint)},
@@ -1992,8 +2056,12 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
         {"embedded_docs", metadata.embeddedDocs},
         {"vector_count", std::to_string(metadata.vectorCount)},
         {"vector_index_ready", metadata.vectorIndexReady},
+        {"vectors_db_bytes", std::to_string(metadata.vectorsDbBytes)},
+        {"vectors_wal_bytes", std::to_string(metadata.vectorsWalBytes)},
         {"persisted_hnsw_nodes", std::to_string(metadata.persistedHnswNodes)},
         {"persisted_hnsw_meta_rows", std::to_string(metadata.persistedHnswMetaRows)},
+        {"persisted_vec0_tables", std::to_string(metadata.persistedVec0Tables)},
+        {"persisted_vec0_rows", std::to_string(metadata.persistedVec0Rows)},
     };
 }
 
@@ -2012,6 +2080,9 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
     metadata.vectorsDisabled = j.value("vectors_disabled", false);
     metadata.requireKgReady = j.value("require_kg_ready", false);
     metadata.graphRerankRequested = j.value("graph_rerank_requested", false);
+    metadata.searchEngine =
+        j.value("search_engine", std::string(yams::vector::vectorSearchEngineName(
+                                     yams::vector::VectorSearchEngine::HnswCosine)));
     metadata.expectedDocs = j.value("expected_docs", 0);
     metadata.expectedQueries = j.value("expected_queries", 0);
     metadata.status = j.value("status", std::string("priming"));
@@ -2046,6 +2117,34 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
             static_cast<std::uintmax_t>(std::stoull(persistedMetaString));
     } catch (...) {
         metadata.persistedHnswMetaRows = 0;
+    }
+
+    const auto vec0TablesString = j.value("persisted_vec0_tables", std::string("0"));
+    try {
+        metadata.persistedVec0Tables = static_cast<std::uintmax_t>(std::stoull(vec0TablesString));
+    } catch (...) {
+        metadata.persistedVec0Tables = 0;
+    }
+
+    const auto vec0RowsString = j.value("persisted_vec0_rows", std::string("0"));
+    try {
+        metadata.persistedVec0Rows = static_cast<std::uintmax_t>(std::stoull(vec0RowsString));
+    } catch (...) {
+        metadata.persistedVec0Rows = 0;
+    }
+
+    const auto dbBytesString = j.value("vectors_db_bytes", std::string("0"));
+    try {
+        metadata.vectorsDbBytes = static_cast<std::uintmax_t>(std::stoull(dbBytesString));
+    } catch (...) {
+        metadata.vectorsDbBytes = 0;
+    }
+
+    const auto walBytesString = j.value("vectors_wal_bytes", std::string("0"));
+    try {
+        metadata.vectorsWalBytes = static_cast<std::uintmax_t>(std::stoull(walBytesString));
+    } catch (...) {
+        metadata.vectorsWalBytes = 0;
     }
 
     return metadata;
@@ -2128,6 +2227,9 @@ static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCac
     if (expected.vectorsDisabled != actual.vectorsDisabled) {
         return mismatch("vectors_disabled mismatch");
     }
+    if (expected.searchEngine != actual.searchEngine) {
+        return mismatch("search_engine mismatch");
+    }
     if (expected.expectedDocs != actual.expectedDocs) {
         return mismatch("expected_docs mismatch");
     }
@@ -2140,9 +2242,14 @@ static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCac
         return mismatch("cache status not reusable");
     }
 
-    if (!expected.vectorsDisabled && actual.status == "primed" &&
-        (!actual.vectorIndexReady || actual.persistedHnswNodes == 0 ||
-         actual.persistedHnswMetaRows == 0)) {
+    const auto expectedEngine = yams::vector::parseVectorSearchEngine(expected.searchEngine)
+                                    .value_or(yams::vector::VectorSearchEngine::HnswCosine);
+    const bool reusableIndex = expectedEngine == yams::vector::VectorSearchEngine::Vec0L2
+                                   ? (actual.vectorIndexReady && actual.persistedVec0Tables > 0 &&
+                                      actual.persistedVec0Rows > 0)
+                                   : (actual.vectorIndexReady && actual.persistedHnswNodes > 0 &&
+                                      actual.persistedHnswMetaRows > 0);
+    if (!expected.vectorsDisabled && actual.status == "primed" && !reusableIndex) {
         return mismatch("vector index not reusable");
     }
 
@@ -2214,11 +2321,17 @@ static BenchCacheMetadata currentBenchCacheMetadata(const BenchCacheMetadata& ba
         std::max(metadata.embeddedDocs, static_cast<int>(getCount("documents_embedded")));
     metadata.vectorCount =
         std::max(metadata.vectorCount, static_cast<std::uintmax_t>(getCount("vector_count")));
+    metadata.searchEngine =
+        std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
 
     const auto persistedHnsw = inspectPersistedHnswState(dataDir);
-    metadata.vectorIndexReady = persistedHnsw.reusable();
+    metadata.vectorIndexReady = persistedHnsw.reusable(benchmarkVectorSearchEngine());
+    metadata.vectorsDbBytes = persistedHnsw.vectorsDbBytes;
+    metadata.vectorsWalBytes = persistedHnsw.vectorsWalBytes;
     metadata.persistedHnswNodes = persistedHnsw.nodeRows;
     metadata.persistedHnswMetaRows = persistedHnsw.metaRows;
+    metadata.persistedVec0Tables = persistedHnsw.vec0Tables;
+    metadata.persistedVec0Rows = persistedHnsw.vec0Rows;
 
     const bool queueDrained = getCount("embed_svc_queued") == 0 && getCount("embed_in_flight") == 0;
     const bool fullCoverage =
@@ -3706,6 +3819,13 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     j["objective"] = result.objectiveScore;
     j["hybrid_eval_ms"] = result.hybridEvalMs;
     j["keyword_eval_ms"] = result.keywordEvalMs;
+    j["search_engine"] = result.searchEngine;
+    j["vectors_db_bytes"] = result.vectorsDbBytes;
+    j["vectors_wal_bytes"] = result.vectorsWalBytes;
+    j["persisted_hnsw_nodes"] = result.persistedHnswNodes;
+    j["persisted_hnsw_meta_rows"] = result.persistedHnswMetaRows;
+    j["persisted_vec0_tables"] = result.persistedVec0Tables;
+    j["persisted_vec0_rows"] = result.persistedVec0Rows;
     j["tuning_state"] = result.tuningState;
     j["tuning_reason"] = result.tuningReason;
     j["error"] = result.errorMessage;
@@ -4779,6 +4899,8 @@ struct BenchFixture {
         expectedCacheMetadata.vectorsDisabled = vectorsDisabled;
         expectedCacheMetadata.requireKgReady = requireKgReady;
         expectedCacheMetadata.graphRerankRequested = graphRerankRequested;
+        expectedCacheMetadata.searchEngine =
+            std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
         expectedCacheMetadata.expectedDocs = corpusSize;
         expectedCacheMetadata.expectedQueries = numQueries;
 
@@ -5266,7 +5388,8 @@ struct BenchFixture {
             initialDocsEmbedded >= static_cast<uint64_t>(corpusSize) && initialEmbedQueued == 0 &&
             initialEmbedInFlight == 0;
         const bool cacheHasReusableVectorIndex =
-            vectorsDisabled || (usingExternalBenchDataDir && initialPersistedHnsw.reusable());
+            vectorsDisabled || (usingExternalBenchDataDir &&
+                                initialPersistedHnsw.reusable(benchmarkVectorSearchEngine()));
 
         if (usingExternalBenchDataDir) {
             spdlog::info("[Bench] External data dir status: indexed_docs={} embedded_docs={} "
@@ -6135,7 +6258,7 @@ struct BenchFixture {
                 return false;
             }
 
-            if (!persisted.reusable()) {
+            if (!persisted.reusable(benchmarkVectorSearchEngine())) {
                 const char* modeLabel = warmDataDirPath.empty() ? "cold-run" : "warm-cache";
                 spdlog::info("[Bench] Finalizing {} vector index (vectors={} persisted_nodes={} "
                              "persisted_meta={})",
@@ -6155,7 +6278,7 @@ struct BenchFixture {
                 persisted = vectorIndexDataDir.empty()
                                 ? PersistedHnswState{}
                                 : inspectPersistedHnswState(vectorIndexDataDir);
-                if (persisted.reusable()) {
+                if (persisted.reusable(benchmarkVectorSearchEngine())) {
                     spdlog::info("[Bench] Vector index finalized in {} ms "
                                  "(persisted_nodes={} persisted_meta={})",
                                  elapsedMs, persisted.nodeRows, persisted.metaRows);
@@ -6166,7 +6289,8 @@ struct BenchFixture {
                 }
             }
 
-            bool ready = persisted.reusable() || vectorDb->hasReusablePersistedSearchIndex();
+            bool ready = persisted.reusable(benchmarkVectorSearchEngine()) ||
+                         vectorDb->hasReusablePersistedSearchIndex();
             updateVectorIndexReadiness(ready);
 
             int readyTimeoutSec = 60;
@@ -6185,7 +6309,7 @@ struct BenchFixture {
                 }
                 if (!ready && !vectorIndexDataDir.empty()) {
                     persisted = inspectPersistedHnswState(vectorIndexDataDir);
-                    ready = persisted.reusable();
+                    ready = persisted.reusable(benchmarkVectorSearchEngine());
                 }
                 if (!ready) {
                     std::this_thread::sleep_for(500ms);
@@ -6891,6 +7015,17 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
             result.tuningState = status.value().searchTuningState;
             result.tuningReason = status.value().searchTuningReason;
         }
+        result.searchEngine =
+            std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
+        if (g_fixture && g_fixture->harness) {
+            const auto persisted = inspectPersistedHnswState(g_fixture->harness->dataDir());
+            result.vectorsDbBytes = persisted.vectorsDbBytes;
+            result.vectorsWalBytes = persisted.vectorsWalBytes;
+            result.persistedHnswNodes = persisted.nodeRows;
+            result.persistedHnswMetaRows = persisted.metaRows;
+            result.persistedVec0Tables = persisted.vec0Tables;
+            result.persistedVec0Rows = persisted.vec0Rows;
+        }
 
         g_debugRunContext->dataset =
             g_fixture->useBEIR ? g_fixture->beirDatasetName : g_fixture->datasetName;
@@ -7185,6 +7320,11 @@ void BM_RetrievalQuality(benchmark::State& state) {
 
     // Store metrics globally for post-teardown summary
     g_final_metrics = metrics;
+    g_benchmark_search_engine =
+        std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
+    if (fixture.harness) {
+        g_final_vector_index_state = inspectPersistedHnswState(fixture.harness->dataDir());
+    }
 
     state.counters["MRR"] = metrics.mrr;
     state.counters["Recall@K"] = metrics.recallAtK;
@@ -7228,6 +7368,8 @@ int main(int argc, char** argv) {
 
     // Hybrid search results
     std::cout << "\n  --- HYBRID SEARCH (text + vector) ---\n";
+    std::cout << "  Search engine:                    " << std::setw(10)
+              << g_benchmark_search_engine << "\n";
     std::cout << "  MRR (Mean Reciprocal Rank):     " << std::setw(10) << g_final_metrics.mrr
               << "\n";
     std::cout << "  Recall@K:                       " << std::setw(10) << g_final_metrics.recallAtK
@@ -7244,6 +7386,18 @@ int main(int argc, char** argv) {
               << hybridDiag["turboquant_apply_rate"].get<double>() << "\n";
     std::cout << "  TurboQuant packed cand mean:    " << std::setw(10)
               << hybridDiag["turboquant_packed_candidates_scored"]["mean"].get<double>() << "\n";
+    std::cout << "  vectors.db bytes:                " << std::setw(10)
+              << g_final_vector_index_state.vectorsDbBytes << "\n";
+    std::cout << "  vectors.db-wal bytes:            " << std::setw(10)
+              << g_final_vector_index_state.vectorsWalBytes << "\n";
+    std::cout << "  persisted_hnsw_nodes:            " << std::setw(10)
+              << g_final_vector_index_state.nodeRows << "\n";
+    std::cout << "  persisted_hnsw_meta_rows:        " << std::setw(10)
+              << g_final_vector_index_state.metaRows << "\n";
+    std::cout << "  persisted_vec0_tables:           " << std::setw(10)
+              << g_final_vector_index_state.vec0Tables << "\n";
+    std::cout << "  persisted_vec0_rows:             " << std::setw(10)
+              << g_final_vector_index_state.vec0Rows << "\n";
 
     // Keyword-only search results (FTS5 isolation)
     std::cout << "\n  --- KEYWORD SEARCH (FTS5 only) ---\n";

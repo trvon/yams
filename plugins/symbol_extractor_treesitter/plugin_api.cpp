@@ -120,7 +120,7 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
             if (dl.has_value()) {
                 lg = loader.loadGrammar(language);
             } else if (dl.error().size()) {
-                dl_err = dl.error();
+                dl_err = std::move(dl.error());
             }
         } else if (!should_auto_download) {
             debugLog("[yams] auto-download disabled, skipping grammar install for '%s'\n",
