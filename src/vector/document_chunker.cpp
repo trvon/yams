@@ -644,7 +644,7 @@ void RecursiveTextSplitter::splitOnSeparator(const std::string& text, const std:
 
         if (current_chunk.size() + segment.size() > target_size && !current_chunk.empty()) {
             results.push_back(current_chunk);
-            current_chunk = segment;
+            current_chunk = std::move(segment);
         } else {
             if (!current_chunk.empty()) {
                 current_chunk += separator;
@@ -911,7 +911,7 @@ std::vector<size_t> findNaturalBreaks(const std::string& text) {
     auto begin = std::sregex_iterator(text.begin(), text.end(), header_regex);
     auto end = std::sregex_iterator();
 
-    for (auto it = begin; it != end; ++it) {
+    for (auto& it = begin; it != end; ++it) {
         breaks.push_back(it->position());
     }
 
@@ -1086,7 +1086,7 @@ std::string createChunkingSummary(const std::vector<DocumentChunk>& chunks) {
 // SemanticChunker
 SemanticChunker::SemanticChunker(const ChunkingConfig& config,
                                  std::shared_ptr<EmbeddingGenerator> embedder)
-    : DocumentChunker(config), embedder_(embedder) {
+    : DocumentChunker(config), embedder_(std::move(embedder)) {
     config_.strategy = ChunkingStrategy::SEMANTIC;
 }
 

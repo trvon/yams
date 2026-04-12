@@ -298,7 +298,7 @@ public:
 
     // Configuration
     void setConfig(const IndexConfig& config);
-    const IndexConfig& getConfig() const;
+    IndexConfig getConfig() const;
 
     // Index type management
     Result<void> changeIndexType(IndexType new_type);

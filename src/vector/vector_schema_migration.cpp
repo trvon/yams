@@ -68,7 +68,7 @@ Result<void> executeSQL(sqlite3* db, const char* sql) {
             continue;
         }
 
-        return Error{ErrorCode::DatabaseError, err};
+        return Error{ErrorCode::DatabaseError, std::move(err)};
     }
 
     daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling

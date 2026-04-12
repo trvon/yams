@@ -1,5 +1,5 @@
-#include <yams/vector/vector_index_manager.h>
 #include <yams/vector/turboquant.h>
+#include <yams/vector/vector_index_manager.h>
 
 #include <algorithm>
 #include <cmath>
@@ -839,7 +839,7 @@ public:
                 [&](auto& index) {
                     result_pairs =
                         index.search_with_filter(std::span<const float>(normalized_query), search_k,
-                                                 config_.hnsw_ef_search, hnsw_filter);
+                                                 config_.hnsw_ef_search, std::move(hnsw_filter));
                 },
                 hnsw_index_);
 
@@ -1415,6 +1415,7 @@ public:
 
     Result<void> addVector(const std::string& id, const std::vector<float>& vector,
                            const std::map<std::string, std::string>& metadata) {
+        std::unique_lock lock(mutex_);
         if (!initialized_) {
             return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
         }
@@ -1428,9 +1429,11 @@ public:
         // Add to delta index if enabled, otherwise to main
         if (delta_index_) {
             auto result = delta_index_->add(id, vector);
+            const bool should_merge = delta_index_->size() >= config_.delta_threshold;
+            lock.unlock();
 
             // Check if delta needs merging
-            if (delta_index_->size() >= config_.delta_threshold) {
+            if (should_merge) {
                 auto merge_result = mergeDeltaIndex();
                 if (!merge_result.has_value()) {
                     return merge_result;
@@ -1446,6 +1449,7 @@ public:
     Result<void> addVectors(const std::vector<std::string>& ids,
                             const std::vector<std::vector<float>>& vectors,
                             const std::vector<std::map<std::string, std::string>>& metadata) {
+        std::unique_lock lock(mutex_);
         if (!initialized_) {
             return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
         }
@@ -1463,9 +1467,11 @@ public:
         // Add to appropriate index
         if (delta_index_) {
             auto result = delta_index_->addBatch(ids, vectors);
+            const bool should_merge = delta_index_->size() >= config_.delta_threshold;
+            lock.unlock();
 
             // Check if delta needs merging
-            if (delta_index_->size() >= config_.delta_threshold) {
+            if (should_merge) {
                 auto merge_result = mergeDeltaIndex();
                 if (!merge_result.has_value()) {
                     return merge_result;
@@ -1480,6 +1486,7 @@ public:
 
     Result<std::vector<SearchResult>> search(const std::vector<float>& query, size_t k,
                                              const SearchFilter& filter) {
+        std::shared_lock lock(mutex_);
         if (!initialized_) {
             return Result<std::vector<SearchResult>>(
                 Error{ErrorCode::InvalidArgument, "Index not initialized"});
@@ -1518,7 +1525,7 @@ public:
             for (auto& result : all_results) {
                 auto it = metadata_store_.find(result.id);
                 if (it != metadata_store_.end()) {
-                    result.metadata = it->second;
+                    result.metadata.insert(it->second.begin(), it->second.end());
                 }
             }
         }
@@ -1527,6 +1534,7 @@ public:
     }
 
     Result<void> mergeDeltaIndex() {
+        std::unique_lock lock(mutex_);
         if (!delta_index_ || delta_index_->size() == 0) {
             return Result<void>();
         }
@@ -1554,6 +1562,7 @@ public:
     }
 
     Result<void> optimizeIndex() {
+        std::shared_lock lock(mutex_);
         if (!initialized_) {
             return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
         }
@@ -1571,6 +1580,7 @@ public:
     }
 
     IndexStats getStats() const {
+        std::shared_lock lock(mutex_);
         if (!initialized_) {
             return IndexStats{};
         }
@@ -1591,6 +1601,7 @@ public:
     }
 
     size_t size() const {
+        std::shared_lock lock(mutex_);
         if (!initialized_) {
             return 0;
         }
@@ -1603,6 +1614,7 @@ public:
     }
 
     Result<std::vector<std::string>> getAllVectorIds() const {
+        std::shared_lock lock(mutex_);
         if (!initialized_) {
             return Result<std::vector<std::string>>(
                 Error{ErrorCode::InvalidArgument, "Index not initialized"});
@@ -1636,10 +1648,14 @@ public:
         return Result<std::vector<std::string>>(std::move(all_ids));
     }
 
-    IndexType getIndexType() const { return config_.type; }
+    IndexType getIndexType() const {
+        std::shared_lock lock(mutex_);
+        return config_.type;
+    }
 
     Result<void> updateVector(const std::string& id, const std::vector<float>& vector,
                               const std::map<std::string, std::string>& metadata) {
+        std::shared_lock lock(mutex_);
         if (!initialized_) {
             return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
         }
@@ -1666,6 +1682,7 @@ public:
     }
 
     Result<void> removeVector(const std::string& id) {
+        std::shared_lock lock(mutex_);
         if (!initialized_) {
             return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
         }
@@ -1689,11 +1706,10 @@ public:
     }
 
     Result<void> saveIndex(const std::string& path) {
+        std::unique_lock lock(mutex_);
         if (!initialized_) {
             return Result<void>(Error{ErrorCode::InvalidArgument, "Index not initialized"});
         }
-
-        std::unique_lock lock(mutex_);
 
         try {
             std::ofstream file(path, std::ios::binary);
@@ -1881,8 +1897,14 @@ public:
     }
 
     // Accessor methods for VectorIndexManager
-    void setConfig(const IndexConfig& config) { config_ = config; }
-    const IndexConfig& getConfig() const { return config_; }
+    void setConfig(const IndexConfig& config) {
+        std::unique_lock lock(mutex_);
+        config_ = config;
+    }
+    IndexConfig getConfig() const {
+        std::shared_lock lock(mutex_);
+        return config_;
+    }
     std::string getLastError() const { return lastError_; }
     void setLastError(const std::string& error) const { lastError_ = error; }
 
@@ -2028,9 +2050,6 @@ Result<void> VectorIndexManager::rebuildIndex() {
     if (!pImpl->isInitialized()) {
         return Result<void>(Error{ErrorCode::NotInitialized, "VectorIndexManager not initialized"});
     }
-
-    // Get current configuration
-    auto config = pImpl->getConfig();
 
     // Get all current vector IDs
     auto idsResult = pImpl->getAllVectorIds();
@@ -2450,7 +2469,7 @@ void VectorIndexManager::setConfig(const IndexConfig& config) {
     pImpl->setConfig(config);
 }
 
-const IndexConfig& VectorIndexManager::getConfig() const {
+IndexConfig VectorIndexManager::getConfig() const {
     return pImpl->getConfig();
 }
 

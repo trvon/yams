@@ -16,12 +16,12 @@ public:
 
     ~Impl() { shutdown(); }
 
-    Result<void> initialize(std::shared_ptr<ModelLoader> loader) {
+    Result<void> initialize(const std::shared_ptr<ModelLoader>& loader) {
         if (!loader) {
             return Error{ErrorCode::InvalidArgument, "Model loader is null"};
         }
 
-        loader_ = loader;
+        loader_ = std::move(loader);
         initialized_ = true;
 
         // Preload models if configured
@@ -197,7 +197,7 @@ private:
         // Create cached entry
         auto cached = std::make_shared<CachedModel>();
         cached->model_id = model_id;
-        cached->model_handle = load_result.value();
+        cached->model_handle = std::move(load_result.value());
         cached->loaded_at = std::chrono::system_clock::now();
         cached->last_accessed = cached->loaded_at;
 
@@ -298,7 +298,7 @@ ModelCache::~ModelCache() = default;
 ModelCache::ModelCache(ModelCache&&) noexcept = default;
 ModelCache& ModelCache::operator=(ModelCache&&) noexcept = default;
 
-Result<void> ModelCache::initialize(std::shared_ptr<ModelLoader> loader) {
+Result<void> ModelCache::initialize(const std::shared_ptr<ModelLoader>& loader) {
     return pImpl->initialize(loader);
 }
 
@@ -468,7 +468,7 @@ std::vector<std::string> generateWarmupSamples(size_t count, size_t avg_length) 
     return samples;
 }
 
-Result<void> warmupWithSamples(std::shared_ptr<void> model,
+Result<void> warmupWithSamples(const std::shared_ptr<void>& model,
                                const std::vector<std::string>& samples) {
     if (!model) {
         return Error{ErrorCode::InvalidArgument, "Model is null"};

@@ -4,10 +4,10 @@
 #include <yams/core/atomic_utils.h>
 #include <yams/profiling.h>
 #include <yams/vector/sqlite_vec_backend.h>
+#include <yams/vector/turboquant.h>
 #include <yams/vector/vector_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
-#include <yams/vector/turboquant.h>
 
 #include <algorithm>
 #include <cmath>
@@ -402,25 +402,32 @@ public:
 
         try {
             // Apply TurboQuant compression if enabled
-            if (config_.enable_turboquant_storage) {
-                // Get owned TurboQuantMSE (creates/configures on first call)
-                TurboQuantMSE* tq = ensureTurboQuant();
+            std::unique_lock<std::shared_mutex> compressionLock(mutex_);
+            const bool useTurboQuant = config_.enable_turboquant_storage;
+            const size_t embeddingDim = config_.embedding_dim;
+            const auto turboquantBits = config_.turboquant_bits;
+            const auto turboquantSeed = config_.turboquant_seed;
+            TurboQuantMSE* tq = useTurboQuant ? ensureTurboQuant() : nullptr;
 
+            if (useTurboQuant) {
+                // Get owned TurboQuantMSE (creates/configures on first call)
                 std::vector<VectorRecord> compressed_records;
                 compressed_records.reserve(records.size());
 
                 for (const auto& record : records) {
                     VectorRecord compressed = record;
                     if (record.quantized.format == VectorRecord::QuantizedFormat::NONE &&
-                        record.embedding.size() == config_.embedding_dim) {
+                        record.embedding.size() == embeddingDim) {
                         compressed.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
-                        compressed.quantized.bits_per_channel = config_.turboquant_bits;
-                        compressed.quantized.seed = config_.turboquant_seed;
+                        compressed.quantized.bits_per_channel = turboquantBits;
+                        compressed.quantized.seed = turboquantSeed;
                         compressed.quantized.packed_codes =
                             vector_utils::packedQuantizeVector(record.embedding, tq);
                     }
                     compressed_records.push_back(std::move(compressed));
                 }
+
+                compressionLock.unlock();
 
                 // Don't hold our mutex while calling backend to avoid potential deadlock
                 auto result = backend_->insertVectorsBatch(compressed_records);
@@ -430,6 +437,7 @@ public:
                     return false;
                 }
             } else {
+                compressionLock.unlock();
                 // Don't hold our mutex while calling backend to avoid potential deadlock
                 auto result = backend_->insertVectorsBatch(records);
                 if (!result) {

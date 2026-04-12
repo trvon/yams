@@ -26,8 +26,8 @@ std::string extractSpecialTokenId(const nlohmann::json& templateArray, bool firs
         if (entry.contains("SpecialToken") && entry["SpecialToken"].contains("id")) {
             auto id = entry["SpecialToken"]["id"].get<std::string>();
             if (first)
-                return id;  // Return the very first SpecialToken
-            lastFound = id; // Track the last SpecialToken seen
+                return id;             // Return the very first SpecialToken
+            lastFound = std::move(id); // Track the last SpecialToken seen
         }
     }
     return lastFound; // Returns last found, or "" if none
@@ -176,7 +176,10 @@ bool HuggingFaceTokenizer::load(const std::string& path) {
                     pp["processors"].is_array()) {
                     const auto& procs = pp["processors"];
                     // Collect special_tokens from all processors
-                    nlohmann::json mergedSt = st;
+                    nlohmann::json mergedSt = nlohmann::json::object();
+                    for (const auto& [k, v] : st.items()) {
+                        mergedSt[k] = v;
+                    }
                     for (const auto& proc : procs) {
                         if (proc.contains("special_tokens") && proc["special_tokens"].is_object()) {
                             for (auto& [k, v] : proc["special_tokens"].items()) {

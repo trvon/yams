@@ -278,7 +278,7 @@ bool EmbeddingService::startRepairAsync() {
             }
         } reset{repairRunning_, workerMutex_};
 
-        this->runRepair(stoken);
+        this->runRepair(std::move(stoken));
     });
 
     return true;
@@ -407,7 +407,7 @@ void EmbeddingService::triggerRepairIfNeeded() {
     }
 }
 
-void EmbeddingService::runRepair(yams::compat::stop_token stopToken) {
+void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
     // Cross-process single-writer lock using a lockfile on vectors.db (declared file-scope)
     fs::path lockPath = dataPath_ / "vectors.db.lock";
     FileLock vlock(lockPath);

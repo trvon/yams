@@ -419,7 +419,7 @@ Result<ModelInfo> parseModelMetadata(const std::string& model_path) {
         info.name = match[1];
         info.version = match[2];
     } else {
-        info.name = filename;
+        info.name = std::move(filename);
         info.version = "1.0.0";
     }
 

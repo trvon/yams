@@ -665,9 +665,9 @@ public:
         last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
         last_hnsw_added_count_ = 0;
         last_hnsw_removed_count_ = 0;
-        background_seed_running_ = false;
-        background_seed_scheduled_ = false;
-        background_seed_cancel_requested_ = false;
+        background_seed_running_.store(false, std::memory_order_release);
+        background_seed_scheduled_.store(false, std::memory_order_release);
+        background_seed_cancel_requested_.store(false, std::memory_order_release);
         query_dim_counts_.clear();
 
         int rc = sqlite3_open(db_path.c_str(), &db_);
@@ -772,7 +772,7 @@ public:
         trace_vector_db_lifetime("close.begin", this, db_path_, db_, SQLITE_OK,
                                  count_live_statements(db_));
 
-        background_seed_cancel_requested_ = true;
+        background_seed_cancel_requested_.store(true, std::memory_order_release);
         std::thread backgroundSeedThread;
         if (background_seed_thread_.joinable()) {
             backgroundSeedThread = std::move(background_seed_thread_);
@@ -808,8 +808,8 @@ public:
         hnsw_dirty_.clear();
         initialized_ = false;
         hnsw_loaded_ = false;
-        background_seed_running_ = false;
-        background_seed_scheduled_ = false;
+        background_seed_running_.store(false, std::memory_order_release);
+        background_seed_scheduled_.store(false, std::memory_order_release);
         query_dim_counts_.clear();
         trace_vector_db_lifetime("close.end", this, db_path_, db_);
     }
@@ -1451,6 +1451,8 @@ public:
         }
 
         if (!hnsw || hnsw->empty()) {
+            lock.unlock();
+            std::unique_lock write_lock(mutex_);
             maybeScheduleBackgroundSeedUnlocked(query_dim);
             last_hnsw_maintenance_mode_ = HnswMaintenanceMode::BruteForceFallback;
             spdlog::info("[HNSW] searchSimilar: no index for dim={} (hnsw={}), falling back to "
@@ -1640,6 +1642,8 @@ public:
         // Find index for this dimension
         auto it = hnsw_indices_.find(query_dim);
         if (it == hnsw_indices_.end() || it->second->empty()) {
+            lock.unlock();
+            std::unique_lock write_lock(mutex_);
             maybeScheduleBackgroundSeedUnlocked(query_dim);
             last_hnsw_maintenance_mode_ = HnswMaintenanceMode::BruteForceFallback;
             spdlog::info("[HNSW] searchSimilarBatch: no index for dim={}, falling back to "
@@ -2432,8 +2436,7 @@ public:
             sqlite3_bind_text(stmt, bind_idx++, params.node_type->c_str(), -1, SQLITE_TRANSIENT);
         }
         if (params.document_hash) {
-            sqlite3_bind_text(stmt, bind_idx++, params.document_hash->c_str(), -1,
-                              SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, bind_idx, params.document_hash->c_str(), -1, SQLITE_TRANSIENT);
         }
 
         // Collect all rows and compute similarities
@@ -2686,6 +2689,7 @@ private:
 
     // Get vector by rowid (assumes lock held)
     std::optional<VectorRecord> getVectorByRowidUnlocked(int64_t rowid) const {
+        std::lock_guard stmt_lock(stmt_mutex_);
         if (!stmt_select_by_rowid_) {
             return std::nullopt;
         }
@@ -2708,6 +2712,7 @@ private:
     };
 
     std::optional<FilterData> getFilterDataByRowidUnlocked(int64_t rowid) const {
+        std::lock_guard stmt_lock(stmt_mutex_);
         if (!stmt_filter_by_rowid_) {
             return std::nullopt;
         }
@@ -2804,6 +2809,7 @@ private:
 
     // Prepare all statements
     void prepareStatements() {
+        std::lock_guard stmt_lock(stmt_mutex_);
         sqlite3_prepare_v2(db_, kInsertVector, -1, &stmt_insert_, nullptr);
         sqlite3_prepare_v2(db_, kSelectByChunkId, -1, &stmt_select_by_chunk_id_, nullptr);
         sqlite3_prepare_v2(db_, kSelectByRowid, -1, &stmt_select_by_rowid_, nullptr);
@@ -2819,6 +2825,7 @@ private:
 
     // Finalize all statements
     void finalizeStatements() {
+        std::lock_guard stmt_lock(stmt_mutex_);
         if (stmt_insert_)
             sqlite3_finalize(stmt_insert_);
         if (stmt_select_by_chunk_id_)
@@ -3028,7 +3035,8 @@ private:
 
     bool shouldScheduleBackgroundSeedUnlocked(size_t query_dim) const {
         if (query_dim == 0 || db_path_ == ":memory:" || hnsw_loaded_ || hnsw_needs_rebuild_ ||
-            background_seed_running_ || background_seed_scheduled_) {
+            background_seed_running_.load(std::memory_order_acquire) ||
+            background_seed_scheduled_.load(std::memory_order_acquire)) {
             return false;
         }
         return query_dim_counts_.find(query_dim) != query_dim_counts_.end() &&
@@ -3244,15 +3252,15 @@ private:
         }
 
         std::unique_lock lock(mutex_);
-        background_seed_scheduled_ = false;
+        background_seed_scheduled_.store(false, std::memory_order_release);
 
-        if (background_seed_cancel_requested_) {
-            background_seed_running_ = false;
+        if (background_seed_cancel_requested_.load(std::memory_order_acquire)) {
+            background_seed_running_.store(false, std::memory_order_release);
             return;
         }
 
         if (!db_ || !hnsw_indices_.empty() || hnsw_loaded_ || hnsw_needs_rebuild_) {
-            background_seed_running_ = false;
+            background_seed_running_.store(false, std::memory_order_release);
             return;
         }
 
@@ -3265,7 +3273,7 @@ private:
             spdlog::info("[HNSW] Background seed published {} dimension-specific indices",
                          hnsw_indices_.size());
         }
-        background_seed_running_ = false;
+        background_seed_running_.store(false, std::memory_order_release);
     }
 
     void maybeScheduleBackgroundSeedUnlocked(size_t query_dim) {
@@ -3273,7 +3281,8 @@ private:
             return;
         }
 
-        if (background_seed_thread_.joinable() && !background_seed_running_) {
+        if (background_seed_thread_.joinable() &&
+            !background_seed_running_.load(std::memory_order_acquire)) {
             background_seed_thread_.join();
         }
 
@@ -3289,8 +3298,8 @@ private:
             return;
         }
 
-        background_seed_scheduled_ = true;
-        background_seed_running_ = true;
+        background_seed_scheduled_.store(true, std::memory_order_release);
+        background_seed_running_.store(true, std::memory_order_release);
         background_seed_thread_ = std::thread([this, snapshot = std::move(snapshot)]() mutable {
             buildBackgroundSeedSnapshot(std::move(snapshot));
         });
@@ -4043,9 +4052,9 @@ ORDER BY rowid
     bool hnsw_needs_rebuild_ = false;
     size_t pending_inserts_ = 0;
     std::unordered_map<size_t, size_t> query_dim_counts_;
-    bool background_seed_running_ = false;
-    bool background_seed_scheduled_ = false;
-    bool background_seed_cancel_requested_ = false;
+    std::atomic<bool> background_seed_running_{false};
+    std::atomic<bool> background_seed_scheduled_{false};
+    std::atomic<bool> background_seed_cancel_requested_{false};
     std::thread background_seed_thread_;
     HnswMaintenanceMode last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
     std::size_t last_hnsw_added_count_ = 0;
@@ -4141,6 +4150,7 @@ ORDER BY rowid
 
     // Thread safety
     mutable std::shared_mutex mutex_;
+    mutable std::mutex stmt_mutex_;
 };
 
 // ============================================================================

@@ -763,28 +763,23 @@ double calculateFragmentation(size_t total_vectors, size_t deleted_vectors, size
 
 std::chrono::minutes estimateOptimizationDuration(size_t vector_count, OptimizationType type) {
     // Rough estimates based on operation type
-    double minutes_per_million = 1.0;
-
     switch (type) {
         case OptimizationType::COMPACT:
-            minutes_per_million = 2.0;
-            break;
+            return std::chrono::minutes(
+                static_cast<int>(std::ceil((vector_count / 1000000.0) * 2.0)));
         case OptimizationType::REBALANCE:
-            minutes_per_million = 3.0;
-            break;
+            return std::chrono::minutes(
+                static_cast<int>(std::ceil((vector_count / 1000000.0) * 3.0)));
         case OptimizationType::REBUILD:
-            minutes_per_million = 5.0;
-            break;
+            return std::chrono::minutes(
+                static_cast<int>(std::ceil((vector_count / 1000000.0) * 5.0)));
         case OptimizationType::INCREMENTAL:
-            minutes_per_million = 0.5;
-            break;
+            return std::chrono::minutes(
+                static_cast<int>(std::ceil((vector_count / 1000000.0) * 0.5)));
         case OptimizationType::FULL:
-            minutes_per_million = 8.0;
-            break;
+            return std::chrono::minutes(
+                static_cast<int>(std::ceil((vector_count / 1000000.0) * 8.0)));
     }
-
-    double estimated_minutes = (vector_count / 1000000.0) * minutes_per_million;
-    return std::chrono::minutes(static_cast<int>(std::ceil(estimated_minutes)));
 }
 
 bool shouldOptimize(const IndexStatistics& stats, const OptimizationPolicy& policy) {

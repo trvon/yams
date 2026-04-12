@@ -1555,7 +1555,7 @@ public:
             }
 
             if (!maybeResponse) {
-                return Error{ErrorCode::NetworkError, lastError.message};
+                return Error{ErrorCode::NetworkError, std::move(lastError.message)};
             }
 
             const auto& response = *maybeResponse;

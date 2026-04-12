@@ -87,7 +87,7 @@ private:
                                             bool showProgress = false);
 
     // Stop-aware repair routine used by the managed worker (compat stop_token)
-    void runRepair(yams::compat::stop_token stopToken);
+    void runRepair(const yams::compat::stop_token& stopToken);
 };
 
 } // namespace yams::vector

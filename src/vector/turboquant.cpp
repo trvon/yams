@@ -1037,7 +1037,7 @@ TurboQuantEncoded TurboQuantProd::encode(const std::vector<float>& vector) {
         qjl_signs[m] = (sum >= 0.0f) ? 1 : -1;
     }
 
-    return {mse_indices, qjl_signs, residual_norm_sq};
+    return {std::move(mse_indices), std::move(qjl_signs), residual_norm_sq};
 }
 
 /**

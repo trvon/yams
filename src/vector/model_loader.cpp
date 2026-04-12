@@ -190,7 +190,7 @@ public:
             return Error{format_result.error().code, format_result.error().message};
         }
 
-        auto format = format_result.value();
+        auto&& format = format_result.value();
         auto it = loaders_.find(format);
         if (it == loaders_.end()) {
             return Error{ErrorCode::NotSupported,
@@ -242,7 +242,7 @@ public:
             return result;
         }
 
-        auto format = format_result.value();
+        const auto& format = format_result.value();
         auto it = loaders_.find(format);
         if (it == loaders_.end()) {
             ValidationResult result;
@@ -310,7 +310,7 @@ ModelLoader::ModelLoader(ModelLoader&&) noexcept = default;
 ModelLoader& ModelLoader::operator=(ModelLoader&&) noexcept = default;
 
 void ModelLoader::registerLoader(const std::string& format, std::shared_ptr<IModelLoader> loader) {
-    pImpl->registerLoader(format, loader);
+    pImpl->registerLoader(format, std::move(loader));
 }
 
 void ModelLoader::unregisterLoader(const std::string& format) {

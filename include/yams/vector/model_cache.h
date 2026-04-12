@@ -82,7 +82,7 @@ public:
     ModelCache& operator=(ModelCache&&) noexcept;
 
     // Initialize cache with model loader
-    Result<void> initialize(std::shared_ptr<ModelLoader> loader);
+    Result<void> initialize(const std::shared_ptr<ModelLoader>& loader);
     void shutdown();
 
     // Model loading and retrieval
@@ -179,7 +179,7 @@ namespace warming {
 std::vector<std::string> generateWarmupSamples(size_t count = 10, size_t avg_length = 100);
 
 // Warm up model with sample inputs
-Result<void> warmupWithSamples(std::shared_ptr<void> model,
+Result<void> warmupWithSamples(const std::shared_ptr<void>& model,
                                const std::vector<std::string>& samples);
 
 // Benchmark model performance during warmup
