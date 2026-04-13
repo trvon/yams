@@ -36,11 +36,7 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
 // Async helpers for interim non-blocking daemon operations
-#include <future>
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/system_executor.hpp>
 #ifndef _WIN32
 #include <unistd.h>
 #else
@@ -388,6 +384,11 @@ public:
     }
 
     Result<void> execute() override {
+        return yams::cli::run_result<void>(this->executeAsync(), std::chrono::minutes{10},
+                                           getExecutor());
+    }
+
+    boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
             // Attempt daemon-first add; fall back to service-based local execution
             {
@@ -406,8 +407,8 @@ public:
                 if (paths.size() > 1) {
                     for (const auto& p : paths) {
                         if (p.string() == "-") {
-                            return Error{ErrorCode::InvalidArgument,
-                                         "Stdin '-' cannot be combined with other paths"};
+                            co_return Error{ErrorCode::InvalidArgument,
+                                            "Stdin '-' cannot be combined with other paths"};
                         }
                     }
                 }
@@ -422,20 +423,23 @@ public:
                 // Session ID is read from YAMS_SESSION_CURRENT env var (set by `yams session use`)
                 std::string activeSessionId = getActiveSessionId(cli_, bypassSession_, false);
 
-                yams::daemon::ClientConfig daemonClientCfg;
-                if (cli_->hasExplicitDataDir()) {
-                    daemonClientCfg.dataDir = cli_->getDataPath();
-                }
-                daemonClientCfg.enableChunkedResponses = false;
-                daemonClientCfg.singleUseConnections = false;
-                daemonClientCfg.requestTimeout =
+                const auto explicitDataDir = (cli_ && cli_->hasExplicitDataDir())
+                                                 ? cli_->getDataPath()
+                                                 : std::filesystem::path{};
+                yams::cli::CliDaemonRequestOptions daemonOpts;
+                daemonOpts.accessPolicy = yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
+                daemonOpts.readyTimeout =
+                    std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
+                daemonOpts.requestTimeout =
                     std::chrono::milliseconds(std::max(1, daemonTimeoutMs_));
 
+                auto daemonClientCfg = yams::cli::build_cli_daemon_client_config(
+                    getExecutor(), explicitDataDir, daemonOpts);
+
                 auto planRes = yams::cli::prepare_cli_daemon_client_plan(
-                    daemonClientCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback,
-                    std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_)));
+                    daemonClientCfg, daemonOpts.accessPolicy, daemonOpts.readyTimeout);
                 if (!planRes) {
-                    return planRes.error();
+                    co_return planRes.error();
                 }
                 auto daemonPlan = std::move(planRes.value());
 
@@ -457,54 +461,54 @@ public:
 
                 if (daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
                     daemonSpinner.pause();
-                    return executeWithServices();
+                    co_return executeWithServices();
                 }
 
                 auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
                 if (!sanitizedTagsRes)
-                    return sanitizedTagsRes.error();
+                    co_return sanitizedTagsRes.error();
                 const auto& sanitizedTags = sanitizedTagsRes.value();
 
                 auto sanitizedIncludeRes =
                     sanitizeStringList(includePatterns_, "Include pattern", kMaxPatternLength);
                 if (!sanitizedIncludeRes)
-                    return sanitizedIncludeRes.error();
+                    co_return sanitizedIncludeRes.error();
                 const auto& sanitizedInclude = sanitizedIncludeRes.value();
 
                 auto sanitizedExcludeRes =
                     sanitizeStringList(excludePatterns_, "Exclude pattern", kMaxPatternLength);
                 if (!sanitizedExcludeRes)
-                    return sanitizedExcludeRes.error();
+                    co_return sanitizedExcludeRes.error();
                 const auto& sanitizedExclude = sanitizedExcludeRes.value();
 
                 auto sanitizedMetadataRes = sanitizeMetadata(metadata_);
                 if (!sanitizedMetadataRes)
-                    return sanitizedMetadataRes.error();
+                    co_return sanitizedMetadataRes.error();
                 const auto& sanitizedMetadata = sanitizedMetadataRes.value();
 
                 std::string sanitizedCollection = trimCopy(collection_);
                 if (hasUnsupportedControlChars(sanitizedCollection)) {
-                    return Error{ErrorCode::InvalidArgument,
-                                 "Collection contains unsupported control characters"};
+                    co_return Error{ErrorCode::InvalidArgument,
+                                    "Collection contains unsupported control characters"};
                 }
                 if (sanitizedCollection.size() > kMaxCollectionLength) {
-                    return Error{ErrorCode::InvalidArgument, "Collection name exceeds limit"};
+                    co_return Error{ErrorCode::InvalidArgument, "Collection name exceeds limit"};
                 }
                 std::string sanitizedSnapshotId = trimCopy(snapshotId_);
                 std::string sanitizedSnapshotLabel = trimCopy(snapshotLabel_);
                 if (hasUnsupportedControlChars(sanitizedSnapshotId) ||
                     hasUnsupportedControlChars(sanitizedSnapshotLabel)) {
-                    return Error{ErrorCode::InvalidArgument,
-                                 "Snapshot identifiers cannot contain control characters"};
+                    co_return Error{ErrorCode::InvalidArgument,
+                                    "Snapshot identifiers cannot contain control characters"};
                 }
                 if (sanitizedSnapshotId.size() > kMaxSnapshotLength ||
                     sanitizedSnapshotLabel.size() > kMaxSnapshotLength) {
-                    return Error{ErrorCode::InvalidArgument,
-                                 "Snapshot identifiers exceed maximum length"};
+                    co_return Error{ErrorCode::InvalidArgument,
+                                    "Snapshot identifiers exceed maximum length"};
                 }
                 std::string sanitizedMimeType = trimCopy(mimeType_);
                 if (sanitizedMimeType.size() > kMaxMimeTypeLength) {
-                    return Error{ErrorCode::InvalidArgument, "MIME type exceeds maximum length"};
+                    co_return Error{ErrorCode::InvalidArgument, "MIME type exceeds maximum length"};
                 }
 
                 // Separate single files from directories for proper handling
@@ -646,12 +650,12 @@ public:
                 // Validate document name once
                 std::string sanitizedName = trimCopy(documentName_);
                 if (sanitizedName.size() > kMaxNameLength) {
-                    return Error{ErrorCode::InvalidArgument,
-                                 "Document name exceeds maximum length"};
+                    co_return Error{ErrorCode::InvalidArgument,
+                                    "Document name exceeds maximum length"};
                 }
                 if (hasUnsupportedControlChars(sanitizedName)) {
-                    return Error{ErrorCode::InvalidArgument,
-                                 "Document name contains unsupported control characters"};
+                    co_return Error{ErrorCode::InvalidArgument,
+                                    "Document name contains unsupported control characters"};
                 }
 
                 // Build batch of AddOptions for single files
@@ -667,7 +671,7 @@ public:
 
                 // Process single files in parallel batch
                 if (!fileBatch.empty()) {
-                    auto batchResult = ing.addBatch(fileBatch, maxConcurrent_);
+                    auto batchResult = co_await ing.addBatchAsync(fileBatch, maxConcurrent_);
                     for (size_t i = 0; i < batchResult.results.size(); ++i) {
                         completedRequests++;
                         const auto& result = batchResult.results[i];
@@ -706,13 +710,13 @@ public:
                         std::string stdinContent((std::istreambuf_iterator<char>(std::cin)),
                                                  std::istreambuf_iterator<char>());
                         if (stdinContent.empty()) {
-                            return Error{ErrorCode::InvalidArgument,
-                                         "No content received from stdin"};
+                            co_return Error{ErrorCode::InvalidArgument,
+                                            "No content received from stdin"};
                         }
                         auto aopts = makeBaseOpts();
                         aopts.content = std::move(stdinContent);
                         aopts.name = sanitizedName.empty() ? "stdin" : sanitizedName;
-                        auto result = ing.addViaDaemon(aopts);
+                        auto result = co_await ing.addViaDaemonAsync(aopts);
                         if (result) {
                             totalAdded += result.value().documentsAdded;
                             totalUpdated += result.value().documentsUpdated;
@@ -741,7 +745,7 @@ public:
 
                 // Process directories in parallel batch
                 if (!dirBatch.empty()) {
-                    auto batchResult = ing.addBatch(dirBatch, maxConcurrent_);
+                    auto batchResult = co_await ing.addBatchAsync(dirBatch, maxConcurrent_);
                     for (size_t i = 0; i < batchResult.results.size(); ++i) {
                         completedRequests++;
                         const auto& result = batchResult.results[i];
@@ -805,25 +809,20 @@ public:
                     const auto& [failedPath, failure] = daemonFailures.front();
                     std::ostringstream oss;
                     oss << "Failed to add '" << failedPath.string() << "': " << failure.message;
-                    return Error{failure.code, oss.str()};
+                    co_return Error{failure.code, oss.str()};
                 }
 
                 if (daemonRequestsAttempted > 0) {
-                    return Result<void>();
+                    co_return Result<void>();
                 }
             }
 
             // Fall back to service-based execution (no stdin — that's handled via daemon above)
-            return executeWithServices();
+            co_return executeWithServices();
 
         } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
+            co_return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
         }
-    }
-
-    boost::asio::awaitable<Result<void>> executeAsync() override {
-        // For now, call the existing execute() to reuse its logic; next pass will fully co_await
-        co_return execute();
     }
 
 private:

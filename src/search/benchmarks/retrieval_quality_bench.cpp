@@ -2057,9 +2057,15 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
     sqlite3_finalize(stmt);
 
     for (const auto& table : tables) {
-        const std::string countSql = "SELECT COUNT(*) FROM \"" + table + "\"";
+        std::string countTarget = table;
+        if (table.find("_vec0") != std::string::npos) {
+            // vec0 virtual tables require the module to be loaded on the inspecting connection.
+            // For benchmark readiness/footprint checks, count the shadow storage table directly.
+            countTarget += "_vectors";
+        }
+        const std::string countSql = "SELECT COUNT(*) FROM \"" + countTarget + "\"";
         if (sqlite3_prepare_v2(db, countSql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-            spdlog::warn("[Bench] Failed to count persisted HNSW table {} in {}: {}", table,
+            spdlog::warn("[Bench] Failed to count persisted vector table {} in {}: {}", countTarget,
                          vectorsDbPath.string(), sqlite3_errmsg(db));
             continue;
         }
@@ -2133,8 +2139,20 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
     metadata.quantizedHnswMode = j.value(
         "quantized_hnsw_mode",
         std::string(yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8)));
-    metadata.quantizedHnswRerankFactor =
-        static_cast<std::size_t>(j.value("quantized_hnsw_rerank_factor", 2));
+    if (j.contains("quantized_hnsw_rerank_factor")) {
+        try {
+            if (j["quantized_hnsw_rerank_factor"].is_number_unsigned() ||
+                j["quantized_hnsw_rerank_factor"].is_number_integer()) {
+                metadata.quantizedHnswRerankFactor =
+                    static_cast<std::size_t>(j["quantized_hnsw_rerank_factor"].get<int>());
+            } else if (j["quantized_hnsw_rerank_factor"].is_string()) {
+                metadata.quantizedHnswRerankFactor = static_cast<std::size_t>(
+                    std::stoull(j["quantized_hnsw_rerank_factor"].get<std::string>()));
+            }
+        } catch (...) {
+            metadata.quantizedHnswRerankFactor = 2;
+        }
+    }
     metadata.expectedDocs = j.value("expected_docs", 0);
     metadata.expectedQueries = j.value("expected_queries", 0);
     metadata.status = j.value("status", std::string("priming"));
@@ -5029,7 +5047,7 @@ struct BenchFixture {
         const char* envWarmCacheDir = std::getenv("YAMS_BENCH_WARM_CACHE_DIR");
         const char* envDataDir = std::getenv("YAMS_BENCH_DATA_DIR");
         if (envWarmCacheDir && *envWarmCacheDir) {
-            fs::path cacheDir = fs::path(envWarmCacheDir) / benchmarkEngineCacheLabel();
+            fs::path cacheDir = fs::path(envWarmCacheDir);
             warmDataDirPath = cacheDir;
             if (fs::exists(cacheDir)) {
                 auto metadataResult = readBenchCacheMetadata(cacheDir);
@@ -6355,12 +6373,12 @@ struct BenchFixture {
                              "persisted_meta={})",
                              modeLabel, vectorRows, persisted.nodeRows, persisted.metaRows);
                 const auto start = std::chrono::steady_clock::now();
-                const bool optimized = vectorDb->optimizeIndex();
+                const bool prepared = vectorDb->prepareSearchIndex();
                 const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - start)
                                            .count();
 
-                if (!optimized) {
+                if (!prepared) {
                     spdlog::warn("[Bench] Vector index finalize failed after {} ms: {}", elapsedMs,
                                  vectorDb->getLastError());
                     return false;

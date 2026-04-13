@@ -2,6 +2,8 @@
 
 #include <iostream>
 #include <sstream>
+#include <string_view>
+#include <vector>
 
 #include <yams/cli/command_catalog.h>
 #include <yams/cli/completion_command.h>
@@ -12,10 +14,96 @@ namespace yams::cli {
 
 namespace {
 
+struct CompletionSubcommand {
+    std::string name;
+    std::string description;
+};
+
+struct CompletionPathEntry {
+    std::string path;
+    std::vector<CompletionSubcommand> children;
+};
+
+std::string joinCommandPath(const std::vector<std::string>& path) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < path.size(); ++i) {
+        if (i > 0) {
+            oss << ' ';
+        }
+        oss << path[i];
+    }
+    return oss.str();
+}
+
 std::string describeCommand(std::string_view name) {
     return std::string(topLevelCommandDescription(name));
 }
 
+std::vector<CompletionSubcommand> collectDirectSubcommands(const CLI::App* app) {
+    std::vector<CompletionSubcommand> children;
+    if (app == nullptr) {
+        return children;
+    }
+
+    for (const auto* sub : app->get_subcommands([](const CLI::App*) { return true; })) {
+        if (sub == nullptr) {
+            continue;
+        }
+        const std::string name = sub->get_name();
+        if (name.empty()) {
+            continue;
+        }
+        std::string description = sub->get_description();
+        if (description.empty()) {
+            description = describeCommand(name);
+        }
+        children.push_back({name, std::move(description)});
+    }
+    return children;
+}
+
+void collectCommandTreeEntriesRecursive(const CLI::App* app, std::vector<std::string>& path,
+                                        std::vector<CompletionPathEntry>& out) {
+    const auto children = collectDirectSubcommands(app);
+    if (!children.empty()) {
+        out.push_back({joinCommandPath(path), children});
+    }
+
+    if (app == nullptr) {
+        return;
+    }
+
+    for (const auto* sub : app->get_subcommands([](const CLI::App*) { return true; })) {
+        if (sub == nullptr) {
+            continue;
+        }
+        const std::string name = sub->get_name();
+        if (name.empty()) {
+            continue;
+        }
+        path.push_back(name);
+        collectCommandTreeEntriesRecursive(sub, path, out);
+        path.pop_back();
+    }
+}
+
+std::vector<CompletionPathEntry> collectCommandTreeEntries(const CLI::App* rootApp) {
+    std::vector<CompletionPathEntry> out;
+    if (rootApp != nullptr) {
+        std::vector<std::string> path;
+        collectCommandTreeEntriesRecursive(rootApp, path, out);
+        if (!out.empty()) {
+            return out;
+        }
+    }
+
+    CompletionPathEntry rootEntry;
+    for (const auto& name : topLevelCommandNames()) {
+        rootEntry.children.push_back({name, describeCommand(name)});
+    }
+    out.push_back(std::move(rootEntry));
+    return out;
+}
 } // namespace
 
 std::string CompletionCommand::getName() const {
@@ -28,6 +116,7 @@ std::string CompletionCommand::getDescription() const {
 
 void CompletionCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     cli_ = cli;
+    rootApp_ = &app;
 
     auto* cmd = app.add_subcommand("completion", getDescription());
 
@@ -64,6 +153,17 @@ Result<void> CompletionCommand::execute() {
 }
 
 std::vector<std::string> CompletionCommand::getAvailableCommands() const {
+    std::vector<std::string> commands;
+    const auto tree = collectCommandTreeEntries(rootApp_);
+    if (!tree.empty()) {
+        commands.reserve(tree.front().children.size());
+        for (const auto& child : tree.front().children) {
+            commands.push_back(child.name);
+        }
+    }
+    if (!commands.empty()) {
+        return commands;
+    }
     return topLevelCommandNames();
 }
 
@@ -74,6 +174,7 @@ std::vector<std::string> CompletionCommand::getGlobalFlags() const {
 
 std::string CompletionCommand::generateBashCompletion() const {
     std::ostringstream oss;
+    const auto commandTree = collectCommandTreeEntries(rootApp_);
 
     oss << "#!/bin/bash\n";
     oss << "# Bash completion script for YAMS CLI\n";
@@ -89,42 +190,65 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "  _filedir() { COMPREPLY=(); }\n";
     oss << "fi\n\n";
 
+    oss << "_yams_subcommands_for() {\n";
+    oss << "    case \"$1\" in\n";
+    for (const auto& entry : commandTree) {
+        oss << "        \"" << entry.path << "\")\n";
+        oss << "            printf '%s\\n'";
+        for (const auto& child : entry.children) {
+            oss << " '" << child.name << "'";
+        }
+        oss << "\n";
+        oss << "            ;;\n";
+    }
+    oss << "    esac\n";
+    oss << "}\n\n";
+
+    oss << "_yams_command_path() {\n";
+    oss << "    local limit=\"$1\"\n";
+    oss << "    local path=\"\"\n";
+    oss << "    local i word subcommands\n";
+    oss << "    for ((i=1; i<limit; ++i)); do\n";
+    oss << "        word=\"${words[i]}\"\n";
+    oss << "        [[ \"$word\" == -* ]] && continue\n";
+    oss << "        subcommands=\"$(_yams_subcommands_for \"$path\" | tr '\\n' ' ')\"\n";
+    oss << "        [[ -z \"$subcommands\" ]] && break\n";
+    oss << "        if [[ \" $subcommands \" == *\" $word \"* ]]; then\n";
+    oss << "            path=\"${path:+$path }$word\"\n";
+    oss << "        else\n";
+    oss << "            break\n";
+    oss << "        fi\n";
+    oss << "    done\n";
+    oss << "    printf '%s' \"$path\"\n";
+    oss << "}\n\n";
+
     oss << "_yams_completion() {\n";
     oss << "    local cur prev words cword\n";
     oss << "    _init_completion || return\n";
     oss << "\n";
 
-    // Global flags
     oss << "    local global_flags=\"";
     for (const auto& flag : getGlobalFlags()) {
         oss << flag << " ";
     }
     oss << "\"\n";
 
-    // Commands
-    oss << "    local commands=\"";
-    for (const auto& cmd : getAvailableCommands()) {
-        oss << cmd << " ";
-    }
-    oss << "\"\n\n";
-
-    // Main completion logic
-    oss << "    # Complete subcommands\n";
-    oss << "    if [[ $cword -eq 1 ]]; then\n";
-    oss << "        COMPREPLY=($(compgen -W \"$commands\" -- \"$cur\"))\n";
-    oss << "        return 0\n";
+    oss << "    local command_path\n";
+    oss << "    command_path=\"$(_yams_command_path \"$cword\")\"\n";
+    oss << "    local available_subcommands\n";
+    oss << "    available_subcommands=\"$(_yams_subcommands_for \"$command_path\" | tr '\\n' ' "
+           "')\"\n";
+    oss << "    if [[ $cur != -* && -n \"$available_subcommands\" ]]; then\n";
+    oss << "        COMPREPLY=($(compgen -W \"$available_subcommands\" -- \"$cur\"))\n";
+    oss << "        if [[ ${#COMPREPLY[@]} -gt 0 ]]; then\n";
+    oss << "            return 0\n";
+    oss << "        fi\n";
     oss << "    fi\n\n";
 
-    // Command-specific completions
-    oss << "    # Handle command-specific completions\n";
-    oss << "    local command=\"${words[1]}\"\n";
-    oss << "    case \"$command\" in\n";
-
-    // Add command
+    oss << "    case \"$command_path\" in\n";
     oss << "        add)\n";
     oss << "            case \"$prev\" in\n";
     oss << "                --name|--tags|--metadata)\n";
-    oss << "                    # No completion for these options\n";
     oss << "                    return 0\n";
     oss << "                    ;;\n";
     oss << "                *)\n";
@@ -134,14 +258,11 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "                        COMPREPLY=($(compgen -W \"$add_flags $global_flags\" -- "
            "\"$cur\"))\n";
     oss << "                    else\n";
-    oss << "                        # Complete file paths\n";
     oss << "                        _filedir\n";
     oss << "                    fi\n";
     oss << "                    ;;\n";
     oss << "            esac\n";
     oss << "            ;;\n";
-
-    // Get command
     oss << "        get)\n";
     oss << "            case \"$prev\" in\n";
     oss << "                --output)\n";
@@ -149,7 +270,6 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "                    return 0\n";
     oss << "                    ;;\n";
     oss << "                --type|--mime|--extension)\n";
-    oss << "                    # No specific completion for these\n";
     oss << "                    return 0\n";
     oss << "                    ;;\n";
     oss << "                *)\n";
@@ -163,8 +283,6 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "                    ;;\n";
     oss << "            esac\n";
     oss << "            ;;\n";
-
-    // List command
     oss << "        list)\n";
     oss << "            case \"$prev\" in\n";
     oss << "                --format)\n";
@@ -189,8 +307,6 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "                    ;;\n";
     oss << "            esac\n";
     oss << "            ;;\n";
-
-    // Grep command
     oss << "        grep)\n";
     oss << "            case \"$prev\" in\n";
     oss << "                --color)\n";
@@ -211,8 +327,6 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "                    ;;\n";
     oss << "            esac\n";
     oss << "            ;;\n";
-
-    // Config command
     oss << "        config)\n";
     oss << "            case \"$prev\" in\n";
     oss << "                --format)\n";
@@ -226,8 +340,6 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "                    ;;\n";
     oss << "            esac\n";
     oss << "            ;;\n";
-
-    // Auth command
     oss << "        auth)\n";
     oss << "            case \"$prev\" in\n";
     oss << "                --key-type)\n";
@@ -246,8 +358,6 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "                    ;;\n";
     oss << "            esac\n";
     oss << "            ;;\n";
-
-    // Status and stats commands
     oss << "        status|stats)\n";
     oss << "            local status_flags=\"--no-physical --corpus\"\n";
     oss << "            if [[ $cur == -* ]]; then\n";
@@ -255,8 +365,6 @@ std::string CompletionCommand::generateBashCompletion() const {
            "\"$cur\"))\n";
     oss << "            fi\n";
     oss << "            ;;\n";
-
-    // Completion command
     oss << "        completion)\n";
     oss << "            if [[ $cword -eq 2 ]]; then\n";
     oss << "                COMPREPLY=($(compgen -W \"bash zsh fish powershell\" -- \"$cur\"))\n";
@@ -264,8 +372,6 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "                COMPREPLY=($(compgen -W \"--help\" -- \"$cur\"))\n";
     oss << "            fi\n";
     oss << "            ;;\n";
-
-    // Default case
     oss << "        *)\n";
     oss << "            if [[ $cur == -* ]]; then\n";
     oss << "                COMPREPLY=($(compgen -W \"$global_flags\" -- \"$cur\"))\n";
@@ -274,7 +380,6 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "    esac\n";
     oss << "}\n\n";
 
-    // Register the completion function
     oss << "# Register completion for yams command\n";
     oss << "complete -F _yams_completion yams\n";
 
@@ -283,6 +388,7 @@ std::string CompletionCommand::generateBashCompletion() const {
 
 std::string CompletionCommand::generateZshCompletion() const {
     std::ostringstream oss;
+    const auto commandTree = collectCommandTreeEntries(rootApp_);
 
     oss << "#compdef yams\n";
     oss << "# Zsh completion script for YAMS CLI\n";
@@ -296,6 +402,60 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "if ! type _arguments >/dev/null 2>&1; then\n";
     oss << "  _arguments() { return 0 }\n";
     oss << "fi\n\n";
+
+    oss << "_yams_subcommand_names_for() {\n";
+    oss << "    case \"$1\" in\n";
+    for (const auto& entry : commandTree) {
+        oss << "        '" << entry.path << "')\n";
+        oss << "            print -l";
+        for (const auto& child : entry.children) {
+            oss << " '" << child.name << "'";
+        }
+        oss << "\n";
+        oss << "            ;;\n";
+    }
+    oss << "    esac\n";
+    oss << "}\n\n";
+
+    oss << "_yams_describe_subcommands() {\n";
+    oss << "    local path=\"$1\"\n";
+    oss << "    local -a commands\n";
+    oss << "    case \"$path\" in\n";
+    for (const auto& entry : commandTree) {
+        oss << "        '" << entry.path << "')\n";
+        oss << "            commands=(\n";
+        for (const auto& child : entry.children) {
+            oss << "                '" << child.name << ":" << child.description << "'\n";
+        }
+        oss << "            )\n";
+        oss << "            ;;\n";
+    }
+    oss << "        *)\n";
+    oss << "            return 1\n";
+    oss << "            ;;\n";
+    oss << "    esac\n";
+    oss << "    _describe 'commands' commands\n";
+    oss << "}\n\n";
+
+    oss << "_yams_command_path() {\n";
+    oss << "    local limit=\"$1\"\n";
+    oss << "    local path=\"\"\n";
+    oss << "    local -a path_parts subcommands\n";
+    oss << "    local i word\n";
+    oss << "    for ((i = 2; i < limit; ++i)); do\n";
+    oss << "        word=\"$words[i]\"\n";
+    oss << "        [[ \"$word\" == -* ]] && continue\n";
+    oss << "        subcommands=(${(f)$(_yams_subcommand_names_for \"$path\")})\n";
+    oss << "        (( ${#subcommands[@]} == 0 )) && break\n";
+    oss << "        if (( ${subcommands[(Ie)$word]} )); then\n";
+    oss << "            path_parts+=(\"$word\")\n";
+    oss << "            path=\"${(j: :)path_parts}\"\n";
+    oss << "        else\n";
+    oss << "            break\n";
+    oss << "        fi\n";
+    oss << "    done\n";
+    oss << "    print -r -- \"$path\"\n";
+    oss << "}\n\n";
 
     oss << "_yams() {\n";
     oss << "    local context state state_descr line\n";
@@ -323,155 +483,183 @@ std::string CompletionCommand::generateZshCompletion() const {
 
     oss << "    _arguments -C \\\n";
     oss << "        \"$global_flags[@]\" \\\n";
-    oss << "        '1: :_yams_commands' \\\n";
     oss << "        '*:: :->args'\n\n";
 
-    oss << "    case $state in\n";
-    oss << "        args)\n";
-    oss << "            case $line[1] in\n";
+    oss << "    local command_path\n";
+    oss << "    command_path=\"$(_yams_command_path $CURRENT)\"\n";
+    oss << "    if [[ \"$PREFIX\" != -* ]]; then\n";
+    oss << "        if _yams_describe_subcommands \"$command_path\"; then\n";
+    oss << "            return 0\n";
+    oss << "        fi\n";
+    oss << "    fi\n\n";
 
-    // Add command
-    oss << "                add)\n";
-    oss << "                    _arguments \\\n";
-    oss << "                        '--name[Name for the content]:name:' \\\n";
-    oss << "                        '--tags[Tags for the content]:tags:' \\\n";
-    oss << "                        '--metadata[Additional metadata]:metadata:' \\\n";
-    oss << "                        '--snapshot-id[Snapshot ID]:id:' \\\n";
-    oss << "                        '*:file:_files'\n";
-    oss << "                    ;;\n";
-
-    // Get command
-    oss << "                get)\n";
-    oss << "                    _arguments \\\n";
-    oss << "                        '--output[Output file]:file:_files' \\\n";
-    oss << "                        '--type[File type filter]:type:' \\\n";
-    oss << "                        '--mime[MIME type filter]:mime:' \\\n";
-    oss << "                        '--extension[Extension filter]:extension:' \\\n";
-    oss << "                        '--binary[Binary files only]' \\\n";
-    oss << "                        '--text[Text files only]' \\\n";
-    oss << "                        '--created-after[Created after]:date:' \\\n";
-    oss << "                        '--created-before[Created before]:date:' \\\n";
-    oss << "                        '--modified-after[Modified after]:date:' \\\n";
-    oss << "                        '--modified-before[Modified before]:date:' \\\n";
-    oss << "                        '--indexed-after[Indexed after]:date:' \\\n";
-    oss << "                        '--indexed-before[Indexed before]:date:'\n";
-    oss << "                    ;;\n";
-
-    // List command
-    oss << "                list)\n";
-    oss << "                    _arguments \\\n";
-    oss << "                        '--format[Output format]:format:(table json csv minimal)' \\\n";
-    oss << "                        '--sort[Sort by]:sort:(name size date hash)' \\\n";
-    oss << "                        '--reverse[Reverse sort order]' \\\n";
-    oss << "                        '--limit[Limit results]:limit:' \\\n";
-    oss << "                        '--type[File type filter]:type:' \\\n";
-    oss << "                        '--mime[MIME type filter]:mime:' \\\n";
-    oss << "                        '--extension[Extension filter]:extension:' \\\n";
-    oss << "                        '--binary[Binary files only]' \\\n";
-    oss << "                        '--text[Text files only]' \\\n";
-    oss << "                        '--created-after[Created after]:date:' \\\n";
-    oss << "                        '--created-before[Created before]:date:' \\\n";
-    oss << "                        '--modified-after[Modified after]:date:' \\\n";
-    oss << "                        '--modified-before[Modified before]:date:' \\\n";
-    oss << "                        '--indexed-after[Indexed after]:date:' \\\n";
-    oss << "                        '--indexed-before[Indexed before]:date:'\n";
-    oss << "                    ;;\n";
-
-    // Grep command
-    oss << "                grep)\n";
-    oss << "                    _arguments \\\n";
-    oss << "                        '(-A --after)'{-A,--after}'[Show N lines after match]:N:' \\\n";
-    oss << "                        '(-B --before)'{-B,--before}'[Show N lines before match]:N:' "
-           "\\\n";
-    oss << "                        '(-C --context)'{-C,--context}'[Show N lines before and after "
+    oss << "    case \"$command_path\" in\n";
+    oss << "        add)\n";
+    oss << "            _arguments \\\n";
+    oss << "                '--name[Name for the content]:name:' \\\n";
+    oss << "                '--tags[Tags for the content]:tags:' \\\n";
+    oss << "                '--metadata[Additional metadata]:metadata:' \\\n";
+    oss << "                '--snapshot-id[Snapshot ID]:id:' \\\n";
+    oss << "                '*:file:_files'\n";
+    oss << "            ;;\n";
+    oss << "        get)\n";
+    oss << "            _arguments \\\n";
+    oss << "                '--output[Output file]:file:_files' \\\n";
+    oss << "                '--type[File type filter]:type:' \\\n";
+    oss << "                '--mime[MIME type filter]:mime:' \\\n";
+    oss << "                '--extension[Extension filter]:extension:' \\\n";
+    oss << "                '--binary[Binary files only]' \\\n";
+    oss << "                '--text[Text files only]' \\\n";
+    oss << "                '--created-after[Created after]:date:' \\\n";
+    oss << "                '--created-before[Created before]:date:' \\\n";
+    oss << "                '--modified-after[Modified after]:date:' \\\n";
+    oss << "                '--modified-before[Modified before]:date:' \\\n";
+    oss << "                '--indexed-after[Indexed after]:date:' \\\n";
+    oss << "                '--indexed-before[Indexed before]:date:'\n";
+    oss << "            ;;\n";
+    oss << "        list)\n";
+    oss << "            _arguments \\\n";
+    oss << "                '--format[Output format]:format:(table json csv minimal)' \\\n";
+    oss << "                '--sort[Sort by]:sort:(name size date hash)' \\\n";
+    oss << "                '--reverse[Reverse sort order]' \\\n";
+    oss << "                '--limit[Limit results]:limit:' \\\n";
+    oss << "                '--type[File type filter]:type:' \\\n";
+    oss << "                '--mime[MIME type filter]:mime:' \\\n";
+    oss << "                '--extension[Extension filter]:extension:' \\\n";
+    oss << "                '--binary[Binary files only]' \\\n";
+    oss << "                '--text[Text files only]' \\\n";
+    oss << "                '--created-after[Created after]:date:' \\\n";
+    oss << "                '--created-before[Created before]:date:' \\\n";
+    oss << "                '--modified-after[Modified after]:date:' \\\n";
+    oss << "                '--modified-before[Modified before]:date:' \\\n";
+    oss << "                '--indexed-after[Indexed after]:date:' \\\n";
+    oss << "                '--indexed-before[Indexed before]:date:'\n";
+    oss << "            ;;\n";
+    oss << "        grep)\n";
+    oss << "            _arguments \\\n";
+    oss << "                '(-A --after)'{-A,--after}'[Show N lines after match]:N:' \\\n";
+    oss << "                '(-B --before)'{-B,--before}'[Show N lines before match]:N:' \\\n";
+    oss << "                '(-C --context)'{-C,--context}'[Show N lines before and after "
            "match]:N:' \\\n";
-    oss << "                        '(-i --ignore-case)'{-i,--ignore-case}'[Case-insensitive "
-           "search]' \\\n";
-    oss << "                        '(-w --word)'{-w,--word}'[Match whole words only]' \\\n";
-    oss << "                        '(-v --invert)'{-v,--invert}'[Invert match]' \\\n";
-    oss << "                        '(-n --line-numbers)'{-n,--line-numbers}'[Show line numbers]' "
-           "\\\n";
-    oss << "                        '(-H --with-filename)'{-H,--with-filename}'[Show filename with "
+    oss << "                '(-i --ignore-case)'{-i,--ignore-case}'[Case-insensitive search]' \\\n";
+    oss << "                '(-w --word)'{-w,--word}'[Match whole words only]' \\\n";
+    oss << "                '(-v --invert)'{-v,--invert}'[Invert match]' \\\n";
+    oss << "                '(-n --line-numbers)'{-n,--line-numbers}'[Show line numbers]' \\\n";
+    oss << "                '(-H --with-filename)'{-H,--with-filename}'[Show filename with "
            "matches]' \\\n";
-    oss << "                        '--no-filename[Never show filename]' \\\n";
-    oss << "                        '(-c --count)'{-c,--count}'[Show only count of matching "
-           "lines]' \\\n";
-    oss << "                        '(-l --files-with-matches)'{-l,--files-with-matches}'[Show "
-           "only filenames with matches]' \\\n";
-    oss << "                        '(-L --files-without-match)'{-L,--files-without-match}'[Show "
-           "only filenames without matches]' \\\n";
-    oss << "                        '--color[Color mode]:mode:(always never auto)' \\\n";
-    oss << "                        '(-m --max-count)'{-m,--max-count}'[Stop after N matches per "
-           "file]:N:' \\\n";
-    oss << "                        '--limit[Alias of --max-count]:N:' \\\n";
-    oss << "                        '*:file:_files'\n";
-    oss << "                    ;;\n";
-
-    // Status and stats commands
-    oss << "                status|stats)\n";
-    oss << "                    _arguments \\\n";
-    oss << "                        '--no-physical[Use daemon stats only without fallback scan]' "
+    oss << "                '--no-filename[Never show filename]' \\\n";
+    oss << "                '(-c --count)'{-c,--count}'[Show only count of matching lines]' \\\n";
+    oss << "                '(-l --files-with-matches)'{-l,--files-with-matches}'[Show only "
+           "filenames with matches]' \\\n";
+    oss << "                '(-L --files-without-match)'{-L,--files-without-match}'[Show only "
+           "filenames without matches]' \\\n";
+    oss << "                '--color[Color mode]:mode:(always never auto)' \\\n";
+    oss << "                '(-m --max-count)'{-m,--max-count}'[Stop after N matches per file]:N:' "
            "\\\n";
-    oss << "                        '--corpus[Show corpus statistics for search tuning]'\n";
-    oss << "                    ;;\n";
-
-    // Config command
-    oss << "                config)\n";
-    oss << "                    _arguments \\\n";
-    oss << "                        '--format[Output format]:format:(toml json)'\n";
-    oss << "                    ;;\n";
-
-    // Auth command
-    oss << "                auth)\n";
-    oss << "                    _arguments \\\n";
-    oss << "                        '--key-type[Key type]:type:(ed25519 rsa)' \\\n";
-    oss << "                        '--output[Output directory]:directory:_directories' \\\n";
-    oss << "                        '--format[Output format]:format:(table json)' \\\n";
-    oss << "                        '--validity[Token validity]:validity:' \\\n";
-    oss << "                        '--key-name[Key name]:name:'\n";
-    oss << "                    ;;\n";
-
-    // Completion command
-    oss << "                completion)\n";
-    oss << "                    _arguments '1:shell:(bash zsh fish powershell)'\n";
-    oss << "                    ;;\n";
-
-    oss << "            esac\n";
+    oss << "                '--limit[Alias of --max-count]:N:' \\\n";
+    oss << "                '*:file:_files'\n";
+    oss << "            ;;\n";
+    oss << "        status|stats)\n";
+    oss << "            _arguments \\\n";
+    oss << "                '--no-physical[Use daemon stats only without fallback scan]' \\\n";
+    oss << "                '--corpus[Show corpus statistics for search tuning]'\n";
+    oss << "            ;;\n";
+    oss << "        config)\n";
+    oss << "            _arguments '--format[Output format]:format:(toml json)'\n";
+    oss << "            ;;\n";
+    oss << "        auth)\n";
+    oss << "            _arguments \\\n";
+    oss << "                '--key-type[Key type]:type:(ed25519 rsa)' \\\n";
+    oss << "                '--output[Output directory]:directory:_directories' \\\n";
+    oss << "                '--format[Output format]:format:(table json)' \\\n";
+    oss << "                '--validity[Token validity]:validity:' \\\n";
+    oss << "                '--key-name[Key name]:name:'\n";
+    oss << "            ;;\n";
+    oss << "        completion)\n";
+    oss << "            _arguments '1:shell:(bash zsh fish powershell)'\n";
     oss << "            ;;\n";
     oss << "    esac\n";
     oss << "}\n\n";
 
-    oss << "_yams_commands() {\n";
-    oss << "    local commands\n";
-    oss << "    commands=(\n";
-    for (const auto& cmd : getAvailableCommands()) {
-        oss << "        '" << cmd << ":" << describeCommand(cmd);
-        oss << "'\n";
-    }
-    oss << "    )\n";
-    oss << "    _describe 'commands' commands\n";
-    oss << "}\n\n";
+    oss << "if typeset -f compdef >/dev/null 2>&1; then\n";
+    oss << "    compdef _yams yams\n";
+    oss << "fi\n";
 
     return oss.str();
 }
 
 std::string CompletionCommand::generateFishCompletion() const {
     std::ostringstream oss;
+    const auto commandTree = collectCommandTreeEntries(rootApp_);
 
     oss << "# Fish completion script for YAMS CLI\n";
     oss << "# Generated by: yams completion fish\n";
     oss << "\n";
 
-    // Function to check if we're completing a specific command
-    oss << "function __fish_yams_using_command\n";
-    oss << "    set cmd (commandline -opc)\n";
-    oss << "    if [ (count $cmd) -gt 1 ]; and [ $cmd[2] = $argv[1] ]\n";
-    oss << "        return 0\n";
+    oss << "function __fish_yams_subcommand_names_for\n";
+    oss << "    switch \"$argv[1]\"\n";
+    for (const auto& entry : commandTree) {
+        oss << "        case '" << entry.path << "'\n";
+        oss << "            printf '%s\\n'";
+        for (const auto& child : entry.children) {
+            oss << " '" << child.name << "'";
+        }
+        oss << "\n";
+    }
     oss << "    end\n";
-    oss << "    return 1\n";
     oss << "end\n\n";
 
-    // Global options
+    oss << "function __fish_yams_current_path\n";
+    oss << "    set -l cmd (commandline -opc)\n";
+    oss << "    if test (count $cmd) -eq 0\n";
+    oss << "        return 1\n";
+    oss << "    end\n";
+    oss << "    set -e cmd[1]\n";
+    oss << "    set -l path\n";
+    oss << "    for token in $cmd\n";
+    oss << "        if string match -qr '^-' -- $token\n";
+    oss << "            continue\n";
+    oss << "        end\n";
+    oss << "        set -l current (string join ' ' $path)\n";
+    oss << "        set -l children (__fish_yams_subcommand_names_for \"$current\")\n";
+    oss << "        if test (count $children) -eq 0\n";
+    oss << "            break\n";
+    oss << "        end\n";
+    oss << "        if contains -- $token $children\n";
+    oss << "            set path $path $token\n";
+    oss << "        else\n";
+    oss << "            break\n";
+    oss << "        end\n";
+    oss << "    end\n";
+    oss << "    string join ' ' $path\n";
+    oss << "end\n\n";
+
+    oss << "function __fish_yams_path_is\n";
+    oss << "    test (__fish_yams_current_path) = (string join ' ' $argv)\n";
+    oss << "end\n\n";
+
+    oss << "function __fish_yams_has_subcommands\n";
+    oss << "    if string match -qr '^-' -- (commandline -ct)\n";
+    oss << "        return 1\n";
+    oss << "    end\n";
+    oss << "    set -l path (__fish_yams_current_path)\n";
+    oss << "    set -l children (__fish_yams_subcommand_names_for \"$path\")\n";
+    oss << "    test (count $children) -gt 0\n";
+    oss << "end\n\n";
+
+    oss << "function __fish_yams_subcommands\n";
+    oss << "    switch (__fish_yams_current_path)\n";
+    for (const auto& entry : commandTree) {
+        oss << "        case '" << entry.path << "'\n";
+        oss << "            printf '%s\\t%s\\n'";
+        for (const auto& child : entry.children) {
+            oss << " '" << child.name << "' '" << child.description << "'";
+        }
+        oss << "\n";
+    }
+    oss << "    end\n";
+    oss << "end\n\n";
+
     oss << "# Global options\n";
     oss << "complete -c yams -s h -l help -d 'Show help information'\n";
     oss << "complete -c yams -l version -d 'Show version information'\n";
@@ -481,152 +669,127 @@ std::string CompletionCommand::generateFishCompletion() const {
     oss << "complete -c yams -l storage -d 'Data directory for storage' -r\n";
     oss << "complete -c yams -l help-all -d 'Show extended help'\n\n";
 
-    // Subcommands
-    oss << "# Subcommands\n";
-    for (const auto& cmd : getAvailableCommands()) {
-        oss << "complete -c yams -f -n '__fish_use_subcommand' -a " << cmd << " -d '"
-            << describeCommand(cmd) << "'\n";
-    }
-    oss << "\n";
+    oss << "# Dynamic subcommand tree\n";
+    oss << "complete -c yams -f -n '__fish_yams_has_subcommands' -a "
+           "'(__fish_yams_subcommands)'\n\n";
 
-    // Command-specific completions
-
-    // Add command
     oss << "# add command\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command add' -l name -d 'Name for the "
-           "content' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command add' -l tags -d 'Tags for the "
-           "content' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command add' -l metadata -d 'Additional "
-           "metadata' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command add' -l snapshot-id -d 'Snapshot ID' "
+    oss << "complete -c yams -f -n '__fish_yams_path_is add' -l name -d 'Name for the content' "
+           "-r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is add' -l tags -d 'Tags for the content' "
+           "-r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is add' -l metadata -d 'Additional metadata' "
+           "-r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is add' -l snapshot-id -d 'Snapshot ID' "
            "-r\n\n";
 
-    // Get command
     oss << "# get command\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l output -d 'Output file' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l type -d 'File type filter' "
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l output -d 'Output file' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l type -d 'File type filter' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l mime -d 'MIME type filter' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l extension -d 'Extension filter' "
            "-r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l mime -d 'MIME type filter' "
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l binary -d 'Binary files only'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l text -d 'Text files only'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l created-after -d 'Created after' "
            "-r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l extension -d 'Extension "
-           "filter' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l binary -d 'Binary files "
-           "only'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l text -d 'Text files only'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l created-after -d 'Created "
-           "after' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l created-before -d 'Created "
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l created-before -d 'Created before' "
+           "-r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l modified-after -d 'Modified after' "
+           "-r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l modified-before -d 'Modified "
            "before' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l modified-after -d 'Modified "
-           "after' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l modified-before -d 'Modified "
-           "before' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l indexed-after -d 'Indexed "
-           "after' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command get' -l indexed-before -d 'Indexed "
-           "before' -r\n\n";
-
-    // List command
-    oss << "# list command\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l format -d 'Output format' "
-           "-a 'table json csv minimal'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l sort -d 'Sort by' -a 'name "
-           "size date hash'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l reverse -d 'Reverse sort "
-           "order'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l limit -d 'Limit results' "
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l indexed-after -d 'Indexed after' "
            "-r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l type -d 'File type filter' "
-           "-r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l mime -d 'MIME type filter' "
-           "-r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l extension -d 'Extension "
-           "filter' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l binary -d 'Binary files "
-           "only'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l text -d 'Text files only'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l created-after -d 'Created "
-           "after' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l created-before -d 'Created "
-           "before' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l modified-after -d 'Modified "
-           "after' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l modified-before -d "
-           "'Modified before' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l indexed-after -d 'Indexed "
-           "after' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command list' -l indexed-before -d 'Indexed "
-           "before' -r\n\n";
-
-    // Grep command
-    oss << "# grep command\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l after -s A -d 'Show N lines "
-           "after match' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l before -s B -d 'Show N "
-           "lines before match' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l context -s C -d 'Show N "
-           "lines before and after match' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l ignore-case -s i -d "
-           "'Case-insensitive search'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l word -s w -d 'Match whole "
-           "words only'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l invert -s v -d 'Invert "
-           "match'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l line-numbers -s n -d 'Show "
-           "line numbers'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l with-filename -s H -d 'Show "
-           "filename with matches'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l no-filename -d 'Never show "
-           "filename'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l count -s c -d 'Show only "
-           "count of matching lines'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l files-with-matches -s l -d "
-           "'Show only filenames with matches'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l files-without-match -s L -d "
-           "'Show only filenames without matches'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l color -d 'Color mode' -a "
-           "'always never auto'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l max-count -s m -d 'Stop "
-           "after N matches per file' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l limit -d 'Alias of "
-           "--max-count' -r\n\n";
-
-    // Status and stats commands
-    oss << "# status/stats commands\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command status; or __fish_yams_using_command "
-           "stats' -l no-physical -d 'Use daemon stats only without fallback scan'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command status; or __fish_yams_using_command "
-           "stats' -l corpus -d 'Show corpus statistics for search tuning'\n\n";
-
-    // Config command
-    oss << "# config command\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command config' -l format -d 'Output format' "
-           "-a 'toml json'\n\n";
-
-    // Auth command
-    oss << "# auth command\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command auth' -l key-type -d 'Key type' -a "
-           "'ed25519 rsa'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command auth' -l output -d 'Output "
-           "directory' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command auth' -l format -d 'Output format' "
-           "-a 'table json'\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command auth' -l validity -d 'Token "
-           "validity' -r\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command auth' -l key-name -d 'Key name' "
+    oss << "complete -c yams -f -n '__fish_yams_path_is get' -l indexed-before -d 'Indexed before' "
            "-r\n\n";
 
-    // Completion command
+    oss << "# list command\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l format -d 'Output format' -a "
+           "'table json csv minimal'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l sort -d 'Sort by' -a 'name size "
+           "date hash'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l reverse -d 'Reverse sort order'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l limit -d 'Limit results' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l type -d 'File type filter' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l mime -d 'MIME type filter' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l extension -d 'Extension filter' "
+           "-r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l binary -d 'Binary files only'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l text -d 'Text files only'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l created-after -d 'Created after' "
+           "-r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l created-before -d 'Created "
+           "before' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l modified-after -d 'Modified "
+           "after' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l modified-before -d 'Modified "
+           "before' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l indexed-after -d 'Indexed after' "
+           "-r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is list' -l indexed-before -d 'Indexed "
+           "before' -r\n\n";
+
+    oss << "# grep command\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l after -s A -d 'Show N lines after "
+           "match' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l before -s B -d 'Show N lines "
+           "before match' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l context -s C -d 'Show N lines "
+           "before and after match' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l ignore-case -s i -d "
+           "'Case-insensitive search'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l word -s w -d 'Match whole words "
+           "only'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l invert -s v -d 'Invert match'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l line-numbers -s n -d 'Show line "
+           "numbers'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l with-filename -s H -d 'Show "
+           "filename with matches'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l no-filename -d 'Never show "
+           "filename'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l count -s c -d 'Show only count of "
+           "matching lines'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l files-with-matches -s l -d 'Show "
+           "only filenames with matches'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l files-without-match -s L -d 'Show "
+           "only filenames without matches'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l color -d 'Color mode' -a 'always "
+           "never auto'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l max-count -s m -d 'Stop after N "
+           "matches per file' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is grep' -l limit -d 'Alias of --max-count' "
+           "-r\n\n";
+
+    oss << "# status/stats commands\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is status; or __fish_yams_path_is stats' -l "
+           "no-physical -d 'Use daemon stats only without fallback scan'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is status; or __fish_yams_path_is stats' -l "
+           "corpus -d 'Show corpus statistics for search tuning'\n\n";
+
+    oss << "# config command\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is config' -l format -d 'Output format' -a "
+           "'toml json'\n\n";
+
+    oss << "# auth command\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is auth' -l key-type -d 'Key type' -a "
+           "'ed25519 rsa'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is auth' -l output -d 'Output directory' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is auth' -l format -d 'Output format' -a "
+           "'table json'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is auth' -l validity -d 'Token validity' -r\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is auth' -l key-name -d 'Key name' -r\n\n";
+
     oss << "# completion command\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command completion' -a 'bash zsh fish "
-           "powershell' -d 'Shell type'\n";
+    oss << "complete -c yams -f -n '__fish_yams_path_is completion' -a 'bash zsh fish powershell' "
+           "-d 'Shell type'\n";
 
     return oss.str();
 }
 
 std::string CompletionCommand::generatePowerShellCompletion() const {
     std::ostringstream oss;
+    const auto commandTree = collectCommandTreeEntries(rootApp_);
 
     oss << "# PowerShell completion script for YAMS CLI\n";
     oss << "# Generated by: yams completion powershell\n";
@@ -643,6 +806,17 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
             << "' }\n";
     }
     oss << "    )\n\n";
+
+    oss << "    $subcommands = @{\n";
+    for (const auto& entry : commandTree) {
+        oss << "        '" << entry.path << "' = @(\n";
+        for (const auto& child : entry.children) {
+            oss << "            @{ Name = '" << child.name << "'; Description = '"
+                << child.description << "' }\n";
+        }
+        oss << "        )\n";
+    }
+    oss << "    }\n\n";
 
     oss << "    $globalFlags = @(\n";
     oss << "        @{ Name = '--help'; Alias = '-h'; Description = 'Show help message' }\n";
@@ -788,19 +962,52 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
 
     oss << "    }\n\n";
 
-    // Completion logic
-    oss << "    $elements = $commandAst.CommandElements\n";
-    oss << "    $command = $null\n";
-    oss << "    if ($elements.Count -gt 1) {\n";
-    oss << "        $command = $elements[1].Extent.Text\n";
+    oss << "    function Resolve-YamsCommandPath {\n";
+    oss << "        param($Tokens, $SubcommandMap)\n";
+    oss << "        $pathParts = @()\n";
+    oss << "        $currentPath = ''\n";
+    oss << "        foreach ($token in $Tokens) {\n";
+    oss << "            if ($token -like '-*') {\n";
+    oss << "                continue\n";
+    oss << "            }\n";
+    oss << "            if (-not $SubcommandMap.ContainsKey($currentPath)) {\n";
+    oss << "                break\n";
+    oss << "            }\n";
+    oss << "            $names = @($SubcommandMap[$currentPath] | ForEach-Object { $_.Name })\n";
+    oss << "            if ($names -contains $token) {\n";
+    oss << "                $pathParts += $token\n";
+    oss << "                $currentPath = [string]::Join(' ', $pathParts)\n";
+    oss << "            } else {\n";
+    oss << "                break\n";
+    oss << "            }\n";
+    oss << "        }\n";
+    oss << "        return $currentPath\n";
     oss << "    }\n\n";
 
-    oss << "    # Complete commands at position 1\n";
-    oss << "    if ($elements.Count -eq 1 -or ($elements.Count -eq 2 -and $wordToComplete -ne "
-           "'')) {\n";
-    oss << "        $commands | Where-Object { $_.Name -like \"$wordToComplete*\" } | "
-           "ForEach-Object "
-           "{\n";
+    oss << "    $elements = $commandAst.CommandElements\n";
+    oss << "    $tokens = @()\n";
+    oss << "    for ($i = 1; $i -lt $elements.Count; $i++) {\n";
+    oss << "        $tokens += $elements[$i].Extent.Text\n";
+    oss << "    }\n";
+    oss << "    $commandPath = Resolve-YamsCommandPath $tokens $subcommands\n\n";
+
+    oss << "    if ($wordToComplete -notlike '-*' -and $subcommands.ContainsKey($commandPath)) {\n";
+    oss << "        $subcommands[$commandPath] | Where-Object { $_.Name -like \"$wordToComplete*\" "
+           "} | "
+           "ForEach-Object {\n";
+    oss << "            [System.Management.Automation.CompletionResult]::new(\n";
+    oss << "                $_.Name, $_.Name, 'ParameterValue', $_.Description\n";
+    oss << "            )\n";
+    oss << "        }\n";
+    oss << "        if (($subcommands[$commandPath] | Where-Object { $_.Name -like "
+           "\"$wordToComplete*\" }).Count -gt 0) {\n";
+    oss << "            return\n";
+    oss << "        }\n";
+    oss << "    }\n\n";
+
+    oss << "    if ($commandPath -eq 'completion' -and $wordToComplete -notlike '-*') {\n";
+    oss << "        $commandFlags['completion'] | Where-Object { $_.Name -like "
+           "\"$wordToComplete*\" } | ForEach-Object {\n";
     oss << "            [System.Management.Automation.CompletionResult]::new(\n";
     oss << "                $_.Name, $_.Name, 'ParameterValue', $_.Description\n";
     oss << "            )\n";
@@ -812,8 +1019,8 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
     oss << "    if ($wordToComplete -like '-*' -or $wordToComplete -eq '') {\n";
     oss << "        $flags = @()\n";
     oss << "        $flags += $globalFlags\n";
-    oss << "        if ($command -and $commandFlags.ContainsKey($command)) {\n";
-    oss << "            $flags += $commandFlags[$command]\n";
+    oss << "        if ($commandPath -and $commandFlags.ContainsKey($commandPath)) {\n";
+    oss << "            $flags += $commandFlags[$commandPath]\n";
     oss << "        }\n";
     oss << "        $flags | Where-Object { $_.Name -like \"$wordToComplete*\" } | ForEach-Object "
            "{\n";
@@ -824,16 +1031,18 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
     oss << "    }\n\n";
 
     oss << "    # Complete flag values\n";
-    oss << "    $prevElement = $elements[$elements.Count - 2].Extent.Text\n";
-    oss << "    if ($command -and $commandFlags.ContainsKey($command)) {\n";
-    oss << "        $flag = $commandFlags[$command] | Where-Object { $_.Name -eq $prevElement -or "
-           "$_.Alias -eq $prevElement }\n";
-    oss << "        if ($flag -and $flag.Values) {\n";
-    oss << "            $flag.Values | Where-Object { $_ -like \"$wordToComplete*\" } | "
+    oss << "    if ($elements.Count -ge 2) {\n";
+    oss << "        $prevElement = $elements[$elements.Count - 2].Extent.Text\n";
+    oss << "        if ($commandPath -and $commandFlags.ContainsKey($commandPath)) {\n";
+    oss << "            $flag = $commandFlags[$commandPath] | Where-Object { $_.Name -eq "
+           "$prevElement -or $_.Alias -eq $prevElement }\n";
+    oss << "            if ($flag -and $flag.Values) {\n";
+    oss << "                $flag.Values | Where-Object { $_ -like \"$wordToComplete*\" } | "
            "ForEach-Object {\n";
-    oss << "                [System.Management.Automation.CompletionResult]::new(\n";
-    oss << "                    $_, $_, 'ParameterValue', $_\n";
-    oss << "                )\n";
+    oss << "                    [System.Management.Automation.CompletionResult]::new(\n";
+    oss << "                        $_, $_, 'ParameterValue', $_\n";
+    oss << "                    )\n";
+    oss << "                }\n";
     oss << "            }\n";
     oss << "        }\n";
     oss << "    }\n";

@@ -41,8 +41,30 @@ Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64
 # Stable release (recommended)
 brew install trvon/yams/yams
 
+# Homebrew installs bash/zsh/fish completions automatically.
+# If completion is not active in the current shell yet, restart your shell
+# or use one of the manual fallbacks below.
+
 # Verify installation
 yams --version
+```
+
+Manual completion setup if needed:
+
+```bash
+# Bash
+source <(yams completion bash)
+
+# Zsh
+autoload -U compinit && compinit
+source <(yams completion zsh)
+
+# Fish
+mkdir -p ~/.config/fish/completions
+yams completion fish > ~/.config/fish/completions/yams.fish
+
+# PowerShell
+yams completion powershell >> $PROFILE
 ```
 
 ### Docker

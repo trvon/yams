@@ -14,7 +14,7 @@ class YamsCLI;
 /**
  * Command to generate shell completion scripts for bash, zsh, fish, and PowerShell
  * Since CLI11 v2.4.1 doesn't support built-in completions, we generate
- * them manually with hardcoded knowledge of YAMS command structure.
+ * them manually from the registered CLI command graph.
  */
 class CompletionCommand : public ICommand {
 public:
@@ -26,6 +26,7 @@ public:
 
 private:
     YamsCLI* cli_ = nullptr;
+    CLI::App* rootApp_ = nullptr;
     std::string shell_; // bash, zsh, fish, powershell
 
     // Shell-specific completion script generators

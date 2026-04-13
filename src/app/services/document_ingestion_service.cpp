@@ -277,20 +277,22 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
     return Error{ErrorCode::Timeout, "AddDocument timed out"};
 }
 
-BatchAddResult DocumentIngestionService::addBatch(const std::vector<AddOptions>& batch,
-                                                  int maxConcurrent) const {
+boost::asio::awaitable<BatchAddResult>
+DocumentIngestionService::addBatchAsync(const std::vector<AddOptions>& batch,
+                                        int maxConcurrent) const {
     BatchAddResult out;
     out.results.resize(batch.size(), Error{ErrorCode::Unknown, "not started"});
 
     if (batch.empty())
-        return out;
+        co_return out;
 
     const std::size_t concurrency = resolveBatchConcurrency(batch.size(), maxConcurrent);
-    auto exec = yams::daemon::GlobalIOContext::global_executor();
+    auto exec = co_await boost::asio::this_coro::executor;
     std::vector<std::future<Result<yams::daemon::AddDocumentResponse>>> futures;
     std::vector<std::size_t> indices;
     futures.reserve(concurrency);
     indices.reserve(concurrency);
+    boost::asio::steady_timer timer(exec);
 
     for (std::size_t offset = 0; offset < batch.size();) {
         const std::size_t waveSize = std::min<std::size_t>(concurrency, batch.size() - offset);
@@ -311,6 +313,11 @@ BatchAddResult DocumentIngestionService::addBatch(const std::vector<AddOptions>&
 
         for (std::size_t i = 0; i < futures.size(); ++i) {
             try {
+                while (futures[i].wait_for(std::chrono::milliseconds(0)) !=
+                       std::future_status::ready) {
+                    timer.expires_after(std::chrono::milliseconds(5));
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                }
                 out.results[indices[i]] = futures[i].get();
             } catch (const std::exception& e) {
                 out.results[indices[i]] =
@@ -331,7 +338,7 @@ BatchAddResult DocumentIngestionService::addBatch(const std::vector<AddOptions>&
         else
             ++out.failed;
     }
-    return out;
+    co_return out;
 }
 
 int DocumentIngestionService::testing_resolveBatchConcurrency(std::size_t batchSize,

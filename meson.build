@@ -611,6 +611,7 @@ else
   subdir('src/wal')
   subdir('src/manifest')
   subdir('src/metadata')
+  subdir('src/topology')
   subdir('src/integrity')
   subdir('src/config')
   subdir('src/extraction')

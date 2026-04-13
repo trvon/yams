@@ -67,6 +67,7 @@ test_deps = [
   dependency('yams_manifest'),
   dependency('yams_integrity'),
   dependency('yams_metadata'),
+  dependency('yams_topology'),
   dependency('yams_extraction'),
   dependency('yams_detection'),
   dependency('yams_content'),
@@ -1819,6 +1820,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_topology_baseline_exe = executable('catch2_topology_baseline',
+    files('unit/topology/topology_baseline_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Fuzzy Index Prioritization Tests(Catch2) - fuzzy index scoring
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -2376,6 +2386,12 @@ if catch2_dep.found()
 
   test('metadata_repository_cache', catch2_metadata_repository_cache_exe,
     suite: ['catch2', 'unit', 'metadata', 'cache'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('topology_baseline', catch2_topology_baseline_exe,
+    suite: ['catch2', 'unit', 'topology'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

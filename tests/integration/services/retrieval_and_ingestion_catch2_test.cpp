@@ -10,7 +10,6 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <iostream>
 #include <string_view>
 #include <thread>
@@ -20,6 +19,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include "../daemon/test_daemon_harness.h"
 #include "common/capability.h"
@@ -403,7 +403,9 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddBatchPreservesOrderAndMi
     b.path = docB.path.string();
     batch.push_back(b);
 
-    auto batchRes = ing.addBatch(batch, 2);
+    auto batchRes = boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(),
+                                          ing.addBatchAsync(batch, 2), boost::asio::use_future)
+                        .get();
     REQUIRE((batchRes.results.size() == batch.size()));
     CHECK((batchRes.succeeded == 2));
     CHECK((batchRes.failed == 1));
