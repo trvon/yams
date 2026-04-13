@@ -9,6 +9,7 @@
 #include <yams/cli/error_hints.h>
 #include <yams/cli/pipeline_stage_render.h>
 #include <yams/cli/result_helpers.h>
+#include <yams/cli/status_metrics.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
@@ -2045,6 +2046,7 @@ private:
                 normalizePath(*daemonDataDir) != normalizePath(configuredDataDir);
             const bool daemonUsesEphemeralData =
                 hasDaemonDataDir && isEphemeralDataDir(*daemonDataDir);
+            const auto searchMetrics = effectiveSearchMetrics(s);
 
             std::cout << title_banner("YAMS Daemon") << "\n\n";
 
@@ -2077,12 +2079,11 @@ private:
             }
 
             // Search summary
-            Severity searchSev = s.searchMetrics.queued > 50   ? Severity::Bad
-                                 : s.searchMetrics.queued > 10 ? Severity::Warn
-                                                               : Severity::Good;
+            Severity searchSev = searchMetrics.queued > 50   ? Severity::Bad
+                                 : searchMetrics.queued > 10 ? Severity::Warn
+                                                             : Severity::Good;
             std::ostringstream searchInfo;
-            searchInfo << s.searchMetrics.active << " active · " << s.searchMetrics.queued
-                       << " queued";
+            searchInfo << searchMetrics.active << " active · " << searchMetrics.queued << " queued";
             overview.push_back({"Search", paintStatus(searchSev, searchInfo.str()), ""});
 
             // Embeddings summary
@@ -2440,22 +2441,22 @@ private:
 
                 std::cout << "\n" << section_header("Search") << "\n\n";
                 std::vector<Row> searchRows;
+                const auto searchMetrics = effectiveSearchMetrics(status);
                 std::ostringstream base;
-                base << status.searchMetrics.active << " active · " << status.searchMetrics.queued
-                     << " queued";
+                base << searchMetrics.active << " active · " << searchMetrics.queued << " queued";
                 std::ostringstream extra;
-                extra << "executed " << status.searchMetrics.executed << " · cache " << std::fixed
-                      << std::setprecision(1) << (status.searchMetrics.cacheHitRate * 100.0)
-                      << "% · latency " << status.searchMetrics.avgLatencyUs << "µs";
+                extra << "executed " << searchMetrics.executed << " · cache " << std::fixed
+                      << std::setprecision(1) << (searchMetrics.cacheHitRate * 100.0)
+                      << "% · latency " << searchMetrics.avgLatencyUs << "µs";
                 Severity searchSeverity =
-                    status.searchMetrics.queued > 50
+                    searchMetrics.queued > 50
                         ? Severity::Bad
-                        : (status.searchMetrics.queued > 10 ? Severity::Warn : Severity::Good);
+                        : (searchMetrics.queued > 10 ? Severity::Warn : Severity::Good);
                 searchRows.push_back(
                     {"Queries", paintStatus(searchSeverity, base.str()), extra.str()});
-                if (status.searchMetrics.concurrencyLimit > 0) {
+                if (searchMetrics.concurrencyLimit > 0) {
                     searchRows.push_back(
-                        {"Concurrency", std::to_string(status.searchMetrics.concurrencyLimit), ""});
+                        {"Concurrency", std::to_string(searchMetrics.concurrencyLimit), ""});
                 }
                 render_rows(std::cout, searchRows);
 

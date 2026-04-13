@@ -4,6 +4,7 @@
 #include <yams/tools/command.h>
 // Daemon metrics (prefer daemon-first, avoid local scans)
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/status_metrics.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -419,48 +420,49 @@ private:
             render_rows(std::cout, vecRows);
         }
 
+        const auto searchMetrics = yams::cli::effectiveSearchMetrics(st);
+
         // Search Metrics
-        if (st.searchMetrics.executed > 0 || st.searchMetrics.active > 0) {
+        if (searchMetrics.executed > 0 || searchMetrics.active > 0 || searchMetrics.queued > 0 ||
+            searchMetrics.avgLatencyUs > 0) {
             std::cout << "\n" << section_header("Search Metrics") << "\n\n";
             std::vector<Row> searchRows;
 
-            searchRows.push_back(
-                {"Queries executed", format_number(st.searchMetrics.executed), ""});
+            searchRows.push_back({"Queries executed", format_number(searchMetrics.executed), ""});
 
-            if (st.searchMetrics.active > 0 || st.searchMetrics.queued > 0) {
+            if (searchMetrics.active > 0 || searchMetrics.queued > 0) {
                 std::ostringstream active;
-                active << st.searchMetrics.active << " active";
-                if (st.searchMetrics.queued > 0) {
-                    active << " · " << st.searchMetrics.queued << " queued";
+                active << searchMetrics.active << " active";
+                if (searchMetrics.queued > 0) {
+                    active << " · " << searchMetrics.queued << " queued";
                 }
-                Severity sev =
-                    st.searchMetrics.queued > 50
-                        ? Severity::Bad
-                        : (st.searchMetrics.queued > 10 ? Severity::Warn : Severity::Good);
+                Severity sev = searchMetrics.queued > 50
+                                   ? Severity::Bad
+                                   : (searchMetrics.queued > 10 ? Severity::Warn : Severity::Good);
                 searchRows.push_back({"Active", paint(sev, active.str()), ""});
             }
 
-            if (st.searchMetrics.cacheHitRate > 0) {
+            if (searchMetrics.cacheHitRate > 0) {
                 std::ostringstream hitRate;
                 hitRate << std::fixed << std::setprecision(1)
-                        << (st.searchMetrics.cacheHitRate * 100.0) << "%";
+                        << (searchMetrics.cacheHitRate * 100.0) << "%";
                 Severity sev =
-                    st.searchMetrics.cacheHitRate >= 0.5
+                    searchMetrics.cacheHitRate >= 0.5
                         ? Severity::Good
-                        : (st.searchMetrics.cacheHitRate >= 0.2 ? Severity::Warn : Severity::Bad);
+                        : (searchMetrics.cacheHitRate >= 0.2 ? Severity::Warn : Severity::Bad);
                 searchRows.push_back({"Cache hit rate", paint(sev, hitRate.str()), ""});
             }
 
-            if (st.searchMetrics.avgLatencyUs > 0) {
+            if (searchMetrics.avgLatencyUs > 0) {
                 std::ostringstream latency;
-                if (st.searchMetrics.avgLatencyUs >= 1000000) {
+                if (searchMetrics.avgLatencyUs >= 1000000) {
                     latency << std::fixed << std::setprecision(2)
-                            << (st.searchMetrics.avgLatencyUs / 1000000.0) << "s";
-                } else if (st.searchMetrics.avgLatencyUs >= 1000) {
+                            << (searchMetrics.avgLatencyUs / 1000000.0) << "s";
+                } else if (searchMetrics.avgLatencyUs >= 1000) {
                     latency << std::fixed << std::setprecision(1)
-                            << (st.searchMetrics.avgLatencyUs / 1000.0) << "ms";
+                            << (searchMetrics.avgLatencyUs / 1000.0) << "ms";
                 } else {
-                    latency << st.searchMetrics.avgLatencyUs << "µs";
+                    latency << searchMetrics.avgLatencyUs << "µs";
                 }
                 searchRows.push_back({"Avg latency", latency.str(), ""});
             }

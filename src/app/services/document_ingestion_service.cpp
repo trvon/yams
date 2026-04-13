@@ -14,10 +14,45 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 namespace yams::app::services {
+
+namespace {
+
+std::size_t resolveBatchConcurrency(std::size_t batchSize, int maxConcurrent) {
+    if (batchSize == 0) {
+        return 1;
+    }
+
+    if (maxConcurrent > 0) {
+        return std::min<std::size_t>(static_cast<std::size_t>(maxConcurrent), batchSize);
+    }
+
+    if (!yams::daemon::TuneAdvisor::enableParallelIngest()) {
+        return 1;
+    }
+
+    std::size_t cap = yams::daemon::TuneAdvisor::maxIngestWorkers();
+    if (cap == 0) {
+        cap = yams::daemon::TuneAdvisor::recommendedThreads();
+    }
+
+    const std::size_t storageCap = yams::daemon::TuneAdvisor::storagePoolSize();
+    if (storageCap > 0) {
+        cap = std::min(cap, storageCap);
+    }
+    if (cap == 0) {
+        cap = 1;
+    }
+
+    return std::min(batchSize, cap);
+}
+
+} // namespace
 
 DocumentIngestionService::DocumentIngestionService(
     std::shared_ptr<yams::daemon::DaemonClient> client)
@@ -244,17 +279,50 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
 
 BatchAddResult DocumentIngestionService::addBatch(const std::vector<AddOptions>& batch,
                                                   int maxConcurrent) const {
-    (void)maxConcurrent;
     BatchAddResult out;
     out.results.resize(batch.size(), Error{ErrorCode::Unknown, "not started"});
 
     if (batch.empty())
         return out;
-    // Keep the CLI batch path bounded and teardown-safe. The earlier coroutine fan-out used
-    // detached tasks referencing stack-owned state and could block forever if one request never
-    // completed. The CLI add path is correctness-sensitive, not throughput-sensitive.
-    for (size_t i = 0; i < batch.size(); ++i) {
-        out.results[i] = addViaDaemon(batch[i]);
+
+    const std::size_t concurrency = resolveBatchConcurrency(batch.size(), maxConcurrent);
+    auto exec = yams::daemon::GlobalIOContext::global_executor();
+    std::vector<std::future<Result<yams::daemon::AddDocumentResponse>>> futures;
+    std::vector<std::size_t> indices;
+    futures.reserve(concurrency);
+    indices.reserve(concurrency);
+
+    for (std::size_t offset = 0; offset < batch.size();) {
+        const std::size_t waveSize = std::min<std::size_t>(concurrency, batch.size() - offset);
+        futures.clear();
+        indices.clear();
+
+        for (std::size_t i = 0; i < waveSize; ++i) {
+            const std::size_t index = offset + i;
+            indices.push_back(index);
+            futures.push_back(boost::asio::co_spawn(
+                exec,
+                [this, opts = batch[index]]() mutable
+                    -> boost::asio::awaitable<Result<yams::daemon::AddDocumentResponse>> {
+                    co_return co_await addViaDaemonAsync(opts);
+                },
+                boost::asio::use_future));
+        }
+
+        for (std::size_t i = 0; i < futures.size(); ++i) {
+            try {
+                out.results[indices[i]] = futures[i].get();
+            } catch (const std::exception& e) {
+                out.results[indices[i]] =
+                    Error{ErrorCode::InternalError,
+                          std::string("batch add failed with exception: ") + e.what()};
+            } catch (...) {
+                out.results[indices[i]] =
+                    Error{ErrorCode::InternalError, "batch add failed with unknown exception"};
+            }
+        }
+
+        offset += waveSize;
     }
 
     for (const auto& r : out.results) {
@@ -264,6 +332,11 @@ BatchAddResult DocumentIngestionService::addBatch(const std::vector<AddOptions>&
             ++out.failed;
     }
     return out;
+}
+
+int DocumentIngestionService::testing_resolveBatchConcurrency(std::size_t batchSize,
+                                                              int maxConcurrent) {
+    return static_cast<int>(resolveBatchConcurrency(batchSize, maxConcurrent));
 }
 
 Result<yams::daemon::DeleteResponse>

@@ -1903,6 +1903,17 @@ static std::size_t benchmarkQuantizedHnswRerankFactor() {
     return 2;
 }
 
+static std::string benchmarkEngineCacheLabel() {
+    const auto engine = benchmarkVectorSearchEngine();
+    std::string label = yams::vector::vectorSearchEngineName(engine);
+    if (engine == yams::vector::VectorSearchEngine::HnswQuantizedL2) {
+        label += std::string("_") +
+                 yams::vector::quantizedHnswModeName(benchmarkQuantizedHnswMode()) + "_r" +
+                 std::to_string(benchmarkQuantizedHnswRerankFactor());
+    }
+    return label;
+}
+
 static bool benchUseStreamingSearch() {
     // Retrieval quality benchmarks measure ranking quality, not IPC chunking behavior.
     // Default to unary search so streaming transport stalls do not skew IR evaluation,
@@ -4316,6 +4327,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
 struct BenchFixture {
     std::unique_ptr<DaemonHarness> harness;
+    std::unique_ptr<ScopedEnvOverrides> scopedEnv;
+    std::unique_ptr<ScopedEnvOverrides> pluginScopedEnv;
     std::unique_ptr<yams::daemon::DaemonClient> client;
     std::unique_ptr<CorpusGenerator> corpus;
     std::unique_ptr<BEIRCorpusLoader> beirCorpus;
@@ -4768,11 +4781,9 @@ struct BenchFixture {
                 const char* forcedOverride = std::getenv("YAMS_BENCH_FORCE_TUNING_OVERRIDE");
                 const char* existingOverride = std::getenv("YAMS_TUNING_OVERRIDE");
                 if (forcedOverride && std::strlen(forcedOverride) > 0) {
-                    setenv("YAMS_ENABLE_ENV_OVERRIDES", "1", 1);
-                    setenv("YAMS_TUNING_OVERRIDE", forcedOverride, 1);
                     spdlog::info(
-                        "Set YAMS_TUNING_OVERRIDE={} via YAMS_BENCH_FORCE_TUNING_OVERRIDE for "
-                        "BEIR benchmark ({})",
+                        "Will set YAMS_TUNING_OVERRIDE={} via YAMS_BENCH_FORCE_TUNING_OVERRIDE "
+                        "for BEIR benchmark ({})",
                         forcedOverride, requestedDatasetName);
                 } else if (existingOverride && std::strlen(existingOverride) > 0) {
                     spdlog::info("Using pre-set YAMS_TUNING_OVERRIDE={} for BEIR benchmark ({})",
@@ -4798,6 +4809,15 @@ struct BenchFixture {
         if (env_topk)
             topK = std::stoi(env_topk);
 
+        std::vector<EnvSetting> benchmarkEnvOverrides;
+        benchmarkEnvOverrides.reserve(24);
+        auto addEnvDefault = [&](const char* key, const char* value) {
+            const char* current = std::getenv(key);
+            if (!(current && std::strlen(current) > 0)) {
+                benchmarkEnvOverrides.push_back({key, std::string(value)});
+            }
+        };
+
         if (useSyntheticCommunityCorpus()) {
             corpusSize = 3;
             if (!(env_queries && *env_queries)) {
@@ -4810,20 +4830,14 @@ struct BenchFixture {
             // Force the graph rerank stage fully on for the synthetic community A/B.
             // Tiny synthetic corpora are still classified as no_kg by the tuner, so enabling the
             // stage alone is not enough to produce an actual rerank window.
-            const auto ensureSyntheticEnvDefault = [](const char* key, const char* value) {
-                const char* current = std::getenv(key);
-                if (!(current && *current)) {
-                    setenv(key, value, 0);
-                }
-            };
-            ensureSyntheticEnvDefault("YAMS_ENABLE_ENV_OVERRIDES", "1");
-            ensureSyntheticEnvDefault("YAMS_SEARCH_KG_WEIGHT", "0.00");
-            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_TOPN", "3");
-            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "1.00");
-            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST", "1.00");
-            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_RERANK_MIN_SIGNAL", "0.01");
-            ensureSyntheticEnvDefault("YAMS_SEARCH_KG_MAX_RESULTS", "3");
-            ensureSyntheticEnvDefault("YAMS_SEARCH_GRAPH_SCORING_BUDGET_MS", "8");
+            addEnvDefault("YAMS_ENABLE_ENV_OVERRIDES", "1");
+            addEnvDefault("YAMS_SEARCH_KG_WEIGHT", "0.00");
+            addEnvDefault("YAMS_SEARCH_GRAPH_RERANK_TOPN", "3");
+            addEnvDefault("YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "1.00");
+            addEnvDefault("YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST", "1.00");
+            addEnvDefault("YAMS_SEARCH_GRAPH_RERANK_MIN_SIGNAL", "0.01");
+            addEnvDefault("YAMS_SEARCH_KG_MAX_RESULTS", "3");
+            addEnvDefault("YAMS_SEARCH_GRAPH_SCORING_BUDGET_MS", "8");
         }
 
         auto optionalPositiveInt = [](const char* raw) -> std::optional<int> {
@@ -4877,38 +4891,52 @@ struct BenchFixture {
                    normalized == "on";
         };
 
-        auto ensureEnvDefault = [](const char* key, const char* value) {
-            const char* current = std::getenv(key);
-            if (!(current && std::strlen(current) > 0)) {
-                setenv(key, value, 0);
+        if (useBEIR) {
+            const char* forcedOverride = std::getenv("YAMS_BENCH_FORCE_TUNING_OVERRIDE");
+            if (forcedOverride && std::strlen(forcedOverride) > 0) {
+                benchmarkEnvOverrides.push_back({"YAMS_ENABLE_ENV_OVERRIDES", std::string("1")});
+                benchmarkEnvOverrides.push_back(
+                    {"YAMS_TUNING_OVERRIDE", std::string(forcedOverride)});
             }
-        };
+        }
 
         // Benchmark determinism defaults (can still be overridden by explicit env values).
         // Real-ingest graph validation needs the post-ingest rebuild so search tuning sees the
         // final corpus stats instead of the startup-empty corpus.
-        ensureEnvDefault("YAMS_DISABLE_SEARCH_REBUILDS", "0");
-        ensureEnvDefault("YAMS_SEARCH_WAIT_FOR_CONCEPTS", "1");
-        ensureEnvDefault("YAMS_HNSW_RANDOM_SEED", "42");
-        ensureEnvDefault("YAMS_HNSW_PARALLEL_BUILD_THRESHOLD", "0");
+        addEnvDefault("YAMS_DISABLE_SEARCH_REBUILDS", "0");
+        addEnvDefault("YAMS_SEARCH_WAIT_FOR_CONCEPTS", "1");
+        addEnvDefault("YAMS_HNSW_RANDOM_SEED", "42");
+        addEnvDefault("YAMS_HNSW_PARALLEL_BUILD_THRESHOLD", "0");
         // Use higher concurrency for embedding/extraction to reduce ingestion time.
         // HNSW seed + wait-for-concepts provide sufficient determinism for ranking;
         // single-threaded embedding only added wall-clock cost without improving reproducibility.
-        ensureEnvDefault("YAMS_POST_EMBED_CONCURRENT", "4");
-        ensureEnvDefault("YAMS_POST_EXTRACTION_CONCURRENT", "4");
-        ensureEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
+        addEnvDefault("YAMS_POST_EMBED_CONCURRENT", "4");
+        addEnvDefault("YAMS_POST_EXTRACTION_CONCURRENT", "4");
+        addEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
 
         // Adaptive sub-batch tuning: the default 15s warning threshold causes premature
         // batch-cap collapse (8→4→1) on machines where ONNX inference is legitimately slow.
         // Raise to 60s so the adaptive logic only shrinks on true stalls, not normal latency.
-        ensureEnvDefault("YAMS_EMBED_SUBBATCH_WARN_MS", "60000");
+        addEnvDefault("YAMS_EMBED_SUBBATCH_WARN_MS", "60000");
 
         // Benchmark default: graph rerank is ON unless explicitly overridden.
         // Canonical env key used by SearchEngineBuilder is YAMS_SEARCH_ENABLE_GRAPH_RERANK.
         const char* graphRerankCanonical = std::getenv("YAMS_SEARCH_ENABLE_GRAPH_RERANK");
         if (!(graphRerankCanonical && *graphRerankCanonical)) {
-            setenv("YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1", 0);
-            graphRerankCanonical = std::getenv("YAMS_SEARCH_ENABLE_GRAPH_RERANK");
+            benchmarkEnvOverrides.push_back({"YAMS_SEARCH_ENABLE_GRAPH_RERANK", std::string("1")});
+            graphRerankCanonical = "1";
+        }
+
+        if (env_debug_file && std::strlen(env_debug_file) > 0) {
+            addEnvDefault("YAMS_SEARCH_STAGE_TRACE", "1");
+            const int traceTopNDefault =
+                parseIntEnvOrDefault("YAMS_BENCH_TRACE_TOP_N", 50, 1, 10000);
+            addEnvDefault("YAMS_SEARCH_STAGE_TRACE_TOP_N",
+                          std::to_string(traceTopNDefault).c_str());
+            const int traceComponentDefault = parseIntEnvOrDefault(
+                "YAMS_BENCH_TRACE_COMPONENT_TOP_N", std::min(traceTopNDefault, 50), 1, 10000);
+            addEnvDefault("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N",
+                          std::to_string(traceComponentDefault).c_str());
         }
 
         const bool graphRerankRequested = envFlagEnabled(graphRerankCanonical);
@@ -4921,6 +4949,9 @@ struct BenchFixture {
             graphRerankRequested, explicitRequireKgReady, useBEIR);
         const bool requireKgReady =
             kgReadinessPolicy != yams::search::BenchmarkKgReadinessPolicy::Skip;
+
+        scopedEnv = std::make_unique<ScopedEnvOverrides>(benchmarkEnvOverrides);
+
         spdlog::info("[Bench] KG readiness policy: {} (graph_rerank_requested={}, beir={}, "
                      "explicit_override={})",
                      yams::search::benchmarkKgReadinessPolicyToString(kgReadinessPolicy),
@@ -4998,7 +5029,7 @@ struct BenchFixture {
         const char* envWarmCacheDir = std::getenv("YAMS_BENCH_WARM_CACHE_DIR");
         const char* envDataDir = std::getenv("YAMS_BENCH_DATA_DIR");
         if (envWarmCacheDir && *envWarmCacheDir) {
-            fs::path cacheDir(envWarmCacheDir);
+            fs::path cacheDir = fs::path(envWarmCacheDir) / benchmarkEngineCacheLabel();
             warmDataDirPath = cacheDir;
             if (fs::exists(cacheDir)) {
                 auto metadataResult = readBenchCacheMetadata(cacheDir);
@@ -5204,10 +5235,14 @@ struct BenchFixture {
             spdlog::info("Configured ONNX plugin models: embedding=embeddinggemma-300m "
                          "reranker=bge-reranker-base");
 
+            std::vector<EnvSetting> pluginEnvOverrides;
             if (!std::getenv("YAMS_ONNX_RERANK_FORCE_CPU") &&
                 !std::getenv("YAMS_ONNX_RERANK_FORCE_GPU")) {
-                setenv("YAMS_ONNX_RERANK_FORCE_CPU", "1", 1);
+                pluginEnvOverrides.push_back({"YAMS_ONNX_RERANK_FORCE_CPU", std::string("1")});
                 spdlog::info("Enabled CPU-preferred ONNX reranker for benchmark evaluation");
+            }
+            if (!pluginEnvOverrides.empty()) {
+                pluginScopedEnv = std::make_unique<ScopedEnvOverrides>(pluginEnvOverrides);
             }
 
             // Configure Glint plugin with GLiNER model path for NL entity extraction
@@ -5236,9 +5271,11 @@ struct BenchFixture {
 
             if (useIsolatedBenchmarkConfig) {
                 std::string configSuffix = "yams_retrieval_bench_config.toml";
+                const std::string engineLabel = benchmarkEngineCacheLabel();
+                configSuffix = "yams_retrieval_bench_config_" + engineLabel + ".toml";
                 if (g_debugRunContext.has_value() && !g_debugRunContext->candidate.empty()) {
-                    configSuffix =
-                        "yams_retrieval_bench_config_" + g_debugRunContext->candidate + ".toml";
+                    configSuffix = "yams_retrieval_bench_config_" + engineLabel + "_" +
+                                   g_debugRunContext->candidate + ".toml";
                 }
                 const fs::path configPath = fs::temp_directory_path() / configSuffix;
                 std::ofstream configOut(configPath, std::ios::trunc);
@@ -6961,29 +6998,6 @@ struct BenchFixture {
 static std::unique_ptr<BenchFixture> g_fixture;
 void SetupFixture() {
     if (!g_fixture) {
-        if (const char* debugBaseEnv = std::getenv("YAMS_BENCH_DEBUG_FILE");
-            debugBaseEnv && std::strlen(debugBaseEnv) > 0) {
-            if (std::getenv("YAMS_SEARCH_STAGE_TRACE") == nullptr) {
-                setenv("YAMS_SEARCH_STAGE_TRACE", "1", 0);
-            }
-
-            if (std::getenv("YAMS_SEARCH_STAGE_TRACE_TOP_N") == nullptr) {
-                const int traceTopNDefault =
-                    parseIntEnvOrDefault("YAMS_BENCH_TRACE_TOP_N", 50, 1, 10000);
-                setenv("YAMS_SEARCH_STAGE_TRACE_TOP_N", std::to_string(traceTopNDefault).c_str(),
-                       0);
-            }
-
-            if (std::getenv("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N") == nullptr) {
-                const int traceTopNDefault =
-                    parseIntEnvOrDefault("YAMS_BENCH_TRACE_TOP_N", 50, 1, 10000);
-                const int traceComponentDefault = parseIntEnvOrDefault(
-                    "YAMS_BENCH_TRACE_COMPONENT_TOP_N", std::min(traceTopNDefault, 50), 1, 10000);
-                setenv("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N",
-                       std::to_string(traceComponentDefault).c_str(), 0);
-            }
-        }
-
         g_fixture = std::make_unique<BenchFixture>();
         g_fixture->setup();
     }

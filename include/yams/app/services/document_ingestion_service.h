@@ -95,8 +95,8 @@ public:
     boost::asio::awaitable<Result<yams::daemon::AddDocumentResponse>>
     addViaDaemonAsync(const AddOptions& opts) const;
 
-    // Batch add with concurrency control (spawns up to maxConcurrent coroutines).
-    BatchAddResult addBatch(const std::vector<AddOptions>& batch, int maxConcurrent = 4) const;
+    // Batch add with concurrency control. Non-positive maxConcurrent uses an auto-sized limit.
+    BatchAddResult addBatch(const std::vector<AddOptions>& batch, int maxConcurrent = 0) const;
 
     // New operations
     Result<yams::daemon::DeleteResponse> deleteDocument(const DeleteOptions& opts) const;
@@ -107,6 +107,8 @@ public:
 
     // Build an AddDocumentRequest from AddOptions (exposed for MCP reuse)
     static yams::daemon::AddDocumentRequest buildRequest(const AddOptions& opts);
+
+    static int testing_resolveBatchConcurrency(std::size_t batchSize, int maxConcurrent);
 
 private:
     mutable std::shared_ptr<yams::daemon::DaemonClient> client_;

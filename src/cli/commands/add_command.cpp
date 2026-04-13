@@ -354,6 +354,10 @@ public:
         cmd->add_option("--daemon-backoff-ms", daemonBackoffMs_,
                         "Initial backoff between retries (ms); doubles each attempt")
             ->default_val(250);
+        cmd->add_option("--max-concurrent", maxConcurrent_,
+                        "Maximum concurrent daemon add requests (0 = auto)")
+            ->default_val(0)
+            ->check(CLI::Range(0, 256));
         cmd->add_option("--daemon-ready-timeout-ms", daemonReadyTimeoutMs_,
                         "Max time to wait for daemon readiness (ms, 0 to skip)")
             ->default_val(10000);
@@ -663,7 +667,7 @@ public:
 
                 // Process single files in parallel batch
                 if (!fileBatch.empty()) {
-                    auto batchResult = ing.addBatch(fileBatch, 4);
+                    auto batchResult = ing.addBatch(fileBatch, maxConcurrent_);
                     for (size_t i = 0; i < batchResult.results.size(); ++i) {
                         completedRequests++;
                         const auto& result = batchResult.results[i];
@@ -737,7 +741,7 @@ public:
 
                 // Process directories in parallel batch
                 if (!dirBatch.empty()) {
-                    auto batchResult = ing.addBatch(dirBatch, 4);
+                    auto batchResult = ing.addBatch(dirBatch, maxConcurrent_);
                     for (size_t i = 0; i < batchResult.results.size(); ++i) {
                         completedRequests++;
                         const auto& result = batchResult.results[i];
@@ -1233,6 +1237,7 @@ private:
     int daemonTimeoutMs_ = 5000; // AddDocument just pushes to queue, 5s is plenty
     int daemonRetries_ = 3;
     int daemonBackoffMs_ = 250;
+    int maxConcurrent_ = 0;
     int daemonReadyTimeoutMs_ = 10000;
 };
 

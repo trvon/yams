@@ -1,11 +1,22 @@
 #include <spdlog/spdlog.h>
+
 #include <iostream>
 #include <sstream>
+
+#include <yams/cli/command_catalog.h>
 #include <yams/cli/completion_command.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 
 namespace yams::cli {
+
+namespace {
+
+std::string describeCommand(std::string_view name) {
+    return std::string(topLevelCommandDescription(name));
+}
+
+} // namespace
 
 std::string CompletionCommand::getName() const {
     return "completion";
@@ -53,9 +64,7 @@ Result<void> CompletionCommand::execute() {
 }
 
 std::vector<std::string> CompletionCommand::getAvailableCommands() const {
-    // Keep in sync with command list in yams_cli.cpp:175
-    return {"init",  "add",       "get",     "delete", "list",  "search",     "config", "auth",
-            "stats", "uninstall", "migrate", "update", "serve", "completion", "model"};
+    return topLevelCommandNames();
 }
 
 std::vector<std::string> CompletionCommand::getGlobalFlags() const {
@@ -203,21 +212,6 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "            esac\n";
     oss << "            ;;\n";
 
-    // Stats command
-    oss << "        stats)\n";
-    oss << "            case \"$prev\" in\n";
-    oss << "                --format)\n";
-    oss << "                    COMPREPLY=($(compgen -W \"text json\" -- \"$cur\"))\n";
-    oss << "                    return 0\n";
-    oss << "                    ;;\n";
-    oss << "                *)\n";
-    oss << "                    local stats_flags=\"--format --help\"\n";
-    oss << "                    COMPREPLY=($(compgen -W \"$stats_flags $global_flags\" -- "
-           "\"$cur\"))\n";
-    oss << "                    ;;\n";
-    oss << "            esac\n";
-    oss << "            ;;\n";
-
     // Config command
     oss << "        config)\n";
     oss << "            case \"$prev\" in\n";
@@ -253,6 +247,15 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "            esac\n";
     oss << "            ;;\n";
 
+    // Status and stats commands
+    oss << "        status|stats)\n";
+    oss << "            local status_flags=\"--no-physical --corpus\"\n";
+    oss << "            if [[ $cur == -* ]]; then\n";
+    oss << "                COMPREPLY=($(compgen -W \"$status_flags $global_flags\" -- "
+           "\"$cur\"))\n";
+    oss << "            fi\n";
+    oss << "            ;;\n";
+
     // Completion command
     oss << "        completion)\n";
     oss << "            if [[ $cword -eq 2 ]]; then\n";
@@ -264,7 +267,6 @@ std::string CompletionCommand::generateBashCompletion() const {
 
     // Default case
     oss << "        *)\n";
-    oss << "            # For other commands, just complete global flags\n";
     oss << "            if [[ $cur == -* ]]; then\n";
     oss << "                COMPREPLY=($(compgen -W \"$global_flags\" -- \"$cur\"))\n";
     oss << "            fi\n";
@@ -326,7 +328,7 @@ std::string CompletionCommand::generateZshCompletion() const {
 
     oss << "    case $state in\n";
     oss << "        args)\n";
-    oss << "            case $words[1] in\n";
+    oss << "            case $line[1] in\n";
 
     // Add command
     oss << "                add)\n";
@@ -405,10 +407,12 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "                        '*:file:_files'\n";
     oss << "                    ;;\n";
 
-    // Stats command
-    oss << "                stats)\n";
+    // Status and stats commands
+    oss << "                status|stats)\n";
     oss << "                    _arguments \\\n";
-    oss << "                        '--format[Output format]:format:(text json)'\n";
+    oss << "                        '--no-physical[Use daemon stats only without fallback scan]' "
+           "\\\n";
+    oss << "                        '--corpus[Show corpus statistics for search tuning]'\n";
     oss << "                    ;;\n";
 
     // Config command
@@ -441,37 +445,7 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "    local commands\n";
     oss << "    commands=(\n";
     for (const auto& cmd : getAvailableCommands()) {
-        oss << "        '" << cmd << ":";
-        if (cmd == "init")
-            oss << "Initialize YAMS storage and configuration";
-        else if (cmd == "add")
-            oss << "Add files or content to YAMS";
-        else if (cmd == "get")
-            oss << "Retrieve content by hash";
-        else if (cmd == "delete")
-            oss << "Delete content from YAMS";
-        else if (cmd == "list")
-            oss << "List stored content";
-        else if (cmd == "search")
-            oss << "Search stored content";
-        else if (cmd == "config")
-            oss << "Show or modify configuration";
-        else if (cmd == "auth")
-            oss << "Authentication and key management";
-        else if (cmd == "stats")
-            oss << "Show storage statistics";
-        else if (cmd == "uninstall")
-            oss << "Uninstall YAMS";
-        else if (cmd == "migrate")
-            oss << "Run database migrations";
-        else if (cmd == "update")
-            oss << "Update stored content";
-        else if (cmd == "serve")
-            oss << "Start MCP server";
-        else if (cmd == "completion")
-            oss << "Generate shell completion scripts";
-        else if (cmd == "model")
-            oss << "Manage embedding models";
+        oss << "        '" << cmd << ":" << describeCommand(cmd);
         oss << "'\n";
     }
     oss << "    )\n";
@@ -510,38 +484,8 @@ std::string CompletionCommand::generateFishCompletion() const {
     // Subcommands
     oss << "# Subcommands\n";
     for (const auto& cmd : getAvailableCommands()) {
-        oss << "complete -c yams -f -n '__fish_use_subcommand' -a " << cmd;
-        if (cmd == "init")
-            oss << " -d 'Initialize YAMS storage and configuration'";
-        else if (cmd == "add")
-            oss << " -d 'Add files or content to YAMS'";
-        else if (cmd == "get")
-            oss << " -d 'Retrieve content by hash'";
-        else if (cmd == "delete")
-            oss << " -d 'Delete content from YAMS'";
-        else if (cmd == "list")
-            oss << " -d 'List stored content'";
-        else if (cmd == "search")
-            oss << " -d 'Search stored content'";
-        else if (cmd == "config")
-            oss << " -d 'Show or modify configuration'";
-        else if (cmd == "auth")
-            oss << " -d 'Authentication and key management'";
-        else if (cmd == "stats")
-            oss << " -d 'Show storage statistics'";
-        else if (cmd == "uninstall")
-            oss << " -d 'Uninstall YAMS'";
-        else if (cmd == "migrate")
-            oss << " -d 'Run database migrations'";
-        else if (cmd == "update")
-            oss << " -d 'Update stored content'";
-        else if (cmd == "serve")
-            oss << " -d 'Start MCP server'";
-        else if (cmd == "completion")
-            oss << " -d 'Generate shell completion scripts'";
-        else if (cmd == "model")
-            oss << " -d 'Manage embedding models'";
-        oss << "\n";
+        oss << "complete -c yams -f -n '__fish_use_subcommand' -a " << cmd << " -d '"
+            << describeCommand(cmd) << "'\n";
     }
     oss << "\n";
 
@@ -648,10 +592,12 @@ std::string CompletionCommand::generateFishCompletion() const {
     oss << "complete -c yams -f -n '__fish_yams_using_command grep' -l limit -d 'Alias of "
            "--max-count' -r\n\n";
 
-    // Stats command
-    oss << "# stats command\n";
-    oss << "complete -c yams -f -n '__fish_yams_using_command stats' -l format -d 'Output format' "
-           "-a 'text json'\n\n";
+    // Status and stats commands
+    oss << "# status/stats commands\n";
+    oss << "complete -c yams -f -n '__fish_yams_using_command status; or __fish_yams_using_command "
+           "stats' -l no-physical -d 'Use daemon stats only without fallback scan'\n";
+    oss << "complete -c yams -f -n '__fish_yams_using_command status; or __fish_yams_using_command "
+           "stats' -l corpus -d 'Show corpus statistics for search tuning'\n\n";
 
     // Config command
     oss << "# config command\n";
@@ -693,7 +639,8 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
 
     oss << "    $commands = @(\n";
     for (const auto& cmd : getAvailableCommands()) {
-        oss << "        @{ Name = '" << cmd << "'; Description = '" << cmd << " command' }\n";
+        oss << "        @{ Name = '" << cmd << "'; Description = '" << describeCommand(cmd)
+            << "' }\n";
     }
     oss << "    )\n\n";
 
@@ -796,10 +743,18 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
     oss << "            @{ Name = '--dry-run'; Description = 'Preview changes' }\n";
     oss << "        )\n";
 
-    // stats command
+    // status and stats commands
+    oss << "        'status' = @(\n";
+    oss << "            @{ Name = '--no-physical'; Description = 'Use daemon stats only without "
+           "fallback scan' }\n";
+    oss << "            @{ Name = '--corpus'; Description = 'Show corpus statistics for search "
+           "tuning' }\n";
+    oss << "        )\n";
     oss << "        'stats' = @(\n";
-    oss << "            @{ Name = '--format'; Description = 'Output format'; Values = "
-           "@('text','json') }\n";
+    oss << "            @{ Name = '--no-physical'; Description = 'Use daemon stats only without "
+           "fallback scan' }\n";
+    oss << "            @{ Name = '--corpus'; Description = 'Show corpus statistics for search "
+           "tuning' }\n";
     oss << "        )\n";
 
     // auth command

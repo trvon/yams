@@ -19,6 +19,7 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/recommendation_util.h>
 #include <yams/cli/result_helpers.h>
+#include <yams/cli/status_metrics.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
@@ -110,6 +111,7 @@ public:
                             auto it = s.requestCounts.find(key);
                             return it != s.requestCounts.end() ? it->second : 0ULL;
                         };
+                        const auto searchMetrics = effectiveSearchMetrics(s);
                         std::string svcSummary;
                         std::string waitingSummary;
                         if (jsonOutput_) {
@@ -293,12 +295,12 @@ public:
                             }
                             {
                                 nlohmann::json sr = nlohmann::json::object();
-                                sr["active"] = s.searchMetrics.active;
-                                sr["queued"] = s.searchMetrics.queued;
-                                sr["executed"] = s.searchMetrics.executed;
-                                sr["cache_hit_rate"] = s.searchMetrics.cacheHitRate;
-                                sr["avg_latency_us"] = s.searchMetrics.avgLatencyUs;
-                                sr["concurrency_limit"] = s.searchMetrics.concurrencyLimit;
+                                sr["active"] = searchMetrics.active;
+                                sr["queued"] = searchMetrics.queued;
+                                sr["executed"] = searchMetrics.executed;
+                                sr["cache_hit_rate"] = searchMetrics.cacheHitRate;
+                                sr["avg_latency_us"] = searchMetrics.avgLatencyUs;
+                                sr["concurrency_limit"] = searchMetrics.concurrencyLimit;
                                 j["search"] = std::move(sr);
                             }
                             // Search tuning state (corpus-aware FSM)
@@ -432,18 +434,18 @@ public:
                             std::cout << "\n" << section_header("Search") << "\n\n";
                             std::vector<Row> searchRows;
                             std::ostringstream searchVal;
-                            searchVal << s.searchMetrics.active << " active · "
-                                      << s.searchMetrics.queued << " queued";
+                            searchVal << searchMetrics.active << " active · "
+                                      << searchMetrics.queued << " queued";
                             searchRows.push_back({"Queries", searchVal.str(), ""});
                             std::ostringstream searchPerf;
                             searchPerf << std::fixed << std::setprecision(1)
-                                       << (s.searchMetrics.cacheHitRate * 100.0) << "% cache · "
-                                       << s.searchMetrics.avgLatencyUs << "µs latency";
+                                       << (searchMetrics.cacheHitRate * 100.0) << "% cache · "
+                                       << searchMetrics.avgLatencyUs << "µs latency";
                             searchRows.push_back({"Performance", searchPerf.str(), ""});
-                            if (s.searchMetrics.concurrencyLimit > 0) {
+                            if (searchMetrics.concurrencyLimit > 0) {
                                 searchRows.push_back(
-                                    {"Concurrency",
-                                     std::to_string(s.searchMetrics.concurrencyLimit), ""});
+                                    {"Concurrency", std::to_string(searchMetrics.concurrencyLimit),
+                                     ""});
                             }
                             // Search tuning state (corpus-aware FSM)
                             if (!s.searchTuningState.empty()) {
@@ -737,14 +739,13 @@ public:
                                     std::cout << "\n";
                                 }
 
-                                std::cout << "SEARCH: active=" << s.searchMetrics.active
-                                          << ", queued=" << s.searchMetrics.queued
-                                          << ", executed=" << s.searchMetrics.executed
+                                std::cout << "SEARCH: active=" << searchMetrics.active
+                                          << ", queued=" << searchMetrics.queued
+                                          << ", executed=" << searchMetrics.executed
                                           << ", cache_hit=" << std::fixed << std::setprecision(1)
-                                          << (s.searchMetrics.cacheHitRate * 100.0)
-                                          << "%, lat=" << s.searchMetrics.avgLatencyUs
-                                          << "us, limit=" << s.searchMetrics.concurrencyLimit
-                                          << "\n";
+                                          << (searchMetrics.cacheHitRate * 100.0)
+                                          << "%, lat=" << searchMetrics.avgLatencyUs
+                                          << "us, limit=" << searchMetrics.concurrencyLimit << "\n";
                                 std::cout.unsetf(std::ios::floatfield);
 
                                 uint64_t casPhys = getU64("cas_physical_bytes");

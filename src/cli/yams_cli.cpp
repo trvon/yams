@@ -5,6 +5,7 @@
 #include <map>
 #include <sstream>
 #include <yams/api/content_store_builder.h>
+#include <yams/cli/command_catalog.h>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/plugin_util.h>
 #include <yams/cli/yams_cli.h>
@@ -290,14 +291,7 @@ int YamsCLI::run(int argc, char* argv[]) {
         // Pre-scan for verbose help flags before CLI11 handles --help
         auto isFlag = [](const char* s) -> bool { return s && s[0] == '-'; };
 
-        // Known subcommands (kept in sync with CommandRegistry)
-        static const std::vector<std::string> kCommands = {
-            "init",    "add",    "get",        "restore", "cat",    "delete",
-            "list",    "tree",   "search",     "grep",    "config", "auth",
-            "status",  "stats",  "uninstall",  "migrate", "update", "download",
-            "session", "watch",  "completion", "repair",  "model",  "daemon",
-            "plugin",  "doctor", "dr",         "graph",   "diff",   "serve",
-        };
+        const auto kCommands = topLevelCommandNames();
 
         auto hasArg = [&](std::string_view needle) {
             for (int i = 1; i < argc; ++i) {
@@ -616,10 +610,14 @@ int YamsCLI::run(int argc, char* argv[]) {
             // Non-fatal: keep whatever CLI11 assigned
         }
 
-        // Check for config migration before storage initialization unless this is a one-shot
-        // daemon-backed hot path with an explicit socket. Those commands do not need local storage
-        // preflight and can skip filesystem/config churn.
-        checkConfigMigration();
+        // Skip config migration for completion generation so stdout stays script-only.
+        // Homebrew and manual shell setup both consume the command output directly.
+        if (subcmd != "completion") {
+            // Check for config migration before storage initialization unless this is a one-shot
+            // daemon-backed hot path with an explicit socket. Those commands do not need local
+            // storage preflight and can skip filesystem/config churn.
+            checkConfigMigration();
+        }
 
         // Storage initialization is performed lazily by commands via ensureStorageInitialized()
 

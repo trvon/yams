@@ -362,8 +362,8 @@ _test_env_ld_library_path = ':'.join(_test_ld_library_path)
   endif
 
   if gtest_dep.found() and unit_exe != [] and get_option('enable-bench-tests')
-    # Note: All bench tests use suite 'bench' or ['bench', 'isolated'].
-    # Run unified benchmarks with: `meson test -C builddir --suite bench`
+#Note : All bench tests use suite 'bench' or ['bench', 'isolated'].
+#Run unified benchmarks with : `meson test - C builddir-- suite bench`
 
     test('unit_isolated_integrity_verifier', unit_exe,
       suite: ['bench', 'isolated', 'perf'],
@@ -376,8 +376,8 @@ _test_env_ld_library_path = ':'.join(_test_ld_library_path)
       timeout: bench_timeout,
     )
 
-    # Daemon lifecycle smoke coverage remains opt-in because it performs full
-    # daemon start/stop sequences.
+#Daemon lifecycle smoke coverage remains opt - in because it performs full
+#daemon start / stop sequences.
   endif
 
   if get_option('enable-daemon-long-tests') and unit_exe != []
@@ -809,7 +809,7 @@ if catch2_dep.found()
     install: false,
   )
 
-#Compressed ANN fusion/dedup contract and behavior tests
+#Compressed ANN fusion / dedup contract and behavior tests
   catch2_compressed_ann_fusion_exe = executable('catch2_compressed_ann_fusion',
     files(
       'unit/search/compressed_ann_fusion_contract_catch2_test.cpp',
@@ -823,7 +823,7 @@ if catch2_dep.found()
     install: false,
   )
 
-#ParallelPostProcessor daemon-aware budgeting tests
+#ParallelPostProcessor daemon - aware budgeting tests
   catch2_parallel_post_processor_exe = executable('catch2_parallel_post_processor',
     files('unit/search/parallel_post_processor_catch2_test.cpp'),
     include_directories: incs,
@@ -1378,7 +1378,7 @@ if catch2_dep.found()
     install: false,
   )
 
-#TuningSlot tests (provenance-tracking primitives for restructured tuning pipeline)
+#TuningSlot tests(provenance - tracking primitives for restructured tuning pipeline)
   catch2_tuning_slot_exe = executable('catch2_tuning_slot',
     files('unit/search/tuning_slot_catch2_test.cpp'),
     include_directories: incs,
@@ -1485,6 +1485,7 @@ if catch2_dep.found()
       'unit/cli/add_command_stdin_catch2_test.cpp',
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/cli_option_isolation_catch2_test.cpp',
+      'unit/cli/completion_command_catch2_test.cpp',
       'unit/cli/config_command_catch2_test.cpp',
       'unit/cli/delete_command_catch2_test.cpp',
       'unit/cli/daemon_helpers_pool_catch2_test.cpp',
@@ -1504,6 +1505,7 @@ if catch2_dep.found()
       'unit/cli/recommendation_util_catch2_test.cpp',
       'unit/cli/repair_command_catch2_test.cpp',
       'unit/cli/session_command_catch2_test.cpp',
+      'unit/cli/status_metrics_catch2_test.cpp',
       'unit/cli/stream_heuristics_catch2_test.cpp',
       'unit/cli/vector_db_util_catch2_test.cpp',
       'unit/cli/update_command_catch2_test.cpp',
@@ -2177,6 +2179,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  document_ingestion_batch_exe = executable('document_ingestion_batch',
+    files('unit/app/services/document_ingestion_batch_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   service_utilities_exe = executable('service_utilities',
     files('unit/app/services/service_utilities_test.cpp'),
     include_directories: incs,
@@ -2549,6 +2560,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'services', 'document'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
+  )
+
+  test('document_ingestion_batch', document_ingestion_batch_exe,
+    suite: ['catch2', 'unit', 'services', 'ingestion', 'batch'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('service_utilities', service_utilities_exe,

@@ -372,6 +372,90 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddViaDaemonAndListGetGrep"
     CHECK(chunked.value().content.size() <= 8u);
 }
 
+TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddBatchPreservesOrderAndMixedResults",
+                 "[integration][services][retrieval][ingestion][batch]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    REQUIRE(startDaemon());
+
+    using yams::app::services::DocumentIngestionService;
+    using yams::app::services::RetrievalOptions;
+    using yams::app::services::RetrievalService;
+
+    auto docA = fixtures_->createTextFixture("batch/a.txt", "alpha", {"batch"});
+    auto docB = fixtures_->createTextFixture("batch/b.txt", "bravo", {"batch"});
+
+    DocumentIngestionService ing;
+    std::vector<yams::app::services::AddOptions> batch;
+
+    yams::app::services::AddOptions a;
+    a.socketPath = socketPath_;
+    a.explicitDataDir = storageDir_;
+    a.path = docA.path.string();
+    a.noEmbeddings = true;
+    a.timeoutMs = kRequestTimeoutMs;
+    batch.push_back(a);
+
+    yams::app::services::AddOptions bad = a;
+    bad.content = "invalid inline content";
+    batch.push_back(bad);
+
+    yams::app::services::AddOptions b = a;
+    b.path = docB.path.string();
+    batch.push_back(b);
+
+    auto batchRes = ing.addBatch(batch, 2);
+    REQUIRE((batchRes.results.size() == batch.size()));
+    CHECK((batchRes.succeeded == 2));
+    CHECK((batchRes.failed == 1));
+    REQUIRE(batchRes.results[0]);
+    REQUIRE_FALSE(batchRes.results[1]);
+    REQUIRE(batchRes.results[2]);
+
+    BarrierStats barrierStats;
+    const bool quiescent =
+        waitForPostIngestQuiescent(socketPath_, storageDir_, 5000ms, 50ms, &barrierStats);
+    CAPTURE(barrierStats.statusPolls, barrierStats.statusErrors, barrierStats.lastPostIngestQueued,
+            barrierStats.lastPostIngestInflight, barrierStats.lastPostIngestDrained,
+            barrierStats.lastIndexVisible);
+    REQUIRE(quiescent);
+
+    RetrievalService rsvc;
+    RetrievalOptions ropts;
+    ropts.socketPath = socketPath_;
+    ropts.explicitDataDir = storageDir_;
+    ropts.headerTimeoutMs = kRequestTimeoutMs;
+    ropts.bodyTimeoutMs = kBodyTimeoutMs;
+    ropts.requestTimeoutMs = kRequestTimeoutMs;
+
+    yams::app::services::GetOptions getA;
+    getA.hash = batchRes.results[0].value().hash;
+    getA.metadataOnly = true;
+    yams::Result<yams::daemon::GetResponse> getARes;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        getARes = rsvc.get(getA, ropts);
+        if (getARes) {
+            break;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(getARes);
+    CHECK((getARes.value().name == "a.txt"));
+
+    yams::app::services::GetOptions getB;
+    getB.hash = batchRes.results[2].value().hash;
+    getB.metadataOnly = true;
+    yams::Result<yams::daemon::GetResponse> getBRes;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        getBRes = rsvc.get(getB, ropts);
+        if (getBRes) {
+            break;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(getBRes);
+    CHECK((getBRes.value().name == "b.txt"));
+}
+
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "SearchPersistsRetrievalServedFeedbackEvent",
                  "[integration][services][retrieval][feedback]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
