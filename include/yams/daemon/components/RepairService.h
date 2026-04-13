@@ -155,6 +155,8 @@ private:
                                                 const ProgressFn& progress);
     RepairOperationResult repairKnowledgeGraph(const RepairRequest& req,
                                                const ProgressFn& progress);
+    RepairOperationResult rebuildTopologyArtifacts(const RepairRequest& req,
+                                                   const ProgressFn& progress);
     RepairOperationResult applySemanticDedupe(const RepairRequest& req, const ProgressFn& progress);
     RepairOperationResult rebuildFts5Index(const RepairRequest& req, const ProgressFn& progress);
     RepairOperationResult generateMissingEmbeddings(const RepairRequest& req,

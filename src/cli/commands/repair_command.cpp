@@ -49,6 +49,8 @@ public:
                       "Recover stuck documents (failed extraction, ghost success, stalled)");
         cmd->add_flag("--graph", repairGraph_,
                       "Rebuild knowledge graph nodes/edges and clean orphaned KG entries");
+        cmd->add_flag("--topology", repairTopology_,
+                      "Rebuild topology cluster artifacts from semantic graph and embeddings");
         cmd->add_flag("--dedupe", repairDedupe_,
                       "Remove semantic duplicates using persisted doctor suggestions");
         cmd->add_option("--include-mime", includeMime_,
@@ -94,14 +96,15 @@ public:
         // If no specific repair requested, default to orphans
         if (!repairOrphans_ && !repairMime_ && !repairChunks_ && !repairEmbeddings_ &&
             !repairFts5_ && !optimizeDb_ && !repairDownloads_ && !repairPathTree_ &&
-            !repairBlockRefs_ && !repairStuckDocs_ && !repairGraph_ && !repairDedupe_ &&
-            !repairAll_) {
+            !repairBlockRefs_ && !repairStuckDocs_ && !repairGraph_ && !repairTopology_ &&
+            !repairDedupe_ && !repairAll_) {
             repairOrphans_ = true;
         }
 
         // Build the RPC request
-        // NOTE: --all intentionally excludes block_refs for now because it can be very slow
-        // on large stores. Use --refs (or --all --refs) to include it explicitly.
+        // NOTE: --all intentionally excludes block_refs and topology for now because they can be
+        // slow on large stores. Use --refs / --topology (or --all with either flag) to include
+        // them explicitly.
         const bool effectiveAll = repairAll_;
         RepairRequest req;
         req.repairOrphans = repairOrphans_ || effectiveAll;
@@ -114,6 +117,7 @@ public:
         req.repairEmbeddings = repairEmbeddings_ || effectiveAll;
         req.repairStuckDocs = repairStuckDocs_ || effectiveAll;
         req.repairGraph = repairGraph_ || effectiveAll;
+        req.repairTopology = repairTopology_;
         req.repairDedupe = repairDedupe_ || effectiveAll;
         req.optimizeDb = optimizeDb_ || effectiveAll;
         req.repairAll = false;
@@ -394,6 +398,7 @@ private:
     bool repairBlockRefs_ = false;
     bool repairStuckDocs_ = false;
     bool repairGraph_ = false;
+    bool repairTopology_ = false;
     bool repairDedupe_ = false;
     bool foreground_ = false;
     std::vector<std::string> includeMime_;

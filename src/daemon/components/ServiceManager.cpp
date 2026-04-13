@@ -94,6 +94,10 @@
 #include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/storage/storage_runtime_resolver.h>
+#include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_input_extractor.h>
+#include <yams/topology/topology_metadata_store.h>
+#include <yams/topology/topology_offline_analyzer.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -2112,6 +2116,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                          maintenance.value().semanticEdgesPruned);
                         }
                     }
+                    requestTopologyRebuild("post_ingest_drain");
                     spdlog::debug(
                         "[ServiceManager] PostIngestQueue drained, signaling SearchEngineManager");
                     searchEngineManager_.signalIndexingDrained();
@@ -3735,6 +3740,138 @@ void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hash
     if (!tasks.empty()) {
         piq->enqueueBatch(std::move(tasks));
     }
+}
+
+Result<ServiceManager::TopologyRebuildStats>
+ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
+                                   const std::vector<std::string>& documentHashes) {
+    auto metadataRepo = getMetadataRepo();
+    auto kgStore = getKgStore();
+    auto vectorDb = getVectorDatabase();
+    if (!metadataRepo || !kgStore || !vectorDb) {
+        return Result<ServiceManager::TopologyRebuildStats>(
+            Error{ErrorCode::InvalidState,
+                  "topology rebuild requires metadata, KG store, and vector database"});
+    }
+
+    auto metadataIface = std::static_pointer_cast<metadata::IMetadataRepository>(metadataRepo);
+    auto extractor =
+        std::make_shared<topology::TopologyInputExtractor>(metadataIface, kgStore, vectorDb);
+    auto engine = std::make_shared<topology::ConnectedComponentTopologyEngine>();
+    topology::TopologyOfflineAnalyzer analyzer(extractor, engine);
+
+    topology::TopologyExtractionConfig extractionConfig;
+    extractionConfig.documentHashes = documentHashes;
+    extractionConfig.limit = documentHashes.empty() ? 0 : static_cast<int>(documentHashes.size());
+    extractionConfig.maxNeighborsPerDocument = 32;
+    extractionConfig.includeEmbeddings = true;
+    extractionConfig.includeMetadata = true;
+    extractionConfig.requireEmbeddings = true;
+    extractionConfig.requireGraphNode = true;
+
+    topology::TopologyBuildConfig buildConfig;
+    buildConfig.mode = topology::TopologyBuildMode::Approximate;
+    buildConfig.inputKind = topology::TopologyInputKind::Hybrid;
+    buildConfig.reciprocalOnly = true;
+    buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
+
+    auto analysisResult = analyzer.analyze(extractionConfig, buildConfig);
+    if (!analysisResult) {
+        return Result<ServiceManager::TopologyRebuildStats>(analysisResult.error());
+    }
+
+    const auto& analysis = analysisResult.value();
+
+    ServiceManager::TopologyRebuildStats stats;
+    stats.reason = reason;
+    stats.dryRun = dryRun;
+    stats.fullRebuild = documentHashes.empty();
+    stats.snapshotId = analysis.artifacts.snapshotId;
+    stats.algorithm = analysis.artifacts.algorithm;
+    stats.documentsRequested = analysis.extractionStats.documentsRequested;
+    stats.documentsProcessed = analysis.extractionStats.documentsReturned;
+    stats.documentsMissingEmbeddings = analysis.extractionStats.documentsMissingEmbeddings;
+    stats.documentsMissingGraphNodes = analysis.extractionStats.documentsMissingGraphNodes;
+    stats.neighborEdgesScanned = analysis.extractionStats.neighborEdgesScanned;
+    stats.neighborsReturned = analysis.extractionStats.neighborsReturned;
+    stats.clustersBuilt = analysis.artifacts.clusters.size();
+    stats.membershipsBuilt = analysis.artifacts.memberships.size();
+
+    if (analysis.artifacts.memberships.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back(
+            "topology rebuild produced no memberships; graph nodes or embeddings may be missing");
+        return stats;
+    }
+
+    if (!dryRun) {
+        topology::MetadataKgTopologyArtifactStore store(metadataIface, kgStore);
+        auto storeResult = store.storeBatch(analysis.artifacts);
+        if (!storeResult) {
+            return Result<ServiceManager::TopologyRebuildStats>(storeResult.error());
+        }
+        stats.stored = true;
+    }
+
+    return stats;
+}
+
+Result<ServiceManager::TopologyRebuildStats>
+ServiceManager::rebuildTopologyArtifacts(const std::string& reason, bool dryRun,
+                                         const std::vector<std::string>& documentHashes) {
+    bool expected = false;
+    if (!topologyRebuildRunning_.compare_exchange_strong(expected, true,
+                                                         std::memory_order_acq_rel)) {
+        TopologyRebuildStats skipped;
+        skipped.skipped = true;
+        skipped.dryRun = dryRun;
+        skipped.fullRebuild = documentHashes.empty();
+        skipped.reason = reason;
+        skipped.issues.push_back("topology rebuild already in progress");
+        return skipped;
+    }
+
+    struct Guard {
+        std::atomic<bool>& running;
+        ~Guard() { running.store(false, std::memory_order_release); }
+    } guard{topologyRebuildRunning_};
+
+    auto result = runTopologyRebuild(reason, dryRun, documentHashes);
+    if (!result) {
+        spdlog::warn("[ServiceManager] Topology rebuild failed (reason={}): {}", reason,
+                     result.error().message);
+        return Result<ServiceManager::TopologyRebuildStats>(result.error());
+    }
+
+    const auto& stats = result.value();
+    if (stats.skipped) {
+        spdlog::info("[ServiceManager] Topology rebuild skipped (reason={}, docs={}, issues={})",
+                     reason, stats.documentsProcessed,
+                     stats.issues.empty() ? 0 : stats.issues.size());
+    } else {
+        spdlog::info("[ServiceManager] Topology rebuild complete (reason={}, docs={}, clusters={}, "
+                     "memberships={}, stored={}, snapshot={})",
+                     reason, stats.documentsProcessed, stats.clustersBuilt, stats.membershipsBuilt,
+                     stats.stored ? 1 : 0, stats.snapshotId);
+    }
+    return result;
+}
+
+void ServiceManager::requestTopologyRebuild(const std::string& reason) {
+    if (shutdownInvoked_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    auto weakSelf = weak_from_this();
+    boost::asio::post(getWorkerExecutor(), [weakSelf, reason]() {
+        if (auto self = weakSelf.lock()) {
+            auto result = self->rebuildTopologyArtifacts(reason, false);
+            if (!result) {
+                spdlog::warn("[ServiceManager] Async topology rebuild failed (reason={}): {}",
+                             reason, result.error().message);
+            }
+        }
+    });
 }
 
 void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {

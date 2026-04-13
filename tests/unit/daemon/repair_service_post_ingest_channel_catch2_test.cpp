@@ -25,6 +25,7 @@
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/topology/topology_metadata_store.h>
 
 #include <boost/asio/use_future.hpp>
 
@@ -1241,6 +1242,228 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     CHECK(provider->batchCalls() >= 2);
     CHECK(provider->singleCalls() >= 1);
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager: async topology rebuild request persists artifacts",
+                 "[daemon][topology][service-manager]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    config_.enableAutoRepair = false;
+    config_.autoLoadPlugins = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    auto kgStore = sm->getKgStore();
+    auto vectorDb = sm->getVectorDatabase();
+    REQUIRE(meta != nullptr);
+    REQUIRE(kgStore != nullptr);
+    REQUIRE(vectorDb != nullptr);
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    const std::vector<std::string> hashes{std::string(64, 'a'), std::string(64, 'b'),
+                                          std::string(64, 'c')};
+
+    for (std::size_t i = 0; i < hashes.size(); ++i) {
+        metadata::DocumentInfo doc{};
+        doc.fileName = "topology-" + std::to_string(i) + ".txt";
+        doc.filePath = (config_.dataDir / doc.fileName).string();
+        doc.fileExtension = "txt";
+        doc.fileSize = 64;
+        doc.sha256Hash = hashes[i];
+        doc.mimeType = "text/plain";
+        doc.modifiedTime = now;
+        doc.indexedTime = now;
+        auto idRes = meta->insertDocument(doc);
+        REQUIRE(idRes.has_value());
+
+        metadata::KGNode node;
+        node.nodeKey = "doc:" + hashes[i];
+        node.label = doc.filePath;
+        node.type = "document";
+        REQUIRE(kgStore->upsertNode(node).has_value());
+
+        yams::vector::VectorRecord vec;
+        vec.document_hash = hashes[i];
+        vec.chunk_id = "topology-doc-" + std::to_string(i);
+        vec.embedding.assign(vectorDb->getConfig().embedding_dim, 0.0f);
+        vec.embedding[i % vec.embedding.size()] = 1.0f;
+        vec.content = "topology seed";
+        vec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+        REQUIRE(vectorDb->insertVector(vec));
+    }
+
+    auto aNode = kgStore->getNodeByKey("doc:" + hashes[0]);
+    auto bNode = kgStore->getNodeByKey("doc:" + hashes[1]);
+    REQUIRE(aNode.has_value());
+    REQUIRE(bNode.has_value());
+    REQUIRE(aNode.value().has_value());
+    REQUIRE(bNode.value().has_value());
+
+    std::vector<metadata::KGEdge> edges;
+    edges.push_back(metadata::KGEdge{.srcNodeId = aNode.value()->id,
+                                     .dstNodeId = bNode.value()->id,
+                                     .relation = "semantic_neighbor",
+                                     .weight = 0.91F});
+    edges.push_back(metadata::KGEdge{.srcNodeId = bNode.value()->id,
+                                     .dstNodeId = aNode.value()->id,
+                                     .relation = "semantic_neighbor",
+                                     .weight = 0.91F});
+    REQUIRE(kgStore->addEdgesUnique(edges).has_value());
+
+    yams::topology::MetadataKgTopologyArtifactStore store(
+        std::static_pointer_cast<metadata::IMetadataRepository>(meta), kgStore);
+
+    sm->requestTopologyRebuild("unit_test_async_topology");
+    const bool built = waitForCondition(std::chrono::seconds(10), [&]() {
+        auto latest = store.loadLatest();
+        return latest.has_value() && latest.value().has_value();
+    });
+    REQUIRE(built);
+
+    auto latest = store.loadLatest();
+    REQUIRE(latest.has_value());
+    REQUIRE(latest.value().has_value());
+    CHECK(latest.value()->clusters.size() == 2);
+
+    auto memberships = store.loadMemberships(hashes);
+    REQUIRE(memberships.has_value());
+    REQUIRE(memberships.value().size() == 3);
+    CHECK(std::count_if(memberships.value().begin(), memberships.value().end(),
+                        [](const auto& membership) {
+                            return membership.role == yams::topology::DocumentTopologyRole::Outlier;
+                        }) == 1);
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: topology rebuild stores artifacts after embedding repair",
+                 "[daemon][repair][topology]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::nullopt);
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    config_.enableAutoRepair = false;
+    config_.autoLoadPlugins = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    auto kgStore = sm->getKgStore();
+    auto vectorDb = sm->getVectorDatabase();
+    REQUIRE(meta != nullptr);
+    REQUIRE(kgStore != nullptr);
+    REQUIRE(vectorDb != nullptr);
+
+    const std::string modelName = "test-model";
+    auto provider = std::make_shared<SelectiveFailingModelProvider>(
+        vectorDb->getConfig().embedding_dim, "never-poison");
+    REQUIRE(provider->loadModel(modelName).has_value());
+    sm->__test_setModelProvider(provider);
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    const std::vector<std::pair<std::string, std::string>> docs = {
+        {std::string(64, 'x'), "cluster alpha"}, {std::string(64, 'y'), "cluster beta"}};
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        metadata::DocumentInfo doc{};
+        doc.fileName = "repair-topology-" + std::to_string(i) + ".txt";
+        doc.filePath = (config_.dataDir / doc.fileName).string();
+        doc.fileExtension = "txt";
+        doc.fileSize = static_cast<int64_t>(docs[i].second.size());
+        doc.sha256Hash = docs[i].first;
+        doc.mimeType = "text/plain";
+        doc.modifiedTime = now;
+        doc.indexedTime = now;
+        auto idRes = meta->insertDocument(doc);
+        REQUIRE(idRes.has_value());
+
+        metadata::DocumentContent content{};
+        content.documentId = idRes.value();
+        content.contentText = docs[i].second;
+        content.contentLength = static_cast<int64_t>(docs[i].second.size());
+        content.extractionMethod = "test";
+        content.language = "en";
+        REQUIRE(meta->insertContent(content).has_value());
+        REQUIRE(meta->updateDocumentExtractionStatus(idRes.value(), true,
+                                                     metadata::ExtractionStatus::Success)
+                    .has_value());
+
+        metadata::KGNode node;
+        node.nodeKey = "doc:" + docs[i].first;
+        node.label = doc.filePath;
+        node.type = "document";
+        REQUIRE(kgStore->upsertNode(node).has_value());
+    }
+
+    RepairService::Config cfg;
+    cfg.enable = false;
+    cfg.dataDir = config_.dataDir;
+    cfg.maxBatch = 2;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+
+    RepairRequest req;
+    req.repairEmbeddings = true;
+    req.repairTopology = true;
+    req.foreground = true;
+    req.embeddingModel = modelName;
+
+    auto response = repair.executeRepair(req, nullptr);
+    REQUIRE(response.success);
+    auto embeddingResult = findOperationResult(response, "embeddings");
+    auto topologyResult = findOperationResult(response, "topology");
+    REQUIRE(embeddingResult.has_value());
+    REQUIRE(topologyResult.has_value());
+    CHECK(embeddingResult->failed == 0);
+    CHECK(topologyResult->failed == 0);
+    CHECK(topologyResult->succeeded == docs.size());
+
+    yams::topology::MetadataKgTopologyArtifactStore store(
+        std::static_pointer_cast<metadata::IMetadataRepository>(meta), kgStore);
+    auto latest = store.loadLatest();
+    REQUIRE(latest.has_value());
+    REQUIRE(latest.value().has_value());
+    CHECK(latest.value()->clusters.size() == 1);
+
+    std::vector<std::string> hashes;
+    for (const auto& [hash, _text] : docs) {
+        hashes.push_back(hash);
+    }
+    auto memberships = store.loadMemberships(hashes);
+    REQUIRE(memberships.has_value());
+    REQUIRE(memberships.value().size() == docs.size());
+    CHECK(memberships.value()[0].clusterId == memberships.value()[1].clusterId);
+
+    auto aNode = kgStore->getNodeByKey("doc:" + docs[0].first);
+    REQUIRE(aNode.has_value());
+    REQUIRE(aNode.value().has_value());
+    auto semanticEdges = kgStore->getEdgesBidirectional(aNode.value()->id, "semantic_neighbor", 16);
+    REQUIRE(semanticEdges.has_value());
+    CHECK_FALSE(semanticEdges.value().empty());
 
     sm->shutdown();
 }

@@ -3128,6 +3128,7 @@ struct RepairRequest {
     bool repairEmbeddings{false};
     bool repairStuckDocs{false};
     bool repairGraph{false};
+    bool repairTopology{false};
     bool repairDedupe{false};
     bool optimizeDb{false};
     bool repairAll{false};
@@ -3146,8 +3147,8 @@ struct RepairRequest {
     void serialize(Serializer& ser) const {
         ser << repairOrphans << repairMime << repairDownloads << repairPathTree << repairChunks
             << repairBlockRefs << repairFts5 << repairEmbeddings << repairStuckDocs << repairGraph
-            << repairDedupe << optimizeDb << repairAll << dryRun << verbose << force << foreground
-            << embeddingModel << includeMime << maxRetries;
+            << repairTopology << repairDedupe << optimizeDb << repairAll << dryRun << verbose
+            << force << foreground << embeddingModel << includeMime << maxRetries;
     }
 
     template <typename Deserializer>
@@ -3180,6 +3181,8 @@ struct RepairRequest {
         if (!readBool(req.repairStuckDocs))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
         if (!readBool(req.repairGraph))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairTopology))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
         if (!readBool(req.repairDedupe))
             return Error{ErrorCode::SerializationError, "RepairRequest"};

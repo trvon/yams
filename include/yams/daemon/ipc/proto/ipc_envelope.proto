@@ -975,6 +975,7 @@ message RepairRequest {
   bool repair_stuck_docs = 9;
   bool repair_dedupe = 20;
   bool repair_graph = 19;
+  bool repair_topology = 21;
   bool optimize_db = 10;
   bool repair_all = 11;
 

@@ -361,6 +361,33 @@ public:
     void startRepairService(std::function<size_t()> activeConnFn);
     void stopRepairService();
 
+    struct TopologyRebuildStats {
+        bool skipped{false};
+        bool dryRun{false};
+        bool fullRebuild{true};
+        bool stored{false};
+        std::string reason;
+        std::string snapshotId;
+        std::string algorithm;
+        std::uint64_t documentsRequested{0};
+        std::uint64_t documentsProcessed{0};
+        std::uint64_t documentsMissingEmbeddings{0};
+        std::uint64_t documentsMissingGraphNodes{0};
+        std::uint64_t neighborEdgesScanned{0};
+        std::uint64_t neighborsReturned{0};
+        std::uint64_t clustersBuilt{0};
+        std::uint64_t membershipsBuilt{0};
+        std::vector<std::string> issues;
+    };
+
+    Result<TopologyRebuildStats>
+    rebuildTopologyArtifacts(const std::string& reason, bool dryRun = false,
+                             const std::vector<std::string>& documentHashes = {});
+    void requestTopologyRebuild(const std::string& reason);
+    bool isTopologyRebuildInProgress() const {
+        return topologyRebuildRunning_.load(std::memory_order_acquire);
+    }
+
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
         if (!walMetricsProvider_)
             walMetricsProvider_ = std::make_shared<WalMetricsProvider>();
@@ -699,6 +726,7 @@ private:
     std::unique_ptr<KGWriteQueue> kgWriteQueue_;
     std::shared_ptr<RepairService> repairService_;
     mutable std::mutex repairServiceMutex_;
+    std::atomic<bool> topologyRebuildRunning_{false};
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     bool embeddingsAutoOnAdd_{false};
@@ -709,6 +737,8 @@ private:
     std::atomic<bool> vectorDbInitAttempted_{false};
 
     Result<bool> initializeVectorDatabaseOnce(const std::filesystem::path& dataDir);
+    Result<TopologyRebuildStats> runTopologyRebuild(const std::string& reason, bool dryRun,
+                                                    const std::vector<std::string>& documentHashes);
 
     std::string adoptedProviderPluginName_;
 

@@ -1125,6 +1125,7 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     bool doEmbeddings = request.repairEmbeddings || request.repairAll;
     bool doStuckDocs = request.repairStuckDocs || request.repairAll;
     bool doGraph = request.repairGraph || request.repairAll;
+    bool doTopology = request.repairTopology;
     bool doDedupe = request.repairDedupe || request.repairAll;
     bool doOptimize = request.optimizeDb || request.repairAll;
 
@@ -1178,6 +1179,9 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     if (doEmbeddings)
         if (!runOp("embeddings",
                    [&] { return generateMissingEmbeddings(request, progress, cancelRequested); }))
+            goto finalize;
+    if (doTopology)
+        if (!runOp("topology", [&] { return rebuildTopologyArtifacts(request, progress); }))
             goto finalize;
 
     // Phase 4: Database maintenance
@@ -1343,6 +1347,7 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
     const bool doEmbeddings = request.repairEmbeddings || request.repairAll;
     const bool doStuckDocs = request.repairStuckDocs || request.repairAll;
     const bool doGraph = request.repairGraph || request.repairAll;
+    const bool doTopology = request.repairTopology;
     const bool doDedupe = request.repairDedupe || request.repairAll;
     const bool doOptimize = request.optimizeDb || request.repairAll;
 
@@ -1406,6 +1411,9 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
                 return generateMissingEmbeddingsAsync(request, progress, cancelRequested);
             });
         }
+    }
+    if (keepGoing && doTopology) {
+        keepGoing = runOp("topology", [&] { return rebuildTopologyArtifacts(request, progress); });
     }
     if (keepGoing && doOptimize) {
         (void)runOp("optimize",
@@ -2156,6 +2164,56 @@ RepairOperationResult RepairService::repairKnowledgeGraph(const RepairRequest& r
     }
     if (req.dryRun) {
         message += " (dry-run: changes were not committed)";
+    }
+    result.message = std::move(message);
+    return result;
+}
+
+RepairOperationResult RepairService::rebuildTopologyArtifacts(const RepairRequest& req,
+                                                              const ProgressFn& progress) {
+    (void)progress;
+
+    RepairOperationResult result;
+    result.operation = "topology";
+
+    if (!services_) {
+        result.failed = 1;
+        result.message = "ServiceManager unavailable";
+        return result;
+    }
+
+    auto rebuildResult = services_->rebuildTopologyArtifacts(
+        req.dryRun ? std::string{"repair.topology.dry_run"} : std::string{"repair.topology"},
+        req.dryRun);
+    if (!rebuildResult) {
+        result.failed = 1;
+        result.message = "Topology rebuild failed: " + rebuildResult.error().message;
+        return result;
+    }
+
+    const auto& stats = rebuildResult.value();
+    result.processed = stats.documentsProcessed;
+    if (stats.skipped || req.dryRun) {
+        result.skipped = stats.documentsProcessed;
+    } else {
+        result.succeeded = stats.documentsProcessed;
+    }
+
+    std::string message = (stats.skipped || req.dryRun) ? "Topology rebuild analyzed "
+                                                        : "Topology rebuild stored artifacts for ";
+    message += std::to_string(stats.documentsProcessed) +
+               " docs (clusters=" + std::to_string(stats.clustersBuilt) +
+               ", memberships=" + std::to_string(stats.membershipsBuilt) + ")";
+    if (!stats.snapshotId.empty()) {
+        message += ", snapshot=" + stats.snapshotId;
+    }
+    if (stats.documentsMissingEmbeddings > 0 || stats.documentsMissingGraphNodes > 0) {
+        message += " [missing_embeddings=" + std::to_string(stats.documentsMissingEmbeddings) +
+                   ", missing_graph_nodes=" + std::to_string(stats.documentsMissingGraphNodes) +
+                   "]";
+    }
+    if (!stats.issues.empty()) {
+        message += ": " + stats.issues.front();
     }
     result.message = std::move(message);
     return result;
@@ -3067,7 +3125,7 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
                                        modelName,
                                        std::vector<InternalEventBus::EmbedPreparedDoc>{},
                                        nullptr};
-        job.updateSemanticGraph = false;
+        job.updateSemanticGraph = req.repairTopology;
 
         const std::string jobLabel =
             "embed batch " + std::to_string(batchIndex) + "/" + std::to_string(totalBatches);
@@ -3278,7 +3336,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
                                        modelName,
                                        std::vector<InternalEventBus::EmbedPreparedDoc>{},
                                        monitor};
-        job.updateSemanticGraph = false;
+        job.updateSemanticGraph = req.repairTopology;
 
         int retries = 0;
         bool pushed = false;

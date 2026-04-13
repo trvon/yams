@@ -3183,6 +3183,7 @@ template <> struct ProtoBinding<RepairRequest> {
         o->set_repair_embeddings(r.repairEmbeddings);
         o->set_repair_stuck_docs(r.repairStuckDocs);
         o->set_repair_graph(r.repairGraph);
+        o->set_repair_topology(r.repairTopology);
         o->set_repair_dedupe(r.repairDedupe);
         o->set_optimize_db(r.optimizeDb);
         o->set_repair_all(r.repairAll);
@@ -3207,6 +3208,7 @@ template <> struct ProtoBinding<RepairRequest> {
         r.repairEmbeddings = i.repair_embeddings();
         r.repairStuckDocs = i.repair_stuck_docs();
         r.repairGraph = i.repair_graph();
+        r.repairTopology = i.repair_topology();
         r.repairDedupe = i.repair_dedupe();
         r.optimizeDb = i.optimize_db();
         r.repairAll = i.repair_all();

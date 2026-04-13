@@ -12,7 +12,10 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_input_extractor.h>
 #include <yams/topology/topology_metadata_store.h>
+#include <yams/topology/topology_offline_analyzer.h>
+#include <yams/vector/vector_database.h>
 
 using namespace yams;
 using namespace yams::metadata;
@@ -84,6 +87,7 @@ struct TopologyFixture {
     std::unique_ptr<ConnectionPool> pool;
     std::shared_ptr<MetadataRepository> repository;
     std::shared_ptr<KnowledgeGraphStore> kgStore;
+    std::shared_ptr<vector::VectorDatabase> vectorDb;
 };
 
 } // namespace
@@ -193,4 +197,112 @@ TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
                      });
     REQUIRE(cccIt != membershipsResult.value().end());
     CHECK(cccIt->role == DocumentTopologyRole::Outlier);
+}
+
+TEST_CASE("Topology extractor and offline analyzer use real stores",
+          "[unit][topology][extractor][offline]") {
+    TopologyFixture fix;
+
+    vector::VectorDatabaseConfig vectorConfig;
+    vectorConfig.database_path = ":memory:";
+    vectorConfig.embedding_dim = 4;
+    vectorConfig.create_if_missing = true;
+    vectorConfig.use_in_memory = true;
+    fix.vectorDb = std::make_shared<vector::VectorDatabase>(vectorConfig);
+    REQUIRE(fix.vectorDb->initialize());
+
+    REQUIRE(fix.repository->insertDocument(makeDocumentWithPath("/repo/a.md", "aaa")).has_value());
+    REQUIRE(fix.repository->insertDocument(makeDocumentWithPath("/repo/b.md", "bbb")).has_value());
+    REQUIRE(fix.repository->insertDocument(makeDocumentWithPath("/repo/c.md", "ccc")).has_value());
+
+    vector::VectorRecord aVec;
+    aVec.chunk_id = "doc-aaa";
+    aVec.document_hash = "aaa";
+    aVec.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+    aVec.level = vector::EmbeddingLevel::DOCUMENT;
+    REQUIRE(fix.vectorDb->insertVector(aVec));
+
+    vector::VectorRecord bVec;
+    bVec.chunk_id = "doc-bbb";
+    bVec.document_hash = "bbb";
+    bVec.embedding = {0.9F, 0.1F, 0.0F, 0.0F};
+    bVec.level = vector::EmbeddingLevel::DOCUMENT;
+    REQUIRE(fix.vectorDb->insertVector(bVec));
+
+    vector::VectorRecord cVec;
+    cVec.chunk_id = "doc-ccc";
+    cVec.document_hash = "ccc";
+    cVec.embedding = {0.0F, 1.0F, 0.0F, 0.0F};
+    cVec.level = vector::EmbeddingLevel::DOCUMENT;
+    REQUIRE(fix.vectorDb->insertVector(cVec));
+
+    metadata::KGNode aNode;
+    aNode.nodeKey = "doc:aaa";
+    aNode.label = std::string{"aaa"};
+    aNode.type = std::string{"document"};
+    auto aNodeId = fix.kgStore->upsertNode(aNode);
+    REQUIRE(aNodeId.has_value());
+
+    metadata::KGNode bNode;
+    bNode.nodeKey = "doc:bbb";
+    bNode.label = std::string{"bbb"};
+    bNode.type = std::string{"document"};
+    auto bNodeId = fix.kgStore->upsertNode(bNode);
+    REQUIRE(bNodeId.has_value());
+
+    metadata::KGNode cNode;
+    cNode.nodeKey = "doc:ccc";
+    cNode.label = std::string{"ccc"};
+    cNode.type = std::string{"document"};
+    auto cNodeId = fix.kgStore->upsertNode(cNode);
+    REQUIRE(cNodeId.has_value());
+
+    std::vector<metadata::KGEdge> edges;
+    edges.push_back(metadata::KGEdge{.srcNodeId = aNodeId.value(),
+                                     .dstNodeId = bNodeId.value(),
+                                     .relation = "semantic_neighbor",
+                                     .weight = 0.9F});
+    edges.push_back(metadata::KGEdge{.srcNodeId = bNodeId.value(),
+                                     .dstNodeId = aNodeId.value(),
+                                     .relation = "semantic_neighbor",
+                                     .weight = 0.9F});
+    REQUIRE(fix.kgStore->addEdgesUnique(edges).has_value());
+
+    auto extractor =
+        std::make_shared<TopologyInputExtractor>(fix.repository, fix.kgStore, fix.vectorDb);
+    TopologyExtractionStats extractionStats;
+    auto extracted = extractor->extract(TopologyExtractionConfig{.limit = 10,
+                                                                 .maxNeighborsPerDocument = 8,
+                                                                 .includeEmbeddings = true,
+                                                                 .includeMetadata = true,
+                                                                 .requireEmbeddings = true,
+                                                                 .requireGraphNode = true},
+                                        &extractionStats);
+    REQUIRE(extracted.has_value());
+    REQUIRE(extracted.value().size() == 3);
+    CHECK(extractionStats.documentsReturned == 3);
+
+    const auto aExtracted = std::find_if(
+        extracted.value().begin(), extracted.value().end(),
+        [](const TopologyDocumentInput& input) { return input.documentHash == "aaa"; });
+    REQUIRE(aExtracted != extracted.value().end());
+    REQUIRE(aExtracted->embedding.size() == 4);
+    REQUIRE(aExtracted->neighbors.size() == 1);
+    CHECK(aExtracted->neighbors.front().documentHash == "bbb");
+    CHECK(aExtracted->neighbors.front().reciprocal);
+    CHECK(aExtracted->metadata.contains("mime_type"));
+
+    auto engine = std::make_shared<ConnectedComponentTopologyEngine>();
+    TopologyOfflineAnalyzer analyzer(extractor, engine);
+    auto analysis = analyzer.analyze(
+        TopologyExtractionConfig{.limit = 10,
+                                 .maxNeighborsPerDocument = 8,
+                                 .includeEmbeddings = true,
+                                 .includeMetadata = true,
+                                 .requireEmbeddings = true,
+                                 .requireGraphNode = true},
+        TopologyBuildConfig{.inputKind = TopologyInputKind::Hybrid, .reciprocalOnly = true});
+    REQUIRE(analysis.has_value());
+    CHECK(analysis.value().artifacts.clusters.size() == 2);
+    CHECK(analysis.value().extractionStats.documentsReturned == 3);
 }

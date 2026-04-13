@@ -221,6 +221,7 @@ yams_daemon_lib = static_library('yams_daemon',
     dependency('yams_app_services'),
     dependency('yams_config'),
     dependency('yams_metadata'),
+    dependency('yams_topology'),
     yams_daemon_client_dep,
     yams_onnx_resource_dep,
     # Direct Boost dependency required because daemon sources

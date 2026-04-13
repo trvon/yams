@@ -1405,9 +1405,13 @@ yams completion bash > ~/.local/share/bash-completion/completions/yams
 yams completion bash | sudo tee /etc/bash_completion.d/yams > /dev/null
 ```
 
+Note: Homebrew installs the bash completion file, but your shell still needs bash-completion
+startup support enabled.
+
 **Zsh (Linux/macOS):**
 ```bash
 # Quick use without installing
+autoload -U compinit && compinit
 source <(yams completion zsh)
 
 # Install for current user (Oh My Zsh)
@@ -1416,12 +1420,23 @@ yams completion zsh > ~/.oh-my-zsh/completions/_yams
 # Or standard location
 mkdir -p ~/.local/share/zsh/site-functions
 yams completion zsh > ~/.local/share/zsh/site-functions/_yams
+
+# Ensure the install directory is on fpath before compinit runs
+fpath=(~/.local/share/zsh/site-functions $fpath)
+autoload -U compinit && compinit
 ```
+
+The generated zsh completion now supports nested subcommands such as
+`yams config embeddings ...`, `yams doctor embeddings ...`, and
+`yams plugin trust ...`.
 
 **Fish:**
 ```bash
 yams completion fish > ~/.config/fish/completions/yams.fish
 ```
+
+If you are not using Homebrew's fish package, make sure your `fish_complete_path`
+includes the directory where the completion file is installed.
 
 **PowerShell (Windows/Linux/macOS):**
 ```powershell
@@ -1443,12 +1458,14 @@ yams completion powershell | Out-File -Encoding utf8 "$completionPath\yams.ps1"
 After installing, restart your shell or reload your profile:
 
 ```bash
-# Bash/Zsh
+# Bash
 source ~/.bashrc   # or ~/.zshrc
 
 # PowerShell
 . $PROFILE
 ```
+
+For zsh, make sure `compinit` runs after your `fpath` updates.
 
 Then test by typing `yams ` and pressing Tab.
 
