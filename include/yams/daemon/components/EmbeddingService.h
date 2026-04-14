@@ -86,6 +86,7 @@ public:
      * that depend on the VectorDatabase contents.
      */
     void setCompressedAnnInvalidator(std::function<void()> cb);
+    void setTopologyRebuildRequester(std::function<void(const std::vector<std::string>&)> cb);
 
     void start();
 
@@ -115,6 +116,7 @@ private:
                                       std::function<void(const ModelLoadEvent&)>)>
         ensureModelReady_;
     std::function<void()> compressedAnnInvalidator_; // called after batch insert
+    std::function<void(const std::vector<std::string>&)> topologyRebuildRequester_;
 
     std::atomic<bool> stop_{false};
     std::atomic<std::size_t> processed_{0};

@@ -199,6 +199,11 @@ void EmbeddingService::setCompressedAnnInvalidator(std::function<void()> cb) {
     compressedAnnInvalidator_ = std::move(cb);
 }
 
+void EmbeddingService::setTopologyRebuildRequester(
+    std::function<void(const std::vector<std::string>&)> cb) {
+    topologyRebuildRequester_ = std::move(cb);
+}
+
 std::size_t EmbeddingService::queuedJobs() const {
     const auto chPtr = std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
     const std::size_t ch = chPtr ? chPtr->size_approx() : 0;
@@ -2279,6 +2284,10 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     // so the next query rebuilds from the current database state.
     if (compressedAnnInvalidator_) {
         compressedAnnInvalidator_();
+    }
+
+    if (topologyRebuildRequester_ && !successHashes.empty()) {
+        topologyRebuildRequester_(successHashes);
     }
 
     logPoolState("job_end");

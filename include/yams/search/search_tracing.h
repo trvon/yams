@@ -46,6 +46,7 @@ struct TraceStageSummary {
     std::string skipReason;
     std::size_t rawHitCount = 0;
     std::size_t uniqueDocCount = 0;
+    std::vector<std::string> uniqueDocIds;
     std::int64_t durationMicros = 0;
 };
 

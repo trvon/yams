@@ -600,18 +600,24 @@ private:
                 // Dispatch to PostIngestQueue for entity extraction via InternalEventBus
                 if (!fileResult.hash.empty()) {
                     try {
-                        auto channel =
-                            daemon::InternalEventBus::instance()
-                                .get_or_create_channel<daemon::InternalEventBus::PostIngestTask>(
-                                    "post_ingest", 65536);
-                        if (channel) {
-                            daemon::InternalEventBus::PostIngestTask task;
-                            task.hash = fileResult.hash;
-                            // mime type not in response - PostIngestQueue will detect from metadata
-                            task.mime = "";
-                            if (!channel->try_push(std::move(task))) {
-                                spdlog::debug("[IndexingService] post_ingest channel full for {}",
-                                              fileResult.hash.substr(0, 12));
+                        if (ctx_.service_manager != nullptr) {
+                            ctx_.service_manager->enqueuePostIngest(fileResult.hash, "");
+                        } else {
+                            auto channel = daemon::InternalEventBus::instance()
+                                               .get_or_create_channel<
+                                                   daemon::InternalEventBus::PostIngestTask>(
+                                                   "post_ingest", 65536);
+                            if (channel) {
+                                daemon::InternalEventBus::PostIngestTask task;
+                                task.hash = fileResult.hash;
+                                // mime type not in response - PostIngestQueue will detect from
+                                // metadata
+                                task.mime = "";
+                                if (!channel->try_push(std::move(task))) {
+                                    spdlog::debug(
+                                        "[IndexingService] post_ingest channel full for {}",
+                                        fileResult.hash.substr(0, 12));
+                                }
                             }
                         }
                     } catch (const std::exception& e) {

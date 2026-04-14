@@ -16,6 +16,8 @@
 #include <yams/search/tuning_pipeline.h>
 #include <yams/search/turboquant_packed_reranker.h>
 #include <yams/search/vector_reranker.h>
+#include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_metadata_store.h>
 #include <yams/vector/compressed_ann.h>
 
 #include <algorithm>
@@ -72,6 +74,67 @@ template <typename Map> inline void reserve_if_needed(Map& m, size_t n) {
 namespace {
 
 using json = nlohmann::json;
+
+std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore, std::string_view query,
+    const std::unordered_set<std::string>& seedDocumentHashes, const SearchEngineConfig& config) {
+    std::unordered_set<std::string> routed;
+    if (!metadataRepo || !kgStore || seedDocumentHashes.empty() ||
+        !config.enableTopologyWeakQueryRouting || config.topologyWeakQueryMaxClusters == 0 ||
+        config.topologyWeakQueryMaxDocs == 0) {
+        return routed;
+    }
+
+    auto metadataIface =
+        std::static_pointer_cast<yams::metadata::IMetadataRepository>(metadataRepo);
+    yams::topology::MetadataKgTopologyArtifactStore store(metadataIface, kgStore);
+    auto latestResult = store.loadLatest();
+    if (!latestResult || !latestResult.value().has_value()) {
+        return routed;
+    }
+
+    yams::topology::StableClusterTopologyRouter router;
+    yams::topology::TopologyRouteRequest routeRequest;
+    routeRequest.queryText = std::string(query);
+    routeRequest.seedDocumentHashes.assign(seedDocumentHashes.begin(), seedDocumentHashes.end());
+    routeRequest.limit = config.topologyWeakQueryMaxClusters;
+    routeRequest.preferStableClusters = true;
+    routeRequest.weakQueryOnly = true;
+
+    auto routesResult = router.route(routeRequest, *latestResult.value());
+    if (!routesResult) {
+        return routed;
+    }
+
+    std::unordered_map<std::string, const yams::topology::ClusterArtifact*> clustersById;
+    clustersById.reserve(latestResult.value()->clusters.size());
+    for (const auto& cluster : latestResult.value()->clusters) {
+        clustersById.emplace(cluster.clusterId, &cluster);
+    }
+
+    for (const auto& route : routesResult.value()) {
+        auto clusterIt = clustersById.find(route.clusterId);
+        if (clusterIt == clustersById.end()) {
+            continue;
+        }
+        const auto* cluster = clusterIt->second;
+        if (cluster->medoid.has_value() && !cluster->medoid->documentHash.empty()) {
+            routed.insert(cluster->medoid->documentHash);
+        }
+        for (const auto& documentHash : cluster->memberDocumentHashes) {
+            if (routed.size() >= config.topologyWeakQueryMaxDocs) {
+                break;
+            }
+            routed.insert(documentHash);
+        }
+        if (routed.size() >= config.topologyWeakQueryMaxDocs) {
+            break;
+        }
+    }
+
+    return routed;
+}
 
 template <typename Work>
 auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& executor)
@@ -2145,6 +2208,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                               tier1CandidateCount);
             }
 
+            std::unordered_set<std::string> tier2Candidates = tier1Candidates;
+            std::size_t topologyWeakQuerySeedCount = 0;
+            std::size_t topologyWeakQueryAddedDocs = 0;
+            bool topologyWeakQueryRoutingApplied = false;
+
             // --- TIER 2: Vector search NARROWED to Tier 1 candidates ---
             // Always run vector search (never skip), but filter to Tier 1 candidates when
             // appropriate
@@ -2190,6 +2258,29 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     effectiveEntityVectorMaxResults);
             }
 
+            if (weakTier1Query && !tier1Candidates.empty() &&
+                workingConfig.enableTopologyWeakQueryRouting) {
+                const auto topologyCandidates = buildTopologyWeakQueryCandidates(
+                    metadataRepo_, kgStore_, query, tier1Candidates, workingConfig);
+                topologyWeakQuerySeedCount = tier1Candidates.size();
+                const auto candidateCountBeforeRouting = tier2Candidates.size();
+                for (const auto& hash : topologyCandidates) {
+                    tier2Candidates.insert(hash);
+                }
+                topologyWeakQueryAddedDocs =
+                    tier2Candidates.size() > candidateCountBeforeRouting
+                        ? tier2Candidates.size() - candidateCountBeforeRouting
+                        : 0;
+                topologyWeakQueryRoutingApplied = topologyWeakQueryAddedDocs > 0;
+                if (topologyWeakQueryRoutingApplied) {
+                    spdlog::debug(
+                        "Tiered search: topology weak-query routing applied (seed_docs={}, "
+                        "added_docs={}, total_candidates={})",
+                        topologyWeakQuerySeedCount, topologyWeakQueryAddedDocs,
+                        tier2Candidates.size());
+                }
+            }
+
             const bool strongBudgetLexical =
                 semanticBudgetActive && (tier1TextHits >= 5 || tier1TopTextScore >= 0.20f);
             const bool shouldSkipSemantic =
@@ -2231,20 +2322,29 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
             const bool shouldNarrow = workingConfig.tieredNarrowVectorSearch &&
-                                      tier1CandidateCount >= workingConfig.tieredMinCandidates;
+                                      tier2Candidates.size() >= workingConfig.tieredMinCandidates;
+
+            response.debugStats["topology_weak_query_routing_applied"] =
+                topologyWeakQueryRoutingApplied ? "1" : "0";
+            response.debugStats["topology_weak_query_seed_docs"] =
+                std::to_string(topologyWeakQuerySeedCount);
+            response.debugStats["topology_weak_query_added_docs"] =
+                std::to_string(topologyWeakQueryAddedDocs);
+            response.debugStats["topology_weak_query_total_candidates"] =
+                std::to_string(tier2Candidates.size());
 
             if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_ &&
                 !hasVectorTierDimMismatch()) {
                 vectorFuture =
                     schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
                              stats_.avgVectorTimeMicros,
-                             [&queryEmbedding, &tier1Candidates, shouldNarrow,
+                             [&queryEmbedding, &tier2Candidates, shouldNarrow,
                               effectiveVectorMaxResults, &queryVectorWithRelaxedRetry]() {
                                  YAMS_ZONE_SCOPED_N("component::vector");
                                  if (shouldNarrow) {
                                      return queryVectorWithRelaxedRetry(queryEmbedding.value(),
                                                                         effectiveVectorMaxResults,
-                                                                        &tier1Candidates);
+                                                                        &tier2Candidates);
                                  } else {
                                      return queryVectorWithRelaxedRetry(queryEmbedding.value(),
                                                                         effectiveVectorMaxResults);

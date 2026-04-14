@@ -102,6 +102,14 @@ TEST_CASE("forProfile CUSTOM also uses defaults", "[search][config][catch2]") {
     CHECK(cfg.corpusProfile == CP::CUSTOM);
 }
 
+TEST_CASE("topology weak query routing defaults stay opt-in", "[search][config][catch2]") {
+    SearchEngineConfig cfg;
+
+    CHECK_FALSE(cfg.enableTopologyWeakQueryRouting);
+    CHECK(cfg.topologyWeakQueryMaxClusters == 2);
+    CHECK(cfg.topologyWeakQueryMaxDocs == 64);
+}
+
 // ────────────────────────────────────────────────────────────────────────────────
 // detectProfile
 // ────────────────────────────────────────────────────────────────────────────────

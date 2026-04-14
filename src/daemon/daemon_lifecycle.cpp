@@ -15,6 +15,18 @@
 
 namespace yams::daemon {
 
+namespace {
+
+bool isSupervisorManagedForegroundDaemon() {
+    if (const char* managed = std::getenv("YAMS_DAEMON_FOREGROUND")) {
+        return std::string_view(managed) == "1" || std::string_view(managed) == "true" ||
+               std::string_view(managed) == "TRUE";
+    }
+    return false;
+}
+
+} // namespace
+
 LifecycleSnapshot DaemonLifecycleAdapter::getLifecycleSnapshot() const {
     if (!daemon_) {
         return LifecycleSnapshot{};
@@ -147,13 +159,19 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
             }
         }
 
-        if (!inTestMode) {
+        if (!inTestMode && !isSupervisorManagedForegroundDaemon()) {
             try {
                 spdlog::info("Daemon shutdown complete, exiting process");
             } catch (...) {
             }
             std::fflush(nullptr);
             std::_Exit(0);
+        } else if (!inTestMode) {
+            try {
+                spdlog::info(
+                    "Daemon shutdown complete (foreground-managed mode, not forcing exit)");
+            } catch (...) {
+            }
         } else {
             try {
                 spdlog::info("Daemon shutdown complete (test mode, not exiting)");

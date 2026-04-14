@@ -209,6 +209,8 @@ void SearchTraceCollector::markStageResult(const std::string& name,
         }
     }
     stage.uniqueDocCount = uniqueDocs.size();
+    stage.uniqueDocIds.assign(uniqueDocs.begin(), uniqueDocs.end());
+    std::sort(stage.uniqueDocIds.begin(), stage.uniqueDocIds.end());
 }
 
 void SearchTraceCollector::markStageTimeout(const std::string& name, std::int64_t durationMicros) {
@@ -242,6 +244,7 @@ void SearchTraceCollector::markStageSkipped(const std::string& name, std::string
     stage.contributed = false;
     stage.rawHitCount = 0;
     stage.uniqueDocCount = 0;
+    stage.uniqueDocIds.clear();
     stage.durationMicros = 0;
     stage.skipReason = std::move(reason);
 }
@@ -259,6 +262,7 @@ nlohmann::json SearchTraceCollector::buildStageSummaryJson() const {
             {"skip_reason", stage.skipReason},
             {"raw_hit_count", stage.rawHitCount},
             {"unique_doc_count", stage.uniqueDocCount},
+            {"unique_doc_ids", stage.uniqueDocIds},
             {"duration_ms", static_cast<double>(stage.durationMicros) / 1000.0},
         };
     }

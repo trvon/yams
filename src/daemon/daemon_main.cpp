@@ -1114,6 +1114,10 @@ int main(int argc, char* argv[]) {
         spdlog::debug("Config migration check failed (non-fatal): {}", e.what());
     }
 
+    // Let managed service launches tell the shutdown path not to force an
+    // out-of-band process exit from the request-handling thread.
+    setenv("YAMS_DAEMON_FOREGROUND", foreground ? "1" : "0", 1);
+
     // Daemonize if not running in foreground
     if (!foreground) {
 #ifdef _WIN32

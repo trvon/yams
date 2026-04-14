@@ -4,6 +4,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_tuner.h>
+#include <yams/topology/topology_artifacts.h>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
@@ -715,6 +716,22 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info(
                 "SearchEngine weakQueryEntityVectorFanoutMultiplier overridden to {:.2f} via env",
                 cfg.weakQueryEntityVectorFanoutMultiplier);
+        }
+        if (auto topologyWeakRouting = getEnvBool("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING")) {
+            cfg.enableTopologyWeakQueryRouting = *topologyWeakRouting;
+            spdlog::info("SearchEngine topology weak-query routing {} via env",
+                         cfg.enableTopologyWeakQueryRouting ? "enabled" : "disabled");
+        }
+        if (auto topologyMaxClusters = getEnvInt("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS")) {
+            cfg.topologyWeakQueryMaxClusters =
+                static_cast<size_t>(std::max(0, *topologyMaxClusters));
+            spdlog::info("SearchEngine topologyWeakQueryMaxClusters overridden to {} via env",
+                         cfg.topologyWeakQueryMaxClusters);
+        }
+        if (auto topologyMaxDocs = getEnvInt("YAMS_SEARCH_TOPOLOGY_MAX_DOCS")) {
+            cfg.topologyWeakQueryMaxDocs = static_cast<size_t>(std::max(0, *topologyMaxDocs));
+            spdlog::info("SearchEngine topologyWeakQueryMaxDocs overridden to {} via env",
+                         cfg.topologyWeakQueryMaxDocs);
         }
         if (auto evidenceRescueSlots = getEnvInt("YAMS_SEARCH_FUSION_EVIDENCE_RESCUE_SLOTS")) {
             cfg.fusionEvidenceRescueSlots = static_cast<size_t>(std::max(0, *evidenceRescueSlots));

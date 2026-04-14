@@ -13,6 +13,9 @@
     YAMS_BENCH_TOPK=N                 - Retrieve top K results (default: 10)
     YAMS_BENCH_DATASET=<name>         - Use BEIR dataset (default: synthetic)
     YAMS_BENCH_DATASET_PATH=...       - Path to dataset directory
+    YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1 - Enable opt-in topology weak-query routing
+    YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=N        - Cap routed topology clusters (default: 2)
+    YAMS_SEARCH_TOPOLOGY_MAX_DOCS=N            - Cap routed topology docs (default: 64)
 
   Tuning for faster ingestion (recommended for large corpora):
     YAMS_POST_EMBED_CONCURRENT=12     - Parallel embedding workers (default: 4-8)
@@ -726,9 +729,12 @@ struct QueryDiagnosticsSummary {
     std::unordered_map<std::string, std::uint64_t> stageAttemptedCount;
     std::unordered_map<std::string, std::uint64_t> stageContributedCount;
     std::unordered_map<std::string, std::uint64_t> stageSkippedCount;
+    std::unordered_map<std::string, std::uint64_t> stageRelevantPresenceCount;
     std::unordered_map<std::string, std::vector<std::string>> stageSkipReasons;
     std::unordered_map<std::string, std::vector<double>> fusionSourceScoreMassSamples;
     std::unordered_map<std::string, std::vector<double>> fusionSourceFinalDocSamples;
+    std::unordered_map<std::string, std::vector<double>> stageUniqueDocCountSamples;
+    std::unordered_map<std::string, std::vector<double>> stageRelevantDocCountSamples;
     std::unordered_map<std::string, std::vector<double>> tunerSignalSamples;
     std::unordered_map<std::string, std::uint64_t> tunerDecisionCounts;
     std::unordered_map<std::string, std::uint64_t> zoomLevelCounts;
@@ -843,6 +849,13 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
         } catch (...) {
         }
     }
+    json stageSummary = json::object();
+    if (auto it = searchStats.find("trace_stage_summary_json"); it != searchStats.end()) {
+        try {
+            stageSummary = json::parse(it->second);
+        } catch (...) {
+        }
+    }
 
     const auto findDoc = [](const json& docs, const std::string& docId) -> json {
         if (!docs.is_array()) {
@@ -892,6 +905,38 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
     bool anyReturnedTopK = false;
     json graphAddedRelevant = json::array();
     json graphDisplacedRelevant = json::array();
+    json stageRelevantPresence = json::object();
+
+    if (stageSummary.is_object()) {
+        for (const auto& [stageName, stageData] : stageSummary.items()) {
+            if (!stageData.is_object()) {
+                continue;
+            }
+            bool anyRelevant = false;
+            std::size_t relevantDocCount = 0;
+            if (auto idsIt = stageData.find("unique_doc_ids");
+                idsIt != stageData.end() && idsIt->is_array()) {
+                for (const auto& id : *idsIt) {
+                    if (!id.is_string()) {
+                        continue;
+                    }
+                    if (std::find(relevantDocIds.begin(), relevantDocIds.end(),
+                                  id.get<std::string>()) != relevantDocIds.end()) {
+                        anyRelevant = true;
+                        ++relevantDocCount;
+                    }
+                }
+            }
+            stageRelevantPresence[stageName] = {
+                {"enabled", stageData.value("enabled", false)},
+                {"attempted", stageData.value("attempted", false)},
+                {"contributed", stageData.value("contributed", false)},
+                {"unique_doc_count", stageData.value("unique_doc_count", 0UL)},
+                {"any_relevant", anyRelevant},
+                {"relevant_doc_count", relevantDocCount},
+            };
+        }
+    }
 
     for (const auto& docId : relevantDocIds) {
         const bool inPre = preSet.contains(docId);
@@ -994,6 +1039,7 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
         {"graph_displaced_relevant_post_fusion_count", graphDisplacedRelevant.size()},
         {"graph_added_relevant_post_fusion_doc_ids", graphAddedRelevant},
         {"graph_displaced_relevant_post_fusion_doc_ids", graphDisplacedRelevant},
+        {"stage_relevant_presence", stageRelevantPresence},
         {"miss_stage", missStage},
         {"relevant_docs", relevant},
     };
@@ -1414,9 +1460,30 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
                             summary.stageSkipReasons[stageName].push_back(reason);
                         }
                     }
+                    if (auto it = stageData.find("unique_doc_count");
+                        it != stageData.end() && it->is_number()) {
+                        summary.stageUniqueDocCountSamples[stageName].push_back(it->get<double>());
+                    }
                 }
             }
         } catch (...) {
+        }
+    }
+
+    if (auto stagePresence = relevantDecisionTrace.find("stage_relevant_presence");
+        relevantDecisionTrace.is_object() && stagePresence != relevantDecisionTrace.end() &&
+        stagePresence->is_object()) {
+        for (const auto& [stageName, stageData] : stagePresence->items()) {
+            if (!stageData.is_object()) {
+                continue;
+            }
+            if (stageData.value("any_relevant", false)) {
+                summary.stageRelevantPresenceCount[stageName]++;
+            }
+            if (auto it = stageData.find("relevant_doc_count");
+                it != stageData.end() && it->is_number()) {
+                summary.stageRelevantDocCountSamples[stageName].push_back(it->get<double>());
+            }
         }
     }
 
@@ -1602,6 +1669,18 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
     }
     out["timings_ms"] = timings;
 
+    json stageUniqueDocCounts = json::object();
+    for (const auto& [stageName, samples] : summary.stageUniqueDocCountSamples) {
+        stageUniqueDocCounts[stageName] = summarizeSamples(samples);
+    }
+    out["stage_unique_doc_counts"] = stageUniqueDocCounts;
+
+    json stageRelevantDocCounts = json::object();
+    for (const auto& [stageName, samples] : summary.stageRelevantDocCountSamples) {
+        stageRelevantDocCounts[stageName] = summarizeSamples(samples);
+    }
+    out["stage_relevant_doc_counts"] = stageRelevantDocCounts;
+
     json stages = json::object();
     for (const auto& [stageName, enabledCount] : summary.stageEnabledCount) {
         const double enabled = static_cast<double>(enabledCount);
@@ -1617,10 +1696,15 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         const double skipped = skippedIt != summary.stageSkippedCount.end()
                                    ? static_cast<double>(skippedIt->second)
                                    : 0.0;
+        const auto relevantIt = summary.stageRelevantPresenceCount.find(stageName);
+        const double relevantPresence = relevantIt != summary.stageRelevantPresenceCount.end()
+                                            ? static_cast<double>(relevantIt->second)
+                                            : 0.0;
         stages[stageName] = {
             {"enabled_rate", enabled / queryCount},
             {"attempt_rate", attempted / queryCount},
             {"contribution_rate", contributed / queryCount},
+            {"relevant_presence_rate", relevantPresence / queryCount},
             {"skip_rate", skipped / queryCount},
             {"skip_reasons", summary.stageSkipReasons.contains(stageName)
                                  ? json(summary.stageSkipReasons.at(stageName))

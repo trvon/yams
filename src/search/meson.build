@@ -3,6 +3,7 @@ nlohmann_json_dep = dependency('nlohmann_json', required: true)
 boost_dep = dependency('boost', required: true)
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
+yams_topology = dependency('yams_topology', required: false)
 yams_vector = dependency('yams_vector', required: false)
 
 # SymSpell dependency (defined in third_party/symspell/meson.build)
@@ -40,7 +41,7 @@ yams_search = static_library('yams_search',
     include_directories('../../include'),
     include_directories('../../third_party/symspell/include'),
   ],
-  dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_vector, symspell_dep],
+  dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_topology, yams_vector, symspell_dep],
   install: true,
 )
 
@@ -57,6 +58,6 @@ yams_search_dep = declare_dependency(
     include_directories('../../include'),
     include_directories('../../third_party/symspell/include'),
   ],
-  dependencies: [yams_core, yams_metadata, yams_vector, nlohmann_json_dep, spdlog_dep, boost_dep, symspell_dep],
+  dependencies: [yams_core, yams_metadata, yams_topology, yams_vector, nlohmann_json_dep, spdlog_dep, boost_dep, symspell_dep],
 )
 meson.override_dependency('yams_search', yams_search_dep)

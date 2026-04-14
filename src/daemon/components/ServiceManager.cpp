@@ -2274,6 +2274,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                                                /*timeoutMs=*/0,
                                                                /*keepHot=*/true, /*warmup=*/true);
                 });
+            embeddingService->setTopologyRebuildRequester(
+                [this](const std::vector<std::string>& hashes) {
+                    this->requestTopologyRebuild("embedding_batch_complete", hashes);
+                });
             embeddingService->start();
             std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
                                        std::memory_order_release);

@@ -5,6 +5,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/query_concept_extractor.h>
 #include <yams/search/search_results.h>
+#include <yams/topology/topology_artifacts.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 
@@ -201,6 +202,10 @@ struct SearchEngineConfig {
         2.0f; // Multiplier for vectorMaxResults when weak-query boost triggers
     float weakQueryEntityVectorFanoutMultiplier =
         1.5f; // Multiplier for entityVectorMaxResults when weak-query boost triggers
+    bool enableTopologyWeakQueryRouting =
+        false; // Expand weak-query vector candidates via topology clusters seeded by Tier 1 docs
+    size_t topologyWeakQueryMaxClusters = 2; // Maximum topology clusters to route through
+    size_t topologyWeakQueryMaxDocs = 64;    // Maximum routed document hashes added to Tier 2
 
     // RRF (Reciprocal Rank Fusion) parameter
     // Lower k = more weight on top-ranked items (better precision/MRR)

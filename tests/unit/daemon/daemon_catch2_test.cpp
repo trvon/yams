@@ -26,6 +26,8 @@ using nlohmann::json;
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_index_manager.h>
 
+#include "tests/common/test_helpers_catch2.h"
+
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -259,6 +261,43 @@ TEST_CASE_METHOD(DaemonFixture, "Lifecycle shutdown falls back to direct stop wi
                !daemon_->shutdownThreadActive_.load(std::memory_order_acquire);
     }));
     daemon_->reapCompletedShutdownThread();
+}
+
+TEST_CASE_METHOD(DaemonFixture,
+                 "Lifecycle shutdown avoids forced exit for foreground-managed daemon",
+                 "[daemon][lifecycle][shutdown-request][foreground-managed]") {
+    SKIP_ON_WINDOWS();
+
+    yams::test::ScopedEnvVar foregroundManaged("YAMS_DAEMON_FOREGROUND", std::string("1"));
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+
+    auto startResult = daemon_->start();
+    if (!startResult && isSocketPermissionDenied(startResult.error())) {
+        SKIP("UNIX domain sockets not permitted");
+    }
+    REQUIRE(startResult);
+
+    startRunLoop();
+    REQUIRE(waitForCondition(
+        2s, [&] { return daemon_->runLoopStarted_.load(std::memory_order_acquire); }));
+
+    DaemonLifecycleAdapter lifecycle(daemon_.get());
+    lifecycle.requestShutdown(true, false);
+
+    REQUIRE(waitForCondition(2s, [&] {
+        return daemon_->stopRequested_.load(std::memory_order_acquire) &&
+               daemon_->shutdownThreadActive_.load(std::memory_order_acquire);
+    }));
+
+    stopRunLoop();
+    auto stopResult = daemon_->stop();
+    REQUIRE(stopResult);
+
+    REQUIRE(waitForCondition(
+        2s, [&] { return !daemon_->shutdownThreadActive_.load(std::memory_order_acquire); }));
+    daemon_->reapCompletedShutdownThread();
+    REQUIRE_FALSE(daemon_->isRunning());
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Daemon start and stop", "[daemon][lifecycle]") {
