@@ -57,6 +57,36 @@ namespace yams::app::services {
 
 namespace {
 
+std::unordered_set<std::string> buildRecentLexicalDeltaSet(const AppContext& ctx) {
+    std::unordered_set<std::string> recent;
+#ifdef YAMS_ENABLE_DAEMON_FEATURES
+    if (ctx.service_manager) {
+        auto hashes = ctx.service_manager->getRecentLexicalDeltaHashes();
+        recent.reserve(hashes.size());
+        for (auto& hash : hashes) {
+            recent.insert(std::move(hash));
+        }
+    }
+#else
+    (void)ctx;
+#endif
+    return recent;
+}
+
+void annotateRecentLexicalDeltaHits(SearchResponse& resp,
+                                    const std::unordered_set<std::string>& recentHashes) {
+    std::size_t recentHits = 0;
+    if (!recentHashes.empty()) {
+        for (auto& item : resp.results) {
+            if (!item.hash.empty() && recentHashes.contains(item.hash)) {
+                item.metadata["lexical_delta_recent"] = "true";
+                ++recentHits;
+            }
+        }
+    }
+    resp.searchStats["lexical_delta_recent_hits"] = std::to_string(recentHits);
+}
+
 // Returns true if s consists only of hex digits
 bool isHex(const std::string& s) {
     return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
@@ -239,18 +269,8 @@ search::SearchExecutionContext buildSearchExecutionContext(const AppContext& ctx
                    : metrics.concurrencyLimit);
         context.recommendedWorkers = std::max<std::uint32_t>(
             1, static_cast<std::uint32_t>(yams::daemon::TuneAdvisor::recommendedThreads(0.5, 0)));
-        if (auto postIngest = ctx.service_manager->getPostIngestQueue()) {
-            context.postIngestQueued = static_cast<std::uint32_t>(std::min<std::size_t>(
-                postIngest->size(), std::numeric_limits<std::uint32_t>::max()));
-            context.postIngestInFlight = static_cast<std::uint32_t>(std::min<std::size_t>(
-                postIngest->totalInFlight(), std::numeric_limits<std::uint32_t>::max()));
-        }
-        const auto searchSnapshot = ctx.service_manager->getSearchEngineStatusSnapshot();
-        context.searchEngineReady = searchSnapshot.state == yams::daemon::SearchEngineState::Ready;
-        context.searchEngineAwaitingDrain =
-            searchSnapshot.state == yams::daemon::SearchEngineState::AwaitingDrain;
-        context.corpusWarming = context.postIngestQueued > 0 || context.postIngestInFlight > 0 ||
-                                context.searchEngineAwaitingDrain || !context.searchEngineReady;
+        context.freshness = ctx.service_manager->getIndexFreshnessSnapshot();
+        context.topologyOverlayHashes = ctx.service_manager->getTopologyOverlayHashes();
     }
 #endif
     if (ctx.workerExecutor) {
@@ -1020,20 +1040,38 @@ public:
                 std::to_string(searchExecutionContext.concurrencyLimit);
             resp.searchStats["search_recommended_workers"] =
                 std::to_string(searchExecutionContext.recommendedWorkers);
+            resp.searchStats["ingest_queued"] =
+                std::to_string(searchExecutionContext.freshness.ingestQueued);
+            resp.searchStats["ingest_inflight"] =
+                std::to_string(searchExecutionContext.freshness.ingestInFlight);
             resp.searchStats["post_ingest_queued"] =
-                std::to_string(searchExecutionContext.postIngestQueued);
+                std::to_string(searchExecutionContext.freshness.postIngestQueued);
             resp.searchStats["post_ingest_inflight"] =
-                std::to_string(searchExecutionContext.postIngestInFlight);
+                std::to_string(searchExecutionContext.freshness.postIngestInFlight);
+            resp.searchStats["lexical_delta_pending_docs"] =
+                std::to_string(searchExecutionContext.freshness.lexicalDeltaPendingDocs);
+            resp.searchStats["lexical_delta_queued_epoch"] =
+                std::to_string(searchExecutionContext.freshness.lexicalDeltaQueuedEpoch);
+            resp.searchStats["lexical_delta_published_epoch"] =
+                std::to_string(searchExecutionContext.freshness.lexicalDeltaPublishedEpoch);
+            resp.searchStats["lexical_delta_published_docs"] =
+                std::to_string(searchExecutionContext.freshness.lexicalDeltaPublishedDocs);
             resp.searchStats["budget_short_query"] =
                 searchExecutionContext.shortQueryBudgeted ? "true" : "false";
             resp.searchStats["budget_pressure"] =
                 searchExecutionContext.pressureBudgeted ? "true" : "false";
             resp.searchStats["search_engine_ready"] =
-                searchExecutionContext.searchEngineReady ? "true" : "false";
+                searchExecutionContext.freshness.lexicalReady ? "true" : "false";
             resp.searchStats["search_engine_awaiting_drain"] =
-                searchExecutionContext.searchEngineAwaitingDrain ? "true" : "false";
+                searchExecutionContext.freshness.awaitingDrain ? "true" : "false";
+            resp.searchStats["vector_ready"] =
+                searchExecutionContext.freshness.vectorReady ? "true" : "false";
+            resp.searchStats["kg_ready"] =
+                searchExecutionContext.freshness.kgReady ? "true" : "false";
+            resp.searchStats["topology_ready"] =
+                searchExecutionContext.freshness.topologyReady ? "true" : "false";
             resp.searchStats["corpus_warming"] =
-                searchExecutionContext.corpusWarming ? "true" : "false";
+                searchExecutionContext.freshness.corpusWarming() ? "true" : "false";
             resp.searchStats["query_intent"] =
                 search::queryIntentToString(routeDecision.intent.label);
             resp.searchStats["query_intent_reason"] = routeDecision.intent.reason;
@@ -1443,6 +1481,7 @@ private:
         SearchResponse resp;
         resp.type = "path";
         resp.usedHybrid = false;
+        const auto recentLexicalDeltaHashes = buildRecentLexicalDeltaSet(ctx_);
         std::vector<metadata::DocumentInfo> docs;
 
         std::string pathQuery = trimCopy(req.query);
@@ -1531,6 +1570,7 @@ private:
             if (req.limit != 0 && resp.results.size() > req.limit) {
                 resp.results.resize(req.limit);
             }
+            annotateRecentLexicalDeltaHits(resp, recentLexicalDeltaHashes);
             resp.total = resp.results.size();
         }
 
@@ -1565,6 +1605,7 @@ private:
         SearchResponse resp;
         resp.type = "hash";
         resp.usedHybrid = false;
+        const auto recentLexicalDeltaHashes = buildRecentLexicalDeltaSet(ctx_);
 
         const std::size_t fetchLimit = std::max<std::size_t>(req.limit * 4, 32);
         auto docsResult = co_await retryMetadataOp(
@@ -1663,6 +1704,7 @@ private:
                 break;
         }
 
+        annotateRecentLexicalDeltaHits(resp, recentLexicalDeltaHashes);
         resp.total = req.pathsOnly ? resp.paths.size() : resp.results.size();
         resp.wasHashSearch = true;
         resp.detectedHashQuery = rawPrefix;
@@ -2318,8 +2360,95 @@ private:
             return serviceResults;
         };
 
+        auto collectRecentLexicalOverlayResults =
+            [&](const SearchRequest& searchReq,
+                const std::unordered_set<std::string>& recentLexicalDeltaHashes)
+            -> std::vector<SearchItem> {
+            std::vector<SearchItem> overlayResults;
+            if (recentLexicalDeltaHashes.empty() || processedQuery.empty()) {
+                return overlayResults;
+            }
+
+            const std::string loweredQuery = toLowerAscii(processedQuery);
+            overlayResults.reserve(recentLexicalDeltaHashes.size());
+
+            auto docIdAllowed = [&](int64_t id) {
+                if (!docIds.has_value()) {
+                    return true;
+                }
+                return std::find(docIds->begin(), docIds->end(), id) != docIds->end();
+            };
+
+            auto fieldMatches = [&](std::string_view text) {
+                return !text.empty() &&
+                       toLowerAscii(std::string(text)).find(loweredQuery) != std::string::npos;
+            };
+
+            for (const auto& hash : recentLexicalDeltaHashes) {
+                auto docResult = ctx_.metadataRepo->getDocumentByHash(hash);
+                if (!docResult || !docResult.value().has_value()) {
+                    continue;
+                }
+                const auto& doc = *docResult.value();
+                if (!docIdAllowed(doc.id)) {
+                    continue;
+                }
+                if (!searchReq.extension.empty() && doc.fileExtension != searchReq.extension &&
+                    doc.fileExtension != ("." + searchReq.extension)) {
+                    continue;
+                }
+                if (!searchReq.mimeType.empty() && doc.mimeType != searchReq.mimeType) {
+                    continue;
+                }
+
+                bool matched = fieldMatches(doc.fileName) || fieldMatches(doc.filePath);
+                std::string snippet;
+                if (!matched) {
+                    auto contentResult = ctx_.metadataRepo->getContent(doc.id);
+                    if (contentResult && contentResult.value().has_value()) {
+                        const auto& content = *contentResult.value();
+                        matched = fieldMatches(content.contentText);
+                        if (matched) {
+                            snippet = utils::createSnippet(content.contentText, 180, true);
+                        }
+                    }
+                }
+
+                if (!matched) {
+                    continue;
+                }
+
+                SearchItem item;
+                item.id = doc.id;
+                item.hash = doc.sha256Hash;
+                item.title = doc.fileName;
+                item.path = doc.filePath;
+                item.fileName = doc.fileName;
+                item.score = 0.82;
+                item.snippet = std::move(snippet);
+                item.mimeType = doc.mimeType;
+                item.fileType = utils::classifyFileType(doc.mimeType, doc.fileExtension);
+                item.size = static_cast<std::uint64_t>(std::max<int64_t>(doc.fileSize, 0));
+                item.created = std::chrono::duration_cast<std::chrono::seconds>(
+                                   doc.createdTime.time_since_epoch())
+                                   .count();
+                item.modified = std::chrono::duration_cast<std::chrono::seconds>(
+                                    doc.modifiedTime.time_since_epoch())
+                                    .count();
+                item.indexed = std::chrono::duration_cast<std::chrono::seconds>(
+                                   doc.indexedTime.time_since_epoch())
+                                   .count();
+                item.matchReason = "recent lexical delta overlay match";
+                item.searchMethod = "lexical_overlay";
+                item.metadata["lexical_delta_recent"] = "true";
+                overlayResults.push_back(std::move(item));
+            }
+            return overlayResults;
+        };
+
         auto runFuzzySearch = [&](const SearchRequest& searchReq) -> Result<SearchResponse> {
             YAMS_ZONE_SCOPED_N("search_service::fuzzy_search");
+            const auto recentLexicalDeltaHashes = buildRecentLexicalDeltaSet(ctx_);
             auto r = ctx_.metadataRepo->fuzzySearch(processedQuery, searchReq.similarity,
                                                     static_cast<int>(searchReq.limit), docIds);
             if (!r) {
@@ -2350,6 +2479,7 @@ private:
 
             resp.results = convertResults(res);
             normalizeScores(resp.results, resp.type);
+            annotateRecentLexicalDeltaHits(resp, recentLexicalDeltaHashes);
             if (!searchReq.pathsOnly) {
                 applyExtensionFacets(resp);
             }
@@ -2359,6 +2489,7 @@ private:
         auto runFullTextSearch = [&](const SearchRequest& searchReq,
                                      bool allowAutoFuzzyFallback) -> Result<SearchResponse> {
             YAMS_ZONE_SCOPED_N("search_service::keyword_fulltext");
+            const auto recentLexicalDeltaHashes = buildRecentLexicalDeltaSet(ctx_);
             // If docIds is set to an empty vector (from tag/path/session intersection with no
             // matches), return empty results immediately since we're filtering to a known-empty
             // set. Note: std::nullopt means "no filter", but empty vector means "filter to
@@ -2380,7 +2511,21 @@ private:
 
             const auto& res = r.value();
             YAMS_PLOT("search_service::fulltext_total", static_cast<double>(res.totalCount));
+            auto overlayResults =
+                collectRecentLexicalOverlayResults(searchReq, recentLexicalDeltaHashes);
             if (allowAutoFuzzyFallback && res.totalCount == 0) {
+                if (!overlayResults.empty()) {
+                    SearchResponse resp;
+                    resp.total = overlayResults.size();
+                    resp.type = "full-text+overlay";
+                    resp.usedHybrid = false;
+                    resp.results = std::move(overlayResults);
+                    annotateRecentLexicalDeltaHits(resp, recentLexicalDeltaHashes);
+                    if (!searchReq.pathsOnly) {
+                        applyExtensionFacets(resp);
+                    }
+                    return resp;
+                }
                 SearchRequest fallbackReq = searchReq;
                 fallbackReq.fuzzy = true;
                 return runFuzzySearch(fallbackReq);
@@ -2406,7 +2551,34 @@ private:
             }
 
             resp.results = convertResults(res);
+            if (!overlayResults.empty()) {
+                std::unordered_set<std::string> seenHashes;
+                for (const auto& item : resp.results) {
+                    if (!item.hash.empty()) {
+                        seenHashes.insert(item.hash);
+                    }
+                }
+                for (auto& item : overlayResults) {
+                    if (!item.hash.empty() && seenHashes.insert(item.hash).second) {
+                        resp.results.push_back(std::move(item));
+                    }
+                }
+                std::sort(resp.results.begin(), resp.results.end(),
+                          [](const SearchItem& lhs, const SearchItem& rhs) {
+                              if (lhs.score == rhs.score) {
+                                  return lhs.path < rhs.path;
+                              }
+                              return lhs.score > rhs.score;
+                          });
+                if (searchReq.limit > 0 && resp.results.size() > searchReq.limit) {
+                    resp.results.resize(searchReq.limit);
+                }
+                resp.total = resp.results.size();
+                resp.searchStats["lexical_overlay_candidates_added"] =
+                    std::to_string(overlayResults.size());
+            }
             normalizeScores(resp.results, resp.type);
+            annotateRecentLexicalDeltaHits(resp, recentLexicalDeltaHashes);
             if (!searchReq.pathsOnly) {
                 applyExtensionFacets(resp);
             }

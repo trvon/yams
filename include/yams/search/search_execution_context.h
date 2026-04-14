@@ -4,22 +4,44 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace yams::search {
+
+struct IndexFreshnessSnapshot {
+    std::uint32_t ingestQueued{0};
+    std::uint32_t ingestInFlight{0};
+    std::uint32_t postIngestQueued{0};
+    std::uint32_t postIngestInFlight{0};
+    std::uint64_t lexicalDeltaQueuedEpoch{0};
+    std::uint64_t lexicalDeltaPublishedEpoch{0};
+    std::uint32_t lexicalDeltaPendingDocs{0};
+    std::uint64_t lexicalDeltaPublishedDocs{0};
+    std::uint32_t lexicalDeltaRecentDocs{0};
+    bool lexicalReady{false};
+    bool vectorReady{false};
+    bool kgReady{false};
+    bool topologyReady{false};
+    bool awaitingDrain{false};
+
+    [[nodiscard]] bool corpusWarming() const noexcept {
+        return ingestQueued > 0 || ingestInFlight > 0 || postIngestQueued > 0 ||
+               postIngestInFlight > 0 || lexicalDeltaPendingDocs > 0 || awaitingDrain ||
+               !lexicalReady;
+    }
+};
 
 struct SearchExecutionContext {
     std::uint32_t activeRequests{1};
     std::uint32_t queuedRequests{0};
     std::uint32_t concurrencyLimit{1};
     std::uint32_t recommendedWorkers{1};
-    std::uint32_t postIngestQueued{0};
-    std::uint32_t postIngestInFlight{0};
     bool allowApproximateFacets{false};
     bool shortQueryBudgeted{false};
     bool pressureBudgeted{false};
-    bool searchEngineReady{false};
-    bool searchEngineAwaitingDrain{false};
-    bool corpusWarming{false};
+    IndexFreshnessSnapshot freshness{};
+    std::vector<std::string> topologyOverlayHashes;
     std::optional<boost::asio::any_io_executor> workerExecutor;
 };
 

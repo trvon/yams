@@ -5,6 +5,7 @@
 #include <exception>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -56,6 +57,7 @@
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/profiling.h>
+#include <yams/search/search_execution_context.h>
 #include <yams/wal/wal_manager.h>
 
 // Forward declarations for services
@@ -285,6 +287,51 @@ public:
     void enqueuePostIngestBatch(const std::vector<std::string>& hashes, const std::string& mime);
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
         return searchEngineManager_.getSnapshot();
+    }
+    yams::search::IndexFreshnessSnapshot getIndexFreshnessSnapshot() const {
+        yams::search::IndexFreshnessSnapshot snapshot;
+        const auto ingest = getIngestMetricsSnapshot();
+        snapshot.ingestQueued = static_cast<std::uint32_t>(
+            std::min<std::size_t>(ingest.queued, std::numeric_limits<std::uint32_t>::max()));
+        snapshot.ingestInFlight = static_cast<std::uint32_t>(
+            std::min<std::size_t>(ingest.active, std::numeric_limits<std::uint32_t>::max()));
+        if (auto postIngest = getPostIngestQueue()) {
+            snapshot.postIngestQueued = static_cast<std::uint32_t>(std::min<std::size_t>(
+                postIngest->size(), std::numeric_limits<std::uint32_t>::max()));
+            snapshot.postIngestInFlight = static_cast<std::uint32_t>(std::min<std::size_t>(
+                postIngest->totalInFlight(), std::numeric_limits<std::uint32_t>::max()));
+        }
+        const auto lexicalDelta = searchEngineManager_.getLexicalDeltaSnapshot();
+        snapshot.lexicalDeltaQueuedEpoch = lexicalDelta.queuedEpoch;
+        snapshot.lexicalDeltaPublishedEpoch = lexicalDelta.publishedEpoch;
+        snapshot.lexicalDeltaPendingDocs = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            lexicalDelta.pendingDocs, std::numeric_limits<std::uint32_t>::max()));
+        snapshot.lexicalDeltaPublishedDocs = lexicalDelta.publishedDocs;
+        snapshot.lexicalDeltaRecentDocs = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            lexicalDelta.recentDocs, std::numeric_limits<std::uint32_t>::max()));
+        const auto searchSnapshot = searchEngineManager_.getSnapshot();
+        snapshot.awaitingDrain = searchSnapshot.state == SearchEngineState::AwaitingDrain;
+        snapshot.lexicalReady = searchSnapshot.state == SearchEngineState::Ready;
+        snapshot.vectorReady = searchSnapshot.vectorEnabled && snapshot.lexicalReady;
+        snapshot.kgReady = snapshot.lexicalReady && snapshot.postIngestQueued == 0 &&
+                           snapshot.postIngestInFlight == 0;
+        snapshot.topologyReady = snapshot.kgReady && !snapshot.awaitingDrain;
+        return snapshot;
+    }
+    std::vector<std::string> getRecentLexicalDeltaHashes() const {
+        return searchEngineManager_.getRecentLexicalDeltaHashes();
+    }
+    std::vector<std::string> getTopologyOverlayHashes(std::size_t limit = 64) const {
+        std::vector<std::string> hashes;
+        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
+        hashes.reserve(std::min(limit, topologyDirtyHashes_.size()));
+        for (const auto& hash : topologyDirtyHashes_) {
+            if (hashes.size() >= limit) {
+                break;
+            }
+            hashes.push_back(hash);
+        }
+        return hashes;
     }
     yams::search::SearchEngine* getCachedSearchEngine() const {
         return searchEngineManager_.getCachedEngine();

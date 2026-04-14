@@ -531,6 +531,8 @@ TEST_CASE(
     REQUIRE(result.value().searchStats.contains("retrieval_mode"));
     CHECK(result.value().searchStats.at("retrieval_mode") == "literal");
     CHECK(result.value().searchStats.at("effective_type") == "keyword");
+    REQUIRE(result.value().searchStats.contains("lexical_delta_pending_docs"));
+    CHECK(result.value().searchStats.at("lexical_delta_pending_docs") == "0");
 }
 
 TEST_CASE("SearchService: explicit keyword key=value query uses metadata filters",

@@ -18,6 +18,14 @@
 
 namespace yams::daemon {
 
+namespace {
+std::uint64_t nextLexicalDeltaEpoch(std::atomic<std::uint64_t>& counter) {
+    return counter.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+constexpr std::size_t kMaxRecentLexicalDeltaDocs = 256;
+} // namespace
+
 yams::search::SearchEngine* SearchEngineManager::getCachedEngine() const {
     std::shared_lock lock(snapshotMutex_);
     return cachedEngine_;
@@ -25,6 +33,86 @@ yams::search::SearchEngine* SearchEngineManager::getCachedEngine() const {
 
 SearchEngineSnapshot SearchEngineManager::getSnapshot() const {
     return fsm_.snapshot();
+}
+
+void SearchEngineManager::noteLexicalDeltaQueued(std::size_t documentCount) {
+    if (documentCount == 0) {
+        return;
+    }
+    lexicalDeltaPendingDocs_.fetch_add(static_cast<std::uint64_t>(documentCount),
+                                       std::memory_order_relaxed);
+    nextLexicalDeltaEpoch(lexicalDeltaQueuedEpoch_);
+}
+
+void SearchEngineManager::noteLexicalDeltaQueuedHash(std::string hash) {
+    if (hash.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(lexicalDeltaMutex_);
+    pendingLexicalDeltaHashes_.push_back(std::move(hash));
+}
+
+void SearchEngineManager::noteLexicalDeltaQueuedHashes(const std::vector<std::string>& hashes) {
+    if (hashes.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(lexicalDeltaMutex_);
+    for (const auto& hash : hashes) {
+        if (!hash.empty()) {
+            pendingLexicalDeltaHashes_.push_back(hash);
+        }
+    }
+}
+
+void SearchEngineManager::noteLexicalDeltaPublished(std::size_t documentCount) {
+    if (documentCount == 0) {
+        return;
+    }
+
+    const auto published = static_cast<std::uint64_t>(documentCount);
+    lexicalDeltaPublishedDocs_.fetch_add(published, std::memory_order_relaxed);
+
+    auto pending = lexicalDeltaPendingDocs_.load(std::memory_order_relaxed);
+    while (true) {
+        const auto nextPending = pending > published ? pending - published : 0;
+        if (lexicalDeltaPendingDocs_.compare_exchange_weak(
+                pending, nextPending, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            break;
+        }
+    }
+    nextLexicalDeltaEpoch(lexicalDeltaPublishedEpoch_);
+
+    std::lock_guard<std::mutex> lock(lexicalDeltaMutex_);
+    for (const auto& hash : pendingLexicalDeltaHashes_) {
+        if (hash.empty() || recentLexicalDeltaSet_.contains(hash)) {
+            continue;
+        }
+        recentLexicalDeltaOrder_.push_back(hash);
+        recentLexicalDeltaSet_.insert(hash);
+        while (recentLexicalDeltaOrder_.size() > kMaxRecentLexicalDeltaDocs) {
+            auto evicted = std::move(recentLexicalDeltaOrder_.front());
+            recentLexicalDeltaOrder_.pop_front();
+            recentLexicalDeltaSet_.erase(evicted);
+        }
+    }
+    pendingLexicalDeltaHashes_.clear();
+}
+
+SearchEngineManager::LexicalDeltaSnapshot
+SearchEngineManager::getLexicalDeltaSnapshot() const noexcept {
+    return {
+        lexicalDeltaQueuedEpoch_.load(std::memory_order_relaxed),
+        lexicalDeltaPublishedEpoch_.load(std::memory_order_relaxed),
+        lexicalDeltaPendingDocs_.load(std::memory_order_relaxed),
+        lexicalDeltaPublishedDocs_.load(std::memory_order_relaxed),
+        static_cast<std::uint64_t>(recentLexicalDeltaSet_.size()),
+    };
+}
+
+std::vector<std::string> SearchEngineManager::getRecentLexicalDeltaHashes() const {
+    std::lock_guard<std::mutex> lock(lexicalDeltaMutex_);
+    return std::vector<std::string>(recentLexicalDeltaOrder_.begin(),
+                                    recentLexicalDeltaOrder_.end());
 }
 
 std::shared_ptr<yams::search::SearchEngine> SearchEngineManager::getEngine() const {

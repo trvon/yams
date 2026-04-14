@@ -849,6 +849,7 @@ private:
     mutable std::atomic<uint64_t> cachedIndexedCount_{0};
     mutable std::atomic<uint64_t> cachedExtractedCount_{0};
     mutable std::atomic<uint64_t> cachedEmbeddedCount_{0};
+    mutable std::atomic<uint64_t> cachedTotalSizeBytes_{0};
     mutable std::atomic<bool> countersInitialized_{false};
 
     // Legacy makeSelect removed; callers now use sql::QuerySpec to build SELECTs

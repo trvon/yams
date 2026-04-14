@@ -78,7 +78,8 @@ using json = nlohmann::json;
 std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
     const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore, std::string_view query,
-    const std::unordered_set<std::string>& seedDocumentHashes, const SearchEngineConfig& config) {
+    const std::unordered_set<std::string>& seedDocumentHashes,
+    const std::vector<std::string>& overlayDocumentHashes, const SearchEngineConfig& config) {
     std::unordered_set<std::string> routed;
     if (!metadataRepo || !kgStore || seedDocumentHashes.empty() ||
         !config.enableTopologyWeakQueryRouting || config.topologyWeakQueryMaxClusters == 0 ||
@@ -113,23 +114,48 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
         clustersById.emplace(cluster.clusterId, &cluster);
     }
 
-    for (const auto& route : routesResult.value()) {
-        auto clusterIt = clustersById.find(route.clusterId);
-        if (clusterIt == clustersById.end()) {
-            continue;
+    auto appendClusterDocuments = [&](const yams::topology::ClusterArtifact& cluster) {
+        if (cluster.medoid.has_value() && !cluster.medoid->documentHash.empty()) {
+            routed.insert(cluster.medoid->documentHash);
         }
-        const auto* cluster = clusterIt->second;
-        if (cluster->medoid.has_value() && !cluster->medoid->documentHash.empty()) {
-            routed.insert(cluster->medoid->documentHash);
-        }
-        for (const auto& documentHash : cluster->memberDocumentHashes) {
+        for (const auto& documentHash : cluster.memberDocumentHashes) {
             if (routed.size() >= config.topologyWeakQueryMaxDocs) {
                 break;
             }
             routed.insert(documentHash);
         }
+    };
+
+    for (const auto& route : routesResult.value()) {
+        auto clusterIt = clustersById.find(route.clusterId);
+        if (clusterIt == clustersById.end()) {
+            continue;
+        }
+        appendClusterDocuments(*clusterIt->second);
         if (routed.size() >= config.topologyWeakQueryMaxDocs) {
             break;
+        }
+    }
+
+    if (!overlayDocumentHashes.empty() && routed.size() < config.topologyWeakQueryMaxDocs) {
+        auto overlayMembershipsResult = store.loadMemberships(overlayDocumentHashes);
+        if (overlayMembershipsResult) {
+            std::unordered_set<std::string> overlayClusters;
+            for (const auto& membership : overlayMembershipsResult.value()) {
+                if (!membership.clusterId.empty()) {
+                    overlayClusters.insert(membership.clusterId);
+                }
+            }
+            for (const auto& clusterId : overlayClusters) {
+                auto clusterIt = clustersById.find(clusterId);
+                if (clusterIt == clustersById.end()) {
+                    continue;
+                }
+                appendClusterDocuments(*clusterIt->second);
+                if (routed.size() >= config.topologyWeakQueryMaxDocs) {
+                    break;
+                }
+            }
         }
     }
 
@@ -1679,20 +1705,32 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const SearchExecutionContext searchExecutionContext = currentSearchExecutionContext();
     const bool shortQueryBudgeted = searchExecutionContext.shortQueryBudgeted;
     const bool pressureBudgeted = searchExecutionContext.pressureBudgeted;
-    const bool corpusWarming = searchExecutionContext.corpusWarming;
+    const auto& freshness = searchExecutionContext.freshness;
+    const auto& topologyOverlayHashes = searchExecutionContext.topologyOverlayHashes;
+    const bool corpusWarming = freshness.corpusWarming();
     const bool semanticBudgetActive = shortQueryBudgeted || pressureBudgeted;
     const bool delayEmbeddingUntilTier1 = semanticBudgetActive;
     response.debugStats["semantic_budget_short_query"] = shortQueryBudgeted ? "1" : "0";
     response.debugStats["semantic_budget_pressure"] = pressureBudgeted ? "1" : "0";
     response.debugStats["corpus_warming"] = corpusWarming ? "1" : "0";
-    response.debugStats["post_ingest_queued"] =
-        std::to_string(searchExecutionContext.postIngestQueued);
-    response.debugStats["post_ingest_inflight"] =
-        std::to_string(searchExecutionContext.postIngestInFlight);
-    response.debugStats["search_engine_ready"] =
-        searchExecutionContext.searchEngineReady ? "1" : "0";
-    response.debugStats["search_engine_awaiting_drain"] =
-        searchExecutionContext.searchEngineAwaitingDrain ? "1" : "0";
+    response.debugStats["ingest_queued"] = std::to_string(freshness.ingestQueued);
+    response.debugStats["ingest_inflight"] = std::to_string(freshness.ingestInFlight);
+    response.debugStats["post_ingest_queued"] = std::to_string(freshness.postIngestQueued);
+    response.debugStats["post_ingest_inflight"] = std::to_string(freshness.postIngestInFlight);
+    response.debugStats["lexical_delta_pending_docs"] =
+        std::to_string(freshness.lexicalDeltaPendingDocs);
+    response.debugStats["lexical_delta_queued_epoch"] =
+        std::to_string(freshness.lexicalDeltaQueuedEpoch);
+    response.debugStats["lexical_delta_published_epoch"] =
+        std::to_string(freshness.lexicalDeltaPublishedEpoch);
+    response.debugStats["lexical_delta_published_docs"] =
+        std::to_string(freshness.lexicalDeltaPublishedDocs);
+    response.debugStats["search_engine_ready"] = freshness.lexicalReady ? "1" : "0";
+    response.debugStats["search_engine_awaiting_drain"] = freshness.awaitingDrain ? "1" : "0";
+    response.debugStats["vector_ready"] = freshness.vectorReady ? "1" : "0";
+    response.debugStats["kg_ready"] = freshness.kgReady ? "1" : "0";
+    response.debugStats["topology_ready"] = freshness.topologyReady ? "1" : "0";
+    response.debugStats["topology_overlay_hashes"] = std::to_string(topologyOverlayHashes.size());
     response.debugStats["semantic_budget_delay_embedding"] = delayEmbeddingUntilTier1 ? "1" : "0";
     if (shortQueryBudgeted) {
         workingConfig.vectorMaxResults = std::min(workingConfig.vectorMaxResults, size_t{8});
@@ -1716,7 +1754,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             shortQueryBudgeted ? "short_query+pressure" : "pressure";
     }
     if (corpusWarming) {
-        workingConfig.enableTopologyWeakQueryRouting = false;
+        if (topologyOverlayHashes.empty()) {
+            workingConfig.enableTopologyWeakQueryRouting = false;
+        }
         workingConfig.enableGraphRerank = false;
         workingConfig.graphRerankTopN = 0;
         workingConfig.graphScoringBudgetMs = 0;
@@ -2370,7 +2410,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (weakTier1Query && !tier1Candidates.empty() &&
                 workingConfig.enableTopologyWeakQueryRouting) {
                 const auto topologyCandidates = buildTopologyWeakQueryCandidates(
-                    metadataRepo_, kgStore_, query, tier1Candidates, workingConfig);
+                    metadataRepo_, kgStore_, query, tier1Candidates, topologyOverlayHashes,
+                    workingConfig);
                 topologyWeakQuerySeedCount = tier1Candidates.size();
                 const auto candidateCountBeforeRouting = tier2Candidates.size();
                 for (const auto& hash : topologyCandidates) {

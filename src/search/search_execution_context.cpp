@@ -16,14 +16,11 @@ SearchExecutionContext defaultSearchExecutionContext() noexcept {
     context.queuedRequests = 0;
     context.concurrencyLimit = static_cast<std::uint32_t>(conservativeWorkers);
     context.recommendedWorkers = static_cast<std::uint32_t>(std::min(4u, conservativeWorkers));
-    context.postIngestQueued = 0;
-    context.postIngestInFlight = 0;
     context.allowApproximateFacets = false;
     context.shortQueryBudgeted = false;
     context.pressureBudgeted = false;
-    context.searchEngineReady = false;
-    context.searchEngineAwaitingDrain = false;
-    context.corpusWarming = false;
+    context.freshness = IndexFreshnessSnapshot{};
+    context.topologyOverlayHashes.clear();
     context.workerExecutor.reset();
     return context;
 }

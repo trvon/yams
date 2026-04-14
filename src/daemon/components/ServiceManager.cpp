@@ -2148,6 +2148,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     if (!disableDrainTopologyRebuild) {
                         requestTopologyRebuild("post_ingest_drain");
                     }
+                    const auto lexicalDelta = searchEngineManager_.getLexicalDeltaSnapshot();
+                    if (lexicalDelta.pendingDocs > 0) {
+                        searchEngineManager_.noteLexicalDeltaPublished(
+                            static_cast<std::size_t>(lexicalDelta.pendingDocs));
+                    }
                     spdlog::debug(
                         "[ServiceManager] PostIngestQueue drained, signaling SearchEngineManager");
                     searchEngineManager_.signalIndexingDrained();
@@ -3762,6 +3767,7 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
     }
 
     PostIngestQueue::Task task{hash, mime};
+    searchEngineManager_.noteLexicalDeltaQueued();
     piq->enqueue(std::move(task));
 }
 
@@ -3783,6 +3789,7 @@ void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hash
         tasks.push_back(PostIngestQueue::Task{hash, mime});
     }
     if (!tasks.empty()) {
+        searchEngineManager_.noteLexicalDeltaQueued(tasks.size());
         {
             std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
             const bool wasEmpty = topologyDirtyHashes_.empty();

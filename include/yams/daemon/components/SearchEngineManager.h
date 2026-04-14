@@ -1,8 +1,13 @@
 #pragma once
 
+#include <atomic>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <unordered_set>
+#include <vector>
 #include "SearchEngineFsm.h"
 #include <boost/asio/awaitable.hpp>
 #include <yams/core/types.h> // For Result type
@@ -46,6 +51,14 @@ namespace yams::daemon {
  */
 class SearchEngineManager {
 public:
+    struct LexicalDeltaSnapshot {
+        std::uint64_t queuedEpoch{0};
+        std::uint64_t publishedEpoch{0};
+        std::uint64_t pendingDocs{0};
+        std::uint64_t publishedDocs{0};
+        std::uint64_t recentDocs{0};
+    };
+
     SearchEngineManager() = default;
     ~SearchEngineManager() = default;
 
@@ -136,6 +149,13 @@ public:
      */
     void signalIndexingDrained() { fsm_.dispatch(SearchEngineIndexingDrainedEvent{}); }
 
+    void noteLexicalDeltaQueued(std::size_t documentCount = 1);
+    void noteLexicalDeltaQueuedHash(std::string hash);
+    void noteLexicalDeltaQueuedHashes(const std::vector<std::string>& hashes);
+    void noteLexicalDeltaPublished(std::size_t documentCount);
+    [[nodiscard]] LexicalDeltaSnapshot getLexicalDeltaSnapshot() const noexcept;
+    [[nodiscard]] std::vector<std::string> getRecentLexicalDeltaHashes() const;
+
     /**
      * Set callback to be invoked when the FSM determines a rebuild should start.
      */
@@ -156,6 +176,15 @@ private:
     // Cached snapshot for non-blocking reads (guarded by snapshotMutex_)
     mutable std::shared_mutex snapshotMutex_;
     yams::search::SearchEngine* cachedEngine_{nullptr};
+
+    std::atomic<std::uint64_t> lexicalDeltaQueuedEpoch_{0};
+    std::atomic<std::uint64_t> lexicalDeltaPublishedEpoch_{0};
+    std::atomic<std::uint64_t> lexicalDeltaPendingDocs_{0};
+    std::atomic<std::uint64_t> lexicalDeltaPublishedDocs_{0};
+    mutable std::mutex lexicalDeltaMutex_;
+    std::vector<std::string> pendingLexicalDeltaHashes_;
+    std::deque<std::string> recentLexicalDeltaOrder_;
+    std::unordered_set<std::string> recentLexicalDeltaSet_;
 };
 
 } // namespace yams::daemon

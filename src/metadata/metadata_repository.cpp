@@ -53,6 +53,17 @@ std::chrono::sys_seconds nowSysSeconds() {
     return std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
 }
 
+void saturatingSubBytes(std::atomic<uint64_t>& counter, uint64_t bytes) {
+    auto current = counter.load(std::memory_order_relaxed);
+    while (true) {
+        const auto next = current > bytes ? current - bytes : 0;
+        if (counter.compare_exchange_weak(current, next, std::memory_order_acq_rel,
+                                          std::memory_order_relaxed)) {
+            return;
+        }
+    }
+}
+
 SemanticDuplicateGroup mapSemanticDuplicateGroupRow(const Statement& stmt) {
     SemanticDuplicateGroup group;
     group.id = stmt.getInt64(0);
@@ -678,6 +689,9 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
 
             // Update component-owned metrics
             cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
+            cachedTotalSizeBytes_.fetch_add(
+                static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0)),
+                std::memory_order_relaxed);
             if (info.contentExtracted) {
                 cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
             }
@@ -770,6 +784,9 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
         if (changes > 0) {
             docId = db.lastInsertRowId();
             cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
+            cachedTotalSizeBytes_.fetch_add(
+                static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0)),
+                std::memory_order_relaxed);
             if (info.contentExtracted) {
                 cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
             }
@@ -943,6 +960,16 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
 
 Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
+        int64_t priorFileSize = info.fileSize;
+        auto priorStmt = db.prepareCached("SELECT file_size FROM documents WHERE id = ?");
+        if (priorStmt) {
+            auto& stmt = *priorStmt.value();
+            YAMS_TRY(stmt.bind(1, info.id));
+            if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
+                priorFileSize = stmt.getInt64(0);
+            }
+        }
+
         // Use prepareCached for better performance on repeated updates
         YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(R"(
             UPDATE documents SET
@@ -963,7 +990,17 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
                               info.extractionError, info.pathPrefix, info.reversePath,
                               info.pathHash, info.parentHash, info.pathDepth, info.id));
 
-        return stmt.execute();
+        YAMS_TRY(stmt.execute());
+        if (db.changes() > 0) {
+            const auto nextSize = static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0));
+            const auto prevSize = static_cast<uint64_t>(std::max<int64_t>(priorFileSize, 0));
+            if (nextSize >= prevSize) {
+                cachedTotalSizeBytes_.fetch_add(nextSize - prevSize, std::memory_order_relaxed);
+            } else {
+                saturatingSubBytes(cachedTotalSizeBytes_, prevSize - nextSize);
+            }
+        }
+        return Result<void>();
     });
 }
 
@@ -973,12 +1010,14 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         bool wasExtracted = false;
         bool wasIndexed = false;
         bool wasEmbedded = false;
+        uint64_t priorFileSize = 0;
         {
             // Use prepareCached for better performance on repeated deletes
             // Note: wasIndexed checks extraction_status (FTS5 indexed) while wasEmbedded uses
             // document_embeddings_status.has_embedding.
             auto checkStmt = db.prepareCached(R"(
                 SELECT d.content_extracted,
+                       d.file_size,
                        CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END,
                        COALESCE(des.has_embedding, 0)
                 FROM documents d
@@ -990,8 +1029,9 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
                 stmt.bind(1, id);
                 if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
                     wasExtracted = stmt.getInt(0) != 0;
-                    wasIndexed = stmt.getInt(1) != 0;
-                    wasEmbedded = stmt.getInt(2) != 0;
+                    priorFileSize = static_cast<uint64_t>(std::max<int64_t>(stmt.getInt64(1), 0));
+                    wasIndexed = stmt.getInt(2) != 0;
+                    wasEmbedded = stmt.getInt(3) != 0;
                 }
             }
         }
@@ -1014,6 +1054,7 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         // Update component-owned metrics (using saturating subtraction to prevent underflow)
         if (db.changes() > 0) {
             core::saturating_sub(cachedDocumentCount_, uint64_t{1});
+            saturatingSubBytes(cachedTotalSizeBytes_, priorFileSize);
             if (wasExtracted) {
                 core::saturating_sub(cachedExtractedCount_, uint64_t{1});
             }
@@ -1053,7 +1094,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
         // wasIndexed checks extraction_status (FTS5 indexed);
         // wasEmbedded checks document_embeddings_status.has_embedding.
         auto checkStmtResult = db.prepareCached(R"(
-            SELECT d.id, d.content_extracted,
+            SELECT d.id, d.content_extracted, d.file_size,
                    CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END,
                    COALESCE(des.has_embedding, 0)
             FROM documents d
@@ -1080,6 +1121,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             bool wasExtracted = false;
             bool wasIndexed = false;
             bool wasEmbedded = false;
+            uint64_t priorFileSize = 0;
 
             if (auto r = checkStmt.reset(); !r) {
                 db.execute("ROLLBACK");
@@ -1091,8 +1133,9 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             }
             if (auto stepRes = checkStmt.step(); stepRes && stepRes.value()) {
                 wasExtracted = checkStmt.getInt(1) != 0;
-                wasIndexed = checkStmt.getInt(2) != 0;
-                wasEmbedded = checkStmt.getInt(3) != 0;
+                priorFileSize = static_cast<uint64_t>(std::max<int64_t>(checkStmt.getInt64(2), 0));
+                wasIndexed = checkStmt.getInt(3) != 0;
+                wasEmbedded = checkStmt.getInt(4) != 0;
             }
 
             // Delete document
@@ -1113,6 +1156,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             if (db.changes() > 0) {
                 deletedCount++;
                 core::saturating_sub(cachedDocumentCount_, uint64_t{1});
+                saturatingSubBytes(cachedTotalSizeBytes_, priorFileSize);
                 if (wasExtracted) {
                     core::saturating_sub(cachedExtractedCount_, uint64_t{1});
                 }
@@ -2971,6 +3015,26 @@ void MetadataRepository::initializeCounters() {
             cachedDocumentCount_.store(static_cast<uint64_t>(totalResult.value()),
                                        std::memory_order_release);
         }
+        auto totalSizeResult = executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+            auto stmtResult = db.prepare("SELECT COALESCE(SUM(file_size), 0) FROM documents");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto& stmt = stmtResult.value();
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return stepResult.error();
+            }
+            if (!stepResult.value()) {
+                return int64_t{0};
+            }
+            return stmt.getInt64(0);
+        });
+        if (totalSizeResult) {
+            cachedTotalSizeBytes_.store(
+                static_cast<uint64_t>(std::max<int64_t>(totalSizeResult.value(), 0)),
+                std::memory_order_release);
+        }
         if (auto indexedResult = getIndexedDocumentCount(); indexedResult) {
             cachedIndexedCount_.store(static_cast<uint64_t>(indexedResult.value()),
                                       std::memory_order_release);
@@ -2983,11 +3047,12 @@ void MetadataRepository::initializeCounters() {
             cachedEmbeddedCount_.store(static_cast<uint64_t>(embeddedResult.value()),
                                        std::memory_order_release);
         }
-        spdlog::info(
-            "MetadataRepository: initialized counters - total={}, indexed={}, extracted={}, "
-            "embedded={}",
-            cachedDocumentCount_.load(), cachedIndexedCount_.load(), cachedExtractedCount_.load(),
-            cachedEmbeddedCount_.load());
+        spdlog::info("MetadataRepository: initialized counters - total={}, bytes={}, indexed={}, "
+                     "extracted={}, "
+                     "embedded={}",
+                     cachedDocumentCount_.load(), cachedTotalSizeBytes_.load(),
+                     cachedIndexedCount_.load(), cachedExtractedCount_.load(),
+                     cachedEmbeddedCount_.load());
     } catch (const std::exception& e) {
         spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
     }
@@ -3245,6 +3310,51 @@ MetadataRepository::getDocumentCountsByExtension() {
 }
 
 Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
+    constexpr auto kCorpusStatsOverlayTtl = std::chrono::minutes(5);
+    auto mergeOnlineOverlay = [&](storage::CorpusStats stats) {
+        const auto liveDocCount =
+            static_cast<int64_t>(cachedDocumentCount_.load(std::memory_order_relaxed));
+        const auto liveEmbeddedCount =
+            static_cast<int64_t>(cachedEmbeddedCount_.load(std::memory_order_relaxed));
+        const auto liveTotalSizeBytes =
+            static_cast<int64_t>(cachedTotalSizeBytes_.load(std::memory_order_relaxed));
+
+        if (liveDocCount > 0) {
+            stats.docCount = liveDocCount;
+            stats.totalSizeBytes = std::max<int64_t>(liveTotalSizeBytes, 0);
+            stats.embeddingCount = std::clamp<int64_t>(liveEmbeddedCount, 0, liveDocCount);
+            stats.embeddingCoverage =
+                static_cast<double>(stats.embeddingCount) / static_cast<double>(stats.docCount);
+            stats.tagCoverage =
+                static_cast<double>(stats.docsWithTags) / static_cast<double>(stats.docCount);
+            stats.symbolDensity =
+                static_cast<double>(stats.symbolCount) / static_cast<double>(stats.docCount);
+            stats.nativeSymbolDensity =
+                static_cast<double>(stats.nativeSymbolCount) / static_cast<double>(stats.docCount);
+            stats.nerEntityDensity =
+                static_cast<double>(stats.nerEntityCount) / static_cast<double>(stats.docCount);
+            if (stats.totalSizeBytes > 0) {
+                stats.avgDocLengthBytes =
+                    static_cast<double>(stats.totalSizeBytes) / static_cast<double>(stats.docCount);
+            }
+        } else {
+            stats.docCount = 0;
+            stats.totalSizeBytes = 0;
+            stats.embeddingCount = 0;
+            stats.embeddingCoverage = 0.0;
+            stats.tagCoverage = 0.0;
+            stats.symbolDensity = 0.0;
+            stats.nativeSymbolDensity = 0.0;
+            stats.nerEntityDensity = 0.0;
+            stats.avgDocLengthBytes = 0.0;
+        }
+
+        stats.computedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+        return stats;
+    };
+
     // Check cache first (reader lock)
     {
         std::shared_lock<std::shared_mutex> readLock(corpusStatsMutex_);
@@ -3262,6 +3372,13 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
 
             if (!isStale && age < kCorpusStatsTtl && docCountUnchanged) {
                 return *cachedCorpusStats_;
+            }
+
+            if (age < kCorpusStatsOverlayTtl) {
+                auto merged = mergeOnlineOverlay(*cachedCorpusStats_);
+                if (isStale || !docCountUnchanged) {
+                    return merged;
+                }
             }
         }
     }
