@@ -53,6 +53,10 @@ std::chrono::sys_seconds nowSysSeconds() {
     return std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
 }
 
+bool isTagMetadataKey(std::string_view key) {
+    return key == "tag" || key.starts_with("tag:");
+}
+
 void saturatingSubBytes(std::atomic<uint64_t>& counter, uint64_t bytes) {
     auto current = counter.load(std::memory_order_relaxed);
     while (true) {
@@ -1518,7 +1522,38 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
 // Metadata operations
 Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::string& key,
                                              const MetadataValue& value) {
+    uint64_t tagCountDelta = 0;
+    uint64_t docsWithTagsDelta = 0;
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        if (isTagMetadataKey(key)) {
+            auto countStmt = db.prepareCached("SELECT COUNT(*) FROM metadata WHERE document_id = ? "
+                                              "AND (key = 'tag' OR key LIKE 'tag:%')");
+            if (countStmt) {
+                auto& stmt = *countStmt.value();
+                YAMS_TRY(stmt.reset());
+                YAMS_TRY(stmt.bind(1, documentId));
+                YAMS_TRY_UNWRAP(hasRow, stmt.step());
+                const auto priorTagCount = hasRow ? stmt.getInt64(0) : 0;
+
+                auto existsStmt = db.prepareCached(
+                    "SELECT COUNT(*) FROM metadata WHERE document_id = ? AND key = ?");
+                if (existsStmt) {
+                    auto& estmt = *existsStmt.value();
+                    YAMS_TRY(estmt.reset());
+                    YAMS_TRY(estmt.bind(1, documentId));
+                    YAMS_TRY(estmt.bind(2, key));
+                    YAMS_TRY_UNWRAP(existsRow, estmt.step());
+                    const auto priorKeyCount = existsRow ? estmt.getInt64(0) : 0;
+                    if (priorKeyCount == 0) {
+                        tagCountDelta = 1;
+                        if (priorTagCount == 0) {
+                            docsWithTagsDelta = 1;
+                        }
+                    }
+                }
+            }
+        }
+
         // Single-row fast path: avoid batch scaffolding + explicit transaction.
         // Use ON CONFLICT to avoid DELETE+INSERT semantics of OR REPLACE (less write
         // amplification).
@@ -1536,6 +1571,12 @@ Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::stri
     });
 
     if (result) {
+        if (tagCountDelta > 0) {
+            cachedTagCount_.fetch_add(tagCountDelta, std::memory_order_relaxed);
+        }
+        if (docsWithTagsDelta > 0) {
+            cachedDocsWithTags_.fetch_add(docsWithTagsDelta, std::memory_order_relaxed);
+        }
         // Signal enumeration cache invalidation
         metadataChangeCounter_.fetch_add(1, std::memory_order_release);
     }
@@ -1548,6 +1589,8 @@ Result<void> MetadataRepository::setMetadataBatch(
         return Result<void>();
     }
 
+    uint64_t tagCountDelta = 0;
+    uint64_t docsWithTagsDelta = 0;
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         // Chunked multi-row upsert:
         // - Avoid INSERT OR REPLACE delete+insert semantics (less write amplification)
@@ -1578,6 +1621,49 @@ Result<void> MetadataRepository::setMetadataBatch(
         // surprises; commit/rollback uses Database::execute.
         YAMS_TRY(beginTransactionWithRetry(db));
         auto rollback = scope_exit([&] { db.execute("ROLLBACK"); });
+
+        std::unordered_map<int64_t, std::vector<std::string>> pendingTagKeysByDoc;
+        for (const auto& [documentId, key, _value] : entries) {
+            if (isTagMetadataKey(key)) {
+                pendingTagKeysByDoc[documentId].push_back(key);
+            }
+        }
+
+        if (!pendingTagKeysByDoc.empty()) {
+            auto tagCountStmt = db.prepareCached("SELECT COUNT(*) FROM metadata WHERE document_id "
+                                                 "= ? AND (key = 'tag' OR key LIKE 'tag:%')");
+            auto keyExistsStmt =
+                db.prepareCached("SELECT COUNT(*) FROM metadata WHERE document_id = ? AND key = ?");
+            if (tagCountStmt && keyExistsStmt) {
+                for (auto& [documentId, keys] : pendingTagKeysByDoc) {
+                    auto& tcStmt = *tagCountStmt.value();
+                    YAMS_TRY(tcStmt.reset());
+                    YAMS_TRY(tcStmt.bind(1, documentId));
+                    YAMS_TRY_UNWRAP(tagRow, tcStmt.step());
+                    const auto priorTagCount = tagRow ? tcStmt.getInt64(0) : 0;
+                    bool docWillGainFirstTag = priorTagCount == 0;
+                    std::unordered_set<std::string> seenKeys;
+                    for (const auto& tagKey : keys) {
+                        if (!seenKeys.insert(tagKey).second) {
+                            continue;
+                        }
+                        auto& keStmt = *keyExistsStmt.value();
+                        YAMS_TRY(keStmt.reset());
+                        YAMS_TRY(keStmt.bind(1, documentId));
+                        YAMS_TRY(keStmt.bind(2, tagKey));
+                        YAMS_TRY_UNWRAP(keyRow, keStmt.step());
+                        const auto priorKeyCount = keyRow ? keStmt.getInt64(0) : 0;
+                        if (priorKeyCount == 0) {
+                            ++tagCountDelta;
+                            if (docWillGainFirstTag) {
+                                ++docsWithTagsDelta;
+                                docWillGainFirstTag = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         for (size_t offset = 0; offset < entries.size(); offset += kMaxRowsPerChunk) {
             const int rows = static_cast<int>(
@@ -1619,6 +1705,12 @@ Result<void> MetadataRepository::setMetadataBatch(
     if (result) {
         // Signal corpus stats stale - metadata batch may affect corpus statistics
         signalCorpusStatsStale();
+        if (tagCountDelta > 0) {
+            cachedTagCount_.fetch_add(tagCountDelta, std::memory_order_relaxed);
+        }
+        if (docsWithTagsDelta > 0) {
+            cachedDocsWithTags_.fetch_add(docsWithTagsDelta, std::memory_order_relaxed);
+        }
         // Signal enumeration cache invalidation
         metadataChangeCounter_.fetch_add(1, std::memory_order_release);
     }
@@ -3047,12 +3139,37 @@ void MetadataRepository::initializeCounters() {
             cachedEmbeddedCount_.store(static_cast<uint64_t>(embeddedResult.value()),
                                        std::memory_order_release);
         }
+        auto tagStatsResult = executeReadQuery<std::pair<int64_t, int64_t>>(
+            [&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
+                auto stmtResult = db.prepare(R"(
+                    SELECT COUNT(DISTINCT document_id), COUNT(*)
+                    FROM metadata
+                    WHERE key = 'tag' OR key LIKE 'tag:%'
+                )");
+                if (!stmtResult) {
+                    return stmtResult.error();
+                }
+                auto& stmt = stmtResult.value();
+                YAMS_TRY_UNWRAP(hasRow, stmt.step());
+                if (!hasRow) {
+                    return std::pair<int64_t, int64_t>{0, 0};
+                }
+                return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
+            });
+        if (tagStatsResult) {
+            cachedDocsWithTags_.store(
+                static_cast<uint64_t>(std::max<int64_t>(tagStatsResult.value().first, 0)),
+                std::memory_order_release);
+            cachedTagCount_.store(
+                static_cast<uint64_t>(std::max<int64_t>(tagStatsResult.value().second, 0)),
+                std::memory_order_release);
+        }
         spdlog::info("MetadataRepository: initialized counters - total={}, bytes={}, indexed={}, "
-                     "extracted={}, "
-                     "embedded={}",
+                     "extracted={}, embedded={}, docs_with_tags={}, tag_count={}",
                      cachedDocumentCount_.load(), cachedTotalSizeBytes_.load(),
                      cachedIndexedCount_.load(), cachedExtractedCount_.load(),
-                     cachedEmbeddedCount_.load());
+                     cachedEmbeddedCount_.load(), cachedDocsWithTags_.load(),
+                     cachedTagCount_.load());
     } catch (const std::exception& e) {
         spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
     }
@@ -3318,6 +3435,12 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             static_cast<int64_t>(cachedEmbeddedCount_.load(std::memory_order_relaxed));
         const auto liveTotalSizeBytes =
             static_cast<int64_t>(cachedTotalSizeBytes_.load(std::memory_order_relaxed));
+        const auto liveDocsWithTags =
+            static_cast<int64_t>(cachedDocsWithTags_.load(std::memory_order_relaxed));
+        const auto liveTagCount =
+            static_cast<int64_t>(cachedTagCount_.load(std::memory_order_relaxed));
+        const auto liveKgCounts =
+            kgStore_ ? kgStore_->getEntityCountSnapshot() : KGEntityCountSnapshot{};
 
         if (liveDocCount > 0) {
             stats.docCount = liveDocCount;
@@ -3325,6 +3448,11 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             stats.embeddingCount = std::clamp<int64_t>(liveEmbeddedCount, 0, liveDocCount);
             stats.embeddingCoverage =
                 static_cast<double>(stats.embeddingCount) / static_cast<double>(stats.docCount);
+            stats.docsWithTags = std::clamp<int64_t>(liveDocsWithTags, 0, liveDocCount);
+            stats.tagCount = std::max<int64_t>(liveTagCount, 0);
+            stats.symbolCount = std::max<int64_t>(liveKgCounts.totalCount, 0);
+            stats.nativeSymbolCount = std::max<int64_t>(liveKgCounts.nativeSymbolCount, 0);
+            stats.nerEntityCount = std::max<int64_t>(liveKgCounts.nerEntityCount, 0);
             stats.tagCoverage =
                 static_cast<double>(stats.docsWithTags) / static_cast<double>(stats.docCount);
             stats.symbolDensity =
@@ -3342,6 +3470,11 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             stats.totalSizeBytes = 0;
             stats.embeddingCount = 0;
             stats.embeddingCoverage = 0.0;
+            stats.docsWithTags = 0;
+            stats.tagCount = 0;
+            stats.symbolCount = 0;
+            stats.nativeSymbolCount = 0;
+            stats.nerEntityCount = 0;
             stats.tagCoverage = 0.0;
             stats.symbolDensity = 0.0;
             stats.nativeSymbolDensity = 0.0;

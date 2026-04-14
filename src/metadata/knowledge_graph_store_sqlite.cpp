@@ -6,6 +6,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -30,13 +31,37 @@ inline ConnectionPoolConfig toPoolConfig(const KnowledgeGraphStoreConfig& cfg) {
     return pcfg;
 }
 
+std::int64_t countNativeEntitiesFromDocEntities(const std::vector<DocEntity>& entities) {
+    std::int64_t count = 0;
+    for (const auto& entity : entities) {
+        if (entity.extractor.has_value() && entity.extractor.value() == "symbol_extractor_v1") {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::int64_t countNerEntitiesFromDocEntities(const std::vector<DocEntity>& entities) {
+    std::int64_t count = 0;
+    for (const auto& entity : entities) {
+        if (entity.extractor.has_value() && entity.extractor->rfind("gliner", 0) == 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 } // namespace
 
 class SqliteKnowledgeGraphStore final : public KnowledgeGraphStore {
 public:
+    friend class SqliteWriteBatch;
+
     // Construct with an external pool (non-owning)
     SqliteKnowledgeGraphStore(ConnectionPool& pool, KnowledgeGraphStoreConfig cfg)
-        : cfg_(cfg), pool_(&pool) {}
+        : cfg_(cfg), pool_(&pool) {
+        initializeEntityCountSnapshot();
+    }
 
     // Construct with owned pool created from dbPath
     static Result<std::unique_ptr<SqliteKnowledgeGraphStore>>
@@ -94,6 +119,11 @@ public:
     const KnowledgeGraphStoreConfig& getConfig() const override { return cfg_; }
 
     Result<std::unique_ptr<WriteBatch>> beginWriteBatch() override;
+    KGEntityCountSnapshot getEntityCountSnapshot() const override {
+        return {static_cast<std::int64_t>(entityCount_.load(std::memory_order_relaxed)),
+                static_cast<std::int64_t>(nativeEntityCount_.load(std::memory_order_relaxed)),
+                static_cast<std::int64_t>(nerEntityCount_.load(std::memory_order_relaxed))};
+    }
 
     // Nodes
     Result<std::int64_t> upsertNode(const KGNode& node) override {
@@ -1160,6 +1190,8 @@ public:
                     if (!rr)
                         return rr;
                 }
+                applyEntityCountDelta(entities.size(), countNativeEntitiesFromDocEntities(entities),
+                                      countNerEntitiesFromDocEntities(entities));
                 return Result<void>();
             });
         });
@@ -1287,6 +1319,10 @@ public:
 
     Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) override {
         return pool_->withConnection([&](Database& db) -> Result<void> {
+            auto priorCounts = queryDocumentEntityCounts(db, documentId);
+            if (!priorCounts) {
+                return priorCounts.error();
+            }
             auto stmtR = db.prepare("DELETE FROM kg_doc_entities WHERE document_id = ?");
             if (!stmtR)
                 return stmtR.error();
@@ -1294,7 +1330,14 @@ public:
             auto br = stmt.bind(1, documentId);
             if (!br)
                 return br.error();
-            return stmt.execute();
+            auto execResult = stmt.execute();
+            if (!execResult) {
+                return execResult.error();
+            }
+            applyEntityCountDelta(-priorCounts.value().totalCount,
+                                  -priorCounts.value().nativeSymbolCount,
+                                  -priorCounts.value().nerEntityCount);
+            return Result<void>();
         });
     }
 
@@ -2263,9 +2306,103 @@ public:
     }
 
 private:
+    struct EntityCountDelta {
+        std::int64_t totalCount{0};
+        std::int64_t nativeSymbolCount{0};
+        std::int64_t nerEntityCount{0};
+    };
+
+    Result<KGEntityCountSnapshot> queryDocumentEntityCounts(Database& db,
+                                                            std::int64_t documentId) const {
+        auto stmtR = db.prepare(R"(
+            SELECT COUNT(*),
+                   SUM(CASE WHEN extractor = 'symbol_extractor_v1' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN extractor LIKE 'gliner%' THEN 1 ELSE 0 END)
+            FROM kg_doc_entities WHERE document_id = ?
+        )");
+        if (!stmtR)
+            return stmtR.error();
+        auto stmt = std::move(stmtR).value();
+        auto bindResult = stmt.bind(1, documentId);
+        if (!bindResult) {
+            return bindResult.error();
+        }
+        auto stepResult = stmt.step();
+        if (!stepResult) {
+            return stepResult.error();
+        }
+        const bool hasRow = stepResult.value();
+        if (!hasRow) {
+            return KGEntityCountSnapshot{};
+        }
+        return KGEntityCountSnapshot{stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2)};
+    }
+
+    void applyEntityCountDelta(std::int64_t totalDelta, std::int64_t nativeDelta,
+                               std::int64_t nerDelta) {
+        auto apply = [](std::atomic<std::uint64_t>& counter, std::int64_t delta) {
+            if (delta >= 0) {
+                counter.fetch_add(static_cast<std::uint64_t>(delta), std::memory_order_relaxed);
+                return;
+            }
+            auto current = counter.load(std::memory_order_relaxed);
+            const auto subtract = static_cast<std::uint64_t>(-delta);
+            while (true) {
+                const auto next = current > subtract ? current - subtract : 0;
+                if (counter.compare_exchange_weak(current, next, std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed)) {
+                    return;
+                }
+            }
+        };
+        apply(entityCount_, totalDelta);
+        apply(nativeEntityCount_, nativeDelta);
+        apply(nerEntityCount_, nerDelta);
+    }
+
+    void initializeEntityCountSnapshot() {
+        if (!pool_) {
+            return;
+        }
+        auto result = pool_->withConnection([&](Database& db) -> Result<KGEntityCountSnapshot> {
+            auto stmtR = db.prepare(R"(
+                SELECT COUNT(*),
+                       SUM(CASE WHEN extractor = 'symbol_extractor_v1' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN extractor LIKE 'gliner%' THEN 1 ELSE 0 END)
+                FROM kg_doc_entities
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return stepResult.error();
+            }
+            const bool hasRow = stepResult.value();
+            if (!hasRow) {
+                return KGEntityCountSnapshot{};
+            }
+            return KGEntityCountSnapshot{stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2)};
+        });
+        if (result) {
+            entityCount_.store(
+                static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().totalCount, 0)),
+                std::memory_order_release);
+            nativeEntityCount_.store(static_cast<std::uint64_t>(std::max<std::int64_t>(
+                                         result.value().nativeSymbolCount, 0)),
+                                     std::memory_order_release);
+            nerEntityCount_.store(static_cast<std::uint64_t>(
+                                      std::max<std::int64_t>(result.value().nerEntityCount, 0)),
+                                  std::memory_order_release);
+        }
+    }
+
     KnowledgeGraphStoreConfig cfg_{};
     ConnectionPool* pool_{nullptr};                       // Non-owning
     std::unique_ptr<ConnectionPool> owned_pool_{nullptr}; // Owns pool when created from path
+    std::atomic<std::uint64_t> entityCount_{0};
+    std::atomic<std::uint64_t> nativeEntityCount_{0};
+    std::atomic<std::uint64_t> nerEntityCount_{0};
 };
 
 // -----------------------------------------------------------------------------
@@ -2274,8 +2411,8 @@ private:
 
 class SqliteWriteBatch final : public KnowledgeGraphStore::WriteBatch {
 public:
-    SqliteWriteBatch(std::unique_ptr<PooledConnection> conn)
-        : conn_(std::move(conn)), committed_(false) {
+    SqliteWriteBatch(SqliteKnowledgeGraphStore* owner, std::unique_ptr<PooledConnection> conn)
+        : owner_(owner), conn_(std::move(conn)), committed_(false) {
         // Begin transaction immediately
         auto result = (*conn_)->beginTransaction();
         if (!result) {
@@ -2576,6 +2713,9 @@ public:
             if (!rr)
                 return rr;
         }
+        entityCountDelta_ += static_cast<std::int64_t>(entities.size());
+        nativeEntityCountDelta_ += countNativeEntitiesFromDocEntities(entities);
+        nerEntityCountDelta_ += countNerEntitiesFromDocEntities(entities);
         return Result<void>();
     }
 
@@ -2584,6 +2724,10 @@ public:
             return Error{ErrorCode::InvalidState, "Transaction not started"};
         }
         Database& db = **conn_;
+        auto priorCounts = owner_->queryDocumentEntityCounts(db, documentId);
+        if (!priorCounts) {
+            return priorCounts.error();
+        }
 
         auto stmtR = db.prepareCached("DELETE FROM kg_doc_entities WHERE document_id = ?");
         if (!stmtR)
@@ -2592,7 +2736,14 @@ public:
         auto br = stmt.bind(1, documentId);
         if (!br)
             return br.error();
-        return stmt.execute();
+        auto execResult = stmt.execute();
+        if (!execResult) {
+            return execResult.error();
+        }
+        entityCountDelta_ -= priorCounts.value().totalCount;
+        nativeEntityCountDelta_ -= priorCounts.value().nativeSymbolCount;
+        nerEntityCountDelta_ -= priorCounts.value().nerEntityCount;
+        return Result<void>();
     }
 
     Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) override {
@@ -2688,6 +2839,10 @@ public:
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
             auto result = (*conn_)->commit();
             if (result) {
+                if (owner_) {
+                    owner_->applyEntityCountDelta(entityCountDelta_, nativeEntityCountDelta_,
+                                                  nerEntityCountDelta_);
+                }
                 committed_ = true;
                 if (attempt > 0) {
                     spdlog::debug("WriteBatch::commit succeeded after {} retries", attempt);
@@ -2720,9 +2875,13 @@ public:
     }
 
 private:
+    SqliteKnowledgeGraphStore* owner_{nullptr};
     std::unique_ptr<PooledConnection> conn_;
     bool transactionStarted_ = false;
     bool committed_ = false;
+    std::int64_t entityCountDelta_{0};
+    std::int64_t nativeEntityCountDelta_{0};
+    std::int64_t nerEntityCountDelta_{0};
 };
 
 // Out-of-line implementation of beginWriteBatch (requires SqliteWriteBatch to be defined)
@@ -2733,7 +2892,7 @@ SqliteKnowledgeGraphStore::beginWriteBatch() {
         return Error{ErrorCode::ResourceExhausted, "Failed to acquire connection for write batch"};
     }
     std::unique_ptr<WriteBatch> batch =
-        std::make_unique<SqliteWriteBatch>(std::move(connResult).value());
+        std::make_unique<SqliteWriteBatch>(this, std::move(connResult).value());
     return batch;
 }
 

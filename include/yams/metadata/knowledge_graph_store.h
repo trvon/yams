@@ -173,6 +173,12 @@ struct SymbolMetadata {
     std::optional<std::string> documentation; // Extracted docstring/comment
 };
 
+struct KGEntityCountSnapshot {
+    std::int64_t totalCount{0};
+    std::int64_t nativeSymbolCount{0};
+    std::int64_t nerEntityCount{0};
+};
+
 /**
  * KnowledgeGraphStore defines the abstract API for reading/writing the local-first KG.
  * Implementations must be thread-safe for concurrent read access; writes should be serialized.
@@ -201,6 +207,7 @@ public:
     virtual const KnowledgeGraphStoreConfig& getConfig() const = 0;
 
     virtual Result<std::unique_ptr<WriteBatch>> beginWriteBatch() = 0;
+    virtual KGEntityCountSnapshot getEntityCountSnapshot() const = 0;
 
     // -----------------------------------------------------------------------------
     // Nodes
