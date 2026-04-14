@@ -11,6 +11,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/profiling.h>
+#include <yams/search/query_router.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/vector_index_manager.h>
 
@@ -454,6 +455,9 @@ public:
         }
 
         std::map<std::string, std::int64_t> phaseTimings;
+        const search::QueryRouter queryRouter;
+        const auto routeDecision = queryRouter.route(req.pattern);
+        const auto retrievalMode = routeDecision.retrievalMode.label;
 
         const auto patternPrepStart = GrepClock::now();
         const std::string rawPattern = req.pattern;
@@ -587,6 +591,8 @@ public:
                     addDocs(convertToGrepCandidates(std::move(tRes.value())));
                 }
             } else if (!req.pattern.empty() && isLikelyFtsPattern(req.pattern) &&
+                       retrievalMode != search::QueryRetrievalMode::Literal &&
+                       retrievalMode != search::QueryRetrievalMode::Path &&
                        !req.filesWithoutMatch) {
                 auto sRes = retryMetadataOp(
                     [&]() { return ctx_.metadataRepo->search(req.pattern, max_docs_hot * 2); }, 4,
@@ -1489,7 +1495,9 @@ public:
         const auto semanticPhaseStart = GrepClock::now();
         {
             YAMS_ZONE_SCOPED_N("grep_service::semantic_phase");
-            if (!req.regexOnly && req.semanticLimit > 0) {
+            if (!req.regexOnly && req.semanticLimit > 0 &&
+                retrievalMode != search::QueryRetrievalMode::Literal &&
+                retrievalMode != search::QueryRetrievalMode::Path) {
                 try {
                     size_t topk = static_cast<size_t>(std::max(1, req.semanticLimit)) * 3;
 
@@ -1646,6 +1654,11 @@ public:
             std::to_string(metadataTelemetry.retries.load(std::memory_order_relaxed));
         response.searchStats["metadata_transient_failures"] =
             std::to_string(metadataTelemetry.transientFailures.load(std::memory_order_relaxed));
+        response.searchStats["query_intent"] =
+            search::queryIntentToString(routeDecision.intent.label);
+        response.searchStats["retrieval_mode"] =
+            search::queryRetrievalModeToString(routeDecision.retrievalMode.label);
+        response.searchStats["retrieval_mode_reason"] = routeDecision.retrievalMode.reason;
         for (const auto& [phaseKey, phaseValue] : phaseTimings) {
             response.searchStats[phaseKey] = std::to_string(phaseValue);
         }

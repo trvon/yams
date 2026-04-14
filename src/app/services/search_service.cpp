@@ -17,11 +17,11 @@
 #endif
 #include <yams/plugins/search_provider_v1.h>
 #include <yams/search/parallel_post_processor.hpp>
+#include <yams/search/query_concept_extractor.h>
+#include <yams/search/query_qualifiers.hpp>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
-#include <yams/search/query_concept_extractor.h>
-#include <yams/search/query_qualifiers.hpp>
 #include <yams/search/symbol_enrichment.h>
 
 #include <algorithm>
@@ -861,8 +861,14 @@ public:
             co_return result;
         }
 
+        const search::QueryRouter queryRouter;
+        const auto routeDecision = queryRouter.route(normalizedReq.query);
+        const auto retrievalMode = routeDecision.retrievalMode.label;
+
         bool forcedHybridFallback = false;
-        const std::string type = resolveSearchType(req, &forcedHybridFallback);
+        const std::string type = resolveSearchType(req, retrievalMode, &forcedHybridFallback);
+        auto effectiveReq = normalizedReq;
+        effectiveReq.type = type;
 
         if (forcedHybridFallback) {
             const auto& requestedType = req.type.empty() ? "hybrid" : req.type;
@@ -903,10 +909,10 @@ public:
                     "Hybrid/semantic search not ready" +
                         (repairDetails_.empty() ? std::string{} : (" - " + repairDetails_))};
             }
-            result = hybridSearch(normalizedReq, parsed.scope, &metadataTelemetry,
-                                  normalizedReq.pathPattern);
+            result = hybridSearch(effectiveReq, parsed.scope, &metadataTelemetry,
+                                  effectiveReq.pathPattern);
         } else {
-            result = metadataSearch(normalizedReq, &metadataTelemetry);
+            result = metadataSearch(effectiveReq, &metadataTelemetry);
         }
 
         // Path filtering: prefer pathPatterns (multiple patterns) over legacy pathPattern
@@ -1006,11 +1012,17 @@ public:
                 searchExecutionContext.shortQueryBudgeted ? "true" : "false";
             resp.searchStats["budget_pressure"] =
                 searchExecutionContext.pressureBudgeted ? "true" : "false";
+            resp.searchStats["query_intent"] =
+                search::queryIntentToString(routeDecision.intent.label);
+            resp.searchStats["query_intent_reason"] = routeDecision.intent.reason;
+            resp.searchStats["retrieval_mode"] =
+                search::queryRetrievalModeToString(routeDecision.retrievalMode.label);
+            resp.searchStats["retrieval_mode_reason"] = routeDecision.retrievalMode.reason;
+            resp.searchStats["effective_type"] = type;
             if (forcedHybridFallback) {
                 const auto& fallbackReason =
                     repairDetails_.empty() ? "hybrid_disabled" : repairDetails_;
                 resp.searchStats["hybrid_fallback"] = fallbackReason;
-                resp.searchStats["effective_type"] = type;
                 resp.searchStats["mode"] = "degraded";
                 if (resp.queryInfo.empty()) {
                     resp.queryInfo = "fallback to keyword search due to: " + fallbackReason;
@@ -1193,11 +1205,25 @@ private:
     std::shared_ptr<yams::search::SymbolEnricher> symbolEnricher_{};
     float symbolWeight_{0.15f};
 
-    std::string resolveSearchType(const SearchRequest& req, bool* forcedHybridFallback) const {
+    std::string resolveSearchType(const SearchRequest& req,
+                                  search::QueryRetrievalMode retrievalMode,
+                                  bool* forcedHybridFallback) const {
         if (forcedHybridFallback)
             *forcedHybridFallback = false;
 
-        const auto& requested = req.type.empty() ? "hybrid" : req.type;
+        std::string requested = req.type;
+        if (requested.empty()) {
+            switch (retrievalMode) {
+                case search::QueryRetrievalMode::Literal:
+                case search::QueryRetrievalMode::Path:
+                    requested = "keyword";
+                    break;
+                case search::QueryRetrievalMode::Semantic:
+                case search::QueryRetrievalMode::Hybrid:
+                    requested = "hybrid";
+                    break;
+            }
+        }
         const bool wantsHybrid = (requested == "hybrid" || requested == "semantic");
         const bool searchDisabled = degraded_ || !ctx_.searchEngine;
 

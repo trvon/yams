@@ -4081,31 +4081,48 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
         return;
     }
 
-    std::vector<std::string> rebuildHashes = documentHashes;
-    if (rebuildHashes.empty()) {
+    bool hasDirty = false;
+    {
         std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
-        rebuildHashes.assign(topologyDirtyHashes_.begin(), topologyDirtyHashes_.end());
-        topologyDirtyHashes_.clear();
-    } else {
-        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
-        for (const auto& hash : topologyDirtyHashes_) {
-            rebuildHashes.push_back(hash);
+        const bool wasEmpty = topologyDirtyHashes_.empty();
+        for (const auto& hash : documentHashes) {
+            if (!hash.empty()) {
+                topologyDirtyHashes_.insert(hash);
+            }
         }
-        topologyDirtyHashes_.clear();
-        std::sort(rebuildHashes.begin(), rebuildHashes.end());
-        rebuildHashes.erase(std::unique(rebuildHashes.begin(), rebuildHashes.end()),
-                            rebuildHashes.end());
+        hasDirty = !topologyDirtyHashes_.empty();
+        if (wasEmpty && !topologyDirtyHashes_.empty()) {
+            std::lock_guard<std::mutex> telemetryLock(topologyTelemetryMutex_);
+            topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
+        }
     }
-    if (rebuildHashes.empty()) {
-        spdlog::debug(
-            "[ServiceManager] Topology rebuild request ignored (reason={}, no dirty docs)", reason);
+
+    if (!hasDirty) {
+        return;
+    }
+
+    bool expected = false;
+    if (!topologyRebuildScheduled_.compare_exchange_strong(expected, true,
+                                                           std::memory_order_acq_rel)) {
         return;
     }
 
     auto weakSelf = weak_from_this();
-    boost::asio::post(getWorkerExecutor(), [weakSelf, reason,
-                                            rebuildHashes = std::move(rebuildHashes)]() mutable {
+    boost::asio::post(getWorkerExecutor(), [weakSelf, reason]() mutable {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
         if (auto self = weakSelf.lock()) {
+            std::vector<std::string> rebuildHashes;
+            {
+                std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);
+                rebuildHashes.assign(self->topologyDirtyHashes_.begin(),
+                                     self->topologyDirtyHashes_.end());
+                self->topologyDirtyHashes_.clear();
+            }
+            self->topologyRebuildScheduled_.store(false, std::memory_order_release);
+            if (rebuildHashes.empty()) {
+                return;
+            }
+
             auto result = self->rebuildTopologyArtifacts(reason, false, rebuildHashes);
             if (!result) {
                 spdlog::warn("[ServiceManager] Async topology rebuild failed (reason={}): {}",

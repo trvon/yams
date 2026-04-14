@@ -22,6 +22,22 @@ enum class QueryIntent { Code, Path, Prose, Mixed };
     return "mixed";
 }
 
+enum class QueryRetrievalMode { Literal, Semantic, Hybrid, Path };
+
+[[nodiscard]] constexpr const char* queryRetrievalModeToString(QueryRetrievalMode mode) noexcept {
+    switch (mode) {
+        case QueryRetrievalMode::Literal:
+            return "literal";
+        case QueryRetrievalMode::Semantic:
+            return "semantic";
+        case QueryRetrievalMode::Hybrid:
+            return "hybrid";
+        case QueryRetrievalMode::Path:
+            return "path";
+    }
+    return "hybrid";
+}
+
 enum class QueryCommunity { Code, Scientific, Media };
 
 [[nodiscard]] constexpr const char* queryCommunityToString(QueryCommunity community) noexcept {
@@ -82,12 +98,16 @@ struct CommunityRouteFamily {
 
 struct QueryRouteDecision {
     RouteMatch<QueryIntent> intent{QueryIntent::Mixed, 0.0f, {}};
+    RouteMatch<QueryRetrievalMode> retrievalMode{QueryRetrievalMode::Hybrid, 0.0f, {}};
     std::optional<RouteMatch<QueryCommunity>> community;
 };
 
 class QueryRouter {
 public:
     [[nodiscard]] RouteMatch<QueryIntent> classifyIntent(std::string_view query) const;
+
+    [[nodiscard]] RouteMatch<QueryRetrievalMode> classifyRetrievalMode(std::string_view query,
+                                                                       QueryIntent intent) const;
 
     [[nodiscard]] std::optional<RouteMatch<QueryCommunity>>
     classifyCommunity(std::string_view query, const CommunityRouteFamily::Context& context) const;

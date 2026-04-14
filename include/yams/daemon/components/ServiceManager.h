@@ -765,6 +765,7 @@ private:
     std::shared_ptr<RepairService> repairService_;
     mutable std::mutex repairServiceMutex_;
     std::atomic<bool> topologyRebuildRunning_{false};
+    std::atomic<bool> topologyRebuildScheduled_{false};
     mutable std::mutex topologyDirtyMutex_;
     std::unordered_set<std::string> topologyDirtyHashes_;
     mutable std::mutex topologyTelemetryMutex_;

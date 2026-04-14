@@ -1618,6 +1618,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     const QueryRouteDecision routeDecision = std::move(policy.routeDecision);
     const QueryIntent intent = routeDecision.intent.label;
+    const QueryRetrievalMode retrievalMode = routeDecision.retrievalMode.label;
     const auto effectiveZoomLevel = policy.effectiveZoomLevel;
     const bool zoomLevelInferredFromIntent = policy.zoomLevelInferredFromIntent;
     workingConfig = std::move(policy.config);
@@ -1708,7 +1709,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         return primary;
     };
 
-    spdlog::debug("Query intent: {}, zoom={} ({})", queryIntentToString(intent),
+    spdlog::debug("Query intent: {}, retrieval={}, zoom={} ({})", queryIntentToString(intent),
+                  queryRetrievalModeToString(retrievalMode),
                   SearchEngineConfig::navigationZoomLevelToString(effectiveZoomLevel),
                   zoomLevelInferredFromIntent ? "intent_auto" : "configured");
 
@@ -5097,6 +5099,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["trace_enabled"] = "1";
         response.debugStats["trace_query_intent"] = queryIntentToString(intent);
         response.debugStats["trace_query_intent_reason"] = routeDecision.intent.reason;
+        response.debugStats["trace_retrieval_mode"] =
+            queryRetrievalModeToString(routeDecision.retrievalMode.label);
+        response.debugStats["trace_retrieval_mode_reason"] = routeDecision.retrievalMode.reason;
         response.debugStats["trace_query_community"] =
             routeDecision.community.has_value()
                 ? queryCommunityToString(routeDecision.community->label)

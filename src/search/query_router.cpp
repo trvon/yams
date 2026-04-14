@@ -10,6 +10,20 @@
 namespace yams::search {
 namespace {
 
+bool isQuotedLiteral(std::string_view query) {
+    return query.size() >= 2 && ((query.front() == '"' && query.back() == '"') ||
+                                 (query.front() == '\'' && query.back() == '\''));
+}
+
+bool hasRegexLikeSyntax(std::string_view query) {
+    static constexpr std::string_view kRegexChars = "[](){}*+?|^$\\";
+    return query.find_first_of(kRegexChars) != std::string_view::npos;
+}
+
+std::size_t tokenCount(std::string_view query) {
+    return tokenizeLower(std::string(query)).size();
+}
+
 bool hasCamelCase(std::string_view input) {
     bool tokenHasAlpha = false;
     bool tokenHasLower = false;
@@ -179,10 +193,49 @@ QueryRouter::classifyCommunity(std::string_view query,
     return router.classify(query, context);
 }
 
+RouteMatch<QueryRetrievalMode> QueryRouter::classifyRetrievalMode(std::string_view query,
+                                                                  QueryIntent intent) const {
+    if (query.empty()) {
+        return RouteMatch<QueryRetrievalMode>{QueryRetrievalMode::Hybrid, 0.25f, "empty_query"};
+    }
+
+    if (intent == QueryIntent::Path) {
+        return RouteMatch<QueryRetrievalMode>{QueryRetrievalMode::Path, 0.99f, "path_intent"};
+    }
+
+    if (isQuotedLiteral(query)) {
+        return RouteMatch<QueryRetrievalMode>{QueryRetrievalMode::Literal, 0.98f, "quoted_literal"};
+    }
+
+    if (hasRegexLikeSyntax(query)) {
+        return RouteMatch<QueryRetrievalMode>{QueryRetrievalMode::Literal, 0.96f, "regex_like"};
+    }
+
+    if (intent == QueryIntent::Code) {
+        return RouteMatch<QueryRetrievalMode>{QueryRetrievalMode::Literal, 0.97f, "code_intent"};
+    }
+
+    const auto tokens = tokenCount(query);
+    if (intent == QueryIntent::Prose) {
+        return RouteMatch<QueryRetrievalMode>{QueryRetrievalMode::Semantic,
+                                              tokens >= 6 ? 0.92f : 0.84f,
+                                              tokens >= 6 ? "long_prose" : "prose_intent"};
+    }
+
+    if (tokens <= 2) {
+        return RouteMatch<QueryRetrievalMode>{QueryRetrievalMode::Literal, 0.72f,
+                                              "short_query_literal_bias"};
+    }
+
+    return RouteMatch<QueryRetrievalMode>{QueryRetrievalMode::Hybrid, 0.60f,
+                                          "mixed_intent_fallback"};
+}
+
 QueryRouteDecision QueryRouter::route(std::string_view query,
                                       const QueryRouteContext& context) const {
     QueryRouteDecision decision;
     decision.intent = classifyIntent(query);
+    decision.retrievalMode = classifyRetrievalMode(query, decision.intent.label);
     decision.community =
         classifyCommunity(query, CommunityRouteFamily::Context{decision.intent.label, context});
     return decision;
