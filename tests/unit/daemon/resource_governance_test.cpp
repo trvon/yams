@@ -8,6 +8,8 @@
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -39,32 +41,7 @@ public:
     ProfileGuard& operator=(const ProfileGuard&) = delete;
 };
 
-/// RAII guard for environment variables
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_;
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name), hadPrev_(false) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-
-    ~EnvGuard() {
-        if (hadPrev_) {
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        } else {
-            unsetenv(name_.c_str());
-        }
-    }
-
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+using yams::test::ScopedEnvVar;
 
 /// RAII guard for OnnxConcurrencyRegistry max slots (restore original on destruction)
 class SlotConfigGuard {
@@ -600,12 +577,12 @@ TEST_CASE("ONNX reserved slot env var overrides", "[daemon][governance][catch2]"
     ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
 
     SECTION("YAMS_ONNX_EMBED_RESERVED overrides default") {
-        EnvGuard envGuard("YAMS_ONNX_EMBED_RESERVED", "3");
+        ScopedEnvVar envGuard("YAMS_ONNX_EMBED_RESERVED", "3");
         CHECK(TuneAdvisor::onnxEmbedReserved() == 3);
     }
 
     SECTION("YAMS_ONNX_RERANKER_RESERVED overrides profile-aware default") {
-        EnvGuard envGuard("YAMS_ONNX_RERANKER_RESERVED", "4");
+        ScopedEnvVar envGuard("YAMS_ONNX_RERANKER_RESERVED", "4");
         CHECK(TuneAdvisor::onnxRerankerReserved() == 4);
     }
 }

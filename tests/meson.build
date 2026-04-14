@@ -1498,6 +1498,7 @@ if catch2_dep.found()
       'unit/cli/error_hints_catch2_test.cpp',
       'unit/cli/graph_helpers_catch2_test.cpp',
       'unit/cli/grep_command_path_tree_catch2_test.cpp',
+      'unit/cli/homebrew_service_formula_catch2_test.cpp',
       'unit/cli/init_command_catch2_test.cpp',
       'unit/cli/model_command_catch2_test.cpp',
       'unit/cli/plugin_command_catch2_test.cpp',

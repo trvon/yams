@@ -5,6 +5,7 @@
 //       → OnnxConcurrencyRegistry → Embedding/Reranker services respect limits
 
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include "test_daemon_harness.h"
 #include <catch2/catch_test_macros.hpp>
 
@@ -33,32 +34,7 @@ struct ExpectedOnnxRegistryConfig {
     uint32_t rerankerReserved{0};
 };
 
-/// RAII guard for environment variables - restores previous value on destruction
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_;
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name), hadPrev_(false) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-
-    ~EnvGuard() {
-        if (hadPrev_) {
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        } else {
-            unsetenv(name_.c_str());
-        }
-    }
-
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+using yams::test::ScopedEnvVar;
 
 ExpectedOnnxRegistryConfig expectedOnnxRegistryConfig() {
     const uint32_t maxConcurrent = TuneAdvisor::onnxMaxConcurrent();
@@ -116,8 +92,8 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
 
     SECTION("YAMS_ONNX_MAX_CONCURRENT configures total slots") {
         // Set env vars before daemon starts (TuneAdvisor reads at startup)
-        EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "6");
-        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced"); // scale=0.5
+        ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "6");
+        ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced"); // scale=0.5
 
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
@@ -138,10 +114,10 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
     }
 
     SECTION("Reserved slots are configured per lane") {
-        EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "10");
-        EnvGuard embedEnv("YAMS_ONNX_EMBED_RESERVED", "3");
-        EnvGuard glinerEnv("YAMS_ONNX_GLINER_RESERVED", "2");
-        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced");
+        ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "10");
+        ScopedEnvVar embedEnv("YAMS_ONNX_EMBED_RESERVED", "3");
+        ScopedEnvVar glinerEnv("YAMS_ONNX_GLINER_RESERVED", "2");
+        ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
 
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
@@ -163,9 +139,9 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
     }
 
     SECTION("Reranker reserved slots are configured") {
-        EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "8");
-        EnvGuard rerankerEnv("YAMS_ONNX_RERANKER_RESERVED", "2");
-        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced");
+        ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "8");
+        ScopedEnvVar rerankerEnv("YAMS_ONNX_RERANKER_RESERVED", "2");
+        ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
 
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
@@ -184,8 +160,8 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
     }
 
     SECTION("Efficient profile scales down max slots") {
-        EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "8");
-        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "efficient"); // scale=0.0
+        ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "8");
+        ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "efficient"); // scale=0.0
 
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
@@ -205,8 +181,8 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
     }
 
     SECTION("Aggressive profile scales up max slots") {
-        EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "4");
-        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "aggressive"); // scale=1.0
+        ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "4");
+        ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "aggressive"); // scale=1.0
 
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
@@ -233,9 +209,9 @@ TEST_CASE("Embedding lane slots are configured correctly",
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     // Configure slots with embedding-specific reservations
-    EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "6");
-    EnvGuard embedEnv("YAMS_ONNX_EMBED_RESERVED", "2");
-    EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced");
+    ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "6");
+    ScopedEnvVar embedEnv("YAMS_ONNX_EMBED_RESERVED", "2");
+    ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
 
     DaemonHarness::Options opts;
     opts.useMockModelProvider = true;
@@ -309,8 +285,8 @@ TEST_CASE("Embedding lane slots are configured correctly",
 TEST_CASE("FSM metrics reflect ONNX configuration", "[daemon][onnx][metrics][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "5");
-    EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced");
+    ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "5");
+    ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
 
     DaemonHarness::Options opts;
     opts.useMockModelProvider = true;
@@ -374,8 +350,8 @@ TEST_CASE("OnnxConcurrencyRegistry state resets on daemon restart",
     SECTION("Different configs apply correctly on daemon restart") {
         // First daemon with 4 slots
         {
-            EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "4");
-            EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced");
+            ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "4");
+            ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
 
             DaemonHarness::Options opts;
             opts.useMockModelProvider = true;
@@ -394,8 +370,8 @@ TEST_CASE("OnnxConcurrencyRegistry state resets on daemon restart",
 
         // Second daemon with 8 slots - should reconfigure
         {
-            EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "8");
-            EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced");
+            ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "8");
+            ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
 
             DaemonHarness::Options opts;
             opts.useMockModelProvider = true;
@@ -420,11 +396,11 @@ TEST_CASE("OnnxConcurrencyRegistry state resets on daemon restart",
 TEST_CASE("Lane metrics update during slot acquisition", "[daemon][onnx][lanes][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "8");
-    EnvGuard embedEnv("YAMS_ONNX_EMBED_RESERVED", "2");
-    EnvGuard glinerEnv("YAMS_ONNX_GLINER_RESERVED", "1");
-    EnvGuard rerankerEnv("YAMS_ONNX_RERANKER_RESERVED", "1");
-    EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced");
+    ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "8");
+    ScopedEnvVar embedEnv("YAMS_ONNX_EMBED_RESERVED", "2");
+    ScopedEnvVar glinerEnv("YAMS_ONNX_GLINER_RESERVED", "1");
+    ScopedEnvVar rerankerEnv("YAMS_ONNX_RERANKER_RESERVED", "1");
+    ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
 
     DaemonHarness::Options opts;
     opts.useMockModelProvider = true;
@@ -472,9 +448,9 @@ TEST_CASE("AbiModelProviderAdapter acquires SlotGuard during real embedding",
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     // Configure conservative slot limits to observe contention
-    EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "4");
-    EnvGuard embedEnv("YAMS_ONNX_EMBED_RESERVED", "1");
-    EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced");
+    ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "4");
+    ScopedEnvVar embedEnv("YAMS_ONNX_EMBED_RESERVED", "1");
+    ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
 
     DaemonHarness::Options opts;
     opts.useMockModelProvider = false; // CRITICAL: Use real ONNX plugin
@@ -627,11 +603,11 @@ TEST_CASE("ONNX slot exhaustion causes graceful timeout", "[daemon][onnx][timeou
 
     // Configure very limited slots AND zero reserved slots to force contention
     // Without zeroing reserved slots, lanes can acquire beyond totalSlots via reserved pool
-    EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "3");
-    EnvGuard embedEnv("YAMS_ONNX_EMBED_RESERVED", "0");
-    EnvGuard glinerEnv("YAMS_ONNX_GLINER_RESERVED", "0");
-    EnvGuard rerankerEnv("YAMS_ONNX_RERANKER_RESERVED", "0");
-    EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced");
+    ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "3");
+    ScopedEnvVar embedEnv("YAMS_ONNX_EMBED_RESERVED", "0");
+    ScopedEnvVar glinerEnv("YAMS_ONNX_GLINER_RESERVED", "0");
+    ScopedEnvVar rerankerEnv("YAMS_ONNX_RERANKER_RESERVED", "0");
+    ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
 
     DaemonHarness::Options opts;
     opts.useMockModelProvider = true;

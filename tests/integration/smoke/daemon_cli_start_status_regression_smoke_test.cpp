@@ -12,6 +12,7 @@
 #include <thread>
 
 #include <yams/compat/unistd.h>
+#include "../../common/test_helpers_catch2.h"
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -41,32 +42,7 @@ struct CommandResult {
     std::string output;
 };
 
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(const std::string& key, const std::string& value) : key_(key) {
-        if (const char* cur = std::getenv(key.c_str())) {
-            hadOld_ = true;
-            oldValue_ = cur;
-        }
-        setEnvValue(key, value);
-    }
-
-    ~ScopedEnvVar() {
-        if (hadOld_) {
-            setEnvValue(key_, oldValue_);
-        } else {
-            unsetEnvValue(key_);
-        }
-    }
-
-    ScopedEnvVar(const ScopedEnvVar&) = delete;
-    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
-
-private:
-    std::string key_;
-    bool hadOld_ = false;
-    std::string oldValue_;
-};
+using yams::test::ScopedEnvVar;
 
 CommandResult runCommandCapture(const std::string& cmd) {
     CommandResult result;

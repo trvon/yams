@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../daemon/test_daemon_harness.h"
+#include "../../common/test_helpers_catch2.h"
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/cli_sync.h>
@@ -30,37 +31,7 @@ using namespace std::chrono_literals;
 
 namespace {
 
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(std::string key, std::optional<std::string> value) : key_(std::move(key)) {
-        if (const char* existing = std::getenv(key_.c_str())) {
-            previous_ = existing;
-            hadPrevious_ = true;
-        }
-
-        if (value) {
-            setenv(key_.c_str(), value->c_str(), 1);
-        } else {
-            unsetenv(key_.c_str());
-        }
-    }
-
-    ~ScopedEnvVar() {
-        if (hadPrevious_) {
-            setenv(key_.c_str(), previous_.c_str(), 1);
-        } else {
-            unsetenv(key_.c_str());
-        }
-    }
-
-    ScopedEnvVar(const ScopedEnvVar&) = delete;
-    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
-
-private:
-    std::string key_;
-    std::string previous_;
-    bool hadPrevious_{false};
-};
+using yams::test::ScopedEnvVar;
 
 class ContentExtractionFixture {
 public:

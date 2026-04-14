@@ -1,0 +1,2 @@
+Beta cluster document.
+This fixture is similar to alpha so the semantic graph should be dense enough to trigger a small topology cluster.

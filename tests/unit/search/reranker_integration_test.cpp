@@ -4,6 +4,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include "../../common/test_helpers_catch2.h"
 
 #include <yams/compat/unistd.h>
 #include <yams/core/types.h>
@@ -571,30 +572,7 @@ private:
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;
 };
 
-class EnvGuard {
-public:
-    EnvGuard(const std::string& key, const std::string& value) : key_(key) {
-        const char* existing = std::getenv(key_.c_str());
-        if (existing) {
-            oldValue_ = existing;
-            hadValue_ = true;
-        }
-        setenv(key_.c_str(), value.c_str(), 1);
-    }
-
-    ~EnvGuard() {
-        if (hadValue_) {
-            setenv(key_.c_str(), oldValue_.c_str(), 1);
-        } else {
-            unsetenv(key_.c_str());
-        }
-    }
-
-private:
-    std::string key_;
-    std::string oldValue_;
-    bool hadValue_{false};
-};
+using yams::test::ScopedEnvVar;
 
 } // namespace
 
@@ -965,7 +943,7 @@ TEST_CASE("SearchEngine: evidence rescue keeps strongest reranked winner in top 
 
 TEST_CASE("SearchEngine: prose sentences are not misclassified as code intent",
           "[search][intent]") {
-    EnvGuard traceGuard("YAMS_SEARCH_STAGE_TRACE", "1");
+    ScopedEnvVar traceGuard("YAMS_SEARCH_STAGE_TRACE", "1");
 
     SearchEngineRerankerFixture fixture;
     fixture.addIndexedDocument(
@@ -989,7 +967,7 @@ TEST_CASE("SearchEngine: prose sentences are not misclassified as code intent",
 }
 
 TEST_CASE("SearchEngine: camelCase identifiers remain code intent", "[search][intent]") {
-    EnvGuard traceGuard("YAMS_SEARCH_STAGE_TRACE", "1");
+    ScopedEnvVar traceGuard("YAMS_SEARCH_STAGE_TRACE", "1");
 
     SearchEngineRerankerFixture fixture;
     fixture.addIndexedDocument("/tmp/intent_code_doc.md", "HASH_INTENT_CODE", "Code doc",
@@ -1011,7 +989,7 @@ TEST_CASE("SearchEngine: camelCase identifiers remain code intent", "[search][in
 
 TEST_CASE("SearchEngine: long prose queries retry semantic search with relaxed threshold",
           "[search][vector][prose-retry]") {
-    EnvGuard traceGuard("YAMS_SEARCH_STAGE_TRACE", "1");
+    ScopedEnvVar traceGuard("YAMS_SEARCH_STAGE_TRACE", "1");
 
     SearchEngineRerankerFixture fixture;
     const std::string pathTop = "/tmp/vector_retry_top.md";

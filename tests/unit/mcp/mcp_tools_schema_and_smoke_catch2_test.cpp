@@ -16,6 +16,7 @@
 #include <vector>
 #include <yams/api/content_store_builder.h>
 #include <yams/metadata/connection_pool.h>
+#include "../../common/test_helpers_catch2.h"
 
 using nlohmann::json;
 
@@ -76,41 +77,7 @@ bool hasProp(const json& props, const std::string& name) {
     return props.is_object() && props.contains(name);
 }
 
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(const char* name, const std::string& value) : name_(name) {
-        if (const char* old = std::getenv(name_)) {
-            hadOld_ = true;
-            oldValue_ = old;
-        }
-#if defined(_WIN32)
-        _putenv_s(name_, value.c_str());
-#else
-        setenv(name_, value.c_str(), 1);
-#endif
-    }
-
-    ~ScopedEnvVar() {
-        if (hadOld_) {
-#if defined(_WIN32)
-            _putenv_s(name_, oldValue_.c_str());
-#else
-            setenv(name_, oldValue_.c_str(), 1);
-#endif
-        } else {
-#if defined(_WIN32)
-            _putenv_s(name_, "");
-#else
-            unsetenv(name_);
-#endif
-        }
-    }
-
-private:
-    const char* name_;
-    bool hadOld_ = false;
-    std::string oldValue_;
-};
+using yams::test::ScopedEnvVar;
 
 } // namespace
 

@@ -10,38 +10,14 @@
 
 #include <cstdlib>
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
 
 using namespace yams::daemon;
 
-namespace {
-
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_;
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name), hadPrev_(false) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-    ~EnvGuard() {
-        if (hadPrev_)
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        else
-            unsetenv(name_.c_str());
-    }
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
-
-} // namespace
+using yams::test::ScopedEnvVar;
 
 // =============================================================================
 // Test 1: statusTickMs supports an idle-mode cadence

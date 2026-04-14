@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdlib>
+#include "../../common/test_helpers_catch2.h"
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -279,43 +280,7 @@ private:
     mutable std::size_t lastBatchSizeArg_{0};
 };
 
-class EnvGuard {
-public:
-    EnvGuard(const char* name, const char* value) : name_(name) {
-        if (const char* current = std::getenv(name_)) {
-            original_ = current;
-        }
-        setValue(value);
-    }
-
-    ~EnvGuard() {
-        if (original_) {
-            setValue(original_->c_str());
-        } else {
-            setValue(nullptr);
-        }
-    }
-
-private:
-    void setValue(const char* value) {
-#ifdef _WIN32
-        if (value) {
-            _putenv_s(name_, value);
-        } else {
-            _putenv_s(name_, "");
-        }
-#else
-        if (value) {
-            ::setenv(name_, value, 1);
-        } else {
-            ::unsetenv(name_);
-        }
-#endif
-    }
-
-    const char* name_;
-    std::optional<std::string> original_;
-};
+using yams::test::ScopedEnvVar;
 
 class TuneAdvisorListGuard {
 public:
@@ -1673,7 +1638,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model honors timeout env floor") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-model.onnx");
         svc.__test_setModelProvider(provider);
-        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
+        ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
 
         LoadModelRequest req;
         req.modelName = "timeout-clamped-model";
@@ -1688,7 +1653,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model survives invalid timeout env value") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-invalid.onnx");
         svc.__test_setModelProvider(provider);
-        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
+        ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
 
         LoadModelRequest req;
         req.modelName = "timeout-invalid-model";
@@ -1911,8 +1876,8 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     RequestDispatcher dispatcher(&lifecycle, &svc, &state);
 
     SECTION("prepareSession returns missing-session error for unknown session") {
-        EnvGuard stateHome("XDG_STATE_HOME",
-                           makeTempDir("yams_prepare_missing_session_").string().c_str());
+        ScopedEnvVar stateHome("XDG_STATE_HOME",
+                               makeTempDir("yams_prepare_missing_session_").string().c_str());
 
         RequestDispatcher::PrepareSessionOptions opts;
         opts.sessionName = "missing";
@@ -1922,7 +1887,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
 
     SECTION("prepareSession warms current session documents") {
         auto stateRoot = makeTempDir("yams_prepare_session_");
-        EnvGuard stateHome("XDG_STATE_HOME", stateRoot.string().c_str());
+        ScopedEnvVar stateHome("XDG_STATE_HOME", stateRoot.string().c_str());
 
         auto repo = std::make_shared<StubPruneMetadataRepository>();
         auto store = std::make_shared<StubContentStore>();
@@ -2669,9 +2634,9 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
         drainStoreDocumentTasks();
 
-        EnvGuard retriesGuard("YAMS_INGEST_ENQUEUE_RETRIES", "not-a-number");
-        EnvGuard baseDelayGuard("YAMS_INGEST_ENQUEUE_BASE_DELAY_MS", "-5");
-        EnvGuard maxDelayGuard("YAMS_INGEST_ENQUEUE_MAX_DELAY_MS", "999999");
+        ScopedEnvVar retriesGuard("YAMS_INGEST_ENQUEUE_RETRIES", "not-a-number");
+        ScopedEnvVar baseDelayGuard("YAMS_INGEST_ENQUEUE_BASE_DELAY_MS", "-5");
+        ScopedEnvVar maxDelayGuard("YAMS_INGEST_ENQUEUE_MAX_DELAY_MS", "999999");
 
         AddDocumentRequest req;
         req.name = "pressure.txt";
@@ -2813,7 +2778,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
         RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
 
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         drainStoreDocumentTasks();
 
         AddDocumentRequest req;
@@ -2856,7 +2821,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
             drainStoreDocumentTasks();
         });
 
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         TuneAdvisor::setStoreDocumentChannelCapacity(64);
         drainStoreDocumentTasks();
 
@@ -2889,7 +2854,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
         RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
 
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         drainStoreDocumentTasks();
 
         auto filePath =
@@ -2920,7 +2885,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
         RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
 
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         drainStoreDocumentTasks();
 
         auto filePath = writeTempFile("yams_documents_init_file_hash_", "init-file-hash.txt",
@@ -2973,7 +2938,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("add document uses async single-file path by default when ready") {
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         drainStoreDocumentTasks();
 
         AddDocumentRequest req;
@@ -3000,7 +2965,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("add document hashes file paths on async path when ready") {
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         drainStoreDocumentTasks();
 
         auto filePath =
@@ -3039,9 +3004,9 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
         drainStoreDocumentTasks();
 
-        EnvGuard retriesGuard("YAMS_INGEST_ENQUEUE_RETRIES", "3");
-        EnvGuard baseDelayGuard("YAMS_INGEST_ENQUEUE_BASE_DELAY_MS", "1");
-        EnvGuard maxDelayGuard("YAMS_INGEST_ENQUEUE_MAX_DELAY_MS", "1");
+        ScopedEnvVar retriesGuard("YAMS_INGEST_ENQUEUE_RETRIES", "3");
+        ScopedEnvVar baseDelayGuard("YAMS_INGEST_ENQUEUE_BASE_DELAY_MS", "1");
+        ScopedEnvVar maxDelayGuard("YAMS_INGEST_ENQUEUE_MAX_DELAY_MS", "1");
         RequestDispatcher::__test_setDocumentsEnqueueFailuresBeforeSuccess(1);
 
         auto filePath = writeTempFile("yams_documents_pressure_retry_", "pressure-retry.txt",
@@ -3072,7 +3037,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
         RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
 
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         drainStoreDocumentTasks();
 
         AddDocumentRequest req;
@@ -3095,7 +3060,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
             drainStoreDocumentTasks();
         });
 
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         TuneAdvisor::setStoreDocumentChannelCapacity(64);
         drainStoreDocumentTasks();
 
@@ -3118,7 +3083,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("add document clears async hash when hashing fails on ready path") {
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         drainStoreDocumentTasks();
 
         auto filePath = writeTempFile("yams_documents_async_hash_fail_", "async-hash-fail.txt",
@@ -3139,7 +3104,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("add document uses sync fallback when explicitly enabled") {
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "1");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "1");
         drainStoreDocumentTasks();
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
 
@@ -3164,7 +3129,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("add document sync fallback forwards metadata and path inputs") {
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "true");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "true");
         drainStoreDocumentTasks();
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
 
@@ -3193,7 +3158,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("add document sync fallback returns store errors") {
-        EnvGuard syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "1");
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "1");
         drainStoreDocumentTasks();
         svc.__test_setContentStore(std::shared_ptr<api::IContentStore>{});
 
@@ -3468,7 +3433,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
 
 TEST_CASE("RequestDispatcher: download handler enforces daemon policy",
           "[daemon][documents][dispatcher][download]") {
-    EnvGuard daemonDownloadEnv("YAMS_ENABLE_DAEMON_DOWNLOAD", "0");
+    ScopedEnvVar daemonDownloadEnv("YAMS_ENABLE_DAEMON_DOWNLOAD", "0");
 
     auto dispatchDownload = [](RequestDispatcher& dispatcher, const std::string& url,
                                std::string outputPath = {}, std::string checksum = {}) {
@@ -4162,7 +4127,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     DaemonConfig cfg;
     cfg.dataDir = makeTempDir("yams_embedding_dispatcher_");
     cfg.configFilePath = cfg.dataDir / "missing-config.toml";
-    EnvGuard preferredModelGuard("YAMS_PREFERRED_MODEL", nullptr);
+    ScopedEnvVar preferredModelGuard("YAMS_PREFERRED_MODEL", std::nullopt);
 
     StubLifecycle lifecycle;
     StateComponent state;
@@ -4258,7 +4223,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-timeout.onnx");
         provider->setSingleEmbeddingResult({0.7f, 0.8f, 0.9f});
         svc.__test_setModelProvider(provider);
-        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
+        ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
 
         GenerateEmbeddingRequest req{"hello world", "embed-timeout", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -4352,7 +4317,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-direct.onnx");
         provider->setBatchEmbeddingResult({{0.2f, 0.8f}});
         svc.__test_setModelProvider(provider);
-        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
+        ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
 
         BatchEmbeddingRequest req;
         req.texts = {"one", "two"};
@@ -4377,7 +4342,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-load-fail.onnx");
         provider->setLoadError(Error{ErrorCode::InvalidState, "batch load refused"});
         svc.__test_setModelProvider(provider);
-        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
+        ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
 
         BatchEmbeddingRequest req;
         req.texts = {"one", "two"};
@@ -5386,9 +5351,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
     SECTION("plugin scan and load search default directories") {
         auto homeDir = makeTempDir("yams_plugin_home_");
         auto homeText = homeDir.string();
-        EnvGuard homeGuard("HOME", homeText.c_str());
+        ScopedEnvVar homeGuard("HOME", homeText.c_str());
 #ifdef _WIN32
-        EnvGuard localAppDataGuard("LOCALAPPDATA", homeText.c_str());
+        ScopedEnvVar localAppDataGuard("LOCALAPPDATA", homeText.c_str());
 #endif
 
         auto [state, lifecycleFsm, svc] = makeReadyService();
@@ -5539,7 +5504,7 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         StubLifecycle lifecycle;
         RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
         auto shimPath = makePythonShimPath();
-        EnvGuard pythonGuard("PATH", shimPath.c_str());
+        ScopedEnvVar pythonGuard("PATH", shimPath.c_str());
 
         auto pluginDir =
             createMockExternalPlugin(svc->getResolvedDataDir(), "dispatcher_external_py");
@@ -5626,7 +5591,7 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         StubLifecycle lifecycle;
         RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
         auto shimPath = makePythonShimPath();
-        EnvGuard pythonGuard("PATH", shimPath.c_str());
+        ScopedEnvVar pythonGuard("PATH", shimPath.c_str());
 
         auto pluginDir =
             createMockExternalPlugin(svc->getResolvedDataDir(), "dispatcher_external_trust_file");
@@ -5673,10 +5638,10 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
 
     auto makeReadyService = [&](StateComponent& readyState, DaemonLifecycleFsm& readyLifecycleFsm,
                                 const std::string& prefix) {
-        EnvGuard disableVectors("YAMS_DISABLE_VECTORS", "1");
-        EnvGuard disableVectorDb("YAMS_DISABLE_VECTOR_DB", "1");
-        EnvGuard skipModelLoading("YAMS_SKIP_MODEL_LOADING", "1");
-        EnvGuard safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1");
+        ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", "1");
+        ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", "1");
+        ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", "1");
+        ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1");
 
         DaemonConfig readyCfg = cfg;
         readyCfg.dataDir = makeTempDir(prefix);

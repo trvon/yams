@@ -1,0 +1,3 @@
+Alpha cluster document.
+This benchmark fixture is intended to exercise ingestion throughput with topology rebuilds enabled.
+It mentions semantic neighbors, embeddings, and graph routing.

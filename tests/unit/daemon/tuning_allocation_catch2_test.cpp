@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <string>
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -27,28 +28,7 @@ public:
     ProfileGuard& operator=(const ProfileGuard&) = delete;
 };
 
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_;
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name), hadPrev_(false) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-    ~EnvGuard() {
-        if (hadPrev_)
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        else
-            unsetenv(name_.c_str());
-    }
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+using yams::test::ScopedEnvVar;
 
 class HwGuard {
     unsigned prev_;
@@ -98,8 +78,8 @@ TEST_CASE("postIngestTotalConcurrent scaling across core counts",
           "[daemon][tune][allocation][catch2]") {
     SECTION("Budget is monotonically non-decreasing in hardware concurrency") {
         resetPostIngestOverrides();
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
         for (auto profile : {TuneAdvisor::Profile::Efficient, TuneAdvisor::Profile::Balanced,
                              TuneAdvisor::Profile::Aggressive}) {
@@ -122,8 +102,8 @@ TEST_CASE("postIngestTotalConcurrent scaling across core counts",
 
     SECTION("Budget is monotonically non-decreasing in profile aggressiveness") {
         resetPostIngestOverrides();
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
         for (unsigned hw : {2u, 4u, 8u}) {
             HwGuard hwGuard(hw);
@@ -150,8 +130,8 @@ TEST_CASE("postIngestTotalConcurrent scaling across core counts",
 
     SECTION("8-core Balanced budget exceeds minimum floor (BUG 1 regression)") {
         resetPostIngestOverrides();
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
         HwGuard hwGuard(8);
         ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
@@ -166,8 +146,8 @@ TEST_CASE("postIngestTotalConcurrent scaling across core counts",
 
     SECTION("16-core Aggressive budget is substantially larger than 2-core Efficient") {
         resetPostIngestOverrides();
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
         uint32_t budget2Eff = 0;
         {
@@ -198,14 +178,14 @@ TEST_CASE("postIngestBudgetedConcurrency stage starvation",
         resetPostIngestOverrides();
         setAllPostIngestStagesActive();
 
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
-        EnvGuard envExtraction("YAMS_POST_EXTRACTION_CONCURRENT", "0");
-        EnvGuard envKg("YAMS_POST_KG_CONCURRENT", "0");
-        EnvGuard envSymbol("YAMS_POST_SYMBOL_CONCURRENT", "0");
-        EnvGuard envEntity("YAMS_POST_ENTITY_CONCURRENT", "0");
-        EnvGuard envTitle("YAMS_POST_TITLE_CONCURRENT", "0");
-        EnvGuard envEmbed("YAMS_POST_EMBED_CONCURRENT", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envExtraction("YAMS_POST_EXTRACTION_CONCURRENT", "0");
+        ScopedEnvVar envKg("YAMS_POST_KG_CONCURRENT", "0");
+        ScopedEnvVar envSymbol("YAMS_POST_SYMBOL_CONCURRENT", "0");
+        ScopedEnvVar envEntity("YAMS_POST_ENTITY_CONCURRENT", "0");
+        ScopedEnvVar envTitle("YAMS_POST_TITLE_CONCURRENT", "0");
+        ScopedEnvVar envEmbed("YAMS_POST_EMBED_CONCURRENT", "0");
 
         HwGuard hwGuard(8);
         ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
@@ -235,14 +215,14 @@ TEST_CASE("postIngestBudgetedConcurrency stage starvation",
         resetPostIngestOverrides();
         setAllPostIngestStagesActive();
 
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
-        EnvGuard envExtraction("YAMS_POST_EXTRACTION_CONCURRENT", "0");
-        EnvGuard envKg("YAMS_POST_KG_CONCURRENT", "0");
-        EnvGuard envSymbol("YAMS_POST_SYMBOL_CONCURRENT", "0");
-        EnvGuard envEntity("YAMS_POST_ENTITY_CONCURRENT", "0");
-        EnvGuard envTitle("YAMS_POST_TITLE_CONCURRENT", "0");
-        EnvGuard envEmbed("YAMS_POST_EMBED_CONCURRENT", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envExtraction("YAMS_POST_EXTRACTION_CONCURRENT", "0");
+        ScopedEnvVar envKg("YAMS_POST_KG_CONCURRENT", "0");
+        ScopedEnvVar envSymbol("YAMS_POST_SYMBOL_CONCURRENT", "0");
+        ScopedEnvVar envEntity("YAMS_POST_ENTITY_CONCURRENT", "0");
+        ScopedEnvVar envTitle("YAMS_POST_TITLE_CONCURRENT", "0");
+        ScopedEnvVar envEmbed("YAMS_POST_EMBED_CONCURRENT", "0");
 
         HwGuard hwGuard(2);
         ProfileGuard profileGuard(TuneAdvisor::Profile::Efficient);
@@ -264,8 +244,8 @@ TEST_CASE("ResourceGovernor scaling cap monotonicity",
           "[daemon][tune][allocation][governor][catch2]") {
     SECTION("Warning caps never exceed Normal caps at 2-core Balanced (BUG 2 regression)") {
         resetPostIngestOverrides();
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
 
         HwGuard hwGuard(2);
         ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
@@ -302,8 +282,8 @@ TEST_CASE("ResourceGovernor scaling cap monotonicity",
 
     SECTION("Caps are monotonically non-increasing across all pressure levels") {
         resetPostIngestOverrides();
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
 
         HwGuard hwGuard(4);
         ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
@@ -367,8 +347,8 @@ TEST_CASE("ResourceGovernor scaling cap monotonicity",
 
     SECTION("Warning caps never exceed Normal caps at 4-core Aggressive") {
         resetPostIngestOverrides();
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
 
         HwGuard hwGuard(4);
         ProfileGuard profileGuard(TuneAdvisor::Profile::Aggressive);

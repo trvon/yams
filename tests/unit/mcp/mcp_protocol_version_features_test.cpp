@@ -17,6 +17,7 @@
 #include <string>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/mcp/mcp_server.h>
+#include "../../common/test_helpers_catch2.h"
 
 using namespace yams::mcp;
 using json = nlohmann::json;
@@ -36,54 +37,7 @@ public:
     }
 };
 
-class EnvGuard {
-public:
-    EnvGuard(const char* key, const char* value) : key_(key) {
-        const char* prev = std::getenv(key_);
-        if (prev) {
-            hadPrev_ = true;
-            prev_ = prev;
-        }
-        setValue(value);
-    }
-
-    ~EnvGuard() {
-        if (hadPrev_) {
-            setValue(prev_.c_str());
-        } else {
-            clearValue();
-        }
-    }
-
-private:
-    void setValue(const char* value) const {
-#if defined(_WIN32)
-        if (value) {
-            _putenv_s(key_, value);
-        } else {
-            _putenv_s(key_, "");
-        }
-#else
-        if (value) {
-            setenv(key_, value, 1);
-        } else {
-            unsetenv(key_);
-        }
-#endif
-    }
-
-    void clearValue() const {
-#if defined(_WIN32)
-        _putenv_s(key_, "");
-#else
-        unsetenv(key_);
-#endif
-    }
-
-    const char* key_;
-    bool hadPrev_ = false;
-    std::string prev_;
-};
+using yams::test::ScopedEnvVar;
 
 } // namespace
 

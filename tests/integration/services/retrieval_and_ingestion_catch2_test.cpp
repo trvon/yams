@@ -22,6 +22,7 @@
 #include <boost/asio/use_future.hpp>
 
 #include "../daemon/test_daemon_harness.h"
+#include "../../common/test_helpers_catch2.h"
 #include "common/capability.h"
 #include "common/fixture_manager.h"
 
@@ -42,31 +43,7 @@ namespace {
 constexpr int kRequestTimeoutMs = 5000;
 constexpr int kBodyTimeoutMs = 15000;
 
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_{false};
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-
-    ~EnvGuard() {
-        if (hadPrev_) {
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        } else {
-            unsetenv(name_.c_str());
-        }
-    }
-
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+using yams::test::ScopedEnvVar;
 
 struct BarrierStats {
     std::uint64_t lastPostIngestQueued{0};
@@ -266,7 +243,7 @@ public:
     fs::path testRoot_;
     fs::path socketPath_;
     fs::path storageDir_;
-    std::optional<EnvGuard> killOthersEnv_;
+    std::optional<ScopedEnvVar> killOthersEnv_;
     std::unique_ptr<yams::test::DaemonHarness> harness_;
     std::unique_ptr<yams::test::FixtureManager> fixtures_;
 };
@@ -951,7 +928,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
                  "AppDocumentList_HotOnlyStillHydratesMetadataWhenRequested",
                  "[integration][services][document][list][hot_only]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
-    EnvGuard listMode("YAMS_LIST_MODE", "hot_only");
+    ScopedEnvVar listMode("YAMS_LIST_MODE", "hot_only");
     REQUIRE(startDaemon());
 
     using yams::app::services::ListDocumentsRequest;

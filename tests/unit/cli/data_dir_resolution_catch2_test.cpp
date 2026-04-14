@@ -14,71 +14,13 @@
 #include <string>
 
 #include <yams/compat/unistd.h>
+#include "../../common/test_helpers_catch2.h"
 
 namespace fs = std::filesystem;
 
 namespace {
 
-/**
- * RAII helper to set and restore environment variables.
- */
-class ScopedEnv {
-public:
-    ScopedEnv(const char* name, const char* value) : name_(name) {
-        if (const char* old = std::getenv(name)) {
-            hadValue_ = true;
-            oldValue_ = old;
-        }
-        set(value);
-    }
-
-    ~ScopedEnv() {
-        if (hadValue_) {
-            set(oldValue_.c_str());
-        } else {
-            unset();
-        }
-    }
-
-    ScopedEnv(const ScopedEnv&) = delete;
-    ScopedEnv& operator=(const ScopedEnv&) = delete;
-
-private:
-    void set(const char* value) { setenv(name_.c_str(), value, 1); }
-
-    void unset() { unsetenv(name_.c_str()); }
-
-    std::string name_;
-    std::string oldValue_;
-    bool hadValue_{false};
-};
-
-class ScopedEnvUnset {
-public:
-    explicit ScopedEnvUnset(const char* name) : name_(name) {
-        if (const char* old = std::getenv(name)) {
-            hadValue_ = true;
-            oldValue_ = old;
-        }
-        unset();
-    }
-
-    ~ScopedEnvUnset() {
-        if (hadValue_) {
-            setenv(name_.c_str(), oldValue_.c_str(), 1);
-        }
-    }
-
-    ScopedEnvUnset(const ScopedEnvUnset&) = delete;
-    ScopedEnvUnset& operator=(const ScopedEnvUnset&) = delete;
-
-private:
-    void unset() { unsetenv(name_.c_str()); }
-
-    std::string name_;
-    std::string oldValue_;
-    bool hadValue_{false};
-};
+using ScopedEnv = yams::test::ScopedEnvVar;
 
 /**
  * RAII helper to create a temporary config file.
@@ -128,8 +70,8 @@ TEST_CASE("DataDirResolution - get_data_dir contains yams", "[cli][data_dir][cat
 
 #ifndef _WIN32
 TEST_CASE("DataDirResolution - get_data_dir respects XDG_DATA_HOME", "[cli][data_dir][catch2]") {
-    ScopedEnvUnset clearDataDir("YAMS_DATA_DIR");
-    ScopedEnvUnset clearStorage("YAMS_STORAGE");
+    ScopedEnv clearDataDir("YAMS_DATA_DIR", std::nullopt);
+    ScopedEnv clearStorage("YAMS_STORAGE", std::nullopt);
     ScopedEnv xdg("XDG_DATA_HOME", "/custom/data");
     auto dataDir = yams::config::get_data_dir();
     CHECK(dataDir == fs::path("/custom/data/yams"));

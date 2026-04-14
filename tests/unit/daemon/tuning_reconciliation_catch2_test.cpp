@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <string>
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
 #include <yams/daemon/components/GradientLimiter.h>
@@ -34,28 +35,7 @@ public:
     ProfileGuard& operator=(const ProfileGuard&) = delete;
 };
 
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_;
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name), hadPrev_(false) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-    ~EnvGuard() {
-        if (hadPrev_)
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        else
-            unsetenv(name_.c_str());
-    }
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+using yams::test::ScopedEnvVar;
 
 class HwGuard {
     unsigned prev_;
@@ -113,8 +93,8 @@ TEST_CASE("Post-ingest budget distribution correctness", "[daemon][tune][reconci
         // With 6 active stages and budget >= 6, every stage should get at least 1.
         resetPostIngestOverrides();
         setAllPostIngestStagesActive();
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
         for (unsigned hw : {8u, 12u, 16u, 24u, 32u}) {
             HwGuard hwGuard(hw);
@@ -152,8 +132,8 @@ TEST_CASE("Post-ingest budget distribution correctness", "[daemon][tune][reconci
     SECTION("Sum of per-stage allocations does not exceed budget") {
         resetPostIngestOverrides();
         setAllPostIngestStagesActive();
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
         for (unsigned hw : {2u, 4u, 8u, 16u, 32u}) {
             HwGuard hwGuard(hw);
@@ -175,8 +155,8 @@ TEST_CASE("Post-ingest budget distribution correctness", "[daemon][tune][reconci
     SECTION("Extraction and embed get minimum 1 when budget >= 2") {
         resetPostIngestOverrides();
         setAllPostIngestStagesActive();
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
         for (unsigned hw : {2u, 3u, 4u}) {
             HwGuard hwGuard(hw);
@@ -205,8 +185,8 @@ TEST_CASE("Post-ingest budget distribution correctness", "[daemon][tune][reconci
         // embed should get at least as much as any single other stage.
         resetPostIngestOverrides();
         setAllPostIngestStagesActive();
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
         for (unsigned hw : {16u, 24u, 32u}) {
             HwGuard hwGuard(hw);
@@ -278,8 +258,8 @@ TEST_CASE("Post-ingest active mask filters stages correctly",
           "[daemon][tune][reconciliation][catch2]") {
     SECTION("Disabled stages get 0 allocation") {
         resetPostIngestOverrides();
-        EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
         HwGuard hwGuard(16);
         ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
 

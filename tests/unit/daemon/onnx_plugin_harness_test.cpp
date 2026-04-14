@@ -14,6 +14,7 @@
 #include <mach-o/dyld.h>
 #endif
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h> // For getpid()
 #include <yams/daemon/resource/plugin_host.h>
@@ -32,31 +33,7 @@ constexpr bool kAddressSanitizerEnabled = true;
 constexpr bool kAddressSanitizerEnabled = false;
 #endif
 
-// RAII environment variable guard
-class EnvGuard {
-public:
-    explicit EnvGuard(const char* name) : name_(name) {
-        if (const char* val = std::getenv(name)) {
-            originalValue_ = val;
-            hadValue_ = true;
-        }
-    }
-
-    ~EnvGuard() {
-        if (hadValue_) {
-            ::setenv(name_, originalValue_.c_str(), 1);
-        } else {
-            ::unsetenv(name_);
-        }
-    }
-
-    void set(const std::string& value) { ::setenv(name_, value.c_str(), 1); }
-
-private:
-    const char* name_;
-    std::string originalValue_;
-    bool hadValue_{false};
-};
+using yams::test::ScopedEnvVar;
 
 // Helper to create isolated temp directory for tests
 struct IsolatedPluginEnv {
@@ -68,8 +45,7 @@ struct IsolatedPluginEnv {
         trustFile = tempDir / "plugins_trust.txt";
 
         // Prevent config/trust file leakage
-        xdgGuard = std::make_unique<EnvGuard>("XDG_CONFIG_HOME");
-        xdgGuard->set(tempDir.string());
+        xdgGuard = std::make_unique<ScopedEnvVar>("XDG_CONFIG_HOME", tempDir.string());
     }
 
     ~IsolatedPluginEnv() {
@@ -79,7 +55,7 @@ struct IsolatedPluginEnv {
 
     fs::path tempDir;
     fs::path trustFile;
-    std::unique_ptr<EnvGuard> xdgGuard;
+    std::unique_ptr<ScopedEnvVar> xdgGuard;
 };
 
 // Get plugin path from environment or build define
@@ -318,8 +294,8 @@ TEST_CASE("Plugin: ONNX plugin reports missing runtime cleanly",
         return;
     }
 #else
-    EnvGuard runtimeLib("YAMS_ONNX_RUNTIME_LIB");
-    runtimeLib.set((env.tempDir / "missing-onnxruntime.so").string());
+    ScopedEnvVar runtimeLib("YAMS_ONNX_RUNTIME_LIB",
+                            (env.tempDir / "missing-onnxruntime.so").string());
 #endif
 
     AbiPluginHost host(nullptr);

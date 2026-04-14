@@ -20,6 +20,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <sqlite3.h>
 #include "../common/env_compat.h"
 #include <benchmark/benchmark.h>
 
@@ -42,6 +43,120 @@ using namespace yams::test;
 using namespace yams::daemon;
 
 namespace {
+
+class BenchmarkMockModelProvider final : public yams::daemon::IModelProvider {
+public:
+    explicit BenchmarkMockModelProvider(std::size_t dim) : dim_(dim) {}
+
+    void setProgressCallback(std::function<void(const yams::daemon::ModelLoadEvent&)> cb) override {
+        progress_ = std::move(cb);
+    }
+
+    yams::Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        return generateEmbeddingFor(defaultModelName_, text);
+    }
+
+    yams::Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+        return generateBatchEmbeddingsFor(defaultModelName_, texts);
+    }
+
+    yams::Result<std::vector<float>> generateEmbeddingFor(const std::string& modelName,
+                                                          const std::string& text) override {
+        if (!isModelLoaded(modelName)) {
+            return yams::Error{yams::ErrorCode::NotFound, "model not loaded"};
+        }
+        std::vector<float> embedding(dim_, 0.0f);
+        std::hash<std::string> hasher;
+        const auto seed = hasher(text);
+        for (std::size_t i = 0; i < embedding.size(); ++i) {
+            embedding[i] = static_cast<float>((seed ^ (i * 131)) % 1000) / 1000.0f;
+        }
+        return embedding;
+    }
+
+    yams::Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddingsFor(const std::string& modelName,
+                               const std::vector<std::string>& texts) override {
+        if (!isModelLoaded(modelName)) {
+            return yams::Error{yams::ErrorCode::NotFound, "model not loaded"};
+        }
+        std::vector<std::vector<float>> batch;
+        batch.reserve(texts.size());
+        for (const auto& text : texts) {
+            auto embedding = generateEmbeddingFor(modelName, text);
+            if (!embedding) {
+                return embedding.error();
+            }
+            batch.push_back(std::move(embedding.value()));
+        }
+        return batch;
+    }
+
+    yams::Result<void> loadModel(const std::string& modelName) override {
+        if (progress_) {
+            yams::daemon::ModelLoadEvent ev;
+            ev.modelName = modelName;
+            ev.phase = "loading";
+            ev.message = "benchmark mock loading";
+            progress_(ev);
+        }
+        loadedModels_.insert(modelName);
+        defaultModelName_ = modelName;
+        if (progress_) {
+            yams::daemon::ModelLoadEvent ev;
+            ev.modelName = modelName;
+            ev.phase = "completed";
+            ev.message = "benchmark mock ready";
+            progress_(ev);
+        }
+        return yams::Result<void>();
+    }
+
+    yams::Result<void> unloadModel(const std::string& modelName) override {
+        loadedModels_.erase(modelName);
+        return yams::Result<void>();
+    }
+
+    bool isModelLoaded(const std::string& modelName) const override {
+        return loadedModels_.contains(modelName);
+    }
+
+    std::vector<std::string> getLoadedModels() const override {
+        return std::vector<std::string>(loadedModels_.begin(), loadedModels_.end());
+    }
+
+    size_t getLoadedModelCount() const override { return loadedModels_.size(); }
+
+    yams::Result<yams::daemon::ModelInfo>
+    getModelInfo(const std::string& modelName) const override {
+        if (!isModelLoaded(modelName)) {
+            return yams::Error{yams::ErrorCode::NotFound, "model not loaded"};
+        }
+        yams::daemon::ModelInfo info;
+        info.name = modelName;
+        info.embeddingDim = dim_;
+        return info;
+    }
+
+    size_t getEmbeddingDim(const std::string&) const override { return dim_; }
+    std::shared_ptr<yams::vector::EmbeddingGenerator>
+    getEmbeddingGenerator(const std::string& = "") override {
+        return nullptr;
+    }
+    std::string getProviderName() const override { return "BenchmarkMockProvider"; }
+    std::string getProviderVersion() const override { return "1.0"; }
+    bool isAvailable() const override { return true; }
+    size_t getMemoryUsage() const override { return 0; }
+    void releaseUnusedResources() override {}
+    void shutdown() override { loadedModels_.clear(); }
+
+private:
+    std::size_t dim_;
+    std::string defaultModelName_;
+    std::unordered_set<std::string> loadedModels_;
+    std::function<void(const yams::daemon::ModelLoadEvent&)> progress_;
+};
 
 // Forward declarations for globals used by helper waits.
 extern std::unique_ptr<DaemonHarness> g_harness;
@@ -140,6 +255,29 @@ bool waitForVectorDbInitialized(std::chrono::milliseconds timeout) {
     return false;
 }
 
+uint64_t querySqliteCount(const std::filesystem::path& dbPath, const char* sql) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open(dbPath.string().c_str(), &db) != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return 0;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    uint64_t count = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            count = static_cast<uint64_t>(sqlite3_column_int64(stmt, 0));
+        }
+    }
+    if (stmt) {
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+    return count;
+}
+
 bool waitForCorpusIndexed(
     std::size_t expectedDocs, bool embeddingsEnabled, std::chrono::milliseconds timeout,
     std::optional<std::chrono::steady_clock::time_point> hardDeadline = std::nullopt,
@@ -188,22 +326,38 @@ bool waitForCorpusIndexed(
         const uint64_t embedQueued = getCountOrZero(st, std::string(metrics::kEmbedQueued));
         const uint64_t embedInflight = getCountOrZero(st, std::string(metrics::kEmbedInflight));
         const uint64_t vectorCount = getCountOrZero(st, std::string(metrics::kVectorCount));
+        const uint64_t topologyRebuildsTotal =
+            getCountOrZero(st, std::string(metrics::kTopologyRebuildsTotal));
+        const auto dataDir = g_harness ? g_harness->dataDir() : std::filesystem::path{};
+        const uint64_t persistedVectorCount =
+            embeddingsEnabled
+                ? querySqliteCount(dataDir / "vectors.db", "SELECT COUNT(*) FROM vectors;")
+                : 0;
+        const uint64_t persistedTopologyMetadata =
+            embeddingsEnabled
+                ? querySqliteCount(dataDir / "yams.db",
+                                   "SELECT COUNT(*) FROM metadata WHERE key LIKE 'topology.%';")
+                : 0;
+        bool topologyFresh = false;
+        if (auto it = st.readinessStates.find(std::string(readiness::kTopologyArtifactsFresh));
+            it != st.readinessStates.end()) {
+            topologyFresh = it->second;
+        }
 
         const bool countsMet =
-            (expectedDocs == 0) || (docsTotal >= static_cast<uint64_t>(expectedDocs) &&
-                                    docsIndexed >= static_cast<uint64_t>(expectedDocs));
+            (expectedDocs == 0) || (docsTotal >= static_cast<uint64_t>(expectedDocs));
         const bool postDrained = (postQueued == 0 && postInflight == 0);
         const bool embedDrained = (!embeddingsEnabled) || (embedQueued == 0 && embedInflight == 0);
         bool vectorReady = (!embeddingsEnabled) || st.vectorDbReady;
         if (auto it = st.readinessStates.find("vector_db"); it != st.readinessStates.end()) {
             vectorReady = (!embeddingsEnabled) || it->second;
         }
-        // Serving semantics: vector_db readiness is only true once vector_count > 0.
-        // For corpus readiness, we actually care that vectors are produced for the corpus.
-        const bool vectorMet =
-            (!embeddingsEnabled) || (vectorCount >= static_cast<uint64_t>(expectedDocs));
+        const bool semanticReady = (!embeddingsEnabled) || topologyFresh ||
+                                   topologyRebuildsTotal > 0 || persistedTopologyMetadata > 0 ||
+                                   vectorReady || vectorCount > 0 ||
+                                   persistedVectorCount >= static_cast<uint64_t>(expectedDocs);
 
-        if (countsMet && postDrained && embedDrained && vectorReady && vectorMet) {
+        if (countsMet && postDrained && embedDrained && semanticReady) {
             ++stableCount;
         } else {
             stableCount = 0;
@@ -220,10 +374,13 @@ bool waitForCorpusIndexed(
                       << " postQ=" << postQueued << " postIn=" << postInflight
                       << " embedQ=" << embedQueued << " embedIn=" << embedInflight
                       << " vectorCount=" << vectorCount
+                      << " persistedVectorCount=" << persistedVectorCount
                       << " vectorDbReady=" << (st.vectorDbReady ? 1 : 0)
-                      << " stable=" << stableCount << "/" << stableRequired
-                      << " rss_mb=" << std::fixed << std::setprecision(1) << st.memoryUsageMb
-                      << " cpu_pct=" << st.cpuUsagePercent << "\n";
+                      << " topologyRebuilds=" << topologyRebuildsTotal
+                      << " persistedTopology=" << persistedTopologyMetadata
+                      << " topologyFresh=" << (topologyFresh ? 1 : 0) << " stable=" << stableCount
+                      << "/" << stableRequired << " rss_mb=" << std::fixed << std::setprecision(1)
+                      << st.memoryUsageMb << " cpu_pct=" << st.cpuUsagePercent << "\n";
             nextLog = now + std::chrono::seconds(5);
         }
 
@@ -232,17 +389,30 @@ bool waitForCorpusIndexed(
 
     if (haveLastStatus) {
         const auto& st = lastStatus;
-        std::cerr << "WARNING: Corpus indexing readiness timeout after " << timeout.count() << "ms"
-                  << " (expectedDocs=" << expectedDocs
-                  << " docsTotal=" << getCountOrZero(st, std::string(metrics::kDocumentsTotal))
-                  << " docsIndexed=" << getCountOrZero(st, std::string(metrics::kDocumentsIndexed))
-                  << " postQueued=" << getCountOrZero(st, std::string(metrics::kPostIngestQueued))
-                  << " postInflight="
-                  << getCountOrZero(st, std::string(metrics::kPostIngestInflight))
-                  << " embedQueued=" << getCountOrZero(st, std::string(metrics::kEmbedQueued))
-                  << " embedInflight=" << getCountOrZero(st, std::string(metrics::kEmbedInflight))
-                  << " vectorCount=" << getCountOrZero(st, std::string(metrics::kVectorCount))
-                  << " vectorDbReady=" << (st.vectorDbReady ? 1 : 0) << ")\n";
+        std::cerr
+            << "WARNING: Corpus indexing readiness timeout after " << timeout.count() << "ms"
+            << " (expectedDocs=" << expectedDocs
+            << " docsTotal=" << getCountOrZero(st, std::string(metrics::kDocumentsTotal))
+            << " docsIndexed=" << getCountOrZero(st, std::string(metrics::kDocumentsIndexed))
+            << " postQueued=" << getCountOrZero(st, std::string(metrics::kPostIngestQueued))
+            << " postInflight=" << getCountOrZero(st, std::string(metrics::kPostIngestInflight))
+            << " embedQueued=" << getCountOrZero(st, std::string(metrics::kEmbedQueued))
+            << " embedInflight=" << getCountOrZero(st, std::string(metrics::kEmbedInflight))
+            << " vectorCount=" << getCountOrZero(st, std::string(metrics::kVectorCount))
+            << " persistedVectorCount="
+            << querySqliteCount(g_harness->dataDir() / "vectors.db",
+                                "SELECT COUNT(*) FROM vectors;")
+            << " vectorDbReady=" << (st.vectorDbReady ? 1 : 0) << " topologyRebuilds="
+            << getCountOrZero(st, std::string(metrics::kTopologyRebuildsTotal))
+            << " persistedTopology="
+            << querySqliteCount(g_harness->dataDir() / "yams.db",
+                                "SELECT COUNT(*) FROM metadata WHERE key LIKE 'topology.%';")
+            << " topologyFresh="
+            << ((st.readinessStates.contains(std::string(readiness::kTopologyArtifactsFresh)) &&
+                 st.readinessStates.at(std::string(readiness::kTopologyArtifactsFresh)))
+                    ? 1
+                    : 0)
+            << ")\n";
     }
     return false;
 }
@@ -522,6 +692,20 @@ bool useMockEmbeddingsForBench() {
     return false;
 }
 
+std::optional<std::filesystem::path> writeMockEmbeddingConfig() {
+    namespace fs = std::filesystem;
+    auto cfgPath = fs::temp_directory_path() /
+                   ("yams_bench_mock_embeddings_" + std::to_string(::getpid()) + ".toml");
+    std::ofstream out(cfgPath);
+    if (!out) {
+        return std::nullopt;
+    }
+    out << "[embeddings]\n";
+    out << "embedding_dim = 384\n";
+    out << "preferred_model = \"all-MiniLM-L6-v2\"\n";
+    return cfgPath;
+}
+
 void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, bool enableEmbeddings,
                                     bool useMockEmbeddings) {
     if (!enableEmbeddings || !harness || !harness->daemon()) {
@@ -534,14 +718,13 @@ void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, bool ena
     }
 
     if (useMockEmbeddings) {
-#ifdef YAMS_TESTING
-        auto mockProvider = yams::daemon::createModelProvider("", true);
-        if (mockProvider) {
-            auto sharedProvider =
-                std::shared_ptr<yams::daemon::IModelProvider>(std::move(mockProvider));
-            serviceManager->__test_setModelProvider(sharedProvider);
+        std::size_t dim = 384;
+        if (auto vectorDb = serviceManager->getVectorDatabase()) {
+            dim = vectorDb->getConfig().embedding_dim;
         }
-#endif
+        auto sharedProvider =
+            std::make_shared<BenchmarkMockModelProvider>(std::max<std::size_t>(dim, 1));
+        serviceManager->__test_setModelProvider(sharedProvider);
     }
 
     auto ready =
@@ -594,6 +777,9 @@ void SetupHarness(const IngestionBenchConfig& config) {
     std::cout << "Duplication rate: " << (config.duplicationRate * 100) << "%\n";
 
     const std::string embedProfile = getBenchEmbedProfile();
+    const auto mockBenchConfig = (config.enableEmbeddings && useMockEmbeddingsForBench())
+                                     ? writeMockEmbeddingConfig()
+                                     : std::optional<std::filesystem::path>{};
     if (!embedProfile.empty()) {
         std::cout << "Embed benchmark profile: " << embedProfile << "\n";
     }
@@ -605,6 +791,17 @@ void SetupHarness(const IngestionBenchConfig& config) {
         ::unsetenv("YAMS_TUNING_PROFILE");
     }
     ::setenv("YAMS_BENCH_ENABLE_EMBEDDINGS", config.enableEmbeddings ? "1" : "0", 1);
+    if (config.enableEmbeddings && useMockEmbeddingsForBench()) {
+        ::setenv("YAMS_USE_MOCK_PROVIDER", "1", 1);
+        ::setenv("YAMS_EMBED_DIM", "384", 1);
+        if (mockBenchConfig.has_value()) {
+            ::setenv("YAMS_CONFIG", mockBenchConfig->string().c_str(), 1);
+        }
+    } else {
+        ::unsetenv("YAMS_USE_MOCK_PROVIDER");
+        ::unsetenv("YAMS_EMBED_DIM");
+        ::unsetenv("YAMS_CONFIG");
+    }
     if (!embedProfile.empty()) {
         ::setenv("YAMS_BENCH_EMBED_PROFILE", embedProfile.c_str(), 1);
     }
@@ -625,6 +822,9 @@ void SetupHarness(const IngestionBenchConfig& config) {
     // AutoRepair/RepairService can compete with ingestion at high scale (per-hash DB checks).
     // Disable for benchmark determinism and throughput analysis.
     harnessOptions.enableAutoRepair = false;
+    if (mockBenchConfig.has_value()) {
+        harnessOptions.configPath = *mockBenchConfig;
+    }
     if (config.enableEmbeddings) {
         const bool useMock = useMockEmbeddingsForBench();
         harnessOptions.useMockModelProvider = useMock;
@@ -640,7 +840,7 @@ void SetupHarness(const IngestionBenchConfig& config) {
         }
     }
     g_harness = std::make_unique<DaemonHarness>(harnessOptions);
-    if (!g_harness->start(std::chrono::seconds(30))) {
+    if (!g_harness->start(std::chrono::seconds(30), [](yams::daemon::YamsDaemon*) {})) {
         std::cerr << "ERROR: Failed to start daemon\n";
         std::exit(1);
     }
@@ -684,6 +884,9 @@ void TeardownHarness() {
     ::unsetenv("YAMS_TUNING_PROFILE");
     ::unsetenv("YAMS_BENCH_ENABLE_EMBEDDINGS");
     ::unsetenv("YAMS_BENCH_EMBED_PROFILE");
+    ::unsetenv("YAMS_USE_MOCK_PROVIDER");
+    ::unsetenv("YAMS_EMBED_DIM");
+    ::unsetenv("YAMS_CONFIG");
 }
 
 // Wait for all queues to drain

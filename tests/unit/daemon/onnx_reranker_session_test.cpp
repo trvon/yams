@@ -11,6 +11,7 @@
 #include <filesystem>
 
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include <yams/compat/unistd.h>
 
 namespace fs = std::filesystem;
@@ -18,32 +19,7 @@ namespace fs = std::filesystem;
 namespace yams::daemon {
 namespace {
 
-// RAII environment variable guard
-class EnvGuard {
-public:
-    explicit EnvGuard(const char* name, const char* value = nullptr) : name_(name) {
-        if (const char* val = std::getenv(name)) {
-            originalValue_ = val;
-            hadValue_ = true;
-        }
-        if (value) {
-            ::setenv(name_, value, 1);
-        }
-    }
-
-    ~EnvGuard() {
-        if (hadValue_) {
-            ::setenv(name_, originalValue_.c_str(), 1);
-        } else {
-            ::unsetenv(name_);
-        }
-    }
-
-private:
-    const char* name_;
-    std::string originalValue_;
-    bool hadValue_{false};
-};
+using yams::test::ScopedEnvVar;
 
 } // namespace
 
@@ -53,7 +29,7 @@ private:
 
 TEST_CASE("OnnxRerankerSession: Mock mode basic functionality", "[daemon][reranker][mock]") {
     // Enable mock mode via environment variable
-    EnvGuard testModeGuard("YAMS_TEST_MODE", "1");
+    ScopedEnvVar testModeGuard("YAMS_TEST_MODE", "1");
 
     RerankerConfig config;
     config.model_path = "/tmp/fake_model.onnx";
@@ -135,7 +111,7 @@ TEST_CASE("OnnxRerankerSession: Mock mode basic functionality", "[daemon][rerank
 }
 
 TEST_CASE("OnnxRerankerSession: Edge cases", "[daemon][reranker][edge]") {
-    EnvGuard testModeGuard("YAMS_TEST_MODE", "1");
+    ScopedEnvVar testModeGuard("YAMS_TEST_MODE", "1");
 
     RerankerConfig config;
     config.model_path = "/tmp/fake_model.onnx";
@@ -185,7 +161,7 @@ TEST_CASE("OnnxRerankerSession: Edge cases", "[daemon][reranker][edge]") {
 }
 
 TEST_CASE("OnnxRerankerSession: Config parsing", "[daemon][reranker][config]") {
-    EnvGuard testModeGuard("YAMS_TEST_MODE", "1");
+    ScopedEnvVar testModeGuard("YAMS_TEST_MODE", "1");
 
     SECTION("Default max sequence length") {
         RerankerConfig config;
@@ -221,9 +197,9 @@ TEST_CASE("OnnxRerankerSession: Real model integration",
     }
 
     // Ensure mock mode is not active
-    EnvGuard testModeGuard("YAMS_TEST_MODE");      // Unset
-    EnvGuard mockGuard("YAMS_USE_MOCK_PROVIDER");  // Unset
-    EnvGuard skipGuard("YAMS_SKIP_MODEL_LOADING"); // Unset
+    ScopedEnvVar testModeGuard("YAMS_TEST_MODE");      // Unset
+    ScopedEnvVar mockGuard("YAMS_USE_MOCK_PROVIDER");  // Unset
+    ScopedEnvVar skipGuard("YAMS_SKIP_MODEL_LOADING"); // Unset
 
     RerankerConfig config;
     config.model_path = modelPath;

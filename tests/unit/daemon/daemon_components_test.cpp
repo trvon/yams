@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include "../../common/test_helpers_catch2.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -120,27 +121,7 @@ std::atomic<int> TestResource::creationCount_{0};
 std::atomic<int> TestResource::destructionCount_{0};
 std::atomic<int> TestResource::workCount_{0};
 
-// Environment variable RAII helper
-class EnvGuard {
-public:
-    explicit EnvGuard(const char* name) : name_(name) {
-        if (const char* val = std::getenv(name)) {
-            saved_ = std::string(val);
-        }
-    }
-
-    ~EnvGuard() {
-        if (saved_.has_value()) {
-            setenv(name_.c_str(), saved_.value().c_str(), 1);
-        } else {
-            unsetenv(name_.c_str());
-        }
-    }
-
-private:
-    std::string name_;
-    std::optional<std::string> saved_;
-};
+using yams::test::ScopedEnvVar;
 } // namespace
 
 // =============================================================================
@@ -239,10 +220,10 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
     fs::create_directories(configDir);
 
     // Save environment
-    EnvGuard yamsSockGuard("YAMS_DAEMON_SOCKET");
-    EnvGuard xdgRuntimeGuard("XDG_RUNTIME_DIR");
-    EnvGuard xdgConfigGuard("XDG_CONFIG_HOME");
-    EnvGuard homeGuard("HOME");
+    ScopedEnvVar yamsSockGuard("YAMS_DAEMON_SOCKET");
+    ScopedEnvVar xdgRuntimeGuard("XDG_RUNTIME_DIR");
+    ScopedEnvVar xdgConfigGuard("XDG_CONFIG_HOME");
+    ScopedEnvVar homeGuard("HOME");
 
     SECTION("Environment variable has highest priority") {
         auto testPath = "/tmp/custom-daemon.sock";
@@ -300,8 +281,8 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
 
     auto configFile = configDir / "config.toml";
 
-    EnvGuard xdgConfigGuard("XDG_CONFIG_HOME");
-    EnvGuard yamsSockGuard("YAMS_DAEMON_SOCKET");
+    ScopedEnvVar xdgConfigGuard("XDG_CONFIG_HOME");
+    ScopedEnvVar yamsSockGuard("YAMS_DAEMON_SOCKET");
 
 #ifndef _WIN32
     SECTION("Config file socket_path is used") {

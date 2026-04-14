@@ -1,0 +1,2 @@
+Gamma outlier document.
+This file is intentionally different so the topology rebuild can distinguish a likely singleton or weakly connected member.

@@ -13,6 +13,7 @@
 #include <string>
 
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include <yams/compat/unistd.h>
 
 using namespace yams::daemon;
@@ -37,32 +38,7 @@ public:
     ProfileGuard& operator=(const ProfileGuard&) = delete;
 };
 
-/// RAII guard for environment variables
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_;
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name), hadPrev_(false) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-
-    ~EnvGuard() {
-        if (hadPrev_) {
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        } else {
-            unsetenv(name_.c_str());
-        }
-    }
-
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+using yams::test::ScopedEnvVar;
 
 class HardwareGuard {
     unsigned prev_;
@@ -125,52 +101,52 @@ TEST_CASE("Model eviction threshold env var overrides", "[daemon][tune][advisor]
     ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
 
     SECTION("Valid warning threshold env var overrides profile default") {
-        EnvGuard envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "0.45");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "0.45");
 
         CHECK(TuneAdvisor::modelEvictWarningThreshold() == Catch::Approx(0.45));
     }
 
     SECTION("Valid critical threshold env var overrides profile default") {
-        EnvGuard envGuard("YAMS_MODEL_EVICT_CRITICAL_THRESHOLD", "0.80");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_CRITICAL_THRESHOLD", "0.80");
 
         CHECK(TuneAdvisor::modelEvictCriticalThreshold() == Catch::Approx(0.80));
     }
 
     SECTION("Valid emergency threshold env var overrides profile default") {
-        EnvGuard envGuard("YAMS_MODEL_EVICT_EMERGENCY_THRESHOLD", "0.92");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_EMERGENCY_THRESHOLD", "0.92");
 
         CHECK(TuneAdvisor::modelEvictEmergencyThreshold() == Catch::Approx(0.92));
     }
 
     SECTION("Invalid env var (non-numeric) falls back to profile default") {
-        EnvGuard envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "invalid");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "invalid");
 
         // Should return profile default (0.60 for Balanced), not crash
         CHECK(TuneAdvisor::modelEvictWarningThreshold() == Catch::Approx(0.60));
     }
 
     SECTION("Env var exactly 1.0 is rejected (must be < 1.0)") {
-        EnvGuard envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "1.0");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "1.0");
 
         // 1.0 should be rejected, falls back to profile default
         CHECK(TuneAdvisor::modelEvictWarningThreshold() == Catch::Approx(0.60));
     }
 
     SECTION("Env var exactly 0.0 is rejected (must be > 0.0)") {
-        EnvGuard envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "0.0");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "0.0");
 
         // 0.0 should be rejected, falls back to profile default
         CHECK(TuneAdvisor::modelEvictWarningThreshold() == Catch::Approx(0.60));
     }
 
     SECTION("Negative env var is rejected") {
-        EnvGuard envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "-0.5");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "-0.5");
 
         CHECK(TuneAdvisor::modelEvictWarningThreshold() == Catch::Approx(0.60));
     }
 
     SECTION("Env var > 1.0 is rejected") {
-        EnvGuard envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "1.5");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "1.5");
 
         CHECK(TuneAdvisor::modelEvictWarningThreshold() == Catch::Approx(0.60));
     }
@@ -258,7 +234,7 @@ TEST_CASE("Model eviction threshold override precedence", "[daemon][tune][adviso
 
     SECTION("Programmatic setter takes precedence over env var") {
         ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
-        EnvGuard envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "0.45");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_WARNING_THRESHOLD", "0.45");
 
         // Env var would give 0.45, but setter should override
         TuneAdvisor::setModelEvictWarningThreshold(0.55);
@@ -267,7 +243,7 @@ TEST_CASE("Model eviction threshold override precedence", "[daemon][tune][adviso
 
     SECTION("Env var takes precedence over profile default") {
         ProfileGuard profileGuard(TuneAdvisor::Profile::Efficient);
-        EnvGuard envGuard("YAMS_MODEL_EVICT_CRITICAL_THRESHOLD", "0.65");
+        ScopedEnvVar envGuard("YAMS_MODEL_EVICT_CRITICAL_THRESHOLD", "0.65");
 
         // Efficient profile default is 0.50, but env var overrides to 0.65
         CHECK(TuneAdvisor::modelEvictCriticalThreshold() == Catch::Approx(0.65));
@@ -288,22 +264,22 @@ TEST_CASE("Governor warning scale percent tuning", "[daemon][tune][advisor][catc
     }
 
     SECTION("Valid env var overrides default") {
-        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "92");
+        ScopedEnvVar envGuard("YAMS_GOV_WARNING_SCALE_PCT", "92");
         CHECK(TuneAdvisor::governorWarningScalePercent() == 92u);
     }
 
     SECTION("Invalid env var falls back to default") {
-        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "invalid");
+        ScopedEnvVar envGuard("YAMS_GOV_WARNING_SCALE_PCT", "invalid");
         CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
     }
 
     SECTION("Out-of-range env var falls back to default") {
-        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "9");
+        ScopedEnvVar envGuard("YAMS_GOV_WARNING_SCALE_PCT", "9");
         CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
     }
 
     SECTION("Programmatic setter overrides env var") {
-        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "90");
+        ScopedEnvVar envGuard("YAMS_GOV_WARNING_SCALE_PCT", "90");
         TuneAdvisor::setGovernorWarningScalePercent(77u);
         CHECK(TuneAdvisor::governorWarningScalePercent() == 77u);
     }
@@ -335,22 +311,22 @@ TEST_CASE("Connection lifetime seconds env var", "[daemon][tune][advisor][catch2
     }
 
     SECTION("Valid env var overrides default") {
-        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "1800");
+        ScopedEnvVar envGuard("YAMS_CONNECTION_LIFETIME_S", "1800");
         CHECK(TuneAdvisor::connectionLifetimeSeconds() == 1800);
     }
 
     SECTION("Zero env var disables lifetime enforcement") {
-        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "0");
+        ScopedEnvVar envGuard("YAMS_CONNECTION_LIFETIME_S", "0");
         CHECK(TuneAdvisor::connectionLifetimeSeconds() == 0);
     }
 
     SECTION("Out-of-range env var falls back to default") {
-        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "90000");
+        ScopedEnvVar envGuard("YAMS_CONNECTION_LIFETIME_S", "90000");
         CHECK(TuneAdvisor::connectionLifetimeSeconds() == 300);
     }
 
     SECTION("Programmatic setter overrides env") {
-        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "1800");
+        ScopedEnvVar envGuard("YAMS_CONNECTION_LIFETIME_S", "1800");
         TuneAdvisor::setConnectionLifetimeSeconds(42);
         CHECK(TuneAdvisor::connectionLifetimeSeconds() == 42);
         TuneAdvisor::resetConnectionLifetimeSecondsOverride();
@@ -435,33 +411,33 @@ TEST_CASE("Repair batch size env var overrides", "[daemon][tune][advisor][catch2
     ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
 
     SECTION("YAMS_REPAIR_MAX_BATCH env var overrides profile") {
-        EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "64");
+        ScopedEnvVar envGuard("YAMS_REPAIR_MAX_BATCH", "64");
 
         CHECK(TuneAdvisor::repairMaxBatch() == 64u);
     }
 
     SECTION("YAMS_REPAIR_STARTUP_BATCH env var overrides profile") {
-        EnvGuard envGuard("YAMS_REPAIR_STARTUP_BATCH", "200");
+        ScopedEnvVar envGuard("YAMS_REPAIR_STARTUP_BATCH", "200");
 
         CHECK(TuneAdvisor::repairStartupBatchSize() == 200u);
     }
 
     SECTION("Invalid env var falls back to profile default") {
-        EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "invalid");
+        ScopedEnvVar envGuard("YAMS_REPAIR_MAX_BATCH", "invalid");
 
         // Should fall back to profile default (20 for Balanced at 0.5 scale)
         CHECK(TuneAdvisor::repairMaxBatch() == 20u);
     }
 
     SECTION("Zero env var falls back to profile default") {
-        EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "0");
+        ScopedEnvVar envGuard("YAMS_REPAIR_MAX_BATCH", "0");
 
         // 0 is rejected, should fall back to profile default
         CHECK(TuneAdvisor::repairMaxBatch() == 20u);
     }
 
     SECTION("Env var > 1000 falls back to profile default") {
-        EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "1001");
+        ScopedEnvVar envGuard("YAMS_REPAIR_MAX_BATCH", "1001");
 
         // > 1000 is rejected, should fall back to profile default
         CHECK(TuneAdvisor::repairMaxBatch() == 20u);
@@ -479,7 +455,7 @@ TEST_CASE("Embed doc cap resolves to safe default when unset",
         // Ensure no explicit override is active.
         TuneAdvisor::setEmbedDocCap(0);
         // Invalid env value should be ignored and still resolve to default.
-        EnvGuard envGuard("YAMS_EMBED_DOC_CAP", "0");
+        ScopedEnvVar envGuard("YAMS_EMBED_DOC_CAP", "0");
         CHECK(TuneAdvisor::getEmbedDocCap() == 0u);
         CHECK(TuneAdvisor::resolvedEmbedDocCap() == TuneAdvisor::kDefaultEmbedDocCap);
         CHECK(TuneAdvisor::resolvedEmbedDocCap() == 64u);
@@ -497,7 +473,7 @@ TEST_CASE("Embed doc cap resolves to safe default when unset",
 
 TEST_CASE("Worker poll cadence overrides", "[daemon][tune][advisor][catch2]") {
     SECTION("Dynamic updates apply when not pinned") {
-        EnvGuard envGuard("YAMS_WORKER_POLL_MS", "0");
+        ScopedEnvVar envGuard("YAMS_WORKER_POLL_MS", "0");
         TuneAdvisor::setWorkerPollMs(0);
 
         TuneAdvisor::setWorkerPollMsDynamic(200);
@@ -509,7 +485,7 @@ TEST_CASE("Worker poll cadence overrides", "[daemon][tune][advisor][catch2]") {
     }
 
     SECTION("Dynamic updates ignored when pinned by setter") {
-        EnvGuard envGuard("YAMS_WORKER_POLL_MS", "0");
+        ScopedEnvVar envGuard("YAMS_WORKER_POLL_MS", "0");
         TuneAdvisor::setWorkerPollMs(250);
         CHECK(TuneAdvisor::workerPollMs() == 250u);
 
@@ -520,7 +496,7 @@ TEST_CASE("Worker poll cadence overrides", "[daemon][tune][advisor][catch2]") {
     }
 
     SECTION("Dynamic updates ignored when env pins cadence") {
-        EnvGuard envGuard("YAMS_WORKER_POLL_MS", "300");
+        ScopedEnvVar envGuard("YAMS_WORKER_POLL_MS", "300");
         TuneAdvisor::setWorkerPollMs(0);
 
         TuneAdvisor::setWorkerPollMsDynamic(100);
@@ -569,7 +545,7 @@ TEST_CASE("gpuAwareBatchSize returns sensible values", "[daemon][tune][advisor][
     }
 
     SECTION("Env override YAMS_GPU_BATCH_SIZE takes precedence") {
-        EnvGuard envGuard("YAMS_GPU_BATCH_SIZE", "42");
+        ScopedEnvVar envGuard("YAMS_GPU_BATCH_SIZE", "42");
         CHECK(TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 768) == 42);
         CHECK(TuneAdvisor::gpuAwareBatchSize(0, 768) == 42);
     }
@@ -603,9 +579,9 @@ TEST_CASE("effectiveGpuBatchBudgetBytes applies unified-memory safety defaults",
     constexpr uint64_t GiB = 1024ULL * 1024ULL * 1024ULL;
 
     SECTION("Dedicated memory uses full detected budget by default") {
-        EnvGuard clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
-        EnvGuard clear2("YAMS_GPU_UNIFIED_BUDGET_MB", "");
-        EnvGuard clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
+        ScopedEnvVar clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
+        ScopedEnvVar clear2("YAMS_GPU_UNIFIED_BUDGET_MB", "");
+        ScopedEnvVar clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
 
         GpuInfo gpu;
         gpu.detected = true;
@@ -617,9 +593,9 @@ TEST_CASE("effectiveGpuBatchBudgetBytes applies unified-memory safety defaults",
     }
 
     SECTION("Unified memory defaults to conservative 4 GiB cap") {
-        EnvGuard clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
-        EnvGuard clear2("YAMS_GPU_UNIFIED_BUDGET_MB", "");
-        EnvGuard clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
+        ScopedEnvVar clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
+        ScopedEnvVar clear2("YAMS_GPU_UNIFIED_BUDGET_MB", "");
+        ScopedEnvVar clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
 
         GpuInfo gpu;
         gpu.detected = true;
@@ -631,9 +607,9 @@ TEST_CASE("effectiveGpuBatchBudgetBytes applies unified-memory safety defaults",
     }
 
     SECTION("Unified memory MB override is honored") {
-        EnvGuard clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
-        EnvGuard envMb("YAMS_GPU_UNIFIED_BUDGET_MB", "6144");
-        EnvGuard clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
+        ScopedEnvVar clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
+        ScopedEnvVar envMb("YAMS_GPU_UNIFIED_BUDGET_MB", "6144");
+        ScopedEnvVar clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
 
         GpuInfo gpu;
         gpu.detected = true;
@@ -645,9 +621,9 @@ TEST_CASE("effectiveGpuBatchBudgetBytes applies unified-memory safety defaults",
     }
 
     SECTION("Global budget override takes precedence") {
-        EnvGuard envGlobal("YAMS_GPU_BATCH_BUDGET_MB", "2048");
-        EnvGuard envMb("YAMS_GPU_UNIFIED_BUDGET_MB", "6144");
-        EnvGuard envFrac("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "0.5");
+        ScopedEnvVar envGlobal("YAMS_GPU_BATCH_BUDGET_MB", "2048");
+        ScopedEnvVar envMb("YAMS_GPU_UNIFIED_BUDGET_MB", "6144");
+        ScopedEnvVar envFrac("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "0.5");
 
         GpuInfo gpu;
         gpu.detected = true;
@@ -732,8 +708,8 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
 
     SECTION("Efficient profile uses 0.0 scaling") {
         ProfileGuard guard(TuneAdvisor::Profile::Efficient);
-        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
-        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
         // With hw=8, all 6 stages active: totalBudget = max(formula, 6) = 6.
@@ -748,8 +724,8 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
 
     SECTION("Balanced profile uses 0.5 scaling") {
         ProfileGuard guard(TuneAdvisor::Profile::Balanced);
-        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
-        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
         // With hw=8, all 6 stages active: totalBudget = max(3, 6) = 6.
@@ -764,8 +740,8 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
 
     SECTION("Aggressive profile uses 1.0x (defaults)") {
         ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
-        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
-        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        ScopedEnvVar maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        ScopedEnvVar postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
         // With hw=8, round-up division: base=max(2,2)=2, scaleRange=max(1,2)=2.
@@ -817,7 +793,7 @@ TEST_CASE("Thread reserve is profile-aware", "[daemon][governance][catch2]") {
 
 TEST_CASE("recommendedThreads remains profile-aware while leaving host headroom",
           "[daemon][governance][catch2]") {
-    EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
+    ScopedEnvVar maxThreadsGuard("YAMS_MAX_THREADS", "0");
     HardwareGuard hwGuard(16);
 
     const auto effThreads = [&]() {
@@ -866,7 +842,7 @@ TEST_CASE("Auto memory budget is profile-aware", "[daemon][governance][catch2]")
 }
 
 TEST_CASE("WorkCoordinator and CLI pool defaults are io-biased", "[daemon][governance][catch2]") {
-    EnvGuard workThreadsGuard("YAMS_WORK_COORDINATOR_THREADS", "0");
+    ScopedEnvVar workThreadsGuard("YAMS_WORK_COORDINATOR_THREADS", "0");
     HardwareGuard hwGuard(16);
 
     const auto efficientWorkers = [&]() {
@@ -920,7 +896,7 @@ TEST_CASE("WorkCoordinator and CLI pool defaults are io-biased", "[daemon][gover
 }
 
 TEST_CASE("Search concurrency limit has a balanced floor", "[daemon][governance][catch2]") {
-    EnvGuard searchOverrideGuard("YAMS_SEARCH_MAX_CONCURRENT", "0");
+    ScopedEnvVar searchOverrideGuard("YAMS_SEARCH_MAX_CONCURRENT", "0");
     HardwareGuard hwGuard(10);
 
     const auto efficientLimit = [&]() {

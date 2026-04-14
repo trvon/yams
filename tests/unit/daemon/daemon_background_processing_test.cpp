@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include "../../common/test_helpers_catch2.h"
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -57,49 +58,11 @@ void drainPostIngestChannel() {
     }
 }
 
-int setEnvValue(const char* name, const char* value) {
-#if defined(_WIN32)
-    return _putenv_s(name, value);
-#else
-    return ::setenv(name, value, 1);
-#endif
-}
-
-int unsetEnvValue(const char* name) {
-#if defined(_WIN32)
-    return _putenv_s(name, "");
-#else
-    return ::unsetenv(name);
-#endif
-}
+using yams::test::ScopedEnvVar;
 
 // =============================================================================
 // Test Helpers
 // =============================================================================
-
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_{false};
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        (void)setEnvValue(name, value);
-    }
-    ~EnvGuard() {
-        if (hadPrev_) {
-            (void)setEnvValue(name_.c_str(), prev_.c_str());
-        } else {
-            (void)unsetEnvValue(name_.c_str());
-        }
-    }
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
 
 class SpdlogCaptureGuard {
 public:
@@ -622,12 +585,12 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     PostIngestBatchGuard batchGuard(4);
 
     // Ensure embed chunking policy is exercised through the PostIngestQueue -> embed_jobs path.
-    EnvGuard chunkStrategy("YAMS_EMBED_CHUNK_STRATEGY", "fixed");
-    EnvGuard chunkTarget("YAMS_EMBED_CHUNK_TARGET", "16");
-    EnvGuard chunkMin("YAMS_EMBED_CHUNK_MIN", "8");
-    EnvGuard chunkMax("YAMS_EMBED_CHUNK_MAX", "32");
-    EnvGuard chunkOverlap("YAMS_EMBED_CHUNK_OVERLAP", "0");
-    EnvGuard preserveSent("YAMS_EMBED_CHUNK_PRESERVE_SENTENCES", "0");
+    ScopedEnvVar chunkStrategy("YAMS_EMBED_CHUNK_STRATEGY", "fixed");
+    ScopedEnvVar chunkTarget("YAMS_EMBED_CHUNK_TARGET", "16");
+    ScopedEnvVar chunkMin("YAMS_EMBED_CHUNK_MIN", "8");
+    ScopedEnvVar chunkMax("YAMS_EMBED_CHUNK_MAX", "32");
+    ScopedEnvVar chunkOverlap("YAMS_EMBED_CHUNK_OVERLAP", "0");
+    ScopedEnvVar preserveSent("YAMS_EMBED_CHUNK_PRESERVE_SENTENCES", "0");
 
     WorkCoordinator coordinator;
     coordinator.start(2);

@@ -22,6 +22,7 @@
 #include <nlohmann/json.hpp>
 #include <numeric>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "../integration/daemon/test_daemon_harness.h"
 
@@ -41,6 +42,120 @@ using yams::app::services::AddOptions;
 using yams::app::services::DocumentIngestionService;
 
 namespace {
+
+class BenchmarkMockModelProvider final : public yams::daemon::IModelProvider {
+public:
+    explicit BenchmarkMockModelProvider(std::size_t dim) : dim_(dim) {}
+
+    void setProgressCallback(std::function<void(const yams::daemon::ModelLoadEvent&)> cb) override {
+        progress_ = std::move(cb);
+    }
+
+    yams::Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        return generateEmbeddingFor(defaultModelName_, text);
+    }
+
+    yams::Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+        return generateBatchEmbeddingsFor(defaultModelName_, texts);
+    }
+
+    yams::Result<std::vector<float>> generateEmbeddingFor(const std::string& modelName,
+                                                          const std::string& text) override {
+        if (!isModelLoaded(modelName)) {
+            return yams::Error{yams::ErrorCode::NotFound, "model not loaded"};
+        }
+        std::vector<float> embedding(dim_, 0.0f);
+        std::hash<std::string> hasher;
+        const auto seed = hasher(text);
+        for (std::size_t i = 0; i < embedding.size(); ++i) {
+            embedding[i] = static_cast<float>((seed ^ (i * 131)) % 1000) / 1000.0f;
+        }
+        return embedding;
+    }
+
+    yams::Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddingsFor(const std::string& modelName,
+                               const std::vector<std::string>& texts) override {
+        if (!isModelLoaded(modelName)) {
+            return yams::Error{yams::ErrorCode::NotFound, "model not loaded"};
+        }
+        std::vector<std::vector<float>> batch;
+        batch.reserve(texts.size());
+        for (const auto& text : texts) {
+            auto embedding = generateEmbeddingFor(modelName, text);
+            if (!embedding) {
+                return embedding.error();
+            }
+            batch.push_back(std::move(embedding.value()));
+        }
+        return batch;
+    }
+
+    yams::Result<void> loadModel(const std::string& modelName) override {
+        if (progress_) {
+            yams::daemon::ModelLoadEvent ev;
+            ev.modelName = modelName;
+            ev.phase = "loading";
+            ev.message = "benchmark mock loading";
+            progress_(ev);
+        }
+        loadedModels_.insert(modelName);
+        defaultModelName_ = modelName;
+        if (progress_) {
+            yams::daemon::ModelLoadEvent ev;
+            ev.modelName = modelName;
+            ev.phase = "completed";
+            ev.message = "benchmark mock ready";
+            progress_(ev);
+        }
+        return yams::Result<void>();
+    }
+
+    yams::Result<void> unloadModel(const std::string& modelName) override {
+        loadedModels_.erase(modelName);
+        return yams::Result<void>();
+    }
+
+    bool isModelLoaded(const std::string& modelName) const override {
+        return loadedModels_.contains(modelName);
+    }
+
+    std::vector<std::string> getLoadedModels() const override {
+        return std::vector<std::string>(loadedModels_.begin(), loadedModels_.end());
+    }
+
+    size_t getLoadedModelCount() const override { return loadedModels_.size(); }
+
+    yams::Result<yams::daemon::ModelInfo>
+    getModelInfo(const std::string& modelName) const override {
+        if (!isModelLoaded(modelName)) {
+            return yams::Error{yams::ErrorCode::NotFound, "model not loaded"};
+        }
+        yams::daemon::ModelInfo info;
+        info.name = modelName;
+        info.embeddingDim = dim_;
+        return info;
+    }
+
+    size_t getEmbeddingDim(const std::string&) const override { return dim_; }
+    std::shared_ptr<yams::vector::EmbeddingGenerator>
+    getEmbeddingGenerator(const std::string& = "") override {
+        return nullptr;
+    }
+    std::string getProviderName() const override { return "BenchmarkMockProvider"; }
+    std::string getProviderVersion() const override { return "1.0"; }
+    bool isAvailable() const override { return true; }
+    size_t getMemoryUsage() const override { return 0; }
+    void releaseUnusedResources() override {}
+    void shutdown() override { loadedModels_.clear(); }
+
+private:
+    std::size_t dim_;
+    std::string defaultModelName_;
+    std::unordered_set<std::string> loadedModels_;
+    std::function<void(const yams::daemon::ModelLoadEvent&)> progress_;
+};
 
 struct RunConfig {
     std::string label;
@@ -218,27 +333,7 @@ void deleteTree(const fs::path& root) {
     }
 }
 
-class ScopedEnv {
-public:
-    ScopedEnv(const std::string& key, std::string value) : key_(key) {
-        const char* existing = std::getenv(key.c_str());
-        if (existing)
-            previous_ = std::string(existing);
-        setenv(key.c_str(), value.c_str(), 1);
-    }
-
-    ~ScopedEnv() {
-        if (previous_) {
-            setenv(key_.c_str(), previous_->c_str(), 1);
-        } else {
-            unsetenv(key_.c_str());
-        }
-    }
-
-private:
-    std::string key_;
-    std::optional<std::string> previous_{};
-};
+using ScopedEnv = yams::test::ScopedEnvVar;
 
 struct StatusSnapshot {
     uint64_t documentsTotal{0};
@@ -324,17 +419,23 @@ struct StatusSnapshot {
     }
 };
 
-std::optional<StatusSnapshot> waitForPipelineIdle(yams::daemon::DaemonClient& client,
-                                                  std::chrono::seconds timeout,
-                                                  bool requireTopologyFresh) {
+struct IdleWaitResult {
+    bool completed{false};
+    StatusSnapshot lastSnapshot{};
+};
+
+IdleWaitResult waitForPipelineIdle(yams::daemon::DaemonClient& client, std::chrono::seconds timeout,
+                                   bool requireTopologyFresh) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     StatusSnapshot previous;
+    StatusSnapshot last;
     bool havePrevious = false;
     int stableCount = 0;
     constexpr int kStableRequired = 5;
 
     while (std::chrono::steady_clock::now() < deadline) {
         StatusSnapshot current = StatusSnapshot::capture(client);
+        last = current;
         bool stable = current.documentsTotal > 0 && current.pipelineIdle(requireTopologyFresh);
         if (stable && havePrevious) {
             stable = current.documentsTotal == previous.documentsTotal &&
@@ -348,7 +449,7 @@ std::optional<StatusSnapshot> waitForPipelineIdle(yams::daemon::DaemonClient& cl
         if (stable) {
             ++stableCount;
             if (stableCount >= kStableRequired) {
-                return current;
+                return IdleWaitResult{.completed = true, .lastSnapshot = current};
             }
         } else {
             stableCount = 0;
@@ -359,7 +460,7 @@ std::optional<StatusSnapshot> waitForPipelineIdle(yams::daemon::DaemonClient& cl
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
-    return std::nullopt;
+    return IdleWaitResult{.completed = false, .lastSnapshot = last};
 }
 
 bool useMockEmbeddingsForBench() {
@@ -367,6 +468,20 @@ bool useMockEmbeddingsForBench() {
         return std::string(env) == "1";
     }
     return false;
+}
+
+std::optional<fs::path> writeMockEmbeddingConfig(const fs::path& root) {
+    std::error_code ec;
+    fs::create_directories(root, ec);
+    const fs::path cfgPath = root / "mock_embeddings.toml";
+    std::ofstream out(cfgPath);
+    if (!out) {
+        return std::nullopt;
+    }
+    out << "[embeddings]\n";
+    out << "embedding_dim = 384\n";
+    out << "preferred_model = \"all-MiniLM-L6-v2\"\n";
+    return cfgPath;
 }
 
 void ensureBenchmarkEmbeddingsReady(yams::daemon::YamsDaemon* daemon, bool enableEmbeddings,
@@ -381,14 +496,13 @@ void ensureBenchmarkEmbeddingsReady(yams::daemon::YamsDaemon* daemon, bool enabl
     }
 
     if (useMockEmbeddings) {
-#ifdef YAMS_TESTING
-        auto mockProvider = yams::daemon::createModelProvider("", true);
-        if (mockProvider) {
-            auto sharedProvider =
-                std::shared_ptr<yams::daemon::IModelProvider>(std::move(mockProvider));
-            serviceManager->__test_setModelProvider(sharedProvider);
+        std::size_t dim = 384;
+        if (auto vectorDb = serviceManager->getVectorDatabase()) {
+            dim = vectorDb->getConfig().embedding_dim;
         }
-#endif
+        auto sharedProvider =
+            std::make_shared<BenchmarkMockModelProvider>(std::max<std::size_t>(dim, 1));
+        serviceManager->__test_setModelProvider(sharedProvider);
     }
 
     auto ready =
@@ -407,7 +521,10 @@ struct RunResult {
     fs::path dataDir;
     StatusSnapshot finalSnapshot{};
     bool drained{false};
+    bool timedOut{false};
     bool topologyValidated{false};
+    std::uint64_t addDocumentsAdded{0};
+    std::string addMessage;
 };
 
 RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datasetCount,
@@ -425,6 +542,7 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     ScopedEnv envParallel("YAMS_ENABLE_PARALLEL_INGEST", "1");
     ScopedEnv envPoolSize("YAMS_STORAGE_POOL_SIZE", "8");
     ScopedEnv envSafeSingle("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1");
+    const bool useMockEmbeddings = useMockEmbeddingsForBench();
     std::optional<ScopedEnv> envDisableVectors;
     if (!run.enableEmbeddings) {
         envDisableVectors.emplace("YAMS_DISABLE_VECTORS", "1");
@@ -433,6 +551,18 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     std::optional<ScopedEnv> envSkipModelLoading;
     if (!run.enableEmbeddings) {
         envSkipModelLoading.emplace("YAMS_SKIP_MODEL_LOADING", "1");
+    }
+    std::optional<ScopedEnv> envUseMockProvider;
+    if (run.enableEmbeddings && useMockEmbeddings) {
+        envUseMockProvider.emplace("YAMS_USE_MOCK_PROVIDER", "1");
+    }
+    std::optional<ScopedEnv> envMockEmbedDim;
+    if (run.enableEmbeddings && useMockEmbeddings) {
+        envMockEmbedDim.emplace("YAMS_EMBED_DIM", "384");
+    }
+    std::optional<fs::path> benchConfigPath;
+    if (run.enableEmbeddings && useMockEmbeddings) {
+        benchConfigPath = writeMockEmbeddingConfig(runRoot);
     }
 
     yams::daemon::TuneAdvisor::setEnableParallelIngest(true);
@@ -443,11 +573,11 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
 
     yams::test::DaemonHarness::Options harnessOptions;
     harnessOptions.enableModelProvider = true;
-    harnessOptions.useMockModelProvider = !run.enableEmbeddings || useMockEmbeddingsForBench();
-    harnessOptions.autoLoadPlugins = run.enableEmbeddings && !useMockEmbeddingsForBench();
-    harnessOptions.configureModelPool = run.enableEmbeddings && !useMockEmbeddingsForBench();
+    harnessOptions.useMockModelProvider = !run.enableEmbeddings || useMockEmbeddings;
+    harnessOptions.autoLoadPlugins = run.enableEmbeddings && !useMockEmbeddings;
+    harnessOptions.configureModelPool = run.enableEmbeddings && !useMockEmbeddings;
     harnessOptions.modelPoolLazyLoading = false;
-    if (run.enableEmbeddings && !useMockEmbeddingsForBench()) {
+    if (run.enableEmbeddings && !useMockEmbeddings) {
         harnessOptions.preloadModels = {"all-MiniLM-L6-v2"};
         if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
             harnessOptions.pluginDir = fs::path(envPluginDir);
@@ -458,13 +588,15 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     harnessOptions.enableAutoRepair = false;
     harnessOptions.isolateState = true;
     harnessOptions.dataDir = runDataDir;
+    if (benchConfigPath.has_value()) {
+        harnessOptions.configPath = *benchConfigPath;
+    }
 
     yams::test::DaemonHarness harness(harnessOptions);
-    if (!harness.start(std::chrono::seconds(30))) {
+    if (!harness.start(std::chrono::seconds(30), [](yams::daemon::YamsDaemon*) {})) {
         throw std::runtime_error("Failed to start daemon harness for ingestion benchmark");
     }
-    ensureBenchmarkEmbeddingsReady(harness.daemon(), run.enableEmbeddings,
-                                   useMockEmbeddingsForBench());
+    ensureBenchmarkEmbeddingsReady(harness.daemon(), run.enableEmbeddings, useMockEmbeddings);
 
     yams::daemon::ClientConfig clientCfg;
     clientCfg.socketPath = harness.socketPath();
@@ -500,14 +632,14 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     if (!addResult) {
         throw std::runtime_error("Daemon ingestion failed: " + addResult.error().message);
     }
-    auto finalSnapshot =
+    auto waitResult =
         waitForPipelineIdle(client, std::chrono::seconds(drainTimeoutSecs), run.enableEmbeddings);
     const auto end = std::chrono::steady_clock::now();
 
     harness.stop();
 
     const double elapsed = std::chrono::duration<double>(end - start).count();
-    const uint64_t documentsTotal = finalSnapshot ? finalSnapshot->documentsTotal : 0;
+    const uint64_t documentsTotal = waitResult.lastSnapshot.documentsTotal;
     const double throughput =
         (documentsTotal > 0) ? static_cast<double>(documentsTotal) / elapsed : 0.0;
 
@@ -529,9 +661,12 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     result.throughputFilesPerSecond = throughput;
     result.command = cmd.str();
     result.dataDir = runRoot;
-    result.finalSnapshot = finalSnapshot.value_or(StatusSnapshot{});
-    result.drained = finalSnapshot.has_value();
+    result.finalSnapshot = waitResult.lastSnapshot;
+    result.drained = waitResult.completed;
+    result.timedOut = !waitResult.completed;
     result.topologyValidated = run.enableEmbeddings;
+    result.addDocumentsAdded = addResult.value().documentsAdded;
+    result.addMessage = addResult.value().message;
     return result;
 }
 
@@ -563,6 +698,9 @@ void appendMetrics(const fs::path& metricsPath, const RunConfig& run, const RunR
         {"files_skipped", skipped},
         {"files_failed", failed},
         {"throughput_files_per_second", throughput},
+        {"timed_out", result.timedOut},
+        {"add_documents_added", result.addDocumentsAdded},
+        {"add_message", result.addMessage},
         {"documents_total", result.finalSnapshot.documentsTotal},
         {"documents_indexed", result.finalSnapshot.documentsIndexed},
         {"worker_queued", result.finalSnapshot.workerQueued},

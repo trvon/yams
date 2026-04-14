@@ -5,6 +5,7 @@
 #include <random>
 #include <thread>
 #include <catch2/catch_test_macros.hpp>
+#include "../../common/test_helpers_catch2.h"
 #include <yams/compat/unistd.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -17,78 +18,7 @@
 namespace yams::daemon {
 namespace fs = std::filesystem;
 
-/**
- * RAII helper to set and restore environment variables.
- * Defined locally to avoid dependency on GTest-based test_helpers.h
- */
-class ScopedEnv {
-public:
-    ScopedEnv(const char* name, const char* value) : name_(name) {
-        if (const char* old = std::getenv(name)) {
-            hadValue_ = true;
-            oldValue_ = old;
-        }
-        set(value);
-    }
-
-    ~ScopedEnv() {
-        if (hadValue_) {
-            set(oldValue_.c_str());
-        } else {
-            unset();
-        }
-    }
-
-    ScopedEnv(const ScopedEnv&) = delete;
-    ScopedEnv& operator=(const ScopedEnv&) = delete;
-
-    // Move support for reassignment
-    ScopedEnv(ScopedEnv&& other) noexcept
-        : name_(std::move(other.name_)), oldValue_(std::move(other.oldValue_)),
-          hadValue_(other.hadValue_), active_(other.active_) {
-        other.active_ = false;
-    }
-
-    ScopedEnv& operator=(ScopedEnv&& other) noexcept {
-        if (this != &other) {
-            if (active_) {
-                if (hadValue_) {
-                    set(oldValue_.c_str());
-                } else {
-                    unset();
-                }
-            }
-            name_ = std::move(other.name_);
-            oldValue_ = std::move(other.oldValue_);
-            hadValue_ = other.hadValue_;
-            active_ = other.active_;
-            other.active_ = false;
-        }
-        return *this;
-    }
-
-private:
-    void set(const char* value) {
-#ifdef _WIN32
-        _putenv_s(name_.c_str(), value);
-#else
-        setenv(name_.c_str(), value, 1);
-#endif
-    }
-
-    void unset() {
-#ifdef _WIN32
-        _putenv_s(name_.c_str(), "");
-#else
-        unsetenv(name_.c_str());
-#endif
-    }
-
-    std::string name_;
-    std::string oldValue_;
-    bool hadValue_{false};
-    bool active_{true};
-};
+using ScopedEnv = yams::test::ScopedEnvVar;
 
 // Generate a unique suffix for test directories to avoid collisions
 inline std::string uniqueSuffix() {

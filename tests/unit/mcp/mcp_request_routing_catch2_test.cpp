@@ -7,18 +7,9 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <yams/mcp/mcp_server.h>
+#include "../../common/test_helpers_catch2.h"
 
-#if defined(_WIN32)
 #include <cstdlib>
-static int setenv(const char* name, const char* value, int) {
-    return _putenv_s(name, value);
-}
-static int unsetenv(const char* name) {
-    return _putenv_s(name, "");
-}
-#else
-#include <cstdlib>
-#endif
 
 using json = nlohmann::json;
 using yams::ErrorCode;
@@ -40,31 +31,7 @@ public:
     TransportState getState() const override { return TransportState::Disconnected; }
 };
 
-class EnvGuard {
-public:
-    EnvGuard(const char* key, const char* value) : key_(key) {
-        if (const char* existing = std::getenv(key_)) {
-            previous_ = std::string(existing);
-        }
-        if (value) {
-            (void)::setenv(key_, value, 1);
-        } else {
-            (void)::unsetenv(key_);
-        }
-    }
-
-    ~EnvGuard() {
-        if (previous_) {
-            (void)::setenv(key_, previous_->c_str(), 1);
-        } else {
-            (void)::unsetenv(key_);
-        }
-    }
-
-private:
-    const char* key_;
-    std::optional<std::string> previous_;
-};
+using yams::test::ScopedEnvVar;
 
 class SpdlogLevelGuard {
 public:
@@ -115,7 +82,7 @@ TEST_CASE("MCP routing logging/setLevel honors extension gating",
     SpdlogLevelGuard levelGuard;
 
     SECTION("enabled by default returns success result") {
-        EnvGuard clearExt("YAMS_DISABLE_EXTENSIONS", nullptr);
+        ScopedEnvVar clearExt("YAMS_DISABLE_EXTENSIONS", std::nullopt);
         auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());
 
         json req = {{"jsonrpc", "2.0"},
@@ -133,7 +100,7 @@ TEST_CASE("MCP routing logging/setLevel honors extension gating",
     }
 
     SECTION("disabled returns method not available error response") {
-        EnvGuard disableExt("YAMS_DISABLE_EXTENSIONS", "1");
+        ScopedEnvVar disableExt("YAMS_DISABLE_EXTENSIONS", std::string("1"));
         auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());
 
         json req = {{"jsonrpc", "2.0"},

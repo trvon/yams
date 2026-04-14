@@ -10,6 +10,7 @@
 
 #include "test_daemon_harness.h"
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
@@ -23,29 +24,7 @@ using namespace std::chrono_literals;
 
 namespace {
 
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_{false};
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-    ~EnvGuard() {
-        if (hadPrev_) {
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        } else {
-            unsetenv(name_.c_str());
-        }
-    }
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+using yams::test::ScopedEnvVar;
 
 DaemonClient createClient(const std::filesystem::path& socketPath) {
     ClientConfig cfg;
@@ -73,7 +52,7 @@ TEST_CASE("Proxy connections cannot starve main status/shutdown", "[daemon][prox
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     // Keep the main slot budget small so starvation is easy to reproduce.
-    EnvGuard envMaxConn("YAMS_MAX_ACTIVE_CONN", "8");
+    ScopedEnvVar envMaxConn("YAMS_MAX_ACTIVE_CONN", "8");
 
     // Proxy socket is derived from daemon socket (no env override required).
     // This avoids global /tmp/proxy.sock collisions and keeps tests isolated.

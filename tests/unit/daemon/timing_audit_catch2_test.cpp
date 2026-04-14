@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include <yams/compat/unistd.h>
 
 using namespace yams::daemon;
@@ -43,30 +44,7 @@ public:
     ProfileGuard& operator=(const ProfileGuard&) = delete;
 };
 
-/// RAII guard for environment variables
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_;
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name), hadPrev_(false) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-    ~EnvGuard() {
-        if (hadPrev_) {
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        } else {
-            unsetenv(name_.c_str());
-        }
-    }
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+using yams::test::ScopedEnvVar;
 
 /// RAII guard for hardware concurrency override
 class HwGuard {
@@ -127,8 +105,8 @@ TEST_CASE("ResourceGovernor level and caps are consistent under concurrent reads
     auto& governor = ResourceGovernor::instance();
 
     // Clean env
-    EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-    EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+    ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+    ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
     resetPostIngestOverridesAndCaps();
     setAllPostIngestStagesActive();
     HwGuard hwGuard(16);
@@ -211,8 +189,8 @@ TEST_CASE("DynamicCap writes are not torn across stages", "[daemon][tune][timing
     setAllPostIngestStagesActive();
     HwGuard hwGuard(16);
     ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
-    EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-    EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+    ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+    ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
     // "High" caps: set all stages to a recognizable high value
     constexpr uint32_t kHigh = 8;
@@ -297,8 +275,8 @@ TEST_CASE("Clearing DynamicCaps immediately restores default concurrency",
     setAllPostIngestStagesActive();
     HwGuard hwGuard(16);
     ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
-    EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-    EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+    ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+    ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
     // Capture defaults (no caps active)
     auto defaultBudget = TuneAdvisor::testing_postIngestBudget(/*includeDynamicCaps=*/false);
@@ -362,8 +340,8 @@ TEST_CASE("Per-stage getters match single budget computation", "[daemon][tune][t
     setAllPostIngestStagesActive();
     HwGuard hwGuard(16);
     ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
-    EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-    EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+    ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+    ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
     // Compute budget once
     auto budget = TuneAdvisor::testing_postIngestBudget(/*includeDynamicCaps=*/true);
@@ -403,8 +381,8 @@ TEST_CASE("Per-stage getters diverge under concurrent DynamicCap writes",
     setAllPostIngestStagesActive();
     HwGuard hwGuard(16);
     ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
-    EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-    EnvGuard envMaxThreads("YAMS_MAX_THREADS", "0");
+    ScopedEnvVar envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+    ScopedEnvVar envMaxThreads("YAMS_MAX_THREADS", "0");
 
     std::atomic<bool> running{true};
     std::atomic<uint32_t> divergences{0};

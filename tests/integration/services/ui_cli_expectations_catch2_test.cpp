@@ -19,6 +19,7 @@
 
 #include "../daemon/test_async_helpers.h"
 #include "../daemon/test_daemon_harness.h"
+#include "../../common/test_helpers_catch2.h"
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
@@ -101,44 +102,7 @@ void dumpOpenFdSummary(const char* label) {
 #define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN() ((void)0)
 #endif
 
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(std::string key, std::string value) : key_(std::move(key)) {
-        if (const char* existing = std::getenv(key_.c_str())) {
-            previous_ = existing;
-            hadPrevious_ = true;
-        }
-#if defined(_WIN32)
-        _putenv_s(key_.c_str(), value.c_str());
-#else
-        setenv(key_.c_str(), value.c_str(), 1);
-#endif
-    }
-
-    ~ScopedEnvVar() {
-#if defined(_WIN32)
-        if (hadPrevious_) {
-            _putenv_s(key_.c_str(), previous_.c_str());
-        } else {
-            _putenv_s(key_.c_str(), "");
-        }
-#else
-        if (hadPrevious_) {
-            setenv(key_.c_str(), previous_.c_str(), 1);
-        } else {
-            unsetenv(key_.c_str());
-        }
-#endif
-    }
-
-    ScopedEnvVar(const ScopedEnvVar&) = delete;
-    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
-
-private:
-    std::string key_;
-    std::string previous_;
-    bool hadPrevious_{false};
-};
+using yams::test::ScopedEnvVar;
 
 class CaptureStdout {
 public:

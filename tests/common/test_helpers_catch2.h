@@ -50,7 +50,12 @@ inline std::filesystem::path write_file(const std::filesystem::path& path, std::
  */
 class ScopedEnvVar {
 public:
-    // Primary constructor taking string key and optional string value
+    // Capture-only constructor: saves the current value of `key` for restore on destruction.
+    // Does not modify the environment variable.
+    explicit ScopedEnvVar(std::string key) : key_(std::move(key)), previous_(get_env(key_)) {}
+
+    // Primary constructor taking string key and optional string value.
+    // Saves the current value and sets (or unsets if nullopt) the variable.
     ScopedEnvVar(std::string key, std::optional<std::string> value)
         : key_(std::move(key)), previous_(get_env(key_)) {
         set_env(key_, std::move(value));
@@ -114,6 +119,27 @@ private:
     std::string key_;
     std::optional<std::string> previous_;
     bool active_ = true;
+};
+
+/**
+ * @brief RAII helper that creates a unique temporary directory and removes it on destruction.
+ */
+class TempDirGuard {
+public:
+    explicit TempDirGuard(std::string_view prefix = "yams_test_") : dir_(make_temp_dir(prefix)) {}
+
+    ~TempDirGuard() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+    }
+
+    TempDirGuard(const TempDirGuard&) = delete;
+    TempDirGuard& operator=(const TempDirGuard&) = delete;
+
+    const std::filesystem::path& path() const { return dir_; }
+
+private:
+    std::filesystem::path dir_;
 };
 
 } // namespace yams::test

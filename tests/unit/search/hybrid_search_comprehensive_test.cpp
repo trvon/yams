@@ -15,6 +15,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include "../../common/test_helpers_catch2.h"
 
 #if defined(_WIN32) && __has_include(<onnxruntime_c_api.h>)
 #include <onnxruntime_c_api.h>
@@ -621,33 +622,7 @@ private:
     bool initialized_{false};
 };
 
-/**
- * @brief RAII helper for environment variables
- */
-class EnvGuard {
-public:
-    EnvGuard(const std::string& key, const std::string& value) : key_(key) {
-        const char* existing = std::getenv(key_.c_str());
-        if (existing) {
-            old_value_ = existing;
-            had_value_ = true;
-        }
-        setenv(key_.c_str(), value.c_str(), 1);
-    }
-
-    ~EnvGuard() {
-        if (had_value_) {
-            setenv(key_.c_str(), old_value_.c_str(), 1);
-        } else {
-            unsetenv(key_.c_str());
-        }
-    }
-
-private:
-    std::string key_;
-    std::string old_value_;
-    bool had_value_{false};
-};
+using yams::test::ScopedEnvVar;
 
 #endif // Disabled broken mocks
 

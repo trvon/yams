@@ -17,6 +17,7 @@
 #include <thread>
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
@@ -30,29 +31,7 @@ using namespace std::chrono_literals;
 
 namespace {
 
-class EnvGuard {
-public:
-    EnvGuard(const char* name, const char* value) : name_(name) {
-        if (const char* existing = std::getenv(name)) {
-            previous_ = existing;
-            hadPrevious_ = true;
-        }
-        setenv(name, value, 1);
-    }
-
-    ~EnvGuard() {
-        if (hadPrevious_) {
-            setenv(name_.c_str(), previous_.c_str(), 1);
-        } else {
-            unsetenv(name_.c_str());
-        }
-    }
-
-private:
-    std::string name_;
-    std::string previous_;
-    bool hadPrevious_{false};
-};
+using yams::test::ScopedEnvVar;
 
 bool waitForLifecycleState(const YamsDaemon& daemon, LifecycleState state,
                            std::chrono::milliseconds timeout) {
@@ -413,8 +392,8 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
           "[daemon][lifecycle][repair-hysteresis]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    EnvGuard degradeGuard("YAMS_REPAIR_DEGRADE_HOLD_MS", "400");
-    EnvGuard readyGuard("YAMS_REPAIR_READY_HOLD_MS", "400");
+    ScopedEnvVar degradeGuard("YAMS_REPAIR_DEGRADE_HOLD_MS", "400");
+    ScopedEnvVar readyGuard("YAMS_REPAIR_READY_HOLD_MS", "400");
 
     const auto busyThreshold = std::max<uint32_t>(1, TuneAdvisor::repairBusyConnThreshold());
     const auto degradeHoldMs = std::chrono::milliseconds(TuneAdvisor::repairDegradeHoldMs());

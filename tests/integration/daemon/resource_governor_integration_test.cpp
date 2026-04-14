@@ -7,6 +7,7 @@
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -44,32 +45,7 @@ public:
     CpuThresholdGuard& operator=(const CpuThresholdGuard&) = delete;
 };
 
-/// RAII guard for environment variables - restores previous value on destruction
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_;
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name), hadPrev_(false) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-
-    ~EnvGuard() {
-        if (hadPrev_) {
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        } else {
-            unsetenv(name_.c_str());
-        }
-    }
-
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+using yams::test::ScopedEnvVar;
 
 /// Wait for daemon to complete initial setup and governor to be active.
 /// The governor budget is populated by TuningManager tick, which runs on ~500ms intervals.
