@@ -28,8 +28,10 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/cli/cli_sync.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/daemon/resource/model_provider.h>
 
 #include <spdlog/spdlog.h>
 
@@ -44,6 +46,7 @@ struct RunConfig {
     std::string label;
     int workers{1};
     int repeat{1};
+    bool enableEmbeddings{false};
     std::vector<std::string> args;
 };
 
@@ -94,6 +97,7 @@ BenchConfig loadConfig(const fs::path& configPath) {
         run.label = entry.value("label", std::string("baseline"));
         run.workers = entry.value("workers", 1);
         run.repeat = std::max(1, entry.value("repeat", 1));
+        run.enableEmbeddings = entry.value("enable_embeddings", false);
         if (entry.contains("args")) {
             for (const auto& arg : entry["args"]) {
                 run.args.push_back(arg.get<std::string>());
@@ -245,10 +249,26 @@ struct StatusSnapshot {
     uint64_t postIngestInflight{0};
     uint64_t postIngestProcessed{0};
     uint64_t postIngestFailed{0};
+    uint64_t topologyDirtyDocuments{0};
+    uint64_t topologyLastSuccessAgeMs{0};
+    uint64_t topologyRebuildLagMs{0};
+    uint64_t topologyRebuildRunningAgeMs{0};
+    uint64_t topologyLastDurationMs{0};
+    uint64_t topologyRebuildsTotal{0};
+    uint64_t topologyRebuildFailuresTotal{0};
+    uint64_t topologyLastDocumentsRequested{0};
+    uint64_t topologyLastDocumentsProcessed{0};
+    uint64_t topologyLastClustersBuilt{0};
+    uint64_t topologyLastMembershipsBuilt{0};
+    bool topologyArtifactsFresh{false};
+    bool topologyRebuildRunning{false};
 
-    [[nodiscard]] bool pipelineIdle() const {
+    [[nodiscard]] bool pipelineIdle(bool requireTopologyFresh) const {
+        const bool topologyIdle =
+            !requireTopologyFresh ||
+            (topologyArtifactsFresh && !topologyRebuildRunning && topologyDirtyDocuments == 0);
         return workerQueued == 0 && workerActive == 0 && postIngestQueued == 0 &&
-               postIngestInflight == 0;
+               postIngestInflight == 0 && topologyIdle;
     }
 
     static StatusSnapshot capture(yams::daemon::DaemonClient& client) {
@@ -272,12 +292,41 @@ struct StatusSnapshot {
         snapshot.postIngestInflight = getCount(yams::daemon::metrics::kPostIngestInflight);
         snapshot.postIngestProcessed = getCount(yams::daemon::metrics::kPostIngestProcessed);
         snapshot.postIngestFailed = getCount(yams::daemon::metrics::kPostIngestFailed);
+        snapshot.topologyDirtyDocuments = getCount(yams::daemon::metrics::kTopologyDirtyDocuments);
+        snapshot.topologyLastSuccessAgeMs =
+            getCount(yams::daemon::metrics::kTopologyLastSuccessAgeMs);
+        snapshot.topologyRebuildLagMs = getCount(yams::daemon::metrics::kTopologyRebuildLagMs);
+        snapshot.topologyRebuildRunningAgeMs =
+            getCount(yams::daemon::metrics::kTopologyRebuildRunningAgeMs);
+        snapshot.topologyLastDurationMs = getCount(yams::daemon::metrics::kTopologyLastDurationMs);
+        snapshot.topologyRebuildsTotal = getCount(yams::daemon::metrics::kTopologyRebuildsTotal);
+        snapshot.topologyRebuildFailuresTotal =
+            getCount(yams::daemon::metrics::kTopologyRebuildFailuresTotal);
+        snapshot.topologyLastDocumentsRequested =
+            getCount(yams::daemon::metrics::kTopologyLastDocumentsRequested);
+        snapshot.topologyLastDocumentsProcessed =
+            getCount(yams::daemon::metrics::kTopologyLastDocumentsProcessed);
+        snapshot.topologyLastClustersBuilt =
+            getCount(yams::daemon::metrics::kTopologyLastClustersBuilt);
+        snapshot.topologyLastMembershipsBuilt =
+            getCount(yams::daemon::metrics::kTopologyLastMembershipsBuilt);
+        if (auto readyIt = status.readinessStates.find(
+                std::string(yams::daemon::readiness::kTopologyArtifactsFresh));
+            readyIt != status.readinessStates.end()) {
+            snapshot.topologyArtifactsFresh = readyIt->second;
+        }
+        if (auto readyIt = status.readinessStates.find(
+                std::string(yams::daemon::readiness::kTopologyRebuildRunning));
+            readyIt != status.readinessStates.end()) {
+            snapshot.topologyRebuildRunning = readyIt->second;
+        }
         return snapshot;
     }
 };
 
 std::optional<StatusSnapshot> waitForPipelineIdle(yams::daemon::DaemonClient& client,
-                                                  std::chrono::seconds timeout) {
+                                                  std::chrono::seconds timeout,
+                                                  bool requireTopologyFresh) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     StatusSnapshot previous;
     bool havePrevious = false;
@@ -286,12 +335,14 @@ std::optional<StatusSnapshot> waitForPipelineIdle(yams::daemon::DaemonClient& cl
 
     while (std::chrono::steady_clock::now() < deadline) {
         StatusSnapshot current = StatusSnapshot::capture(client);
-        bool stable = current.documentsTotal > 0 && current.pipelineIdle();
+        bool stable = current.documentsTotal > 0 && current.pipelineIdle(requireTopologyFresh);
         if (stable && havePrevious) {
             stable = current.documentsTotal == previous.documentsTotal &&
                      current.documentsIndexed == previous.documentsIndexed &&
                      current.postIngestProcessed == previous.postIngestProcessed &&
-                     current.postIngestFailed == previous.postIngestFailed;
+                     current.postIngestFailed == previous.postIngestFailed &&
+                     current.topologyRebuildsTotal == previous.topologyRebuildsTotal &&
+                     current.topologyDirtyDocuments == previous.topologyDirtyDocuments;
         }
 
         if (stable) {
@@ -311,6 +362,43 @@ std::optional<StatusSnapshot> waitForPipelineIdle(yams::daemon::DaemonClient& cl
     return std::nullopt;
 }
 
+bool useMockEmbeddingsForBench() {
+    if (const char* env = std::getenv("YAMS_BENCH_FORCE_MOCK_EMBEDDINGS")) {
+        return std::string(env) == "1";
+    }
+    return false;
+}
+
+void ensureBenchmarkEmbeddingsReady(yams::daemon::YamsDaemon* daemon, bool enableEmbeddings,
+                                    bool useMockEmbeddings) {
+    if (!enableEmbeddings || !daemon) {
+        return;
+    }
+
+    auto serviceManager = daemon->getServiceManager();
+    if (!serviceManager) {
+        return;
+    }
+
+    if (useMockEmbeddings) {
+#ifdef YAMS_TESTING
+        auto mockProvider = yams::daemon::createModelProvider("", true);
+        if (mockProvider) {
+            auto sharedProvider =
+                std::shared_ptr<yams::daemon::IModelProvider>(std::move(mockProvider));
+            serviceManager->__test_setModelProvider(sharedProvider);
+        }
+#endif
+    }
+
+    auto ready =
+        serviceManager->ensureEmbeddingModelReadySync("all-MiniLM-L6-v2", {}, 10000, false, false);
+    if (!ready) {
+        spdlog::warn("[bench] Embedding model not ready for throughput run: {}",
+                     ready.error().message);
+    }
+}
+
 struct RunResult {
     int exitCode{0};
     double durationSeconds{0.0};
@@ -319,6 +407,7 @@ struct RunResult {
     fs::path dataDir;
     StatusSnapshot finalSnapshot{};
     bool drained{false};
+    bool topologyValidated{false};
 };
 
 RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datasetCount,
@@ -336,9 +425,15 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     ScopedEnv envParallel("YAMS_ENABLE_PARALLEL_INGEST", "1");
     ScopedEnv envPoolSize("YAMS_STORAGE_POOL_SIZE", "8");
     ScopedEnv envSafeSingle("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1");
-    ScopedEnv envDisableVectors("YAMS_DISABLE_VECTORS", "1");
+    std::optional<ScopedEnv> envDisableVectors;
+    if (!run.enableEmbeddings) {
+        envDisableVectors.emplace("YAMS_DISABLE_VECTORS", "1");
+    }
     ScopedEnv envDisableWatcher("YAMS_DISABLE_SESSION_WATCHER", "1");
-    ScopedEnv envSkipModelLoading("YAMS_SKIP_MODEL_LOADING", "1");
+    std::optional<ScopedEnv> envSkipModelLoading;
+    if (!run.enableEmbeddings) {
+        envSkipModelLoading.emplace("YAMS_SKIP_MODEL_LOADING", "1");
+    }
 
     yams::daemon::TuneAdvisor::setEnableParallelIngest(true);
     yams::daemon::TuneAdvisor::setMaxIngestWorkers(static_cast<uint32_t>(std::max(1, run.workers)));
@@ -348,8 +443,18 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
 
     yams::test::DaemonHarness::Options harnessOptions;
     harnessOptions.enableModelProvider = true;
-    harnessOptions.useMockModelProvider = true;
-    harnessOptions.autoLoadPlugins = false;
+    harnessOptions.useMockModelProvider = !run.enableEmbeddings || useMockEmbeddingsForBench();
+    harnessOptions.autoLoadPlugins = run.enableEmbeddings && !useMockEmbeddingsForBench();
+    harnessOptions.configureModelPool = run.enableEmbeddings && !useMockEmbeddingsForBench();
+    harnessOptions.modelPoolLazyLoading = false;
+    if (run.enableEmbeddings && !useMockEmbeddingsForBench()) {
+        harnessOptions.preloadModels = {"all-MiniLM-L6-v2"};
+        if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
+            harnessOptions.pluginDir = fs::path(envPluginDir);
+        } else {
+            harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
+        }
+    }
     harnessOptions.enableAutoRepair = false;
     harnessOptions.isolateState = true;
     harnessOptions.dataDir = runDataDir;
@@ -358,6 +463,8 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     if (!harness.start(std::chrono::seconds(30))) {
         throw std::runtime_error("Failed to start daemon harness for ingestion benchmark");
     }
+    ensureBenchmarkEmbeddingsReady(harness.daemon(), run.enableEmbeddings,
+                                   useMockEmbeddingsForBench());
 
     yams::daemon::ClientConfig clientCfg;
     clientCfg.socketPath = harness.socketPath();
@@ -376,7 +483,7 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     addOptions.metadata = opts.metadata;
     addOptions.collection = opts.collection;
     addOptions.verify = opts.verify;
-    addOptions.noEmbeddings = true;
+    addOptions.noEmbeddings = !run.enableEmbeddings;
     addOptions.timeoutMs = 30000;
     addOptions.retries = 2;
 
@@ -393,7 +500,8 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     if (!addResult) {
         throw std::runtime_error("Daemon ingestion failed: " + addResult.error().message);
     }
-    auto finalSnapshot = waitForPipelineIdle(client, std::chrono::seconds(drainTimeoutSecs));
+    auto finalSnapshot =
+        waitForPipelineIdle(client, std::chrono::seconds(drainTimeoutSecs), run.enableEmbeddings);
     const auto end = std::chrono::steady_clock::now();
 
     harness.stop();
@@ -404,7 +512,8 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
         (documentsTotal > 0) ? static_cast<double>(documentsTotal) / elapsed : 0.0;
 
     std::ostringstream cmd;
-    cmd << "daemon_ingest_full_pipeline label=" << run.label << " workers=" << run.workers;
+    cmd << "daemon_ingest_full_pipeline label=" << run.label << " workers=" << run.workers
+        << " embeddings=" << (run.enableEmbeddings ? 1 : 0);
     if (!opts.includePatterns.empty()) {
         cmd << " include=";
         for (size_t i = 0; i < opts.includePatterns.size(); ++i) {
@@ -422,6 +531,7 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     result.dataDir = runRoot;
     result.finalSnapshot = finalSnapshot.value_or(StatusSnapshot{});
     result.drained = finalSnapshot.has_value();
+    result.topologyValidated = run.enableEmbeddings;
     return result;
 }
 
@@ -461,6 +571,20 @@ void appendMetrics(const fs::path& metricsPath, const RunConfig& run, const RunR
         {"post_ingest_inflight", result.finalSnapshot.postIngestInflight},
         {"post_ingest_processed", result.finalSnapshot.postIngestProcessed},
         {"post_ingest_failed", result.finalSnapshot.postIngestFailed},
+        {"topology_validated", result.topologyValidated},
+        {"topology_artifacts_fresh", result.finalSnapshot.topologyArtifactsFresh},
+        {"topology_rebuild_running", result.finalSnapshot.topologyRebuildRunning},
+        {"topology_dirty_documents", result.finalSnapshot.topologyDirtyDocuments},
+        {"topology_last_success_age_ms", result.finalSnapshot.topologyLastSuccessAgeMs},
+        {"topology_rebuild_lag_ms", result.finalSnapshot.topologyRebuildLagMs},
+        {"topology_rebuild_running_age_ms", result.finalSnapshot.topologyRebuildRunningAgeMs},
+        {"topology_last_duration_ms", result.finalSnapshot.topologyLastDurationMs},
+        {"topology_rebuilds_total", result.finalSnapshot.topologyRebuildsTotal},
+        {"topology_rebuild_failures_total", result.finalSnapshot.topologyRebuildFailuresTotal},
+        {"topology_last_documents_requested", result.finalSnapshot.topologyLastDocumentsRequested},
+        {"topology_last_documents_processed", result.finalSnapshot.topologyLastDocumentsProcessed},
+        {"topology_last_clusters_built", result.finalSnapshot.topologyLastClustersBuilt},
+        {"topology_last_memberships_built", result.finalSnapshot.topologyLastMembershipsBuilt},
         {"drained", result.drained},
         {"command", result.command},
         {"data_dir", result.dataDir.string()},

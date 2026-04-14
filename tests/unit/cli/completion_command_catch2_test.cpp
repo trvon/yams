@@ -211,7 +211,18 @@ TEST_CASE("CompletionCommand - bash completes nested subcommands from command tr
         script.string() +
         "\"; COMP_WORDS=(yams config em); COMP_CWORD=2; _yams_completion; printf \"CONFIG:%s\\n\" "
         "\"${COMPREPLY[*]}\"; COMP_WORDS=(yams plugin trust re); COMP_CWORD=3; "
-        "_yams_completion; printf \"PLUGIN:%s\\n\" \"${COMPREPLY[*]}\"' > '" +
+        "_yams_completion; printf \"PLUGIN:%s\\n\" \"${COMPREPLY[*]}\"; "
+        "COMP_WORDS=(yams daemon start \"\"); COMP_CWORD=3; _yams_completion; printf "
+        "\"START:%s\\n\" \"${COMPREPLY[*]}\"; "
+        "COMP_WORDS=(yams daemon start --log-level \"\"); COMP_CWORD=4; _yams_completion; "
+        "printf \"LOGLEVEL:%s\\n\" \"${COMPREPLY[*]}\"; "
+        "COMP_WORDS=(yams config search path-tree enable --mode \"\"); COMP_CWORD=6; "
+        "_yams_completion; "
+        "printf \"PATHTREE:%s\\n\" \"${COMPREPLY[*]}\"; "
+        "COMP_WORDS=(yams plugin trust list \"\"); COMP_CWORD=4; _yams_completion; printf "
+        "\"TRUSTLIST:%s\\n\" \"${COMPREPLY[*]}\"; "
+        "COMP_WORDS=(yams plugins trust list \"\"); COMP_CWORD=4; _yams_completion; printf "
+        "\"PLUGINSALIAS:%s\\n\" \"${COMPREPLY[*]}\"' > '" +
         out.string() + "'";
 
     const int rc = std::system(cmd.c_str());
@@ -222,12 +233,32 @@ TEST_CASE("CompletionCommand - bash completes nested subcommands from command tr
     REQUIRE(input.good());
     std::string configLine;
     std::string pluginLine;
+    std::string daemonStartLine;
+    std::string logLevelLine;
+    std::string pathTreeLine;
+    std::string pluginTrustListLine;
+    std::string pluginsAliasLine;
     std::getline(input, configLine);
     std::getline(input, pluginLine);
+    std::getline(input, daemonStartLine);
+    std::getline(input, logLevelLine);
+    std::getline(input, pathTreeLine);
+    std::getline(input, pluginTrustListLine);
+    std::getline(input, pluginsAliasLine);
 
     CHECK_THAT(configLine, ContainsSubstring("CONFIG:embeddings"));
     CHECK_THAT(pluginLine, ContainsSubstring("PLUGIN:remove"));
     CHECK_THAT(pluginLine, ContainsSubstring("reset"));
+    CHECK_THAT(daemonStartLine, ContainsSubstring("START:--socket"));
+    CHECK_THAT(daemonStartLine, ContainsSubstring("--foreground"));
+    CHECK_THAT(daemonStartLine, ContainsSubstring("--daemon-binary"));
+    CHECK_THAT(logLevelLine, ContainsSubstring("LOGLEVEL:trace"));
+    CHECK_THAT(logLevelLine, ContainsSubstring("debug"));
+    CHECK_THAT(logLevelLine, ContainsSubstring("error"));
+    CHECK_THAT(pathTreeLine, ContainsSubstring("PATHTREE:fallback"));
+    CHECK_THAT(pathTreeLine, ContainsSubstring("preferred"));
+    CHECK_THAT(pluginTrustListLine, ContainsSubstring("TRUSTLIST:--details"));
+    CHECK_THAT(pluginsAliasLine, ContainsSubstring("PLUGINSALIAS:--details"));
 
     std::error_code ec;
     fs::remove_all(tempDir, ec);
@@ -255,6 +286,17 @@ TEST_CASE("CompletionCommand - zsh and fish status aliases no longer advertise f
     CHECK_THAT(zshOutput, ContainsSubstring("'embeddings:Manage embedding configuration'"));
     CHECK_THAT(zshOutput, ContainsSubstring("'plugin trust')"));
     CHECK_THAT(zshOutput, ContainsSubstring("'remove:Remove a trusted plugin path'"));
+    CHECK((zshOutput.find("'plugins trust')") == std::string::npos));
+    CHECK_THAT(zshOutput, ContainsSubstring("'daemon start')"));
+    CHECK_THAT(zshOutput, ContainsSubstring("'--socket:Socket path for daemon communication'"));
+    CHECK_THAT(zshOutput, ContainsSubstring("'plugin trust list')"));
+    CHECK_THAT(zshOutput,
+               ContainsSubstring(
+                   "'--details:Show trust file, defaults, strict mode, and effective roots'"));
+    CHECK_THAT(zshOutput, ContainsSubstring("'daemon start:--log-level')"));
+    CHECK_THAT(zshOutput, ContainsSubstring("'trace' 'debug' 'info' 'warn' 'error'"));
+    CHECK_THAT(zshOutput, ContainsSubstring("'config search path-tree enable:--mode')"));
+    CHECK_THAT(zshOutput, ContainsSubstring("'fallback' 'preferred'"));
 
     CaptureStdout fishCapture;
     const int fishRc = helper.runCommand({"yams", "completion", "fish"});
@@ -269,6 +311,22 @@ TEST_CASE("CompletionCommand - zsh and fish status aliases no longer advertise f
     CHECK_THAT(fishOutput, ContainsSubstring("'embeddings' 'Manage embedding configuration'"));
     CHECK_THAT(fishOutput, ContainsSubstring("case 'plugin trust'"));
     CHECK_THAT(fishOutput, ContainsSubstring("'remove' 'Remove a trusted plugin path'"));
+    CHECK((fishOutput.find("case 'plugins trust'") == std::string::npos));
+    CHECK_THAT(fishOutput, ContainsSubstring("__fish_yams_path_is daemon start"));
+    CHECK_THAT(fishOutput,
+               ContainsSubstring("-l socket -d 'Socket path for daemon communication' -r"));
+    CHECK_THAT(fishOutput, ContainsSubstring("__fish_yams_path_is plugin trust list"));
+    CHECK_THAT(fishOutput,
+               ContainsSubstring(
+                   "-l details -d 'Show trust file, defaults, strict mode, and effective roots'"));
+    CHECK_THAT(
+        fishOutput,
+        ContainsSubstring(
+            "__fish_yams_path_is daemon start' -l log-level -a 'trace debug info warn error'"));
+    CHECK_THAT(
+        fishOutput,
+        ContainsSubstring(
+            "__fish_yams_path_is config search path-tree enable' -l mode -a 'fallback preferred'"));
 }
 
 TEST_CASE("CompletionCommand - PowerShell status aliases no longer advertise format",
@@ -284,6 +342,19 @@ TEST_CASE("CompletionCommand - PowerShell status aliases no longer advertise for
     CHECK_THAT(output, ContainsSubstring("'stats' = @("));
     CHECK_THAT(output, ContainsSubstring("'config' = @("));
     CHECK_THAT(output, ContainsSubstring("'plugin trust' = @("));
+    CHECK((output.find("'plugins trust' = @(") == std::string::npos));
+    CHECK_THAT(output, ContainsSubstring("'daemon start' = @("));
+    CHECK_THAT(output, ContainsSubstring("'plugin trust list' = @("));
+    CHECK_THAT(
+        output,
+        ContainsSubstring("'daemon start:--log-level' = @('trace','debug','info','warn','error')"));
+    CHECK_THAT(output, ContainsSubstring(
+                           "'config search path-tree enable:--mode' = @('fallback','preferred')"));
+    CHECK_THAT(output,
+               ContainsSubstring(
+                   "@{ Name = '--socket'; Description = 'Socket path for daemon communication'"));
+    CHECK_THAT(output, ContainsSubstring("@{ Name = '--details'; Description = 'Show trust file, "
+                                         "defaults, strict mode, and effective roots'"));
     CHECK_THAT(output, ContainsSubstring("--no-physical"));
     CHECK_THAT(output, ContainsSubstring("--corpus"));
     CHECK((output.find("'stats' = @(\n            @{ Name = '--format'") == std::string::npos));

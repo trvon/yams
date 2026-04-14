@@ -41,13 +41,19 @@ Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64
 # Stable release (recommended)
 brew install trvon/yams/yams
 
-# Homebrew installs bash/zsh/fish completions automatically.
-# If completion is not active in the current shell yet, restart your shell
-# or use one of the manual fallbacks below.
+# Homebrew installs completion files for bash/zsh/fish.
+# Shell activation still depends on your shell startup config.
 
 # Verify installation
 yams --version
 ```
+
+Generated completions include nested subcommands and leaf value hints such as:
+- `yams config embeddings ...`
+- `yams plugin trust ...`
+- `yams plugins trust ...` (alias of `plugin`)
+- `yams daemon start --log-level <Tab>`
+- `yams config search path-tree enable --mode <Tab>`
 
 Manual completion setup if needed:
 
@@ -55,16 +61,21 @@ Manual completion setup if needed:
 # Bash
 source <(yams completion bash)
 
-# Zsh
+# Zsh: quick use in the current shell
 autoload -U compinit && compinit
 source <(yams completion zsh)
+
+# Zsh: persistent install
+mkdir -p ~/.local/share/zsh/site-functions
+yams completion zsh > ~/.local/share/zsh/site-functions/_yams
+# Ensure ~/.local/share/zsh/site-functions is on fpath before compinit in ~/.zshrc
 
 # Fish
 mkdir -p ~/.config/fish/completions
 yams completion fish > ~/.config/fish/completions/yams.fish
 
-# PowerShell
-yams completion powershell >> $PROFILE
+# PowerShell: quick use for the current session
+pwsh -NoLogo -NoProfile -Command 'Invoke-Expression (yams completion powershell | Out-String)'
 ```
 
 ### Docker

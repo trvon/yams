@@ -1,0 +1,21 @@
+{
+  "dataset_path": "../data/topology_ingestion_fixture",
+  "output_metrics": "../baseline/ingestion_topology_smoke.jsonl",
+  "post_run_cleanup": true,
+  "runs": [
+    {
+      "label": "topology_smoke_no_embeddings",
+      "workers": 2,
+      "repeat": 1,
+      "enable_embeddings": false,
+      "args": ["--recursive"]
+    },
+    {
+      "label": "topology_smoke_with_embeddings",
+      "workers": 2,
+      "repeat": 1,
+      "enable_embeddings": true,
+      "args": ["--recursive"]
+    }
+  ]
+}

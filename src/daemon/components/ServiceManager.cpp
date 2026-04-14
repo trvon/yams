@@ -13,10 +13,13 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
@@ -282,6 +285,122 @@ adoptPluginInterface(yams::daemon::AbiPluginHost* host, const std::string& inter
         }
     }
     return adopted;
+}
+
+std::optional<std::string> topologyDocumentHashFromNodeKey(std::string_view nodeKey) {
+    constexpr std::string_view kDocPrefix{"doc:"};
+    if (!nodeKey.starts_with(kDocPrefix) || nodeKey.size() <= kDocPrefix.size()) {
+        return std::nullopt;
+    }
+    return std::string{nodeKey.substr(kDocPrefix.size())};
+}
+
+std::vector<std::string> collectIncrementalTopologyClosure(
+    const std::optional<yams::topology::TopologyArtifactBatch>& latestBatch,
+    yams::metadata::KnowledgeGraphStore* kgStore, const std::vector<std::string>& seedHashes,
+    std::size_t maxNeighborsPerDocument) {
+    if (seedHashes.empty()) {
+        return {};
+    }
+
+    std::unordered_map<std::string, std::vector<std::string>> clusterMembersById;
+    std::unordered_map<std::string, std::string> clusterIdByDocument;
+    if (latestBatch.has_value()) {
+        clusterMembersById.reserve(latestBatch->clusters.size());
+        for (const auto& cluster : latestBatch->clusters) {
+            clusterMembersById.emplace(cluster.clusterId, cluster.memberDocumentHashes);
+        }
+        clusterIdByDocument.reserve(latestBatch->memberships.size());
+        for (const auto& membership : latestBatch->memberships) {
+            clusterIdByDocument.emplace(membership.documentHash, membership.clusterId);
+        }
+    }
+
+    std::queue<std::string> pending;
+    for (const auto& hash : seedHashes) {
+        if (!hash.empty()) {
+            pending.push(hash);
+        }
+    }
+
+    std::unordered_set<std::string> visited;
+    std::vector<std::string> closure;
+    while (!pending.empty()) {
+        std::string hash = std::move(pending.front());
+        pending.pop();
+        if (hash.empty() || !visited.insert(hash).second) {
+            continue;
+        }
+        closure.push_back(hash);
+
+        if (auto clusterIt = clusterIdByDocument.find(hash);
+            clusterIt != clusterIdByDocument.end()) {
+            if (auto membersIt = clusterMembersById.find(clusterIt->second);
+                membersIt != clusterMembersById.end()) {
+                for (const auto& memberHash : membersIt->second) {
+                    if (!memberHash.empty() && !visited.contains(memberHash)) {
+                        pending.push(memberHash);
+                    }
+                }
+            }
+        }
+
+        if (!kgStore) {
+            continue;
+        }
+        auto nodeResult = kgStore->getNodeByKey("doc:" + hash);
+        if (!nodeResult || !nodeResult.value().has_value()) {
+            continue;
+        }
+
+        auto edgesResult = kgStore->getEdgesBidirectional(
+            nodeResult.value()->id, std::string_view{"semantic_neighbor"},
+            std::max<std::size_t>(maxNeighborsPerDocument * 4, maxNeighborsPerDocument));
+        if (!edgesResult) {
+            continue;
+        }
+
+        std::unordered_set<std::int64_t> neighborNodeIds;
+        for (const auto& edge : edgesResult.value()) {
+            if (edge.srcNodeId == nodeResult.value()->id) {
+                neighborNodeIds.insert(edge.dstNodeId);
+            }
+            if (edge.dstNodeId == nodeResult.value()->id) {
+                neighborNodeIds.insert(edge.srcNodeId);
+            }
+        }
+        if (neighborNodeIds.empty()) {
+            continue;
+        }
+
+        std::vector<std::int64_t> neighborIds(neighborNodeIds.begin(), neighborNodeIds.end());
+        auto neighborNodes = kgStore->getNodesByIds(neighborIds);
+        if (!neighborNodes) {
+            continue;
+        }
+
+        for (const auto& neighborNode : neighborNodes.value()) {
+            auto neighborHash = topologyDocumentHashFromNodeKey(neighborNode.nodeKey);
+            if (neighborHash.has_value() && !visited.contains(*neighborHash)) {
+                pending.push(*neighborHash);
+            }
+        }
+    }
+
+    std::sort(closure.begin(), closure.end());
+    return closure;
+}
+
+std::uint64_t nowUnixSeconds() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                          std::chrono::system_clock::now().time_since_epoch())
+                                          .count());
+}
+
+std::uint64_t nowUnixMillis() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::system_clock::now().time_since_epoch())
+                                          .count());
 }
 
 } // namespace
@@ -3716,6 +3835,16 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
         return;
     }
 
+    if (!hash.empty()) {
+        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
+        const bool wasEmpty = topologyDirtyHashes_.empty();
+        topologyDirtyHashes_.insert(hash);
+        if (wasEmpty) {
+            std::lock_guard<std::mutex> telemetryLock(topologyTelemetryMutex_);
+            topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
+        }
+    }
+
     PostIngestQueue::Task task{hash, mime};
     piq->enqueue(std::move(task));
 }
@@ -3738,6 +3867,17 @@ void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hash
         tasks.push_back(PostIngestQueue::Task{hash, mime});
     }
     if (!tasks.empty()) {
+        {
+            std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
+            const bool wasEmpty = topologyDirtyHashes_.empty();
+            for (const auto& task : tasks) {
+                topologyDirtyHashes_.insert(task.hash);
+            }
+            if (wasEmpty) {
+                std::lock_guard<std::mutex> telemetryLock(topologyTelemetryMutex_);
+                topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
+            }
+        }
         piq->enqueueBatch(std::move(tasks));
     }
 }
@@ -3755,14 +3895,29 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
     }
 
     auto metadataIface = std::static_pointer_cast<metadata::IMetadataRepository>(metadataRepo);
+    topology::MetadataKgTopologyArtifactStore store(metadataIface, kgStore);
     auto extractor =
         std::make_shared<topology::TopologyInputExtractor>(metadataIface, kgStore, vectorDb);
     auto engine = std::make_shared<topology::ConnectedComponentTopologyEngine>();
-    topology::TopologyOfflineAnalyzer analyzer(extractor, engine);
+
+    std::optional<topology::TopologyArtifactBatch> latestBatch;
+    if (!documentHashes.empty()) {
+        auto latestResult = store.loadLatest();
+        if (!latestResult) {
+            return Result<ServiceManager::TopologyRebuildStats>(latestResult.error());
+        }
+        latestBatch = std::move(latestResult.value());
+    }
+
+    std::vector<std::string> rebuildHashes = documentHashes;
+    if (!documentHashes.empty()) {
+        rebuildHashes =
+            collectIncrementalTopologyClosure(latestBatch, kgStore.get(), documentHashes, 32);
+    }
 
     topology::TopologyExtractionConfig extractionConfig;
-    extractionConfig.documentHashes = documentHashes;
-    extractionConfig.limit = documentHashes.empty() ? 0 : static_cast<int>(documentHashes.size());
+    extractionConfig.documentHashes = rebuildHashes;
+    extractionConfig.limit = rebuildHashes.empty() ? 0 : static_cast<int>(rebuildHashes.size());
     extractionConfig.maxNeighborsPerDocument = 32;
     extractionConfig.includeEmbeddings = true;
     extractionConfig.includeMetadata = true;
@@ -3775,29 +3930,46 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
     buildConfig.reciprocalOnly = true;
     buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
 
-    auto analysisResult = analyzer.analyze(extractionConfig, buildConfig);
-    if (!analysisResult) {
-        return Result<ServiceManager::TopologyRebuildStats>(analysisResult.error());
+    topology::TopologyExtractionStats extractionStats;
+    auto extracted = extractor->extract(extractionConfig, &extractionStats);
+    if (!extracted) {
+        return Result<ServiceManager::TopologyRebuildStats>(extracted.error());
     }
 
-    const auto& analysis = analysisResult.value();
+    Result<topology::TopologyArtifactBatch> artifactResult = [&]() {
+        if (latestBatch.has_value() && !rebuildHashes.empty()) {
+            return engine->updateArtifacts(*latestBatch, extracted.value(), buildConfig);
+        }
+        return engine->buildArtifacts(extracted.value(), buildConfig);
+    }();
+    if (!artifactResult) {
+        return Result<ServiceManager::TopologyRebuildStats>(artifactResult.error());
+    }
+
+    const auto& artifacts = artifactResult.value();
 
     ServiceManager::TopologyRebuildStats stats;
     stats.reason = reason;
     stats.dryRun = dryRun;
     stats.fullRebuild = documentHashes.empty();
-    stats.snapshotId = analysis.artifacts.snapshotId;
-    stats.algorithm = analysis.artifacts.algorithm;
-    stats.documentsRequested = analysis.extractionStats.documentsRequested;
-    stats.documentsProcessed = analysis.extractionStats.documentsReturned;
-    stats.documentsMissingEmbeddings = analysis.extractionStats.documentsMissingEmbeddings;
-    stats.documentsMissingGraphNodes = analysis.extractionStats.documentsMissingGraphNodes;
-    stats.neighborEdgesScanned = analysis.extractionStats.neighborEdgesScanned;
-    stats.neighborsReturned = analysis.extractionStats.neighborsReturned;
-    stats.clustersBuilt = analysis.artifacts.clusters.size();
-    stats.membershipsBuilt = analysis.artifacts.memberships.size();
+    stats.snapshotId = artifacts.snapshotId;
+    stats.algorithm = artifacts.algorithm;
+    stats.documentsRequested = extractionStats.documentsRequested;
+    stats.documentsProcessed = extractionStats.documentsReturned;
+    stats.documentsMissingEmbeddings = extractionStats.documentsMissingEmbeddings;
+    stats.documentsMissingGraphNodes = extractionStats.documentsMissingGraphNodes;
+    stats.neighborEdgesScanned = extractionStats.neighborEdgesScanned;
+    stats.neighborsReturned = extractionStats.neighborsReturned;
+    stats.clustersBuilt = artifacts.clusters.size();
+    stats.membershipsBuilt = artifacts.memberships.size();
 
-    if (analysis.artifacts.memberships.empty()) {
+    if (!documentHashes.empty()) {
+        stats.issues.push_back("incremental topology rebuild expanded " +
+                               std::to_string(documentHashes.size()) + " seed docs to " +
+                               std::to_string(rebuildHashes.size()) + " docs");
+    }
+
+    if (artifacts.memberships.empty()) {
         stats.skipped = true;
         stats.issues.push_back(
             "topology rebuild produced no memberships; graph nodes or embeddings may be missing");
@@ -3805,12 +3977,18 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
     }
 
     if (!dryRun) {
-        topology::MetadataKgTopologyArtifactStore store(metadataIface, kgStore);
-        auto storeResult = store.storeBatch(analysis.artifacts);
+        auto storeResult = store.storeBatch(artifacts);
         if (!storeResult) {
             return Result<ServiceManager::TopologyRebuildStats>(storeResult.error());
         }
         stats.stored = true;
+    }
+
+    if (stats.stored && stats.fullRebuild) {
+        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
+        topologyDirtyHashes_.clear();
+        std::lock_guard<std::mutex> telemetryLock(topologyTelemetryMutex_);
+        topologyTelemetry_.dirtySinceUnixMillis = 0;
     }
 
     return stats;
@@ -3836,14 +4014,53 @@ ServiceManager::rebuildTopologyArtifacts(const std::string& reason, bool dryRun,
         ~Guard() { running.store(false, std::memory_order_release); }
     } guard{topologyRebuildRunning_};
 
+    const auto startedAt = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(topologyTelemetryMutex_);
+        ++topologyTelemetry_.rebuildsTotal;
+        topologyTelemetry_.lastReason = reason;
+        topologyTelemetry_.lastRunSucceeded = false;
+        topologyTelemetry_.lastRunSkipped = false;
+        topologyTelemetry_.lastRunStored = false;
+        topologyTelemetry_.lastRunFullRebuild = documentHashes.empty();
+        topologyTelemetry_.lastStartedUnixSeconds = nowUnixSeconds();
+        topologyTelemetry_.lastDocumentsRequested = documentHashes.size();
+    }
+
     auto result = runTopologyRebuild(reason, dryRun, documentHashes);
     if (!result) {
         spdlog::warn("[ServiceManager] Topology rebuild failed (reason={}): {}", reason,
                      result.error().message);
+        std::lock_guard<std::mutex> lock(topologyTelemetryMutex_);
+        ++topologyTelemetry_.rebuildFailuresTotal;
+        topologyTelemetry_.lastDurationMs =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - startedAt)
+                                           .count());
         return Result<ServiceManager::TopologyRebuildStats>(result.error());
     }
 
     const auto& stats = result.value();
+    {
+        std::lock_guard<std::mutex> lock(topologyTelemetryMutex_);
+        topologyTelemetry_.lastRunSucceeded = !stats.skipped;
+        topologyTelemetry_.lastRunSkipped = stats.skipped;
+        topologyTelemetry_.lastRunStored = stats.stored;
+        topologyTelemetry_.lastRunFullRebuild = stats.fullRebuild;
+        topologyTelemetry_.lastCompletedUnixSeconds = nowUnixSeconds();
+        topologyTelemetry_.lastDurationMs =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - startedAt)
+                                           .count());
+        topologyTelemetry_.lastSnapshotId = stats.snapshotId;
+        topologyTelemetry_.lastAlgorithm = stats.algorithm;
+        topologyTelemetry_.lastDocumentsRequested = stats.documentsRequested;
+        topologyTelemetry_.lastDocumentsProcessed = stats.documentsProcessed;
+        topologyTelemetry_.lastDocumentsMissingEmbeddings = stats.documentsMissingEmbeddings;
+        topologyTelemetry_.lastDocumentsMissingGraphNodes = stats.documentsMissingGraphNodes;
+        topologyTelemetry_.lastClustersBuilt = stats.clustersBuilt;
+        topologyTelemetry_.lastMembershipsBuilt = stats.membershipsBuilt;
+    }
     if (stats.skipped) {
         spdlog::info("[ServiceManager] Topology rebuild skipped (reason={}, docs={}, issues={})",
                      reason, stats.documentsProcessed,
@@ -3857,18 +4074,91 @@ ServiceManager::rebuildTopologyArtifacts(const std::string& reason, bool dryRun,
     return result;
 }
 
-void ServiceManager::requestTopologyRebuild(const std::string& reason) {
+ServiceManager::TopologyTelemetrySnapshot ServiceManager::getTopologyTelemetrySnapshot() const {
+    TopologyTelemetrySnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(topologyTelemetryMutex_);
+        snapshot = topologyTelemetry_;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
+        snapshot.dirtyDocumentCount = topologyDirtyHashes_.size();
+    }
+
+    snapshot.rebuildRunning = topologyRebuildRunning_.load(std::memory_order_acquire);
+    const auto nowMs = nowUnixMillis();
+    if (snapshot.lastCompletedUnixSeconds > 0) {
+        const auto completedMs = snapshot.lastCompletedUnixSeconds * 1000ULL;
+        snapshot.lastSuccessAgeMs = nowMs > completedMs ? nowMs - completedMs : 0;
+    }
+    if (snapshot.dirtyDocumentCount > 0 && snapshot.dirtySinceUnixMillis > 0) {
+        snapshot.rebuildLagMs =
+            nowMs > snapshot.dirtySinceUnixMillis ? nowMs - snapshot.dirtySinceUnixMillis : 0;
+    } else {
+        snapshot.rebuildLagMs = 0;
+    }
+    if (snapshot.rebuildRunning && snapshot.lastStartedUnixSeconds > 0) {
+        const auto startedMs = snapshot.lastStartedUnixSeconds * 1000ULL;
+        snapshot.rebuildRunningAgeMs = nowMs > startedMs ? nowMs - startedMs : 0;
+    } else {
+        snapshot.rebuildRunningAgeMs = 0;
+    }
+    snapshot.artifactsFresh = !snapshot.rebuildRunning && snapshot.dirtyDocumentCount == 0 &&
+                              snapshot.lastRunStored && snapshot.lastCompletedUnixSeconds > 0;
+    return snapshot;
+}
+
+void ServiceManager::requestTopologyRebuild(const std::string& reason,
+                                            const std::vector<std::string>& documentHashes) {
     if (shutdownInvoked_.load(std::memory_order_acquire)) {
         return;
     }
 
+    std::vector<std::string> rebuildHashes = documentHashes;
+    if (rebuildHashes.empty()) {
+        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
+        rebuildHashes.assign(topologyDirtyHashes_.begin(), topologyDirtyHashes_.end());
+        topologyDirtyHashes_.clear();
+    }
+    if (rebuildHashes.empty()) {
+        spdlog::debug(
+            "[ServiceManager] Topology rebuild request ignored (reason={}, no dirty docs)", reason);
+        return;
+    }
+
     auto weakSelf = weak_from_this();
-    boost::asio::post(getWorkerExecutor(), [weakSelf, reason]() {
+    boost::asio::post(getWorkerExecutor(), [weakSelf, reason,
+                                            rebuildHashes = std::move(rebuildHashes)]() mutable {
         if (auto self = weakSelf.lock()) {
-            auto result = self->rebuildTopologyArtifacts(reason, false);
+            auto result = self->rebuildTopologyArtifacts(reason, false, rebuildHashes);
             if (!result) {
                 spdlog::warn("[ServiceManager] Async topology rebuild failed (reason={}): {}",
                              reason, result.error().message);
+                std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);
+                const bool wasEmpty = self->topologyDirtyHashes_.empty();
+                for (const auto& hash : rebuildHashes) {
+                    self->topologyDirtyHashes_.insert(hash);
+                }
+                if (wasEmpty && !rebuildHashes.empty()) {
+                    std::lock_guard<std::mutex> telemetryLock(self->topologyTelemetryMutex_);
+                    self->topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
+                }
+            } else if (result.value().skipped) {
+                std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);
+                const bool wasEmpty = self->topologyDirtyHashes_.empty();
+                for (const auto& hash : rebuildHashes) {
+                    self->topologyDirtyHashes_.insert(hash);
+                }
+                if (wasEmpty && !rebuildHashes.empty()) {
+                    std::lock_guard<std::mutex> telemetryLock(self->topologyTelemetryMutex_);
+                    self->topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
+                }
+            } else {
+                std::lock_guard<std::mutex> telemetryLock(self->topologyTelemetryMutex_);
+                if (self->topologyDirtyHashes_.empty()) {
+                    self->topologyTelemetry_.dirtySinceUnixMillis = 0;
+                }
             }
         }
     });

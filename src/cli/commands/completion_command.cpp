@@ -1,5 +1,7 @@
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <array>
 #include <iostream>
 #include <sstream>
 #include <string_view>
@@ -19,10 +21,127 @@ struct CompletionSubcommand {
     std::string description;
 };
 
+struct CompletionOption {
+    std::vector<std::string> names;
+    std::string description;
+    bool takesValue = false;
+};
+
+struct CompletionValueHint {
+    std::string path;
+    std::string trigger;
+    std::vector<std::string> values;
+};
+
 struct CompletionPathEntry {
     std::string path;
     std::vector<CompletionSubcommand> children;
+    std::vector<CompletionOption> options;
 };
+
+std::string canonicalizePath(std::string_view path) {
+    if (path == "plugins" || path.starts_with("plugins ")) {
+        std::string normalized(path);
+        normalized.replace(0, std::string("plugins").size(), "plugin");
+        return normalized;
+    }
+    return std::string(path);
+}
+
+bool isGlobalFlagName(std::string_view name) {
+    static constexpr std::array<std::string_view, 9> kGlobalFlagNames = {
+        "--help",    "-h", "--version", "--data-dir", "--storage",
+        "--verbose", "-v", "--json",    "--help-all",
+    };
+    return std::find(kGlobalFlagNames.begin(), kGlobalFlagNames.end(), name) !=
+           kGlobalFlagNames.end();
+}
+
+std::string escapeSingleQuotedShell(std::string_view text) {
+    std::string escaped;
+    escaped.reserve(text.size());
+    for (char ch : text) {
+        if (ch == '\'') {
+            escaped += "'\\''";
+        } else {
+            escaped.push_back(ch);
+        }
+    }
+    return escaped;
+}
+
+std::string escapePowerShellSingleQuoted(std::string_view text) {
+    std::string escaped;
+    escaped.reserve(text.size());
+    for (char ch : text) {
+        if (ch == '\'') {
+            escaped += "''";
+        } else {
+            escaped.push_back(ch);
+        }
+    }
+    return escaped;
+}
+
+bool isManualOptionPath(std::string_view path) {
+    static constexpr std::array<std::string_view, 8> kManualPaths = {
+        "add", "get", "list", "grep", "config", "auth", "status", "stats",
+    };
+    return std::find(kManualPaths.begin(), kManualPaths.end(), path) != kManualPaths.end();
+}
+
+std::vector<CompletionValueHint> manualValueHints() {
+    return {
+        {"daemon start", "--log-level", {"trace", "debug", "info", "warn", "error"}},
+        {"daemon log", "--level", {"trace", "debug", "info", "warn", "error"}},
+        {"config search path-tree enable", "--mode", {"fallback", "preferred"}},
+        {"config search path-tree mode", "__positional__", {"fallback", "preferred"}},
+        {"config embeddings tune", "__positional__", {"performance", "quality", "balanced"}},
+        {"config tuning preset", "__positional__", {"efficient", "balanced", "aggressive"}},
+        {"completion", "__positional__", {"bash", "zsh", "fish", "powershell", "pwsh"}},
+    };
+}
+
+std::vector<CompletionOption> collectDirectOptions(const CLI::App* app) {
+    std::vector<CompletionOption> options;
+    if (app == nullptr) {
+        return options;
+    }
+
+    for (const auto* option : app->get_options(
+             [](const CLI::Option* opt) { return opt != nullptr && opt->nonpositional(); })) {
+        if (option == nullptr) {
+            continue;
+        }
+
+        CompletionOption completionOption;
+        for (const auto& longName : option->get_lnames()) {
+            const std::string rendered = "--" + longName;
+            if (!isGlobalFlagName(rendered)) {
+                completionOption.names.push_back(rendered);
+            }
+        }
+        for (const auto& shortName : option->get_snames()) {
+            const std::string rendered = "-" + shortName;
+            if (!isGlobalFlagName(rendered)) {
+                completionOption.names.push_back(rendered);
+            }
+        }
+
+        if (completionOption.names.empty()) {
+            continue;
+        }
+
+        completionOption.description = option->get_description();
+        if (completionOption.description.empty()) {
+            completionOption.description = completionOption.names.front();
+        }
+        completionOption.takesValue = option->get_items_expected_min() > 0;
+        options.push_back(std::move(completionOption));
+    }
+
+    return options;
+}
 
 std::string joinCommandPath(const std::vector<std::string>& path) {
     std::ostringstream oss;
@@ -62,11 +181,46 @@ std::vector<CompletionSubcommand> collectDirectSubcommands(const CLI::App* app) 
     return children;
 }
 
+void mergeChildren(std::vector<CompletionSubcommand>& target,
+                   const std::vector<CompletionSubcommand>& source) {
+    for (const auto& child : source) {
+        auto it =
+            std::find_if(target.begin(), target.end(), [&](const CompletionSubcommand& existing) {
+                return existing.name == child.name;
+            });
+        if (it == target.end()) {
+            target.push_back(child);
+        }
+    }
+}
+
+void mergeOptions(std::vector<CompletionOption>& target,
+                  const std::vector<CompletionOption>& source) {
+    for (const auto& option : source) {
+        auto it = std::find_if(target.begin(), target.end(), [&](const CompletionOption& existing) {
+            return existing.names == option.names;
+        });
+        if (it == target.end()) {
+            target.push_back(option);
+        }
+    }
+}
+
 void collectCommandTreeEntriesRecursive(const CLI::App* app, std::vector<std::string>& path,
                                         std::vector<CompletionPathEntry>& out) {
     const auto children = collectDirectSubcommands(app);
-    if (!children.empty()) {
-        out.push_back({joinCommandPath(path), children});
+    const auto options = collectDirectOptions(app);
+    if (!children.empty() || !options.empty()) {
+        const auto normalizedPath = canonicalizePath(joinCommandPath(path));
+        auto it = std::find_if(out.begin(), out.end(), [&](const CompletionPathEntry& existing) {
+            return existing.path == normalizedPath;
+        });
+        if (it == out.end()) {
+            out.push_back({normalizedPath, children, options});
+        } else {
+            mergeChildren(it->children, children);
+            mergeOptions(it->options, options);
+        }
     }
 
     if (app == nullptr) {
@@ -183,20 +337,68 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "# Safety: provide minimal fallbacks if bash-completion isn't loaded\n";
     oss << "if ! declare -F _init_completion >/dev/null 2>&1; then\n";
     oss << "  _init_completion() { cur=\"${COMP_WORDS[COMP_CWORD]}\"; "
-           "prev=\"${COMP_WORDS[COMP_CWORD-1]}\"; words=(${COMP_WORDS[@]}); cword=${COMP_CWORD}; "
+           "prev=\"${COMP_WORDS[COMP_CWORD-1]}\"; words=(\"${COMP_WORDS[@]}\"); "
+           "cword=${COMP_CWORD}; "
            "}\n";
     oss << "fi\n";
     oss << "if ! declare -F _filedir >/dev/null 2>&1; then\n";
     oss << "  _filedir() { COMPREPLY=(); }\n";
     oss << "fi\n\n";
 
+    oss << "_yams_normalize_path() {\n";
+    oss << "    case \"$1\" in\n";
+    oss << "        plugins|plugins\\ *)\n";
+    oss << "            printf '%s' \"${1/plugins/plugin}\"\n";
+    oss << "            ;;\n";
+    oss << "        *)\n";
+    oss << "            printf '%s' \"$1\"\n";
+    oss << "            ;;\n";
+    oss << "    esac\n";
+    oss << "}\n\n";
+
     oss << "_yams_subcommands_for() {\n";
     oss << "    case \"$1\" in\n";
     for (const auto& entry : commandTree) {
+        if (entry.children.empty()) {
+            continue;
+        }
         oss << "        \"" << entry.path << "\")\n";
         oss << "            printf '%s\\n'";
         for (const auto& child : entry.children) {
             oss << " '" << child.name << "'";
+        }
+        oss << "\n";
+        oss << "            ;;\n";
+    }
+    oss << "    esac\n";
+    oss << "}\n\n";
+
+    oss << "_yams_options_for() {\n";
+    oss << "    case \"$1\" in\n";
+    for (const auto& entry : commandTree) {
+        if (entry.options.empty()) {
+            continue;
+        }
+        oss << "        \"" << entry.path << "\")\n";
+        oss << "            printf '%s\\n'";
+        for (const auto& option : entry.options) {
+            for (const auto& name : option.names) {
+                oss << " '" << name << "'";
+            }
+        }
+        oss << "\n";
+        oss << "            ;;\n";
+    }
+    oss << "    esac\n";
+    oss << "}\n\n";
+
+    oss << "_yams_values_for() {\n";
+    oss << "    case \"$1:$2\" in\n";
+    for (const auto& hint : manualValueHints()) {
+        oss << "        \"" << hint.path << ":" << hint.trigger << "\")\n";
+        oss << "            printf '%s\\n'";
+        for (const auto& value : hint.values) {
+            oss << " '" << value << "'";
         }
         oss << "\n";
         oss << "            ;;\n";
@@ -211,7 +413,8 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "    for ((i=1; i<limit; ++i)); do\n";
     oss << "        word=\"${words[i]}\"\n";
     oss << "        [[ \"$word\" == -* ]] && continue\n";
-    oss << "        subcommands=\"$(_yams_subcommands_for \"$path\" | tr '\\n' ' ')\"\n";
+    oss << "        subcommands=\"$(_yams_subcommands_for \"$(_yams_normalize_path \"$path\")\" | "
+           "tr '\\n' ' ')\"\n";
     oss << "        [[ -z \"$subcommands\" ]] && break\n";
     oss << "        if [[ \" $subcommands \" == *\" $word \"* ]]; then\n";
     oss << "            path=\"${path:+$path }$word\"\n";
@@ -219,7 +422,7 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "            break\n";
     oss << "        fi\n";
     oss << "    done\n";
-    oss << "    printf '%s' \"$path\"\n";
+    oss << "    printf '%s' \"$(_yams_normalize_path \"$path\")\"\n";
     oss << "}\n\n";
 
     oss << "_yams_completion() {\n";
@@ -238,8 +441,35 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "    local available_subcommands\n";
     oss << "    available_subcommands=\"$(_yams_subcommands_for \"$command_path\" | tr '\\n' ' "
            "')\"\n";
+    oss << "    local command_flags\n";
+    oss << "    command_flags=\"$(_yams_options_for \"$command_path\" | tr '\\n' ' ')\"\n";
+    oss << "    local value_hints\n";
+    oss << "    value_hints=\"$(_yams_values_for \"$command_path\" \"$prev\" | tr '\\n' ' ')\"\n";
+    oss << "    if [[ -n \"$value_hints\" ]]; then\n";
+    oss << "        COMPREPLY=($(compgen -W \"$value_hints\" -- \"$cur\"))\n";
+    oss << "        if [[ ${#COMPREPLY[@]} -gt 0 ]]; then\n";
+    oss << "            return 0\n";
+    oss << "        fi\n";
+    oss << "    fi\n";
+    oss << "    if [[ $cur != -* && -z \"$available_subcommands\" ]]; then\n";
+    oss << "        value_hints=\"$(_yams_values_for \"$command_path\" __positional__ | tr '\\n' ' "
+           "')\"\n";
+    oss << "        if [[ -n \"$value_hints\" ]]; then\n";
+    oss << "            COMPREPLY=($(compgen -W \"$value_hints\" -- \"$cur\"))\n";
+    oss << "            if [[ ${#COMPREPLY[@]} -gt 0 ]]; then\n";
+    oss << "                return 0\n";
+    oss << "            fi\n";
+    oss << "        fi\n";
+    oss << "    fi\n";
     oss << "    if [[ $cur != -* && -n \"$available_subcommands\" ]]; then\n";
     oss << "        COMPREPLY=($(compgen -W \"$available_subcommands\" -- \"$cur\"))\n";
+    oss << "        if [[ ${#COMPREPLY[@]} -gt 0 ]]; then\n";
+    oss << "            return 0\n";
+    oss << "        fi\n";
+    oss << "    fi\n\n";
+
+    oss << "    if [[ -z \"$available_subcommands\" && ( $cur == -* || -z \"$cur\" ) ]]; then\n";
+    oss << "        COMPREPLY=($(compgen -W \"$command_flags $global_flags\" -- \"$cur\"))\n";
     oss << "        if [[ ${#COMPREPLY[@]} -gt 0 ]]; then\n";
     oss << "            return 0\n";
     oss << "        fi\n";
@@ -403,9 +633,23 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "  _arguments() { return 0 }\n";
     oss << "fi\n\n";
 
+    oss << "_yams_normalize_path() {\n";
+    oss << "    case \"$1\" in\n";
+    oss << "        plugins|plugins\\ *)\n";
+    oss << "            print -r -- \"${1/plugins/plugin}\"\n";
+    oss << "            ;;\n";
+    oss << "        *)\n";
+    oss << "            print -r -- \"$1\"\n";
+    oss << "            ;;\n";
+    oss << "    esac\n";
+    oss << "}\n\n";
+
     oss << "_yams_subcommand_names_for() {\n";
     oss << "    case \"$1\" in\n";
     for (const auto& entry : commandTree) {
+        if (entry.children.empty()) {
+            continue;
+        }
         oss << "        '" << entry.path << "')\n";
         oss << "            print -l";
         for (const auto& child : entry.children) {
@@ -422,6 +666,9 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "    local -a commands\n";
     oss << "    case \"$path\" in\n";
     for (const auto& entry : commandTree) {
+        if (entry.children.empty()) {
+            continue;
+        }
         oss << "        '" << entry.path << "')\n";
         oss << "            commands=(\n";
         for (const auto& child : entry.children) {
@@ -437,6 +684,53 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "    _describe 'commands' commands\n";
     oss << "}\n\n";
 
+    oss << "_yams_describe_options() {\n";
+    oss << "    local path=\"$1\"\n";
+    oss << "    local -a options\n";
+    oss << "    case \"$path\" in\n";
+    for (const auto& entry : commandTree) {
+        if (entry.options.empty()) {
+            continue;
+        }
+        oss << "        '" << entry.path << "')\n";
+        oss << "            options=(\n";
+        for (const auto& option : entry.options) {
+            for (const auto& name : option.names) {
+                oss << "                '" << name << ":"
+                    << escapeSingleQuotedShell(option.description) << "'\n";
+            }
+        }
+        oss << "            )\n";
+        oss << "            ;;\n";
+    }
+    oss << "        *)\n";
+    oss << "            return 1\n";
+    oss << "            ;;\n";
+    oss << "    esac\n";
+    oss << "    _describe 'options' options\n";
+    oss << "}\n\n";
+
+    oss << "_yams_describe_values() {\n";
+    oss << "    local path=\"$1\"\n";
+    oss << "    local trigger=\"$2\"\n";
+    oss << "    local -a values\n";
+    oss << "    case \"$path:$trigger\" in\n";
+    for (const auto& hint : manualValueHints()) {
+        oss << "        '" << hint.path << ":" << hint.trigger << "')\n";
+        oss << "            values=(";
+        for (const auto& value : hint.values) {
+            oss << " '" << value << "'";
+        }
+        oss << " )\n";
+        oss << "            ;;\n";
+    }
+    oss << "        *)\n";
+    oss << "            return 1\n";
+    oss << "            ;;\n";
+    oss << "    esac\n";
+    oss << "    _describe 'values' values\n";
+    oss << "}\n\n";
+
     oss << "_yams_command_path() {\n";
     oss << "    local limit=\"$1\"\n";
     oss << "    local path=\"\"\n";
@@ -445,7 +739,8 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "    for ((i = 2; i < limit; ++i)); do\n";
     oss << "        word=\"$words[i]\"\n";
     oss << "        [[ \"$word\" == -* ]] && continue\n";
-    oss << "        subcommands=(${(f)$(_yams_subcommand_names_for \"$path\")})\n";
+    oss << "        subcommands=(${(f)$(_yams_subcommand_names_for \"$(_yams_normalize_path "
+           "\"$path\")\")})\n";
     oss << "        (( ${#subcommands[@]} == 0 )) && break\n";
     oss << "        if (( ${subcommands[(Ie)$word]} )); then\n";
     oss << "            path_parts+=(\"$word\")\n";
@@ -454,7 +749,7 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "            break\n";
     oss << "        fi\n";
     oss << "    done\n";
-    oss << "    print -r -- \"$path\"\n";
+    oss << "    print -r -- \"$(_yams_normalize_path \"$path\")\"\n";
     oss << "}\n\n";
 
     oss << "_yams() {\n";
@@ -487,6 +782,20 @@ std::string CompletionCommand::generateZshCompletion() const {
 
     oss << "    local command_path\n";
     oss << "    command_path=\"$(_yams_command_path $CURRENT)\"\n";
+    oss << "    local prev_word=\"\"\n";
+    oss << "    if (( CURRENT > 2 )); then\n";
+    oss << "        prev_word=\"$words[CURRENT-1]\"\n";
+    oss << "    fi\n";
+    oss << "    if [[ -n \"$prev_word\" ]]; then\n";
+    oss << "        if _yams_describe_values \"$command_path\" \"$prev_word\"; then\n";
+    oss << "            return 0\n";
+    oss << "        fi\n";
+    oss << "    fi\n";
+    oss << "    if [[ \"$PREFIX\" != -* ]]; then\n";
+    oss << "        if _yams_describe_values \"$command_path\" __positional__; then\n";
+    oss << "            return 0\n";
+    oss << "        fi\n";
+    oss << "    fi\n";
     oss << "    if [[ \"$PREFIX\" != -* ]]; then\n";
     oss << "        if _yams_describe_subcommands \"$command_path\"; then\n";
     oss << "            return 0\n";
@@ -578,6 +887,9 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "        completion)\n";
     oss << "            _arguments '1:shell:(bash zsh fish powershell)'\n";
     oss << "            ;;\n";
+    oss << "        *)\n";
+    oss << "            _yams_describe_options \"$command_path\"\n";
+    oss << "            ;;\n";
     oss << "    esac\n";
     oss << "}\n\n";
 
@@ -596,9 +908,21 @@ std::string CompletionCommand::generateFishCompletion() const {
     oss << "# Generated by: yams completion fish\n";
     oss << "\n";
 
+    oss << "function __fish_yams_normalize_path\n";
+    oss << "    switch \"$argv[1]\"\n";
+    oss << "        case plugins 'plugins *'\n";
+    oss << "            string replace -r '^plugins' 'plugin' -- \"$argv[1]\"\n";
+    oss << "        case '*'\n";
+    oss << "            string join '' \"$argv[1]\"\n";
+    oss << "    end\n";
+    oss << "end\n\n";
+
     oss << "function __fish_yams_subcommand_names_for\n";
     oss << "    switch \"$argv[1]\"\n";
     for (const auto& entry : commandTree) {
+        if (entry.children.empty()) {
+            continue;
+        }
         oss << "        case '" << entry.path << "'\n";
         oss << "            printf '%s\\n'";
         for (const auto& child : entry.children) {
@@ -621,7 +945,8 @@ std::string CompletionCommand::generateFishCompletion() const {
     oss << "            continue\n";
     oss << "        end\n";
     oss << "        set -l current (string join ' ' $path)\n";
-    oss << "        set -l children (__fish_yams_subcommand_names_for \"$current\")\n";
+    oss << "        set -l children (__fish_yams_subcommand_names_for (__fish_yams_normalize_path "
+           "\"$current\"))\n";
     oss << "        if test (count $children) -eq 0\n";
     oss << "            break\n";
     oss << "        end\n";
@@ -631,7 +956,7 @@ std::string CompletionCommand::generateFishCompletion() const {
     oss << "            break\n";
     oss << "        end\n";
     oss << "    end\n";
-    oss << "    string join ' ' $path\n";
+    oss << "    __fish_yams_normalize_path (string join ' ' $path)\n";
     oss << "end\n\n";
 
     oss << "function __fish_yams_path_is\n";
@@ -650,6 +975,9 @@ std::string CompletionCommand::generateFishCompletion() const {
     oss << "function __fish_yams_subcommands\n";
     oss << "    switch (__fish_yams_current_path)\n";
     for (const auto& entry : commandTree) {
+        if (entry.children.empty()) {
+            continue;
+        }
         oss << "        case '" << entry.path << "'\n";
         oss << "            printf '%s\\t%s\\n'";
         for (const auto& child : entry.children) {
@@ -672,6 +1000,61 @@ std::string CompletionCommand::generateFishCompletion() const {
     oss << "# Dynamic subcommand tree\n";
     oss << "complete -c yams -f -n '__fish_yams_has_subcommands' -a "
            "'(__fish_yams_subcommands)'\n\n";
+
+    oss << "# Generated exact-path value hints\n";
+    for (const auto& hint : manualValueHints()) {
+        if (hint.trigger == "__positional__") {
+            oss << "complete -c yams -f -n '__fish_yams_path_is " << hint.path << "' -a '";
+            for (size_t i = 0; i < hint.values.size(); ++i) {
+                if (i > 0) {
+                    oss << ' ';
+                }
+                oss << hint.values[i];
+            }
+            oss << "'\n";
+            continue;
+        }
+        oss << "complete -c yams -f -n '__fish_yams_path_is " << hint.path << "'";
+        if (hint.trigger.rfind("--", 0) == 0) {
+            oss << " -l " << hint.trigger.substr(2);
+        } else if (hint.trigger.rfind("-", 0) == 0 && hint.trigger.size() == 2) {
+            oss << " -s " << hint.trigger.substr(1);
+        }
+        oss << " -a '";
+        for (size_t i = 0; i < hint.values.size(); ++i) {
+            if (i > 0) {
+                oss << ' ';
+            }
+            oss << hint.values[i];
+        }
+        oss << "'\n";
+    }
+    oss << "\n";
+
+    oss << "# Generated exact-path options\n";
+    for (const auto& entry : commandTree) {
+        if (entry.options.empty() || isManualOptionPath(entry.path) || entry.path == "completion") {
+            continue;
+        }
+        for (const auto& option : entry.options) {
+            oss << "complete -c yams -f -n '__fish_yams_path_is " << entry.path << "'";
+            bool emittedName = false;
+            for (const auto& name : option.names) {
+                if (name.rfind("--", 0) == 0 && !emittedName) {
+                    oss << " -l " << name.substr(2);
+                    emittedName = true;
+                } else if (name.rfind("-", 0) == 0 && name.size() == 2) {
+                    oss << " -s " << name.substr(1);
+                }
+            }
+            oss << " -d '" << escapeSingleQuotedShell(option.description) << "'";
+            if (option.takesValue) {
+                oss << " -r";
+            }
+            oss << "\n";
+        }
+    }
+    oss << "\n";
 
     oss << "# add command\n";
     oss << "complete -c yams -f -n '__fish_yams_path_is add' -l name -d 'Name for the content' "
@@ -827,8 +1210,38 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
     oss << "        @{ Name = '--json'; Description = 'JSON output format' }\n";
     oss << "    )\n\n";
 
+    oss << "    $valueHints = @{\n";
+    for (const auto& hint : manualValueHints()) {
+        oss << "        '" << hint.path << ":" << hint.trigger << "' = @(";
+        for (size_t i = 0; i < hint.values.size(); ++i) {
+            if (i > 0) {
+                oss << ',';
+            }
+            oss << "'" << escapePowerShellSingleQuoted(hint.values[i]) << "'";
+        }
+        oss << ")\n";
+    }
+    oss << "    }\n\n";
+
     // Command-specific flags
     oss << "    $commandFlags = @{\n";
+
+    for (const auto& entry : commandTree) {
+        if (entry.options.empty()) {
+            continue;
+        }
+        oss << "        '" << entry.path << "' = @(\n";
+        for (const auto& option : entry.options) {
+            const std::string primaryName = option.names.front();
+            oss << "            @{ Name = '" << escapePowerShellSingleQuoted(primaryName)
+                << "'; Description = '" << escapePowerShellSingleQuoted(option.description) << "'";
+            if (option.names.size() > 1) {
+                oss << "; Alias = '" << escapePowerShellSingleQuoted(option.names[1]) << "'";
+            }
+            oss << " }\n";
+        }
+        oss << "        )\n";
+    }
 
     // add command
     oss << "        'add' = @(\n";
@@ -984,12 +1397,52 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
     oss << "        return $currentPath\n";
     oss << "    }\n\n";
 
+    oss << "    function Normalize-YamsPath {\n";
+    oss << "        param([string]$Path)\n";
+    oss << "        if ($Path -eq 'plugins' -or $Path.StartsWith('plugins ')) {\n";
+    oss << "            return ('plugin' + $Path.Substring('plugins'.Length))\n";
+    oss << "        }\n";
+    oss << "        return $Path\n";
+    oss << "    }\n\n";
+
     oss << "    $elements = $commandAst.CommandElements\n";
     oss << "    $tokens = @()\n";
     oss << "    for ($i = 1; $i -lt $elements.Count; $i++) {\n";
     oss << "        $tokens += $elements[$i].Extent.Text\n";
     oss << "    }\n";
-    oss << "    $commandPath = Resolve-YamsCommandPath $tokens $subcommands\n\n";
+    oss << "    $commandPath = Normalize-YamsPath (Resolve-YamsCommandPath $tokens "
+           "$subcommands)\n\n";
+    oss << "    $prevElement = $null\n";
+    oss << "    if ($elements.Count -ge 2) {\n";
+    oss << "        $prevElement = $elements[$elements.Count - 2].Extent.Text\n";
+    oss << "    }\n";
+
+    oss << "    if ($prevElement) {\n";
+    oss << "        $valueKey = \"$commandPath:$prevElement\"\n";
+    oss << "        if ($valueHints.ContainsKey($valueKey)) {\n";
+    oss << "            $valueHints[$valueKey] | Where-Object { $_ -like \"$wordToComplete*\" } | "
+           "ForEach-Object {\n";
+    oss << "                [System.Management.Automation.CompletionResult]::new($_, $_, "
+           "'ParameterValue', $_)\n";
+    oss << "            }\n";
+    oss << "            return\n";
+    oss << "        }\n";
+    oss << "    }\n\n";
+
+    oss << "    if ($wordToComplete -notlike '-*') {\n";
+    oss << "        $positionalKey = \"$commandPath:__positional__\"\n";
+    oss << "        if ($valueHints.ContainsKey($positionalKey)) {\n";
+    oss << "            $valueHints[$positionalKey] | Where-Object { $_ -like \"$wordToComplete*\" "
+           "} | ForEach-Object {\n";
+    oss << "                [System.Management.Automation.CompletionResult]::new($_, $_, "
+           "'ParameterValue', $_)\n";
+    oss << "            }\n";
+    oss << "            if (($valueHints[$positionalKey] | Where-Object { $_ -like "
+           "\"$wordToComplete*\" }).Count -gt 0) {\n";
+    oss << "                return\n";
+    oss << "            }\n";
+    oss << "        }\n";
+    oss << "    }\n\n";
 
     oss << "    if ($wordToComplete -notlike '-*' -and $subcommands.ContainsKey($commandPath)) {\n";
     oss << "        $subcommands[$commandPath] | Where-Object { $_.Name -like \"$wordToComplete*\" "
@@ -1031,18 +1484,15 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
     oss << "    }\n\n";
 
     oss << "    # Complete flag values\n";
-    oss << "    if ($elements.Count -ge 2) {\n";
-    oss << "        $prevElement = $elements[$elements.Count - 2].Extent.Text\n";
-    oss << "        if ($commandPath -and $commandFlags.ContainsKey($commandPath)) {\n";
-    oss << "            $flag = $commandFlags[$commandPath] | Where-Object { $_.Name -eq "
-           "$prevElement -or $_.Alias -eq $prevElement }\n";
-    oss << "            if ($flag -and $flag.Values) {\n";
-    oss << "                $flag.Values | Where-Object { $_ -like \"$wordToComplete*\" } | "
+    oss << "    if ($prevElement -and $commandPath -and $commandFlags.ContainsKey($commandPath)) "
+           "{\n";
+    oss << "        $flag = $commandFlags[$commandPath] | Where-Object { $_.Name -eq $prevElement "
+           "-or $_.Alias -eq $prevElement }\n";
+    oss << "        if ($flag -and $flag.Values) {\n";
+    oss << "            $flag.Values | Where-Object { $_ -like \"$wordToComplete*\" } | "
            "ForEach-Object {\n";
-    oss << "                    [System.Management.Automation.CompletionResult]::new(\n";
-    oss << "                        $_, $_, 'ParameterValue', $_\n";
-    oss << "                    )\n";
-    oss << "                }\n";
+    oss << "                [System.Management.Automation.CompletionResult]::new($_, $_, "
+           "'ParameterValue', $_)\n";
     oss << "            }\n";
     oss << "        }\n";
     oss << "    }\n";

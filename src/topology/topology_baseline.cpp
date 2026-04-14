@@ -30,15 +30,15 @@ std::string makeClusterId(const std::string& anchorHash) {
 Result<TopologyArtifactBatch>
 ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> documents,
                                                  const TopologyBuildConfig& config) {
-    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::system_clock::now().time_since_epoch())
-                         .count();
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto nowSeconds = std::chrono::duration_cast<std::chrono::seconds>(now).count();
+    const auto nowMillis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
 
     TopologyArtifactBatch batch;
-    batch.snapshotId = makeSnapshotId(static_cast<std::uint64_t>(now));
+    batch.snapshotId = makeSnapshotId(static_cast<std::uint64_t>(nowMillis));
     batch.algorithm = "connected_components_v1";
     batch.inputKind = config.inputKind;
-    batch.generatedAtUnixSeconds = static_cast<std::uint64_t>(now);
+    batch.generatedAtUnixSeconds = static_cast<std::uint64_t>(nowSeconds);
 
     if (documents.empty()) {
         return batch;
@@ -231,11 +231,72 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     if (!rebuilt) {
         return rebuilt.error();
     }
+
+    if (changedDocuments.empty()) {
+        return existing;
+    }
+
+    std::unordered_set<std::string> affectedHashes;
+    affectedHashes.reserve(changedDocuments.size());
+    for (const auto& document : changedDocuments) {
+        if (!document.documentHash.empty()) {
+            affectedHashes.insert(document.documentHash);
+        }
+    }
+
+    TopologyArtifactBatch merged = existing;
+    merged.snapshotId = rebuilt.value().snapshotId;
+    merged.algorithm = rebuilt.value().algorithm;
+    merged.inputKind = rebuilt.value().inputKind;
+    merged.generatedAtUnixSeconds = rebuilt.value().generatedAtUnixSeconds;
+
+    std::size_t removedClusters = 0;
+    merged.clusters.erase(std::remove_if(merged.clusters.begin(), merged.clusters.end(),
+                                         [&](const ClusterArtifact& cluster) {
+                                             const bool intersects = std::any_of(
+                                                 cluster.memberDocumentHashes.begin(),
+                                                 cluster.memberDocumentHashes.end(),
+                                                 [&](const std::string& documentHash) {
+                                                     return affectedHashes.contains(documentHash);
+                                                 });
+                                             if (intersects) {
+                                                 ++removedClusters;
+                                             }
+                                             return intersects;
+                                         }),
+                          merged.clusters.end());
+
+    std::size_t removedMemberships = 0;
+    merged.memberships.erase(std::remove_if(merged.memberships.begin(), merged.memberships.end(),
+                                            [&](const DocumentClusterMembership& membership) {
+                                                const bool affected = affectedHashes.contains(
+                                                    membership.documentHash);
+                                                if (affected) {
+                                                    ++removedMemberships;
+                                                }
+                                                return affected;
+                                            }),
+                             merged.memberships.end());
+
+    merged.clusters.insert(merged.clusters.end(), rebuilt.value().clusters.begin(),
+                           rebuilt.value().clusters.end());
+    merged.memberships.insert(merged.memberships.end(), rebuilt.value().memberships.begin(),
+                              rebuilt.value().memberships.end());
+
+    std::sort(merged.clusters.begin(), merged.clusters.end(),
+              [](const ClusterArtifact& lhs, const ClusterArtifact& rhs) {
+                  return lhs.clusterId < rhs.clusterId;
+              });
+    std::sort(merged.memberships.begin(), merged.memberships.end(),
+              [](const DocumentClusterMembership& lhs, const DocumentClusterMembership& rhs) {
+                  return lhs.documentHash < rhs.documentHash;
+              });
+
     if (stats != nullptr) {
         stats->documentsProcessed = changedDocuments.size();
-        stats->clustersCreated = existing.clusters.empty() ? rebuilt.value().clusters.size() : 0;
-        stats->clustersUpdated = existing.clusters.empty() ? 0 : rebuilt.value().clusters.size();
-        stats->membershipsUpdated = rebuilt.value().memberships.size();
+        stats->clustersCreated = rebuilt.value().clusters.size();
+        stats->clustersUpdated = removedClusters;
+        stats->membershipsUpdated = rebuilt.value().memberships.size() + removedMemberships;
         stats->bridgeDocsTagged =
             std::count_if(rebuilt.value().memberships.begin(), rebuilt.value().memberships.end(),
                           [](const DocumentClusterMembership& membership) {
@@ -247,7 +308,7 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
                               return membership.role == DocumentTopologyRole::Medoid;
                           });
     }
-    return rebuilt;
+    return merged;
 }
 
 Result<std::vector<ClusterRoute>>

@@ -312,6 +312,33 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 setVal(metrics::kRepairRunning, snap->repairRunning ? 1 : 0);
                 setVal(metrics::kRepairInProgress, snap->repairInProgress ? 1 : 0);
 
+                // Topology rebuild telemetry
+                setReady(readiness::kTopologyArtifactsFresh, snap->topologyArtifactsFresh);
+                setReady(readiness::kTopologyRebuildRunning, snap->topologyRebuildRunning);
+                setVal(metrics::kTopologyRebuildRunning, snap->topologyRebuildRunning ? 1 : 0);
+                setVal(metrics::kTopologyDirtyDocuments,
+                       static_cast<size_t>(snap->topologyDirtyDocuments));
+                setVal(metrics::kTopologyLastSuccessAgeMs,
+                       static_cast<size_t>(snap->topologyLastSuccessAgeMs));
+                setVal(metrics::kTopologyRebuildLagMs,
+                       static_cast<size_t>(snap->topologyRebuildLagMs));
+                setVal(metrics::kTopologyRebuildRunningAgeMs,
+                       static_cast<size_t>(snap->topologyRebuildRunningAgeMs));
+                setVal(metrics::kTopologyLastDurationMs,
+                       static_cast<size_t>(snap->topologyLastDurationMs));
+                setVal(metrics::kTopologyRebuildsTotal,
+                       static_cast<size_t>(snap->topologyRebuildsTotal));
+                setVal(metrics::kTopologyRebuildFailuresTotal,
+                       static_cast<size_t>(snap->topologyRebuildFailuresTotal));
+                setVal(metrics::kTopologyLastDocumentsRequested,
+                       static_cast<size_t>(snap->topologyLastDocumentsRequested));
+                setVal(metrics::kTopologyLastDocumentsProcessed,
+                       static_cast<size_t>(snap->topologyLastDocumentsProcessed));
+                setVal(metrics::kTopologyLastClustersBuilt,
+                       static_cast<size_t>(snap->topologyLastClustersBuilt));
+                setVal(metrics::kTopologyLastMembershipsBuilt,
+                       static_cast<size_t>(snap->topologyLastMembershipsBuilt));
+
                 // File/directory add tracking
                 setVal(metrics::kFilesAdded, static_cast<size_t>(snap->filesAdded));
                 setVal(metrics::kDirectoriesAdded, static_cast<size_t>(snap->directoriesAdded));

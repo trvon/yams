@@ -58,6 +58,8 @@ class YamsNightly < Formula
 
     # Runtime assets (schemas, etc.)
     share.install Dir[(root/"share/*").to_s] if (root/"share").exist?
+
+    generate_completions_from_executable(bin/"yams", "completion") if (bin/"yams").exist?
   end
 
   service do
@@ -80,6 +82,28 @@ class YamsNightly < Formula
 
       To start the YAMS daemon as a service:
         brew services start yams-nightly
+
+      Homebrew installs completion files for bash, zsh, and fish.
+      If completion is not active in your current shell yet, start a new shell or use:
+        source <(yams completion bash)
+        autoload -U compinit && compinit && source <(yams completion zsh)
+        mkdir -p ~/.config/fish/completions && yams completion fish > ~/.config/fish/completions/yams.fish
+
+      Zsh persistent setup:
+        mkdir -p ~/.local/share/zsh/site-functions
+        yams completion zsh > ~/.local/share/zsh/site-functions/_yams
+        # Ensure ~/.local/share/zsh/site-functions is on fpath before compinit
+        # then run: autoload -U compinit && compinit
+
+      Nested subcommands are included, e.g.:
+        yams config embeddings <TAB>
+        yams plugin trust <TAB>
+        yams plugins trust <TAB>
+        yams daemon start --log-level <TAB>
+        yams config search path-tree enable --mode <TAB>
+
+      PowerShell completion is available manually:
+        pwsh -NoLogo -NoProfile -Command 'Invoke-Expression (yams completion powershell | Out-String)'
 
       Documentation: https://yamsmemory.ai
     EOS

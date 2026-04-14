@@ -33,7 +33,9 @@
 #include "../integration/daemon/test_daemon_harness.h"
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/daemon/resource/model_provider.h>
 
 using namespace yams;
 using namespace yams::test;
@@ -297,6 +299,22 @@ struct TimeSeriesSample {
     uint64_t titleQueued{0};
     uint64_t titleInflight{0};
 
+    // Topology rebuild telemetry
+    uint64_t topologyDirtyDocuments{0};
+    uint64_t topologyLastSuccessAgeMs{0};
+    uint64_t topologyRebuildLagMs{0};
+    uint64_t topologyRebuildRunningAgeMs{0};
+    uint64_t topologyLastDurationMs{0};
+    uint64_t topologyRebuildsTotal{0};
+    uint64_t topologyRebuildFailuresTotal{0};
+    uint64_t topologyLastDocumentsRequested{0};
+    uint64_t topologyLastDocumentsProcessed{0};
+    uint64_t topologyLastClustersBuilt{0};
+    uint64_t topologyLastMembershipsBuilt{0};
+    uint64_t topologyHotspotScore{0};
+    bool topologyArtifactsFresh{false};
+    bool topologyRebuildRunning{false};
+
     // Resource metrics
     uint64_t rssBytes{0};
     double cpuPercent{0.0};
@@ -415,6 +433,35 @@ private:
             sample.entityInflight = getCount(std::string(metrics::kEntityInflight));
             sample.titleQueued = getCount(std::string(metrics::kTitleQueueDepth));
             sample.titleInflight = getCount(std::string(metrics::kTitleInflight));
+            sample.topologyDirtyDocuments = getCount(std::string(metrics::kTopologyDirtyDocuments));
+            sample.topologyLastSuccessAgeMs =
+                getCount(std::string(metrics::kTopologyLastSuccessAgeMs));
+            sample.topologyRebuildLagMs = getCount(std::string(metrics::kTopologyRebuildLagMs));
+            sample.topologyRebuildRunningAgeMs =
+                getCount(std::string(metrics::kTopologyRebuildRunningAgeMs));
+            sample.topologyLastDurationMs = getCount(std::string(metrics::kTopologyLastDurationMs));
+            sample.topologyRebuildsTotal = getCount(std::string(metrics::kTopologyRebuildsTotal));
+            sample.topologyRebuildFailuresTotal =
+                getCount(std::string(metrics::kTopologyRebuildFailuresTotal));
+            sample.topologyLastDocumentsRequested =
+                getCount(std::string(metrics::kTopologyLastDocumentsRequested));
+            sample.topologyLastDocumentsProcessed =
+                getCount(std::string(metrics::kTopologyLastDocumentsProcessed));
+            sample.topologyLastClustersBuilt =
+                getCount(std::string(metrics::kTopologyLastClustersBuilt));
+            sample.topologyLastMembershipsBuilt =
+                getCount(std::string(metrics::kTopologyLastMembershipsBuilt));
+            if (auto it = st.readinessStates.find(std::string(readiness::kTopologyArtifactsFresh));
+                it != st.readinessStates.end()) {
+                sample.topologyArtifactsFresh = it->second;
+            }
+            if (auto it = st.readinessStates.find(std::string(readiness::kTopologyRebuildRunning));
+                it != st.readinessStates.end()) {
+                sample.topologyRebuildRunning = it->second;
+            }
+            sample.topologyHotspotScore =
+                sample.topologyDirtyDocuments + sample.topologyRebuildLagMs +
+                sample.topologyRebuildRunningAgeMs + sample.topologyLastDurationMs;
 
             // Document counts
             sample.docsIngested = getCount(std::string(metrics::kDocumentsTotal));
@@ -466,6 +513,43 @@ bool getEnableEmbeddings() {
         return std::string(env) == "1";
     }
     return false;
+}
+
+bool useMockEmbeddingsForBench() {
+    if (const char* env = std::getenv("YAMS_BENCH_FORCE_MOCK_EMBEDDINGS")) {
+        return std::string(env) == "1";
+    }
+    return false;
+}
+
+void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, bool enableEmbeddings,
+                                    bool useMockEmbeddings) {
+    if (!enableEmbeddings || !harness || !harness->daemon()) {
+        return;
+    }
+
+    auto serviceManager = harness->daemon()->getServiceManager();
+    if (!serviceManager) {
+        return;
+    }
+
+    if (useMockEmbeddings) {
+#ifdef YAMS_TESTING
+        auto mockProvider = yams::daemon::createModelProvider("", true);
+        if (mockProvider) {
+            auto sharedProvider =
+                std::shared_ptr<yams::daemon::IModelProvider>(std::move(mockProvider));
+            serviceManager->__test_setModelProvider(sharedProvider);
+        }
+#endif
+    }
+
+    auto ready =
+        serviceManager->ensureEmbeddingModelReadySync("all-MiniLM-L6-v2", {}, 10000, false, false);
+    if (!ready) {
+        std::cerr << "WARNING: Embedding model not ready for benchmark: " << ready.error().message
+                  << "\n";
+    }
 }
 
 std::string getTuningProfile() {
@@ -542,15 +626,17 @@ void SetupHarness(const IngestionBenchConfig& config) {
     // Disable for benchmark determinism and throughput analysis.
     harnessOptions.enableAutoRepair = false;
     if (config.enableEmbeddings) {
-        // Keep everything enabled: let PluginManager decide availability.
-        harnessOptions.useMockModelProvider = false;
-        harnessOptions.autoLoadPlugins = true;
-        harnessOptions.configureModelPool = true;
+        const bool useMock = useMockEmbeddingsForBench();
+        harnessOptions.useMockModelProvider = useMock;
+        harnessOptions.autoLoadPlugins = !useMock;
+        harnessOptions.configureModelPool = !useMock;
         harnessOptions.modelPoolLazyLoading = false;
-        if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
-            harnessOptions.pluginDir = std::filesystem::path(envPluginDir);
-        } else {
-            harnessOptions.pluginDir = std::filesystem::current_path() / "builddir" / "plugins";
+        if (!useMock) {
+            if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
+                harnessOptions.pluginDir = std::filesystem::path(envPluginDir);
+            } else {
+                harnessOptions.pluginDir = std::filesystem::current_path() / "builddir" / "plugins";
+            }
         }
     }
     g_harness = std::make_unique<DaemonHarness>(harnessOptions);
@@ -569,6 +655,9 @@ void SetupHarness(const IngestionBenchConfig& config) {
     if (!waitForSearchEngineReady(std::chrono::seconds(60))) {
         std::cerr << "WARNING: Search engine not ready after 60s.\n";
     }
+
+    ensureBenchmarkEmbeddingsReady(g_harness.get(), config.enableEmbeddings,
+                                   useMockEmbeddingsForBench());
 
     if (config.enableEmbeddings) {
         auto timeout = std::chrono::milliseconds(600000);
@@ -619,6 +708,13 @@ struct DrainSnapshot {
     uint64_t entityInflight{0};
     uint64_t titleQueued{0};
     uint64_t titleInflight{0};
+    uint64_t topologyDirtyDocuments{0};
+    uint64_t topologyRebuildLagMs{0};
+    uint64_t topologyRebuildRunningAgeMs{0};
+    uint64_t topologyLastDurationMs{0};
+    uint64_t topologyRebuildsTotal{0};
+    bool topologyArtifactsFresh{false};
+    bool topologyRebuildRunning{false};
     int stableCount{0};
     int stableRequired{0};
     uint64_t polls{0};
@@ -722,6 +818,13 @@ bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled,
         uint64_t symbolQueued = 0, symbolInflight = 0;
         uint64_t entityQueued = 0, entityInflight = 0;
         uint64_t titleQueued = 0, titleInflight = 0;
+        uint64_t topologyDirtyDocuments = 0;
+        uint64_t topologyRebuildLagMs = 0;
+        uint64_t topologyRebuildRunningAgeMs = 0;
+        uint64_t topologyLastDurationMs = 0;
+        uint64_t topologyRebuildsTotal = 0;
+        bool topologyArtifactsFresh = false;
+        bool topologyRebuildRunning = false;
 
         if (scope == DrainScope::Full) {
             kgQueued = getCount(std::string(metrics::kKgQueueDepth));
@@ -736,6 +839,29 @@ bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled,
 
             totalQueued += kgQueued + symbolQueued + entityQueued + titleQueued;
             totalInflight += kgInflight + symbolInflight + entityInflight + titleInflight;
+            if (embeddingsEnabled) {
+                topologyDirtyDocuments = getCount(std::string(metrics::kTopologyDirtyDocuments));
+                topologyRebuildLagMs = getCount(std::string(metrics::kTopologyRebuildLagMs));
+                topologyRebuildRunningAgeMs =
+                    getCount(std::string(metrics::kTopologyRebuildRunningAgeMs));
+                topologyLastDurationMs = getCount(std::string(metrics::kTopologyLastDurationMs));
+                topologyRebuildsTotal = getCount(std::string(metrics::kTopologyRebuildsTotal));
+                if (auto it =
+                        st.readinessStates.find(std::string(readiness::kTopologyArtifactsFresh));
+                    it != st.readinessStates.end()) {
+                    topologyArtifactsFresh = it->second;
+                }
+                if (auto it =
+                        st.readinessStates.find(std::string(readiness::kTopologyRebuildRunning));
+                    it != st.readinessStates.end()) {
+                    topologyRebuildRunning = it->second;
+                }
+                if (!topologyArtifactsFresh || topologyRebuildRunning ||
+                    topologyDirtyDocuments > 0) {
+                    totalQueued += topologyDirtyDocuments;
+                    totalInflight += topologyRebuildRunning ? 1ULL : 0ULL;
+                }
+            }
         }
 
         snapshot.totalQueued = totalQueued;
@@ -752,6 +878,13 @@ bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled,
         snapshot.entityInflight = entityInflight;
         snapshot.titleQueued = titleQueued;
         snapshot.titleInflight = titleInflight;
+        snapshot.topologyDirtyDocuments = topologyDirtyDocuments;
+        snapshot.topologyRebuildLagMs = topologyRebuildLagMs;
+        snapshot.topologyRebuildRunningAgeMs = topologyRebuildRunningAgeMs;
+        snapshot.topologyLastDurationMs = topologyLastDurationMs;
+        snapshot.topologyRebuildsTotal = topologyRebuildsTotal;
+        snapshot.topologyArtifactsFresh = topologyArtifactsFresh;
+        snapshot.topologyRebuildRunning = topologyRebuildRunning;
 
         if (totalQueued == 0 && totalInflight == 0) {
             if (++stableCount >= stableRequired) {
@@ -780,6 +913,13 @@ bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled,
                           << " symQ=" << symbolQueued << " symIn=" << symbolInflight
                           << " entQ=" << entityQueued << " entIn=" << entityInflight
                           << " titleQ=" << titleQueued << " titleIn=" << titleInflight;
+                if (embeddingsEnabled) {
+                    std::cerr << " topologyFresh=" << (topologyArtifactsFresh ? 1 : 0)
+                              << " topologyRun=" << (topologyRebuildRunning ? 1 : 0)
+                              << " topologyDirty=" << topologyDirtyDocuments
+                              << " topologyLagMs=" << topologyRebuildLagMs
+                              << " topologyLastMs=" << topologyLastDurationMs;
+                }
             }
             std::cerr << " stable=" << stableCount << "/" << stableRequired
                       << " rss_mb=" << std::fixed << std::setprecision(1) << st.memoryUsageMb
@@ -856,6 +996,12 @@ void writeTimeSeriesCsv(const std::vector<TimeSeriesSample>& samples,
         << "embed_infer_last_ms,embed_infer_max_ms,embed_infer_warn_count,"
         << "kg_queued,kg_inflight,symbol_queued,symbol_inflight,"
         << "entity_queued,entity_inflight,title_queued,title_inflight,"
+        << "topology_dirty_documents,topology_artifacts_fresh,topology_rebuild_running,"
+        << "topology_last_success_age_ms,topology_rebuild_lag_ms,"
+        << "topology_rebuild_running_age_ms,topology_last_duration_ms,"
+        << "topology_rebuilds_total,topology_rebuild_failures_total,"
+        << "topology_last_documents_requested,topology_last_documents_processed,"
+        << "topology_last_clusters_built,topology_last_memberships_built,topology_hotspot_score,"
         << "rss_bytes,cpu_percent,pressure_level,"
         << "kg_dropped,symbol_dropped,entity_dropped,title_dropped,bus_post_dropped,"
         << "docs_per_sec,bytes_per_sec\n";
@@ -868,10 +1014,17 @@ void writeTimeSeriesCsv(const std::vector<TimeSeriesSample>& samples,
             << s.embedInferLastMs << "," << s.embedInferMaxMs << "," << s.embedInferWarnCount << ","
             << s.kgQueued << "," << s.kgInflight << "," << s.symbolQueued << "," << s.symbolInflight
             << "," << s.entityQueued << "," << s.entityInflight << "," << s.titleQueued << ","
-            << s.titleInflight << "," << s.rssBytes << "," << s.cpuPercent << "," << s.pressureLevel
-            << "," << s.kgDropped << "," << s.symbolDropped << "," << s.entityDropped << ","
-            << s.titleDropped << "," << s.busPostDropped << "," << s.docsPerSecond << ","
-            << s.bytesPerSecond << "\n";
+            << s.titleInflight << "," << s.topologyDirtyDocuments << ","
+            << (s.topologyArtifactsFresh ? 1 : 0) << "," << (s.topologyRebuildRunning ? 1 : 0)
+            << "," << s.topologyLastSuccessAgeMs << "," << s.topologyRebuildLagMs << ","
+            << s.topologyRebuildRunningAgeMs << "," << s.topologyLastDurationMs << ","
+            << s.topologyRebuildsTotal << "," << s.topologyRebuildFailuresTotal << ","
+            << s.topologyLastDocumentsRequested << "," << s.topologyLastDocumentsProcessed << ","
+            << s.topologyLastClustersBuilt << "," << s.topologyLastMembershipsBuilt << ","
+            << s.topologyHotspotScore << "," << s.rssBytes << "," << s.cpuPercent << ","
+            << s.pressureLevel << "," << s.kgDropped << "," << s.symbolDropped << ","
+            << s.entityDropped << "," << s.titleDropped << "," << s.busPostDropped << ","
+            << s.docsPerSecond << "," << s.bytesPerSecond << "\n";
     }
 }
 
@@ -1102,6 +1255,18 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         int maxPressure = 0;
         double embedBacklogSeconds = 0.0;
         double embedBacklogSingleWorkerSeconds = 0.0;
+        uint64_t peakTopologyDirtyDocuments = 0;
+        uint64_t peakTopologyRebuildLagMs = 0;
+        uint64_t peakTopologyRunningAgeMs = 0;
+        uint64_t peakTopologyLastDurationMs = 0;
+        uint64_t peakTopologyHotspotScore = 0;
+        uint64_t endTopologyRebuildsTotal = 0;
+        uint64_t endTopologyFailuresTotal = 0;
+        uint64_t endTopologyLastDocumentsProcessed = 0;
+        uint64_t endTopologyLastClustersBuilt = 0;
+        uint64_t endTopologyLastMembershipsBuilt = 0;
+        uint64_t topologyRebuildActiveSamples = 0;
+        uint64_t topologyFreshSamples = 0;
 
         uint64_t endEmbedQueued = 0;
         uint64_t endEmbedInflight = 0;
@@ -1126,9 +1291,19 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
             peakEmbedInferOldestMs = std::max(peakEmbedInferOldestMs, s.embedInferOldestMs);
             peakEmbedInferLastMs = std::max(peakEmbedInferLastMs, s.embedInferLastMs);
             peakEmbedInferMaxMs = std::max(peakEmbedInferMaxMs, s.embedInferMaxMs);
+            peakTopologyDirtyDocuments =
+                std::max(peakTopologyDirtyDocuments, s.topologyDirtyDocuments);
+            peakTopologyRebuildLagMs = std::max(peakTopologyRebuildLagMs, s.topologyRebuildLagMs);
+            peakTopologyRunningAgeMs =
+                std::max(peakTopologyRunningAgeMs, s.topologyRebuildRunningAgeMs);
+            peakTopologyLastDurationMs =
+                std::max(peakTopologyLastDurationMs, s.topologyLastDurationMs);
+            peakTopologyHotspotScore = std::max(peakTopologyHotspotScore, s.topologyHotspotScore);
             peakRss = std::max(peakRss, s.rssBytes);
             maxCpu = std::max(maxCpu, s.cpuPercent);
             maxPressure = std::max(maxPressure, s.pressureLevel);
+            topologyRebuildActiveSamples += s.topologyRebuildRunning ? 1ULL : 0ULL;
+            topologyFreshSamples += s.topologyArtifactsFresh ? 1ULL : 0ULL;
 
             if (!firstSeen) {
                 firstSeen = true;
@@ -1155,6 +1330,11 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
             endEmbedInferStarted = s.embedInferStarted;
             endEmbedInferCompleted = s.embedInferCompleted;
             endEmbedInferWarnCount = s.embedInferWarnCount;
+            endTopologyRebuildsTotal = s.topologyRebuildsTotal;
+            endTopologyFailuresTotal = s.topologyRebuildFailuresTotal;
+            endTopologyLastDocumentsProcessed = s.topologyLastDocumentsProcessed;
+            endTopologyLastClustersBuilt = s.topologyLastClustersBuilt;
+            endTopologyLastMembershipsBuilt = s.topologyLastMembershipsBuilt;
         }
 
         const uint64_t inferStartedDelta = (endEmbedInferStarted >= firstEmbedInferStarted)
@@ -1187,6 +1367,16 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         state.counters["peak_embed_infer_oldest_ms"] = static_cast<double>(peakEmbedInferOldestMs);
         state.counters["peak_embed_infer_last_ms"] = static_cast<double>(peakEmbedInferLastMs);
         state.counters["peak_embed_infer_max_ms"] = static_cast<double>(peakEmbedInferMaxMs);
+        state.counters["peak_topology_dirty_documents"] =
+            static_cast<double>(peakTopologyDirtyDocuments);
+        state.counters["peak_topology_rebuild_lag_ms"] =
+            static_cast<double>(peakTopologyRebuildLagMs);
+        state.counters["peak_topology_running_age_ms"] =
+            static_cast<double>(peakTopologyRunningAgeMs);
+        state.counters["peak_topology_last_duration_ms"] =
+            static_cast<double>(peakTopologyLastDurationMs);
+        state.counters["peak_topology_hotspot_score"] =
+            static_cast<double>(peakTopologyHotspotScore);
         state.counters["peak_rss_mb"] = static_cast<double>(peakRss / (1024 * 1024));
         state.counters["max_cpu_pct"] = maxCpu;
         state.counters["max_pressure"] = static_cast<double>(maxPressure);
@@ -1201,6 +1391,18 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         state.counters["embed_infer_started_delta"] = static_cast<double>(inferStartedDelta);
         state.counters["embed_infer_completed_delta"] = static_cast<double>(inferCompletedDelta);
         state.counters["embed_infer_warn_delta"] = static_cast<double>(inferWarnDelta);
+        state.counters["topology_rebuilds_total"] = static_cast<double>(endTopologyRebuildsTotal);
+        state.counters["topology_rebuild_failures_total"] =
+            static_cast<double>(endTopologyFailuresTotal);
+        state.counters["topology_last_documents_processed"] =
+            static_cast<double>(endTopologyLastDocumentsProcessed);
+        state.counters["topology_last_clusters_built"] =
+            static_cast<double>(endTopologyLastClustersBuilt);
+        state.counters["topology_last_memberships_built"] =
+            static_cast<double>(endTopologyLastMembershipsBuilt);
+        state.counters["topology_rebuild_active_samples"] =
+            static_cast<double>(topologyRebuildActiveSamples);
+        state.counters["topology_fresh_samples"] = static_cast<double>(topologyFreshSamples);
         state.counters["drain_last_total_queued"] = static_cast<double>(drainSnapshot.totalQueued);
         state.counters["drain_last_total_inflight"] =
             static_cast<double>(drainSnapshot.totalInflight);
@@ -1210,6 +1412,16 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         state.counters["drain_last_post_queued"] = static_cast<double>(drainSnapshot.postQueued);
         state.counters["drain_last_post_inflight"] =
             static_cast<double>(drainSnapshot.postInflight);
+        state.counters["drain_last_topology_dirty_documents"] =
+            static_cast<double>(drainSnapshot.topologyDirtyDocuments);
+        state.counters["drain_last_topology_rebuild_lag_ms"] =
+            static_cast<double>(drainSnapshot.topologyRebuildLagMs);
+        state.counters["drain_last_topology_last_duration_ms"] =
+            static_cast<double>(drainSnapshot.topologyLastDurationMs);
+        state.counters["drain_last_topology_rebuilds_total"] =
+            static_cast<double>(drainSnapshot.topologyRebuildsTotal);
+        state.counters["drain_last_topology_fresh"] =
+            drainSnapshot.topologyArtifactsFresh ? 1.0 : 0.0;
         state.counters["drain_poll_count"] = static_cast<double>(drainSnapshot.polls);
         state.counters["drain_stable_count"] = static_cast<double>(drainSnapshot.stableCount);
         state.counters["drain_hard_timeout"] = drainSnapshot.hitHardTimeout ? 1.0 : 0.0;
@@ -1313,6 +1525,8 @@ int main(int argc, char** argv) {
     std::cout << "\nEnvironment Variables:\n";
     std::cout << "  YAMS_BENCH_DOC_COUNT=N          Override document count\n";
     std::cout << "  YAMS_BENCH_ENABLE_EMBEDDINGS=1  Enable embedding generation\n";
+    std::cout
+        << "  YAMS_BENCH_FORCE_MOCK_EMBEDDINGS=1 Use mock embeddings to isolate topology cost\n";
     std::cout << "  YAMS_TUNING_PROFILE=NAME        Set profile (Efficient/Balanced/Aggressive)\n";
     std::cout << "  YAMS_BENCH_EMBED_PROFILE=NAME   Embedding profile (safe|balanced)\n";
     std::cout << "  YAMS_BENCH_DUPLICATION_RATE=0.05 Set duplication rate (0.0-1.0)\n";
@@ -1349,6 +1563,8 @@ int main(int argc, char** argv) {
     std::cout << "\nMetrics:\n";
     std::cout << "  - Throughput: docs/sec\n";
     std::cout << "  - Queue depths: Peak queued/inflight per stage\n";
+    std::cout
+        << "  - Topology rebuild: freshness, lag, dirty-doc scope, last duration, hotspot score\n";
     std::cout << "  - Resource: Peak RSS, CPU%, pressure level\n";
     std::cout << "  - Time series: CSV output for plotting\n\n";
 

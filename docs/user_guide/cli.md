@@ -1426,9 +1426,13 @@ fpath=(~/.local/share/zsh/site-functions $fpath)
 autoload -U compinit && compinit
 ```
 
-The generated zsh completion now supports nested subcommands such as
-`yams config embeddings ...`, `yams doctor embeddings ...`, and
-`yams plugin trust ...`.
+The generated completions now support nested subcommands and nested leaf values such as:
+- `yams config embeddings ...`
+- `yams doctor embeddings ...`
+- `yams plugin trust ...`
+- `yams plugins trust ...` (alias of `plugin`)
+- `yams daemon start --log-level <Tab>`
+- `yams config search path-tree enable --mode <Tab>`
 
 **Fish:**
 ```bash
@@ -1467,7 +1471,14 @@ source ~/.bashrc   # or ~/.zshrc
 
 For zsh, make sure `compinit` runs after your `fpath` updates.
 
-Then test by typing `yams ` and pressing Tab.
+Then test by typing one of these and pressing Tab:
+
+```bash
+yams plugin trust 
+yams plugins trust 
+yams daemon start --log-level 
+yams config search path-tree enable --mode 
+```
 
 
 ## Exit Codes

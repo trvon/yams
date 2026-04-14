@@ -17,6 +17,7 @@
 #include "../../common/test_helpers_catch2.h"
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -1329,7 +1330,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     yams::topology::MetadataKgTopologyArtifactStore store(
         std::static_pointer_cast<metadata::IMetadataRepository>(meta), kgStore);
 
-    sm->requestTopologyRebuild("unit_test_async_topology");
+    sm->requestTopologyRebuild("unit_test_async_topology", hashes);
     const bool built = waitForCondition(std::chrono::seconds(10), [&]() {
         auto latest = store.loadLatest();
         return latest.has_value() && latest.value().has_value();
@@ -1348,6 +1349,61 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                         [](const auto& membership) {
                             return membership.role == yams::topology::DocumentTopologyRole::Outlier;
                         }) == 1);
+
+    auto cNode = kgStore->getNodeByKey("doc:" + hashes[2]);
+    REQUIRE(cNode.has_value());
+    REQUIRE(cNode.value().has_value());
+
+    std::vector<metadata::KGEdge> newEdges;
+    newEdges.push_back(metadata::KGEdge{.srcNodeId = bNode.value()->id,
+                                        .dstNodeId = cNode.value()->id,
+                                        .relation = "semantic_neighbor",
+                                        .weight = 0.88F});
+    newEdges.push_back(metadata::KGEdge{.srcNodeId = cNode.value()->id,
+                                        .dstNodeId = bNode.value()->id,
+                                        .relation = "semantic_neighbor",
+                                        .weight = 0.88F});
+    REQUIRE(kgStore->addEdgesUnique(newEdges).has_value());
+
+    auto incremental =
+        sm->rebuildTopologyArtifacts("unit_test_incremental_topology", false, {hashes[2]});
+    REQUIRE(incremental.has_value());
+    CHECK_FALSE(incremental.value().fullRebuild);
+    CHECK(incremental.value().documentsProcessed == 3);
+
+    latest = store.loadLatest();
+    REQUIRE(latest.has_value());
+    REQUIRE(latest.value().has_value());
+    CHECK(latest.value()->clusters.size() == 1);
+
+    {
+        DaemonMetrics metrics(&lifecycleFsm_, &state_, sm.get(), sm->getWorkCoordinator());
+        auto snap = metrics.getSnapshot(true);
+        REQUIRE(snap != nullptr);
+        CHECK(snap->topologyArtifactsFresh);
+        CHECK_FALSE(snap->topologyRebuildRunning);
+        CHECK(snap->topologyDirtyDocuments == 0);
+        CHECK(snap->topologyRebuildLagMs == 0);
+        CHECK(snap->topologyRebuildsTotal >= 2);
+        CHECK(snap->topologyLastDocumentsProcessed == 3);
+        CHECK(snap->topologyLastClustersBuilt == 1);
+        CHECK(snap->topologyLastMembershipsBuilt == 3);
+        CHECK(snap->topologyLastRunSucceeded);
+        CHECK(snap->topologyLastRunStored);
+    }
+
+    memberships = store.loadMemberships(hashes);
+    REQUIRE(memberships.has_value());
+    auto mergedMemberships = memberships.value();
+    REQUIRE(mergedMemberships.size() == 3);
+    const auto mergedClusterId = mergedMemberships.front().clusterId;
+    std::size_t mergedCount = 0;
+    for (const auto& membership : mergedMemberships) {
+        if (membership.clusterId == mergedClusterId) {
+            ++mergedCount;
+        }
+    }
+    CHECK(mergedCount == 3);
 
     sm->shutdown();
 }

@@ -219,6 +219,20 @@ constexpr std::string_view kRepairBusyTicks = "repair_busy_ticks";
 constexpr std::string_view kRepairTotalBacklog = "repair_total_backlog";
 constexpr std::string_view kRepairProcessed = "repair_processed";
 
+// Topology rebuild telemetry
+constexpr std::string_view kTopologyRebuildRunning = "topology_rebuild_running";
+constexpr std::string_view kTopologyDirtyDocuments = "topology_dirty_documents";
+constexpr std::string_view kTopologyLastSuccessAgeMs = "topology_last_success_age_ms";
+constexpr std::string_view kTopologyRebuildLagMs = "topology_rebuild_lag_ms";
+constexpr std::string_view kTopologyRebuildRunningAgeMs = "topology_rebuild_running_age_ms";
+constexpr std::string_view kTopologyLastDurationMs = "topology_last_duration_ms";
+constexpr std::string_view kTopologyRebuildsTotal = "topology_rebuilds_total";
+constexpr std::string_view kTopologyRebuildFailuresTotal = "topology_rebuild_failures_total";
+constexpr std::string_view kTopologyLastDocumentsRequested = "topology_last_documents_requested";
+constexpr std::string_view kTopologyLastDocumentsProcessed = "topology_last_documents_processed";
+constexpr std::string_view kTopologyLastClustersBuilt = "topology_last_clusters_built";
+constexpr std::string_view kTopologyLastMembershipsBuilt = "topology_last_memberships_built";
+
 } // namespace yams::daemon::metrics
 
 namespace yams::daemon::readiness {
@@ -244,6 +258,8 @@ constexpr std::string_view kEmbeddingReady = "embedding_ready";
 constexpr std::string_view kEmbeddingDegraded = "embedding_degraded";
 constexpr std::string_view kPluginsReady = "plugins_ready";
 constexpr std::string_view kPluginsDegraded = "plugins_degraded";
+constexpr std::string_view kTopologyArtifactsFresh = "topology_artifacts_fresh";
+constexpr std::string_view kTopologyRebuildRunning = "topology_rebuild_running";
 constexpr std::string_view kVectorEmbeddingsAvailable = "vector_embeddings_available";
 constexpr std::string_view kVectorScoringEnabled = "vector_scoring_enabled";
 constexpr std::string_view kSearchEngineBuildReasonInitial = "search_engine_build_reason_initial";

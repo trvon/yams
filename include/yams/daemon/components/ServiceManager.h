@@ -380,10 +380,40 @@ public:
         std::vector<std::string> issues;
     };
 
+    struct TopologyTelemetrySnapshot {
+        bool rebuildRunning{false};
+        bool artifactsFresh{false};
+        bool lastRunSucceeded{false};
+        bool lastRunSkipped{false};
+        bool lastRunFullRebuild{true};
+        bool lastRunStored{false};
+        std::uint64_t dirtyDocumentCount{0};
+        std::uint64_t dirtySinceUnixMillis{0};
+        std::uint64_t lastStartedUnixSeconds{0};
+        std::uint64_t lastCompletedUnixSeconds{0};
+        std::uint64_t lastSuccessAgeMs{0};
+        std::uint64_t rebuildLagMs{0};
+        std::uint64_t rebuildRunningAgeMs{0};
+        std::uint64_t lastDurationMs{0};
+        std::uint64_t rebuildsTotal{0};
+        std::uint64_t rebuildFailuresTotal{0};
+        std::uint64_t lastDocumentsRequested{0};
+        std::uint64_t lastDocumentsProcessed{0};
+        std::uint64_t lastDocumentsMissingEmbeddings{0};
+        std::uint64_t lastDocumentsMissingGraphNodes{0};
+        std::uint64_t lastClustersBuilt{0};
+        std::uint64_t lastMembershipsBuilt{0};
+        std::string lastReason;
+        std::string lastSnapshotId;
+        std::string lastAlgorithm;
+    };
+
     Result<TopologyRebuildStats>
     rebuildTopologyArtifacts(const std::string& reason, bool dryRun = false,
                              const std::vector<std::string>& documentHashes = {});
-    void requestTopologyRebuild(const std::string& reason);
+    void requestTopologyRebuild(const std::string& reason,
+                                const std::vector<std::string>& documentHashes = {});
+    TopologyTelemetrySnapshot getTopologyTelemetrySnapshot() const;
     bool isTopologyRebuildInProgress() const {
         return topologyRebuildRunning_.load(std::memory_order_acquire);
     }
@@ -727,6 +757,10 @@ private:
     std::shared_ptr<RepairService> repairService_;
     mutable std::mutex repairServiceMutex_;
     std::atomic<bool> topologyRebuildRunning_{false};
+    mutable std::mutex topologyDirtyMutex_;
+    std::unordered_set<std::string> topologyDirtyHashes_;
+    mutable std::mutex topologyTelemetryMutex_;
+    TopologyTelemetrySnapshot topologyTelemetry_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     bool embeddingsAutoOnAdd_{false};

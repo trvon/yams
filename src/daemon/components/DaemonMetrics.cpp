@@ -657,6 +657,31 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.repairBusyTicks = state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
         out.repairTotalBacklog = state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
         out.repairProcessed = state_->stats.repairProcessed.load(std::memory_order_relaxed);
+        if (services_) {
+            auto topology = services_->getTopologyTelemetrySnapshot();
+            out.topologyRebuildRunning = topology.rebuildRunning;
+            out.topologyArtifactsFresh = topology.artifactsFresh;
+            out.topologyLastRunSucceeded = topology.lastRunSucceeded;
+            out.topologyLastRunSkipped = topology.lastRunSkipped;
+            out.topologyLastRunFullRebuild = topology.lastRunFullRebuild;
+            out.topologyLastRunStored = topology.lastRunStored;
+            out.topologyDirtyDocuments = topology.dirtyDocumentCount;
+            out.topologyLastSuccessAgeMs = topology.lastSuccessAgeMs;
+            out.topologyRebuildLagMs = topology.rebuildLagMs;
+            out.topologyRebuildRunningAgeMs = topology.rebuildRunningAgeMs;
+            out.topologyLastDurationMs = topology.lastDurationMs;
+            out.topologyRebuildsTotal = topology.rebuildsTotal;
+            out.topologyRebuildFailuresTotal = topology.rebuildFailuresTotal;
+            out.topologyLastDocumentsRequested = topology.lastDocumentsRequested;
+            out.topologyLastDocumentsProcessed = topology.lastDocumentsProcessed;
+            out.topologyLastDocumentsMissingEmbeddings = topology.lastDocumentsMissingEmbeddings;
+            out.topologyLastDocumentsMissingGraphNodes = topology.lastDocumentsMissingGraphNodes;
+            out.topologyLastClustersBuilt = topology.lastClustersBuilt;
+            out.topologyLastMembershipsBuilt = topology.lastMembershipsBuilt;
+            out.topologyLastReason = topology.lastReason;
+            out.topologyLastSnapshotId = topology.lastSnapshotId;
+            out.topologyLastAlgorithm = topology.lastAlgorithm;
+        }
     } catch (...) {
     }
 
@@ -699,6 +724,10 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.readinessStates[std::string(readiness::kPlugins)] =
             state_->readiness.pluginsReady.load();
         out.readinessStates[std::string(readiness::kRepairService)] = out.repairRunning;
+        out.readinessStates[std::string(readiness::kTopologyArtifactsFresh)] =
+            out.topologyArtifactsFresh;
+        out.readinessStates[std::string(readiness::kTopologyRebuildRunning)] =
+            out.topologyRebuildRunning;
         // Only include search init progress while not fully ready or when progress < 100%
         const bool searchReady = state_->readiness.searchEngineReady.load();
         const int searchPct = std::clamp<int>(state_->readiness.searchProgress.load(), 0, 100);

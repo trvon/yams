@@ -353,6 +353,30 @@ struct MetricsSnapshot {
     std::uint64_t repairBusyTicks{0};
     std::uint64_t repairTotalBacklog{0};
     std::uint64_t repairProcessed{0};
+
+    // Topology rebuild telemetry
+    bool topologyRebuildRunning{false};
+    bool topologyArtifactsFresh{false};
+    bool topologyLastRunSucceeded{false};
+    bool topologyLastRunSkipped{false};
+    bool topologyLastRunFullRebuild{true};
+    bool topologyLastRunStored{false};
+    std::uint64_t topologyDirtyDocuments{0};
+    std::uint64_t topologyLastSuccessAgeMs{0};
+    std::uint64_t topologyRebuildLagMs{0};
+    std::uint64_t topologyRebuildRunningAgeMs{0};
+    std::uint64_t topologyLastDurationMs{0};
+    std::uint64_t topologyRebuildsTotal{0};
+    std::uint64_t topologyRebuildFailuresTotal{0};
+    std::uint64_t topologyLastDocumentsRequested{0};
+    std::uint64_t topologyLastDocumentsProcessed{0};
+    std::uint64_t topologyLastDocumentsMissingEmbeddings{0};
+    std::uint64_t topologyLastDocumentsMissingGraphNodes{0};
+    std::uint64_t topologyLastClustersBuilt{0};
+    std::uint64_t topologyLastMembershipsBuilt{0};
+    std::string topologyLastReason;
+    std::string topologyLastSnapshotId;
+    std::string topologyLastAlgorithm;
 };
 
 class SocketServer; // Forward declaration
