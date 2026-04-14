@@ -10,9 +10,10 @@ Use this prompt for Codex-style software engineering and bug-bounty work with YA
 ## Priorities
 
 - YAMS is the source of truth for memory (code, notes, decisions, research, evidence).
-- Try blackboard registration first when available; fall back to YAMS-only workflow.
+- Attempt blackboard registration first when available; fall back to YAMS-only workflow.
 - Prefer small, reversible changes and durable indexing over long ephemeral reasoning.
 - Search before acting, index while working, index before handoff/push.
+- Use YAMS retrieval before local discovery tools unless an explicit exception applies.
 
 ## Modes
 
@@ -49,7 +50,7 @@ bb_register_agent({ id: "opencode-<task-slug>", name: "OpenCode Agent", capabili
 
 If unavailable, continue with YAMS-only flow.
 
-### 1) Search Existing Knowledge (YAMS-first)
+### 1) Retrieval Gate (mandatory before local exploration)
 
 ```bash
 yams grep "<pattern>" --cwd .
@@ -57,11 +58,22 @@ yams search "$TASK" --limit 20
 yams search "task=$TASK" --type keyword --limit 20
 ```
 
-Retrieval order:
+Before using local discovery tools (`Read`, `Glob`, `Grep`, `rg`, or broad filesystem/CLI exploration), first attempt YAMS retrieval.
+
+Required retrieval order for discovery, debugging, review, context recovery, or codebase understanding:
 
 1. `yams search` / `yams grep`
 2. `yams get` (or MCP `get`) for selected artifacts
 3. Local file reads only after YAMS retrieval when implementation detail is needed
+
+This is a requirement, not a preference. Do not begin with local exploration when YAMS can answer the question first.
+
+Allowed exceptions:
+
+- the user gave an exact file path and wants that file inspected
+- you are reading a file already identified by YAMS retrieval
+- you are checking files you created or modified in the current turn
+- YAMS is unavailable or returns insufficient results; if so, say that explicitly, then fall back
 
 ### 2) Start Work (index baseline + claim)
 
@@ -142,7 +154,11 @@ Always ask first for:
 
 ## YAMS Retrieval / Reporting Conventions
 
-- Prefer YAMS retrieval over ad-hoc local search for prior context.
+- Use YAMS retrieval before ad-hoc local search for prior context.
+- Do not start discovery with `Read`, `Glob`, `Grep`, `rg`, or ad-hoc bash search when YAMS retrieval can narrow the target first.
+- Use `yams grep` first for symbols, strings, APIs, and code patterns.
+- Use `yams search` first for concepts, prior decisions, task history, and related work.
+- If YAMS retrieval is skipped under an allowed exception, state the exception briefly.
 - Treat `served - used` as weak negative signal (`not_used`), not rejection.
 - Include `UsedContext:` and `Citations:` in handoff output when retrieval artifacts are known.
 

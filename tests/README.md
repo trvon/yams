@@ -61,7 +61,7 @@ meson test -C build/debug integration_services -v
 
 # Notes
 # - Requires AF_UNIX socket availability (macOS/Linux). If your environment forbids AF_UNIX
-#   binds, affected tests will GTEST_SKIP with an explanatory message.
+#   binds, affected tests will SKIP with an explanatory message.
 # - Logs: build/debug/meson-logs/testlog.txt
 ```
 
@@ -140,47 +140,36 @@ tests/
 ### Unit Tests
 
 Unit tests verify individual components in isolation. Place unit tests in `tests/unit/<module>/`.
+All tests use Catch2 v3; see `tests/CATCH2_PATTERNS.md` for canonical patterns.
 
 ```cpp
-#include <gtest/gtest.h>
+#include <catch2/catch_test_macros.hpp>
 #include <yams/extraction/pdf_extractor.h>
 #include "tests/common/fixture_manager.h"
 
 using namespace yams;
 using namespace yams::test;
 
-class PDFExtractorTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        extractor_ = std::make_unique<extraction::PDFExtractor>();
-    }
-    
+namespace {
+struct PDFExtractorFixture {
+    PDFExtractorFixture() { extractor_ = std::make_unique<extraction::PDFExtractor>(); }
     std::unique_ptr<extraction::PDFExtractor> extractor_;
 };
+} // namespace
 
-TEST_F(PDFExtractorTest, ExtractTextFromSimplePDF) {
-    // Arrange
+TEST_CASE_METHOD(PDFExtractorFixture, "ExtractTextFromSimplePDF", "[pdf]") {
     auto fixture = FixtureManager::getSimplePDF();
-    
-    // Act
     auto result = extractor_->extract(fixture.path);
-    
-    // Assert
-    ASSERT_TRUE(result.has_value());
-    EXPECT_FALSE(result->text.empty());
-    EXPECT_EQ(result->metadata["pages"], "1");
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result->text.empty());
+    CHECK(result->metadata["pages"] == "1");
 }
 
-TEST_F(PDFExtractorTest, HandleCorruptedPDF) {
-    // Arrange
+TEST_CASE_METHOD(PDFExtractorFixture, "HandleCorruptedPDF", "[pdf]") {
     auto fixture = FixtureManager::getCorruptedPDF();
-    
-    // Act
     auto result = extractor_->extract(fixture.path);
-    
-    // Assert
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, ErrorCode::InvalidFormat);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::InvalidFormat);
 }
 ```
 
@@ -189,37 +178,31 @@ TEST_F(PDFExtractorTest, HandleCorruptedPDF) {
 Integration tests verify multiple components working together. Place in `tests/integration/`.
 
 ```cpp
-#include <gtest/gtest.h>
-#include "tests/common/test_helpers.h"
+#include <catch2/catch_test_macros.hpp>
+#include "tests/common/test_helpers_catch2.h"
 
-class DocumentLifecycleTest : public yams::test::YamsTest {
-protected:
-    void SetUp() override {
-        YamsTest::SetUp();
-        // Initialize YAMS in test directory
-        initializeYAMS(testDir);
-    }
+namespace {
+struct DocumentLifecycleFixture {
+    DocumentLifecycleFixture() { initializeYAMS(testDir); }
+    std::filesystem::path testDir = yams::test::make_temp_dir("yams_doc_lifecycle");
 };
+} // namespace
 
-TEST_F(DocumentLifecycleTest, CompleteDocumentWorkflow) {
-    // Add document
+TEST_CASE_METHOD(DocumentLifecycleFixture, "CompleteDocumentWorkflow", "[integration]") {
     auto addResult = runCommand("yams add test.txt --tags test");
-    ASSERT_TRUE(addResult.isOk());
-    
+    REQUIRE(addResult.isOk());
+
     std::string hash = extractHash(addResult.value());
-    
-    // Search for document
+
     auto searchResult = runCommand("yams search test");
-    ASSERT_TRUE(searchResult.value().contains(hash));
-    
-    // Update metadata
+    REQUIRE(searchResult.value().contains(hash));
+
     auto updateResult = runCommand(
         "yams update --hash " + hash + " --metadata status=processed");
-    ASSERT_TRUE(updateResult.isOk());
-    
-    // Retrieve document
+    REQUIRE(updateResult.isOk());
+
     auto getResult = runCommand("yams get " + hash);
-    ASSERT_EQ(getResult.value(), readFile("test.txt"));
+    CHECK(getResult.value() == readFile("test.txt"));
 }
 ```
 
@@ -414,9 +397,11 @@ chmod +x .git/hooks/pre-commit
    - Use `SetUp()` and `TearDown()` for initialization/cleanup
    - Don't share state between tests
 
-3. **Assertions**: Use appropriate assertion macros
-   - `ASSERT_*`: Fatal failures that abort the test
-   - `EXPECT_*`: Non-fatal failures that continue the test
+3. **Assertions**: Use appropriate Catch2 macros
+   - `REQUIRE(...)`: Fatal failures that abort the test
+   - `CHECK(...)`: Non-fatal failures that continue the test
+   - `SKIP("reason")`: Skip a test case at runtime
+   - Filter by tag: `./test_binary "[tag]"` (replaces `--gtest_filter`)
 
 4. **Test Data**: Use generators and fixtures instead of hardcoded data
    - Ensures reproducibility
@@ -486,20 +471,20 @@ chmod +x .git/hooks/pre-commit
 ### Debug Techniques
 
 ```bash
-# Run single test with debugging
-gdb ./tests/unit/extraction/extraction_tests
-(gdb) break PDFExtractorTest_ExtractText_Test::TestBody
-(gdb) run --gtest_filter="PDFExtractorTest.ExtractText"
+# Run single test case by tag (Catch2 filter)
+./build/debug/tests/<test_binary> "[pdf]"
 
-# Run with sanitizers
-cmake -B build -DSANITIZE_ADDRESS=ON
-./build/tests/unit/all_unit_tests
+# Run under gdb and break inside a Catch2 TEST_CASE
+gdb ./build/debug/tests/<test_binary>
+(gdb) break Catch::RunContext::runCurrentTest
+(gdb) run "[pdf]"
 
 # Verbose test output
-ctest -V --output-on-failure
+meson test -C build/debug -v --print-errorlogs
 
-# Test with valgrind
-valgrind --leak-check=full ./tests/unit/all_unit_tests
+# Run with sanitizers (configure once)
+meson setup build/asan --buildtype=debug -Dbuild-tests=true -Db_sanitize=address
+meson test -C build/asan
 ```
 
 ## Contributing Tests

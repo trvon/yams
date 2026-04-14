@@ -1,18 +1,6 @@
 #!Meson configure - time test discovery without fs.glob / subdir_glob
 
-gtest_dep = dependency('gtest', required: false)
-gmock_dep = dependency('gmock', required: false)
-
-gtest_compile_dep = []
-if gtest_dep.found()
-  gtest_compile_dep = gtest_dep.partial_dependency(compile_args: true, includes: true)
-endif
-gmock_compile_deps = []
-gmock_link_deps = []
-if gmock_dep.found()
-  gmock_compile_deps += [gmock_dep.partial_dependency(compile_args: true, includes: true)]
-  gmock_link_deps += [gmock_dep]
-endif
+# GTest/GMock migration complete (PBI-068): all tests now use Catch2.
 
 #Catch2 dependency for modern test framework(PBI - 050)
 #Prefer system installs, but fall back to Meson wrap subproject when available.
@@ -184,27 +172,17 @@ test_cpp_noerror_args = cxx.get_supported_arguments([
 
 ## Meson-native test discovery via structured subdirs (no shell globs)
 #Build legacy GTest unit tests only when GTest is available.
-if gtest_dep.found()
-#Build unit test object library in subdir and link here for the aggregate runner
-  subdir('unit')
-  if get_option('build-plugins')
-    subdir('plugins')
-  endif
-else
-  message('GTest not found; skipping GTest unit/plugin test build (Catch2 tests may still be enabled).')
-  yams_unit_objs = []
+# Unit test object library (Catch2-only; may be empty after PBI-068 migration).
+subdir('unit')
+
+if get_option('build-plugins') and catch2_dep.found()
+  subdir('plugins')
 endif
-
-
 
 if get_option('enable-integration-tests') or get_option('buildtype') == 'debug'
   subdir('integration/smoke')
   subdir('integration/daemon')
-  if gtest_dep.found()
-    subdir('integration/cli')
-  else
-    message('GTest not found; skipping GTest-based CLI integration tests.')
-  endif
+  subdir('integration/cli')
   subdir('integration/search')
 endif
 if get_option('enable-mobile-tests')
@@ -212,9 +190,8 @@ if get_option('enable-mobile-tests')
 endif
 
 stress_srcs = files(
-  'stress/main.cpp',
-  'stress/storage/concurrent_test.cpp',
-  'stress/mcp_socket_stress_test.cpp',
+  'stress/storage/concurrent_catch2_test.cpp',
+  'stress/mcp_socket_stress_catch2_test.cpp',
 )
 
 common_srcs = []  # currently no .cpp files under tests/common
@@ -288,310 +265,13 @@ endforeach
 #Prepare LD_LIBRARY_PATH for test environment(needed for transitive TBB dependencies)
 _test_env_ld_library_path = ':'.join(_test_ld_library_path)
 
- unit_exe = []
-#Only build the GTest executable if there are remaining GTest sources
- if gtest_dep.found() and yams_unit_objs != []
-   unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
-     include_directories: incs,
-     dependencies: [gtest_dep] + gmock_link_deps + test_deps,
-     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-     link_whole: yams_unit_objs,
-     build_rpath: ':'.join(_test_rpaths),
-     install: false,
-   )
- else
-   message('GTest unit tests fully migrated to Catch2 or GTest not found; skipping GTest-based unit test executable.')
- endif
-  unit_shards = get_option('unit-shards')
+# Unit/bench timeouts are still referenced by standalone Catch2 benchmark
+# targets below. The legacy GTest aggregate runner (yams_unit_tests) and its
+# --gtest_filter shards were removed in PBI-068 once all unit tests moved to
+# individual Catch2 executables.
   unit_timeout = get_option('unit-timeout')
   bench_timeout = get_option('bench-timeout')
-#CI - friendly timeout for the unit_safe runner : 2x unit_timeout, floor at 600s
-  safe_timeout = unit_timeout * 2
-  if safe_timeout < 600
-    safe_timeout = 600
-  endif
 
-  if gtest_dep.found() and unit_exe != [] and get_option('enable-full-unit') and unit_shards > 1
-#Derive per - shard timeout(ceil division) with a small floor of 120s
-    shard_timeout = (unit_timeout + unit_shards - 1) / unit_shards
-    if shard_timeout < 120
-      shard_timeout = 120
-    endif
-
-    foreach i : range(unit_shards)
-      test('unit_shard@0@'.format(i), unit_exe,
-        suite: 'unit',
-        args: ['--gtest_filter=' + unit_exclude],
-        env: {
-    'GTEST_TOTAL_SHARDS' : unit_shards.to_string(), 'GTEST_SHARD_INDEX' : i.to_string(),
-#Be brief to reduce log size
-        'GTEST_BRIEF' : '1',
-                        'YAMS_TEST_SAFE_SINGLE_INSTANCE' : '1',
-#Stabilize SQLite / vec for unit runs(PBI - 040)
-                                                           'YAMS_SQLITE_MINIMAL_PRAGMAS'
-        : '1',
-          'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS' : '1500',
-                                              'YAMS_SQLITE_BUSY_TIMEOUT_MS' : '1000',
-                                                                              'YAMS_VDB_IN_MEMORY'
-        : '1',
-          'YAMS_SQLITE_VEC_SKIP_INIT' : '1',
-                                        'YAMS_DISABLE_VECTORS' : '1',
-                                                                 'YAMS_TESTING' : '1',
-#Add TBB library path for transitive dependencies
-                                                                                  'LD_LIBRARY_PATH'
-        : _test_env_ld_library_path,
-        },
-        timeout: shard_timeout
-      )
-    endforeach
-  elif gtest_dep.found() and unit_exe != [] and get_option('enable-full-unit')
-    test('unit', unit_exe,
-      suite: 'unit',
-      args: ['--gtest_filter=' + unit_exclude],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-        'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
-        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-        'YAMS_VDB_IN_MEMORY': '1',
-        'YAMS_SQLITE_VEC_SKIP_INIT': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'YAMS_TESTING': '1',
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      },
-      timeout: unit_timeout)
-  endif
-
-  if gtest_dep.found() and unit_exe != [] and get_option('enable-bench-tests')
-#Note : All bench tests use suite 'bench' or ['bench', 'isolated'].
-#Run unified benchmarks with : `meson test - C builddir-- suite bench`
-
-    test('unit_isolated_integrity_verifier', unit_exe,
-      suite: ['bench', 'isolated', 'perf'],
-      args: ['--gtest_filter=IntegrityVerifierTest.*'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'GTEST_BRIEF': '1',
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      },
-      timeout: bench_timeout,
-    )
-
-#Daemon lifecycle smoke coverage remains opt - in because it performs full
-#daemon start / stop sequences.
-  endif
-
-  if get_option('enable-daemon-long-tests') and unit_exe != []
-    test('unit_isolated_daemon', unit_exe,
-      suite: ['daemon-long'],
-      args: ['--gtest_filter=DaemonTest.*'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'GTEST_BRIEF': '1',
-      },
-      timeout: bench_timeout,
-    )
-  endif
-
-  if gtest_dep.found() and unit_exe != [] and get_option('enable-bench-tests')
-  test('unit_isolated_streaming_chunker', unit_exe,
-    suite: ['bench', 'isolated', 'perf'],
-    args: ['--gtest_filter=StreamingChunkerTest.*'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-
-  test('unit_isolated_chunk_validator', unit_exe,
-    suite: ['bench', 'isolated', 'perf'],
-    args: ['--gtest_filter=ChunkValidatorParallel.*'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-
-  test('unit_isolated_download_manager', unit_exe,
-    suite: ['bench', 'isolated', 'perf'],
-    args: ['--gtest_filter=DownloadManagerExport.*'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-
-  test('unit_isolated_storage_backend', unit_exe,
-    suite: ['bench', 'isolated', 'perf'],
-    args: ['--gtest_filter=StorageBackendTest.*'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-
-  test('unit_isolated_service_manager', unit_exe,
-    suite: ['bench', 'isolated', 'perf'],
-    args: ['--gtest_filter=ServiceManagerTest.*'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-
-  test('unit_shard_vectordb_metrics', unit_exe,
-    suite: ['bench', 'perf'],
-    args: ['--gtest_filter=DaemonMetrics.VectorDbReadyHealsFromHandle'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-
-  test('unit_shard_post_ingest_queue', unit_exe,
-    suite: ['bench', 'perf'],
-    args: ['--gtest_filter=PostIngestQueueStandardTest.*'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-
-#Fast warm - latency bench(replaces unit WarmLatencyBenchmark)
-  test('unit_bench_daemon_warm_latency', unit_exe,
-    suite: ['bench', 'perf'],
-    args: ['--gtest_filter=DaemonBench.WarmLatencyFast'],
-    env: {
-    'YAMS_TEST_SAFE_SINGLE_INSTANCE' : '1',
-                                       'GTEST_BRIEF' : '1',
-#Require an explicit opt - in to actually run the daemon warm bench
-#in CI or local : YAMS_ENABLE_DAEMON_BENCH = 1 must be set in addition
-#to this fast flag; otherwise the test self - skips.
-                                                       'YAMS_BENCH_FAST' : '1',
-                                                                           'LD_LIBRARY_PATH'
-        : _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-
-  endif
-
-  if gtest_dep.found() and unit_exe != [] and get_option('enable-reliability-tests')
-  test('unit_reliability_grep_search_startup', unit_exe,
-    suite: ['bench', 'reliability'],
-    args: ['--gtest_filter=GrepServiceTest.RetriesTransientMetadataErrors:GrepServiceTest.PropagatesMetadataErrorsWhenTagsUnavailable:SearchServiceTest.LightIndexRetriesTransientMetadataErrors'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-      'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
-      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-      'YAMS_VDB_IN_MEMORY': '1',
-      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
-      'YAMS_DISABLE_VECTORS': '1',
-      'YAMS_TESTING': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-  endif
-
-  if gtest_dep.found() and unit_exe != []
-#Define a fast "smoke" subset using gtest filter for developer iteration
-    smoke_filter = 'ContentStoreTest.*:ProgressReporterTest.*:ContentMetadataTest.*:ContentStoreBuilderTest.*:SearchSmoke.*'
-    test('unit_smoke', unit_exe,
-      suite: ['unit', 'smoke'],
-      args: ['--gtest_filter=' + smoke_filter],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-        'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
-        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-        'YAMS_VDB_IN_MEMORY': '1',
-        'YAMS_SQLITE_VEC_SKIP_INIT': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'YAMS_TESTING': '1',
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      },
-      timeout: 120,
-    )
-
-#Targeted fast subset for PBI - 045 metadata modernization acceptance
-    targeted_filter = 'DatabaseStatementChronoTest.*:QueryHelpersIntegration.*:MetadataRepositoryCache.*:ConnectionPoolMaintenance.*:SqlBuildSelectTest.*:TagsQuerySpecIntegration.*:MetadataRepositoryTest.CountsAndModifiedSince:MetadataValueVariantTest.*'
-    test('unit_targeted_metadata', unit_exe,
-      suite: ['unit', 'pbi045'],
-      args: ['--gtest_filter=' + targeted_filter],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'GTEST_BRIEF': '1',
-        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-        'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
-        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-        'YAMS_VDB_IN_MEMORY': '1',
-        'YAMS_SQLITE_VEC_SKIP_INIT': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'YAMS_TESTING': '1',
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      },
-      timeout: 180,
-    )
-
-#PBI - 040 : unit_safe runner — stable daily gate excluding known heavy / fragile suites
-#This provides a fast, reliable unit test subset for CI / developer iteration
-#CI - stable subset : drop FTS - heavy, repo search, reference counter stats and vector smoke
-    safe_include_filter = 'ContentStoreTest.*:ProgressReporterTest.*:QueryHelpersIntegration.*:ConnectionPoolMaintenance.*:BKTreeTest.*:SearchCacheTest.*:QueryParserTest.*:MessageFramingTest.*:ResponseOfTest.*:IPCMessageTypeTest.*'
-    test('unit_safe', unit_exe,
-      suite: ['unit', 'safe', 'pbi040'],
-      args: ['--gtest_filter=' + safe_include_filter],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'GTEST_BRIEF': '1',
-        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-        'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
-        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-        'YAMS_VDB_IN_MEMORY': '1',
-        'YAMS_SQLITE_VEC_SKIP_INIT': '1',
-        'YAMS_DISABLE_VECTORS': '1',
-        'YAMS_TESTING': '1',
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      },
-      timeout: safe_timeout,
-    )
-
-#PBI - 040 : Conditional vector smoke test(runs only when sqlite - vec is available)
-    test('unit_vector_smoke', unit_exe,
-      suite: ['unit', 'vector', 'pbi040'],
-      args: ['--gtest_filter=VectorSmokeTest.*'],
-      env: {
-    'YAMS_TEST_SAFE_SINGLE_INSTANCE' : '1',
-                                       'GTEST_BRIEF' : '1',
-                                                       'YAMS_SQLITE_MINIMAL_PRAGMAS'
-        : '1',
-          'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS' : '3000',
-                                              'YAMS_SQLITE_BUSY_TIMEOUT_MS' : '1000',
-                                                                              'YAMS_VDB_IN_MEMORY'
-        : '1',
-          'YAMS_TESTING' : '1',
-#Note : sqlite - vec env toggles NOT set, allowing initialization if available
-                           'LD_LIBRARY_PATH' : _test_env_ld_library_path,
-      },
-      timeout: 120,
-    )
-  endif
 
 
 ## integration_smoke now defined in subdir('integration/smoke')
@@ -634,23 +314,23 @@ endif
 subdir('acceptance')
 
 #Stress tests can be heavy; register but mark as long - running via suite name
-if gtest_dep.found() and get_option('enable-stress-tests') and all_stress.length() > 0
-  stress_exe = executable('yams_stress_tests', all_stress + test_main,
+if catch2_dep.found() and get_option('enable-stress-tests') and all_stress.length() > 0
+  stress_exe = executable('yams_stress_tests', all_stress,
     include_directories: incs,
-    dependencies: [gtest_dep, test_deps],
+    dependencies: [catch2_dep, catch2_main_dep, test_deps],
     cpp_args: ['-DYAMS_TESTING=1'],
     install: false,
   )
   test('stress', stress_exe,
     suite: 'stress',
-    args: ['--gtest_filter=MCPSocketStressTest.*'],
+    args: ['[mcpsocketstresstest]'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
     },
     timeout: 300)
 elif get_option('enable-stress-tests')
-  message('GTest not found; skipping stress test registration.')
+  message('Catch2 not found; skipping stress test registration.')
 endif
 
 # ============================================================================

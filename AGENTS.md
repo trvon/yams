@@ -18,10 +18,11 @@ Use this file for YAMS repo specifics, local conventions, and repo-scoped safety
 
 ## Repo Priorities (Overrides / Additions)
 
-- Prefer YAMS retrieval before local file reads when recovering context or prior decisions.
+- Use YAMS retrieval before local file reads when recovering context or prior decisions.
 - Keep memory artifacts small and queryable (checkpoint code + short notes > long prose dumps).
 - Index work before `git push`, and before deleting files.
 - If blackboard tools are unavailable, continue with YAMS-only workflow without blocking.
+- Do not start discovery with local search/read tools when YAMS retrieval can narrow the target first.
 
 ## CLI Philosophy
 
@@ -69,9 +70,20 @@ Use this order when you need context for reasoning:
 
 Behavior rules:
 
-- Prefer YAMS retrieval over ad-hoc local `rg`/`cat` for prior knowledge.
+- Use YAMS retrieval before ad-hoc local `rg`, `Read`, `Glob`, `Grep`, `cat`, or broad bash exploration for prior knowledge.
+- For discovery or context-building tasks, start with `yams grep` and/or `yams search` before local search/read tools.
+- Local tools are for implementation detail after YAMS has identified likely artifacts.
+- If YAMS fails, returns no useful hits, or is unavailable, note that explicitly and then fall back.
+- Direct local read is allowed without prior YAMS retrieval only when the user gives an exact file path, or when reading files you already changed in the current turn.
 - Do not mark chunks as rejected unless explicit user/model feedback says so.
 - Treat `served - used` as weak negative signal (`not_used`), not hard rejection.
+
+Default retrieval choice:
+
+- Exact symbol/text/pattern: `yams grep`
+- Concept / prior work / decisions / history: `yams search`
+- Need artifact contents after retrieval: `yams get`
+- Need exact implementation detail in a known file: local `Read`
 
 Reporting when retrieval is used:
 

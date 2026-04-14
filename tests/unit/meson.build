@@ -290,16 +290,9 @@ unit_srcs += unit_ingest
 unit_srcs += unit_wal
 unit_srcs += unit_plugins
 
-if gtest_dep.found() and unit_srcs.length() > 0
-  yams_unit_objs = static_library('yams_unit_objs', unit_srcs,
-    include_directories: incs,
-    dependencies: [gtest_compile_dep] + gmock_compile_deps + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    install: false,
-    pic: true,
-  )
-elif unit_srcs.length() == 0
-  message('All GTest sources migrated to Catch2; skipping yams_unit_objs.')
+if unit_srcs.length() > 0
+  message('Stray unit sources remain after Catch2 migration; yams_unit_objs is no longer built.')
 else
-  message('GTest not found; skipping compilation of yams_unit_objs.')
+  message('All unit tests have individual Catch2 executables; no aggregate unit objects to build.')
 endif
+yams_unit_objs = []

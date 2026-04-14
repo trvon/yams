@@ -2,12 +2,11 @@
 # These tests require the tree-sitter symbol extractor plugin binary to exist.
 if get_option('plugin-symbols')
   plugin_tests = files(
-    'symbol_extractor_all_langs_test.cpp',
-    'symbol_extractor_edge_cases_test.cpp',
-    'symbol_extractor_solidity_test.cpp',
-    'onnx_request_plugin_test.cpp',
-    'onnx_provider_plugin_test.cpp',
-    '../test_main.cpp',
+    'symbol_extractor_all_langs_catch2_test.cpp',
+    'symbol_extractor_edge_cases_catch2_test.cpp',
+    'symbol_extractor_solidity_catch2_test.cpp',
+    'onnx_request_plugin_catch2_test.cpp',
+    'onnx_provider_plugin_catch2_test.cpp',
   )
 
   # Define plugin path based on build directory and platform
@@ -25,7 +24,7 @@ if get_option('plugin-symbols')
 
   plugin_exe = executable('yams_plugin_tests', plugin_tests,
     include_directories: incs,
-    dependencies: [gtest_dep] + test_deps,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: ['-DPLUGIN_PATH="' + plugin_path + '"'],
     install: false,
   )
@@ -61,9 +60,9 @@ if get_option('plugin-zyp')
   zyp_plugin_path = join_paths(plugin_build_dir, 'plugins/zyp/yams_zyp' + plugin_ext)
 
   zyp_test_exe = executable('yams_zyp_tests',
-    files('zyp/zyp_plugin_test.cpp', '../test_main.cpp'),
+    files('zyp/zyp_plugin_catch2_test.cpp'),
     include_directories: incs,
-    dependencies: [gtest_dep] + test_deps,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: ['-DZYP_PLUGIN_PATH="' + zyp_plugin_path + '"'],
     install: false,
   )
@@ -79,9 +78,9 @@ if get_option('plugin-glint')
   glint_plugin_path = join_paths(plugin_build_dir, 'plugins/glint/yams_glint' + plugin_ext)
 
   glint_test_exe = executable('yams_glint_tests',
-    files('glint/glint_plugin_test.cpp', '../test_main.cpp'),
+    files('glint/glint_plugin_catch2_test.cpp'),
     include_directories: incs,
-    dependencies: [gtest_dep, nlohmann_json_dep] + test_deps,
+    dependencies: [catch2_dep, catch2_main_dep, nlohmann_json_dep] + test_deps,
     cpp_args: ['-DGLINT_PLUGIN_PATH="' + glint_plugin_path + '"'],
     install: false,
   )

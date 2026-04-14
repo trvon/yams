@@ -1,0 +1,216 @@
+#include <catch2/catch_test_macros.hpp>
+
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "common/test_helpers_catch2.h"
+
+#include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/global_io_context.h>
+
+namespace fs = std::filesystem;
+
+namespace {
+
+class CaptureStdout {
+public:
+    CaptureStdout() : old_(std::cout.rdbuf(buffer_.rdbuf())) {}
+    ~CaptureStdout() { std::cout.rdbuf(old_); }
+
+    std::string str() const { return buffer_.str(); }
+
+private:
+    std::ostringstream buffer_;
+    std::streambuf* old_{nullptr};
+};
+
+int run_cli(const std::vector<std::string>& args, std::string* output = nullptr,
+            std::optional<std::string> stdinData = std::nullopt) {
+    std::vector<std::string> effectiveArgs = args;
+    const bool hasDataDirFlag =
+        std::find(effectiveArgs.begin(), effectiveArgs.end(), "--data-dir") !=
+            effectiveArgs.end() ||
+        std::find(effectiveArgs.begin(), effectiveArgs.end(), "--storage") != effectiveArgs.end();
+    if (!hasDataDirFlag) {
+        if (const char* dataDir = std::getenv("YAMS_DATA_DIR"); dataDir && *dataDir) {
+            effectiveArgs.insert(effectiveArgs.begin() + 1, std::string(dataDir));
+            effectiveArgs.insert(effectiveArgs.begin() + 1, "--data-dir");
+        }
+    }
+    int rc = 0;
+    std::string captured;
+    try {
+        yams::cli::YamsCLI cli;
+        std::vector<char*> argv;
+        argv.reserve(effectiveArgs.size());
+        for (const auto& arg : effectiveArgs) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+
+        CaptureStdout capture;
+
+        std::istringstream in;
+        std::streambuf* oldIn = nullptr;
+        if (stdinData.has_value()) {
+            in.str(*stdinData);
+            oldIn = std::cin.rdbuf(in.rdbuf());
+        }
+
+        {
+            rc = cli.run(static_cast<int>(argv.size()), argv.data());
+        }
+
+        if (oldIn) {
+            std::cin.rdbuf(oldIn);
+        }
+        if (captured.empty()) {
+            captured = capture.str();
+        }
+    } catch (const std::exception& e) {
+        rc = -1;
+        captured = std::string("EXCEPTION: ") + e.what();
+    } catch (...) {
+        rc = -1;
+        captured = "EXCEPTION: unknown";
+    }
+    if (output) {
+        *output = std::move(captured);
+    }
+    return rc;
+}
+
+nlohmann::json parse_json_output(const std::string& raw) {
+    const auto pos = raw.find('{');
+    if (pos == std::string::npos) {
+        return nlohmann::json{};
+    }
+    return nlohmann::json::parse(raw.substr(pos));
+}
+
+} // namespace
+
+TEST_CASE("IntegrationSmoke.AddCommandSandboxOperations", "[smoke][integrationsmoke]") {
+    const fs::path root = yams::test::make_temp_dir("yams_add_sandbox_");
+    const fs::path dataDir = root / "data";
+    const fs::path inputDir = root / "input";
+    fs::create_directories(dataDir);
+    fs::create_directories(inputDir / "sub");
+
+    const fs::path fileA = inputDir / "alpha.txt";
+    const fs::path fileB = inputDir / "sub" / "beta.md";
+    const fs::path fileSkip = inputDir / "sub" / "skip.log";
+    const fs::path fileM1 = inputDir / "multi1.txt";
+    const fs::path fileM2 = inputDir / "multi2.txt";
+
+    yams::test::write_file(fileA, "alpha sandbox add content\n");
+    yams::test::write_file(fileB, "beta sandbox add content\n");
+    yams::test::write_file(fileSkip, "skip me\n");
+    yams::test::write_file(fileM1, "multi file one\n");
+    yams::test::write_file(fileM2, "multi file two\n");
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", dataDir.string());
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+    yams::test::ScopedEnvVar disableAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART",
+                                              std::string("1"));
+
+    std::string out;
+
+    int rc = run_cli({"yams", "--json", "add", fileA.string(), "--name", "single-alpha.txt",
+                      "--tags", "sandbox,single", "--metadata", "source=test"},
+                     &out);
+    INFO(out); REQUIRE(rc == 0);
+    auto j = parse_json_output(out);
+    INFO(out); REQUIRE(j.is_object());
+    REQUIRE(j.contains("summary"));
+    CHECK(j["summary"]["failed"].get<int>() == 0);
+
+    rc = run_cli({"yams", "--json", "add", inputDir.string(), "--recursive", "--include",
+                  "*.txt,*.md", "--exclude", "*.log", "--tags", "sandbox,dir"},
+                 &out);
+    INFO(out); REQUIRE(rc == 0);
+    j = parse_json_output(out);
+    INFO(out); REQUIRE(j.is_object());
+    REQUIRE(j.contains("summary"));
+    CHECK(j["summary"]["failed"].get<int>() == 0);
+    CHECK(j.contains("results"));
+    CHECK_FALSE(j["results"].empty());
+
+    rc = run_cli(
+        {"yams", "--json", "add", "-", "--name", "stdin-sandbox.txt", "--tags", "sandbox,stdin"},
+        &out, std::string("stdin payload for sandbox add\n"));
+    INFO(out); REQUIRE(rc == 0);
+    j = parse_json_output(out);
+    INFO(out); REQUIRE(j.is_object());
+    REQUIRE(j.contains("summary"));
+    CHECK(j["summary"]["failed"].get<int>() == 0);
+
+    rc = run_cli(
+        {"yams", "--json", "add", fileM1.string(), fileM2.string(), "--tags", "sandbox,multi"},
+        &out);
+    INFO(out); REQUIRE(rc == 0);
+    j = parse_json_output(out);
+    INFO(out); REQUIRE(j.is_object());
+    REQUIRE(j.contains("results"));
+    CHECK(static_cast<int>(j["results"].size()) >= 2);
+    CHECK(j["summary"]["failed"].get<int>() == 0);
+
+    rc = run_cli({"yams", "--json", "list", "--limit", "200"}, &out);
+    INFO(out); REQUIRE(rc == 0);
+    j = parse_json_output(out);
+    INFO(out); REQUIRE((j.is_array() || (j.is_object() && j.contains("items")) ||
+                (j.is_object() && j.contains("documents"))));
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
+TEST_CASE("IntegrationSmoke.AddCommandFallsBackToInProcessWhenDaemonStartupUnavailable", "[smoke][integrationsmoke]") {
+    const fs::path root = yams::test::make_temp_dir("yams_add_fallback_");
+    const fs::path dataDir = root / "data";
+    const fs::path blockedSocketDir = root / "blocked-socket";
+    const fs::path inputFile = root / "fallback.txt";
+    fs::create_directories(dataDir);
+    fs::create_directories(blockedSocketDir);
+
+    yams::test::write_file(inputFile, "fallback add content\n");
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", dataDir.string());
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+    yams::test::ScopedEnvVar daemonSocket("YAMS_DAEMON_SOCKET",
+                                          (blockedSocketDir / "daemon.sock").string());
+
+    std::error_code ec;
+    fs::permissions(blockedSocketDir, fs::perms::none, fs::perm_options::replace, ec);
+
+    std::string out;
+    const int rc =
+        run_cli({"yams", "--json", "add", inputFile.string(), "--tags", "fallback"}, &out);
+
+    fs::permissions(blockedSocketDir, fs::perms::owner_all, fs::perm_options::replace, ec);
+
+    INFO(out); REQUIRE(rc == 0);
+    auto j = parse_json_output(out);
+    INFO(out); REQUIRE(j.is_object());
+    REQUIRE(j.contains("summary"));
+    CHECK(j["summary"]["failed"].get<int>() == 0);
+    REQUIRE(j.contains("results"));
+    REQUIRE_FALSE(j["results"].empty());
+    CHECK(j["results"][0]["success"].get<bool>());
+}

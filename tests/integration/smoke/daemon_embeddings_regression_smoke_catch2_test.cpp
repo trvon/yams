@@ -1,0 +1,592 @@
+#include <catch2/catch_test_macros.hpp>
+
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#endif
+
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#if !defined(_WIN32)
+#include <pwd.h>
+#include <unistd.h>
+#endif
+
+#include "common/fixture_manager.h"
+#include "common/search_corpus_presets.h"
+
+#include <yams/app/services/document_ingestion_service.h>
+#include <yams/cli/cli_sync.h>
+#include <yams/core/types.h>
+#include <yams/crypto/hasher.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/daemon.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
+// Local-socket bind probe for sandboxed environments
+#include <boost/asio/local/stream_protocol.hpp>
+#include <boost/system/error_code.hpp>
+
+using namespace std::chrono_literals;
+namespace fs = std::filesystem;
+
+namespace {
+using yams::cli::run_sync;
+using StatusClock = std::chrono::steady_clock;
+
+bool truthy_env(const char* value) {
+    if (!value || !*value) {
+        return false;
+    }
+    std::string v(value);
+    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+std::string unique_suffix() {
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::to_string(now);
+}
+
+template <typename Map> size_t parse_counter(const Map& stats, const std::string& key) {
+    auto it = stats.find(key);
+    if (it == stats.end()) {
+        return 0;
+    }
+    size_t value = 0;
+    for (char ch : it->second) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) {
+            return 0;
+        }
+        value = (value * 10) + static_cast<size_t>(ch - '0');
+    }
+    return value;
+}
+
+bool wait_for_daemon_ready(yams::daemon::DaemonClient& client, std::chrono::milliseconds max_wait,
+                           std::string* last_status, const yams::daemon::YamsDaemon* daemon) {
+    const auto deadline = StatusClock::now() + max_wait;
+    while (StatusClock::now() < deadline) {
+        auto statusRes = run_sync(client.status(), 10000ms);
+        if (statusRes) {
+            const auto& status = statusRes.value();
+            if (last_status) {
+                *last_status =
+                    status.overallStatus.empty() ? std::string("(empty)") : status.overallStatus;
+                *last_status += " | ready=" + std::string(status.ready ? "true" : "false");
+                *last_status +=
+                    " | lifecycle=" + (status.lifecycleState.empty() ? std::string("(empty)")
+                                                                     : status.lifecycleState);
+                if (!status.readinessStates.empty()) {
+                    *last_status += " | readiness=";
+                    for (const auto& [k, v] : status.readinessStates) {
+                        *last_status += k + '=' + std::string(v ? "true" : "false") + ';';
+                    }
+                }
+                if (!status.initProgress.empty()) {
+                    *last_status += " | progress=";
+                    for (const auto& [k, v] : status.initProgress) {
+                        *last_status += k + '=' + std::to_string(static_cast<unsigned>(v)) + ';';
+                    }
+                }
+                if (!status.requestCounts.empty()) {
+                    *last_status += " | requests=";
+                    for (const auto& [k, v] : status.requestCounts) {
+                        *last_status += k + '=' + std::to_string(v) + ';';
+                    }
+                }
+                if (!status.lastError.empty()) {
+                    *last_status += " | last_error=" + status.lastError;
+                }
+                std::cerr << "status tick: " << *last_status << std::endl;
+            }
+            if (status.ready || status.overallStatus == "ready" ||
+                status.overallStatus == "Ready" || status.overallStatus == "degraded" ||
+                status.overallStatus == "Degraded") {
+                return true;
+            }
+        }
+        if (last_status && !statusRes) {
+            *last_status = statusRes.error().message.empty() ? std::string("status call failed")
+                                                             : statusRes.error().message;
+            std::cerr << "status tick: " << *last_status << std::endl;
+        }
+        if (daemon) {
+            try {
+                auto snap = daemon->getLifecycle().snapshot();
+                if (snap.state == yams::daemon::LifecycleState::Ready ||
+                    snap.state == yams::daemon::LifecycleState::Degraded) {
+                    if (last_status && last_status->empty()) {
+                        *last_status = "lifecycle_ready";
+                    }
+                    return true;
+                }
+            } catch (...) {
+            }
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    if (last_status && last_status->empty()) {
+        *last_status = "timeout waiting for ready";
+    }
+    return false;
+}
+
+static bool canBindUnixSocketHere() {
+    try {
+        boost::asio::io_context io;
+        boost::asio::local::stream_protocol::acceptor acc(io);
+        auto path = fs::path("/tmp") /
+                    (std::string("yams-smoke-probe-") + std::to_string(::getpid()) + ".sock");
+        std::error_code ec;
+        fs::remove(path, ec);
+        boost::system::error_code bec;
+        acc.open(boost::asio::local::stream_protocol::endpoint(path.string()).protocol(), bec);
+        if (bec)
+            return false;
+        acc.bind(boost::asio::local::stream_protocol::endpoint(path.string()), bec);
+        if (bec)
+            return false;
+        acc.close();
+        fs::remove(path, ec);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool wait_for_vector_index_growth(yams::daemon::DaemonClient& client, size_t base_bytes,
+                                  size_t base_rows, size_t base_embed_consumed,
+                                  std::chrono::milliseconds max_wait, std::string* detail) {
+    const auto deadline = StatusClock::now() + max_wait;
+    yams::daemon::GetStatsRequest req;
+    while (StatusClock::now() < deadline) {
+        auto statsRes = yams::cli::run_sync(client.getStats(req), 2s);
+        if (statsRes) {
+            const auto& stats = statsRes.value();
+            size_t rows = parse_counter(stats.additionalStats, "vector_rows");
+            size_t embed_consumed = parse_counter(stats.additionalStats, "bus_embed_consumed");
+            if (stats.vectorIndexSize > base_bytes || rows > base_rows ||
+                embed_consumed > base_embed_consumed) {
+                if (detail) {
+                    *detail = "vector_index_size=" + std::to_string(stats.vectorIndexSize) +
+                              ", vector_rows=" + std::to_string(rows) +
+                              ", bus_embed_consumed=" + std::to_string(embed_consumed);
+                }
+                return true;
+            }
+            if (detail) {
+                *detail = "vector_index_size=" + std::to_string(stats.vectorIndexSize) +
+                          ", vector_rows=" + std::to_string(rows) +
+                          ", bus_embed_consumed=" + std::to_string(embed_consumed);
+            }
+        } else if (detail) {
+            *detail = statsRes.error().message;
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+    return false;
+}
+
+bool wait_for_documents_available(yams::daemon::DaemonClient& client,
+                                  const std::vector<std::string>& hashes,
+                                  std::chrono::milliseconds max_wait, std::string* detail) {
+    const auto deadline = StatusClock::now() + max_wait;
+    while (StatusClock::now() < deadline) {
+        bool all_ok = true;
+        for (const auto& hash : hashes) {
+            yams::daemon::GetRequest req;
+            req.hash = hash;
+            req.metadataOnly = false;
+            req.maxBytes = 65536; // limit payload while ensuring content retrieval
+            auto getRes = yams::cli::run_sync(client.get(req), 3s);
+            if (!getRes) {
+                all_ok = false;
+                if (detail) {
+                    *detail = "hash=" + hash + " error=" + getRes.error().message;
+                }
+                break;
+            }
+            const auto& resp = getRes.value();
+            if (!resp.hasContent || resp.content.empty()) {
+                all_ok = false;
+                if (detail) {
+                    *detail = "hash=" + hash + " missing content";
+                }
+                break;
+            }
+        }
+        if (all_ok) {
+            if (detail) {
+                *detail = "all documents retrievable";
+            }
+            return true;
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+    return false;
+}
+
+bool ensure_embeddings_provider(yams::daemon::DaemonClient& client,
+                                std::chrono::milliseconds max_wait, const std::string& model_name,
+                                std::string* reason, const yams::daemon::YamsDaemon* daemon) {
+    std::string status;
+    if (!wait_for_daemon_ready(client, max_wait, &status, daemon)) {
+        if (reason)
+            *reason = "Daemon not ready (status=" + status + ")";
+        return false;
+    }
+
+    yams::daemon::GenerateEmbeddingRequest req;
+    req.text = "_healthcheck_";
+    req.modelName = model_name.empty() ? std::string{"all-MiniLM-L6-v2"} : model_name;
+    req.normalize = true;
+
+    const auto timeout = max_wait;
+    auto res = run_sync(client.generateEmbedding(req), timeout);
+    if (!res) {
+        if (reason)
+            *reason = std::string{"GenerateEmbedding failed: "} + res.error().message;
+        return false;
+    }
+    if (res.value().embedding.empty()) {
+        if (reason)
+            *reason = "Embedding provider returned empty embedding";
+        return false;
+    }
+    return true;
+}
+
+bool wait_for_post_ingest_idle(yams::daemon::DaemonClient& client,
+                               std::chrono::milliseconds max_wait, std::string* reason) {
+    const auto deadline = StatusClock::now() + max_wait;
+    while (StatusClock::now() < deadline) {
+        auto statusRes = run_sync(client.status(), 500ms);
+        if (statusRes) {
+            const auto& status = statusRes.value();
+            size_t queued = 0;
+            size_t inflight = 0;
+            if (auto it = status.requestCounts.find("post_ingest_queued");
+                it != status.requestCounts.end()) {
+                queued = it->second;
+            }
+            if (auto it = status.requestCounts.find("post_ingest_inflight");
+                it != status.requestCounts.end()) {
+                inflight = it->second;
+            }
+            if (queued == 0 && inflight == 0) {
+                if (reason)
+                    reason->clear();
+                return true;
+            }
+            if (reason) {
+                *reason =
+                    "queued=" + std::to_string(queued) + " inflight=" + std::to_string(inflight);
+            }
+        } else if (reason) {
+            *reason = statusRes.error().message;
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+    return false;
+}
+} // namespace
+
+TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPresets", "[smoke][daemonembeddingsregressionsmoke]") {
+    if (std::getenv("GTEST_DISCOVERY_MODE")) {
+        SKIP("Skipping during test discovery");
+    }
+    // Respect CI gating: skip when vectors are disabled
+    if (const char* dv = std::getenv("YAMS_DISABLE_VECTORS"); truthy_env(dv)) {
+        SKIP("Skipping embeddings smoke: YAMS_DISABLE_VECTORS=1");
+    }
+    if (!canBindUnixSocketHere()) {
+        SKIP("Skipping smoke: environment forbids AF_UNIX bind (sandbox).");
+    }
+
+#if defined(_WIN32)
+    _putenv_s("YAMS_DAEMON_KILL_OTHERS", "0");
+    _putenv_s("YAMS_DISABLE_VECTOR_DB", "0");
+#else
+    setenv("YAMS_DAEMON_KILL_OTHERS", "0", 1);
+    unsetenv("YAMS_DISABLE_VECTOR_DB");
+#endif
+    // Skip content store stats queries that can race when embedding loads are slow.
+#if defined(_WIN32)
+    _putenv_s("YAMS_DISABLE_STORE_STATS", "1");
+#else
+    setenv("YAMS_DISABLE_STORE_STATS", "1", 1);
+#endif
+
+    const fs::path root = fs::temp_directory_path() / ("yams_embed_regression_" + unique_suffix());
+    const fs::path dataDir = root / "data";
+    const fs::path fixturesRoot = root / "fixtures";
+    fs::create_directories(dataDir);
+    fs::create_directories(fixturesRoot);
+    std::cerr << "embed smoke temp root: " << root << std::endl;
+
+    yams::test::FixtureManager fixtures(fixturesRoot);
+
+    yams::daemon::DaemonConfig cfg;
+    cfg.dataDir = dataDir;
+    // Prefer /tmp-based path to avoid path-length and sandbox issues
+    fs::path sockdir = fs::path("/tmp") / (std::string("yamsr-") + std::to_string(::getpid()));
+    std::error_code mkec;
+    fs::create_directories(sockdir, mkec);
+    cfg.socketPath =
+        sockdir / (std::string("yams-daemon-smoke-") + std::to_string(::getpid()) + ".sock");
+    cfg.pidFile = root / "daemon.pid";
+    cfg.logFile = root / "daemon.log";
+    cfg.enableModelProvider = true;
+    bool useMockProvider = false;
+    if (const char* envMock = std::getenv("YAMS_USE_MOCK_PROVIDER")) {
+        useMockProvider = truthy_env(envMock);
+    }
+    cfg.useMockModelProvider = useMockProvider;
+    cfg.autoLoadPlugins = true;
+    std::string resolvedModelsRoot;
+    if (const char* modelsRoot = std::getenv("YAMS_MODELS_ROOT"); modelsRoot && *modelsRoot) {
+        resolvedModelsRoot = modelsRoot;
+    } else if (const char* home = std::getenv("HOME"); home && *home) {
+        resolvedModelsRoot = (fs::path(home) / ".local" / "share" / "yams" / "models").string();
+#if !defined(_WIN32)
+    } else if (const passwd* pw = ::getpwuid(::getuid()); pw && pw->pw_dir && *pw->pw_dir) {
+        resolvedModelsRoot =
+            (fs::path(pw->pw_dir) / ".local" / "share" / "yams" / "models").string();
+#endif
+    }
+    if (!resolvedModelsRoot.empty()) {
+        cfg.modelPoolConfig.modelsRoot = resolvedModelsRoot;
+#if !defined(_WIN32)
+        ::setenv("YAMS_MODELS_ROOT", resolvedModelsRoot.c_str(), 1);
+#endif
+    }
+    cfg.modelPoolConfig.lazyLoading = false;
+    cfg.modelPoolConfig.preloadModels = {"all-MiniLM-L6-v2"};
+
+    const std::string modelName = "all-MiniLM-L6-v2";
+
+    yams::daemon::YamsDaemon daemon(cfg);
+    auto started = daemon.start();
+    INFO((started ? std::string{} : started.error().message)); REQUIRE(started);
+
+    // runLoop is required to drive async initialization. Without it the daemon can
+    // remain in initializing state and never become ready.
+    std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
+    std::this_thread::sleep_for(50ms);
+
+    struct Guard {
+        yams::daemon::YamsDaemon* daemon;
+        std::thread* runLoopThread;
+        fs::path root;
+        ~Guard() {
+            if (daemon) {
+                (void)daemon->stop();
+            }
+            if (runLoopThread && runLoopThread->joinable()) {
+                runLoopThread->join();
+            }
+            const char* keepEnv = std::getenv("YAMS_KEEP_SMOKE_TEMP");
+            const bool keep = truthy_env(keepEnv);
+            std::cerr << "Guard cleanup: keep_env='" << (keepEnv ? keepEnv : "")
+                      << "' keep=" << (keep ? "true" : "false") << " root=" << root << std::endl;
+            if (!root.empty() && !keep) {
+                std::error_code ec;
+                fs::remove_all(root, ec);
+            }
+        }
+    } guard{&daemon, &runLoopThread, root};
+
+    // Build deterministic search corpus fixtures.
+    auto spec = yams::test::defaultSearchCorpusSpec();
+    spec.commonTags.push_back("regression");
+    auto corpus = fixtures.createSearchCorpus(spec);
+    const std::size_t expectedDocs = corpus.fixtures.size();
+    REQUIRE(expectedDocs > 0u);
+
+    yams::daemon::ClientConfig clientCfg;
+    clientCfg.socketPath = cfg.socketPath;
+    clientCfg.requestTimeout = 60s;
+    clientCfg.headerTimeout = 60s;
+    clientCfg.bodyTimeout = 120s;
+    clientCfg.enableChunkedResponses = false;
+    clientCfg.autoStart = false;
+
+    yams::daemon::DaemonClient client(clientCfg);
+    auto connected = yams::cli::run_sync(client.connect(), 5s);
+    INFO("Daemon connect failed: " << connected.error().message); REQUIRE(connected);
+
+    client.setStreamingEnabled(false);
+
+    std::string status;
+    bool ready = wait_for_daemon_ready(client, 30s, &status, &daemon);
+    if (!ready) {
+        auto statusRes = yams::cli::run_sync(client.status(), 2s);
+        if (statusRes) {
+            const auto& s = statusRes.value();
+            status += " | last_overall=" + s.overallStatus;
+            status += " | lifecycle=" + s.lifecycleState;
+            status += " | ready=" + std::string(s.ready ? "true" : "false");
+            if (!s.readinessStates.empty()) {
+                status += " | readiness=";
+                for (const auto& [k, v] : s.readinessStates) {
+                    status += k + '=' + std::string(v ? "true" : "false") + ';';
+                }
+            }
+            if (!s.initProgress.empty()) {
+                status += " | progress=";
+                for (const auto& [k, v] : s.initProgress) {
+                    status += k + '=' + std::to_string(static_cast<unsigned>(v)) + ';';
+                }
+            }
+            if (!s.requestCounts.empty()) {
+                status += " | requests=";
+                for (const auto& [k, v] : s.requestCounts) {
+                    status += k + '=' + std::to_string(v) + ';';
+                }
+            }
+            if (!s.lastError.empty()) {
+                status += " | last_error=" + s.lastError;
+            }
+        } else {
+            status += " | status_err=" + statusRes.error().message;
+        }
+    }
+    if (!ready) {
+        std::cerr << "final daemon status: " << status << std::endl;
+    }
+    INFO("Daemon not ready: " << status); REQUIRE(ready);
+
+    std::string reason;
+    INFO("Embeddings provider unavailable: " << reason); REQUIRE(ensure_embeddings_provider(client, 30s, modelName, &reason, &daemon));
+
+    yams::app::services::DocumentIngestionService ingestion;
+    yams::app::services::AddOptions baseOpts;
+    baseOpts.socketPath = cfg.socketPath;
+    baseOpts.explicitDataDir = dataDir;
+    baseOpts.recursive = false;
+    baseOpts.noEmbeddings = false;
+    baseOpts.timeoutMs = 60000;
+
+    std::vector<std::string> baseTags = spec.commonTags;
+    baseTags.push_back("corpus:search");
+
+    std::vector<std::string> daemonHashes;
+    daemonHashes.reserve(expectedDocs);
+
+    for (const auto& fixture : corpus.fixtures) {
+        yams::app::services::AddOptions fileOpts = baseOpts;
+        fileOpts.path = fixture.path.string();
+        fileOpts.tags = baseTags;
+        fileOpts.tags.insert(fileOpts.tags.end(), fixture.tags.begin(), fixture.tags.end());
+
+        auto addRes = ingestion.addViaDaemon(fileOpts);
+        INFO("addViaDaemon failed for " << fixture.path << ": "
+                            << addRes.error().message); REQUIRE(addRes);
+        if (!addRes.value().hash.empty()) {
+            daemonHashes.push_back(addRes.value().hash);
+        }
+    }
+
+    std::string ingestDrainReason;
+    INFO("Post-ingest queue did not drain: " << ingestDrainReason); REQUIRE(wait_for_post_ingest_idle(client, 20s, &ingestDrainReason));
+
+    // Collect the document hashes directly from the fixtures so we can explicitly
+    // request embeddings for the known corpus.
+    auto hasher = yams::crypto::createSHA256Hasher();
+    INFO("Failed to create SHA256 hasher"); REQUIRE(hasher);
+
+    std::vector<std::string> corpusHashes;
+    corpusHashes.reserve(corpus.fixtures.size());
+    for (const auto& fixture : corpus.fixtures) {
+        std::string hash = hasher->hashFile(fixture.path);
+        INFO("Failed to hash fixture: " << fixture.path.string()); REQUIRE_FALSE(hash.empty());
+        corpusHashes.push_back(std::move(hash));
+    }
+    std::sort(corpusHashes.begin(), corpusHashes.end());
+    corpusHashes.erase(std::unique(corpusHashes.begin(), corpusHashes.end()), corpusHashes.end());
+
+    std::sort(daemonHashes.begin(), daemonHashes.end());
+    daemonHashes.erase(std::unique(daemonHashes.begin(), daemonHashes.end()), daemonHashes.end());
+    INFO("Hashes returned from addViaDaemon did not match corpus hashes"); CHECK(daemonHashes == corpusHashes);
+
+    std::string documentReadyDetail;
+    INFO("Ingested documents not yet retrievable: " << documentReadyDetail); REQUIRE(wait_for_documents_available(client, corpusHashes, 15s, &documentReadyDetail));
+
+    yams::daemon::GetStatsRequest statsReq;
+    auto statsBaseline = yams::cli::run_sync(client.getStats(statsReq), 5s);
+    INFO("GetStats baseline failed: " << statsBaseline.error().message); REQUIRE(statsBaseline);
+    const size_t baseVectorBytes = statsBaseline.value().vectorIndexSize;
+    const size_t baseVectorRows =
+        parse_counter(statsBaseline.value().additionalStats, "vector_rows");
+    const size_t baseEmbedConsumed =
+        parse_counter(statsBaseline.value().additionalStats, "bus_embed_consumed");
+
+    yams::daemon::EmbedDocumentsRequest embedReq;
+    embedReq.documentHashes = corpusHashes;
+    embedReq.modelName = modelName;
+    embedReq.normalize = true;
+    embedReq.batchSize = std::max<std::size_t>(16, corpusHashes.size());
+    embedReq.skipExisting = false;
+
+    auto embedRes = yams::cli::run_sync(client.call(embedReq), 60s);
+    INFO("EmbedDocuments failed: " << embedRes.error().message); REQUIRE(embedRes);
+    INFO("Embedding service did not embed expected number of documents"); CHECK(embedRes.value().embedded >= expectedDocs);
+
+    std::string vectorGrowthDetail;
+    bool vectorGrowthObserved = wait_for_vector_index_growth(
+        client, baseVectorBytes, baseVectorRows, baseEmbedConsumed, 20s, &vectorGrowthDetail);
+    if (!vectorGrowthObserved) {
+        INFO("Vector growth not observed: " + vectorGrowthDetail);
+    }
+
+    // Wait for vector scoring to become active so semantic queries leverage embeddings.
+    bool vectorReady = false;
+    for (int i = 0; i < 120; ++i) {
+        auto stRes = yams::cli::run_sync(client.status(), 500ms);
+        if (stRes) {
+            const auto& st = stRes.value();
+            auto it = st.readinessStates.find("vector_scoring_enabled");
+            if (it != st.readinessStates.end() && it->second) {
+                vectorReady = true;
+                break;
+            }
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+    INFO("vector scoring never reported ready"); CHECK(vectorReady);
+
+    // Poll stats until embeddings appear in the vector index.
+    // Run representative semantic queries drawn from the shared preset.
+    auto queries = yams::test::defaultSearchQueries();
+    const int maxSearchAttempts = 20;
+    std::size_t semanticHits = 0;
+    bool searchReady = false;
+    for (int attempt = 0; attempt < maxSearchAttempts && !searchReady; ++attempt) {
+        semanticHits = 0;
+        for (const auto& query : queries) {
+            yams::daemon::SearchRequest req;
+            req.query = query;
+            req.limit = static_cast<size_t>(expectedDocs);
+            req.searchType = "semantic";
+            req.similarity = 0.1;
+            req.timeout = 2s;
+            auto res = yams::cli::run_sync(client.search(req), 3s);
+            if (res && res.value().totalCount > 0) {
+                ++semanticHits;
+            }
+        }
+        if (semanticHits >= queries.size() / 2) {
+            searchReady = true;
+            break;
+        }
+        std::this_thread::sleep_for(300ms);
+    }
+    INFO("Semantic search never returned enough results after "
+                             << maxSearchAttempts << " attempts"); CHECK(searchReady);
+}
