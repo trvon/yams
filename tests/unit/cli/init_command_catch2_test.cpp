@@ -53,12 +53,16 @@ struct CliTestHelper {
     std::optional<yams::test::ScopedEnvVar> dataEnv;
     std::optional<yams::test::ScopedEnvVar> nonInteractiveEnv;
     std::optional<yams::test::ScopedEnvVar> disableDaemonEnv;
+    std::optional<yams::test::ScopedEnvVar> xdgConfigEnv;
+    std::optional<yams::test::ScopedEnvVar> xdgDataEnv;
 
     CliTestHelper() {
         tempDir = yams::test::make_temp_dir("yams_init_catch2_test_");
         dataDir = tempDir / "data";
-        configPath = tempDir / "config.toml";
+        fs::path xdgConfigHome = tempDir / "xdg_config";
+        configPath = xdgConfigHome / "yams" / "config.toml";
         fs::create_directories(dataDir);
+        fs::create_directories(configPath.parent_path());
 
         configEnv.emplace("YAMS_CONFIG", configPath.string());
         dataEnv.emplace("YAMS_DATA_DIR", dataDir.string());
@@ -66,6 +70,8 @@ struct CliTestHelper {
                                   std::optional<std::string>("1"));
         disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"),
                                  std::optional<std::string>("1"));
+        xdgConfigEnv.emplace("XDG_CONFIG_HOME", xdgConfigHome.string());
+        xdgDataEnv.emplace("XDG_DATA_HOME", (tempDir / "xdg_data").string());
     }
 
     ~CliTestHelper() {
@@ -73,6 +79,8 @@ struct CliTestHelper {
         dataEnv.reset();
         nonInteractiveEnv.reset();
         disableDaemonEnv.reset();
+        xdgConfigEnv.reset();
+        xdgDataEnv.reset();
 
         std::error_code ec;
         fs::remove_all(tempDir, ec);

@@ -101,10 +101,16 @@ public:
             // 1) Resolve directories using platform-specific helpers
             auto dataPath = cli_->getDataPath();
 
-            // Use platform-specific config directory
-            fs::path configDir = yams::config::get_config_dir();
+            // Honor YAMS_CONFIG (test fixtures, explicit overrides) before falling back to the
+            // platform-specific config directory; otherwise init would write to the real user
+            // config even when YAMS_CONFIG points at a sandbox path.
+            fs::path configPath = yams::config::get_config_path();
+            fs::path configDir = configPath.parent_path();
+            if (configDir.empty()) {
+                configDir = yams::config::get_config_dir();
+                configPath = configDir / "config.toml";
+            }
             fs::path keysDir = configDir / "keys";
-            fs::path configPath = configDir / "config.toml";
 
             if (!nonInteractive_) {
                 dataPath = promptForDataDir(dataPath);
