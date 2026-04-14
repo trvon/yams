@@ -10,8 +10,15 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/storage/corpus_stats.h>
 
 namespace yams::daemon {
+
+namespace {
+constexpr auto kOverlayRebuildMinAge = std::chrono::minutes(5);
+constexpr std::uint64_t kOverlayHeavyRebuildMinDocs = 256;
+constexpr std::uint64_t kTopologyDirtyFastThreshold = 64;
+} // namespace
 
 SearchComponent::SearchComponent(ServiceManager& serviceManager, StateComponent& state,
                                  const Config& config)
@@ -57,6 +64,53 @@ bool SearchComponent::hasSignificantGrowth() const {
     bool absoluteExceeded = (currentCount >= lastBuildCount + config_.growthAbsoluteThreshold);
 
     return ratioExceeded || absoluteExceeded;
+}
+
+bool SearchComponent::shouldTriggerHeavyRebuild() const {
+    if (!hasSignificantGrowth()) {
+        return false;
+    }
+
+    auto metadataRepo = serviceManager_.getMetadataRepo();
+    if (!metadataRepo) {
+        return true;
+    }
+
+    const auto statsResult = metadataRepo->getCorpusStats();
+    if (!statsResult) {
+        return true;
+    }
+
+    const auto& stats = statsResult.value();
+    if (!stats.usedOnlineOverlay) {
+        return true;
+    }
+
+    const auto freshness = serviceManager_.getIndexFreshnessSnapshot();
+    const auto topology = serviceManager_.getTopologyTelemetrySnapshot();
+    const auto currentCount = getCurrentDocCount();
+    const auto lastBuildCount = lastBuildDocCount_.load();
+    const auto growth = currentCount > lastBuildCount ? currentCount - lastBuildCount : 0;
+    const auto minGrowth =
+        std::max<std::uint64_t>(config_.growthAbsoluteThreshold * 2, kOverlayHeavyRebuildMinDocs);
+    const bool overlayLarge = freshness.lexicalDeltaRecentDocs >= minGrowth || growth >= minGrowth;
+    const bool topologyPressure = topology.dirtyDocumentCount >= kTopologyDirtyFastThreshold;
+
+    if (stats.reconciledComputedAtMs <= 0) {
+        return overlayLarge && topologyPressure;
+    }
+
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count();
+    const auto overlayAgeMs = nowMs > stats.reconciledComputedAtMs
+                                  ? static_cast<std::uint64_t>(nowMs - stats.reconciledComputedAtMs)
+                                  : 0;
+    const bool overlayAged =
+        overlayAgeMs >=
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(kOverlayRebuildMinAge).count());
+    return overlayLarge && (overlayAged || topologyPressure);
 }
 
 void SearchComponent::recordSuccessfulBuild(uint64_t docCount) {
@@ -142,8 +196,8 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
         return false;
     }
 
-    // Check for significant corpus growth
-    if (!hasSignificantGrowth()) {
+    // Heavy rebuilds should follow reconciled shifts or large/aged overlay deltas.
+    if (!shouldTriggerHeavyRebuild()) {
         rebuildInProgress_.store(false);
         return false;
     }

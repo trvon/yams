@@ -190,13 +190,13 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
 
     // Create builder and configure
     auto builder = std::make_shared<yams::search::SearchEngineBuilder>();
-    builder->withMetadataRepo(metadataRepo);
+    builder->withMetadataRepo(std::move(metadataRepo));
     if (kgStore)
-        builder->withKGStore(kgStore);
+        builder->withKGStore(std::move(kgStore));
     if (vectorEnabled && vectorDatabase)
-        builder->withVectorDatabase(vectorDatabase);
+        builder->withVectorDatabase(std::move(vectorDatabase));
     if (vectorEnabled && embeddingGen)
-        builder->withEmbeddingGenerator(embeddingGen);
+        builder->withEmbeddingGenerator(std::move(embeddingGen));
 
     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
     // Default daemon policy: lexical-first with adaptive semantic fallback.

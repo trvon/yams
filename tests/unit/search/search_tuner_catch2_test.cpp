@@ -1062,6 +1062,61 @@ TEST_CASE("SearchTuner: graph richness scales budget and results", "[unit][searc
     CHECK(highTuner.getParams().graphRerankWeight > lowTuner.getParams().graphRerankWeight);
 }
 
+TEST_CASE("SearchTuner: overlay-backed stats damp graph-heavy tuning",
+          "[unit][search_tuner][graph]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.50f;
+    stats.proseRatio = 0.40f;
+    stats.symbolDensity = 1.0f;
+    stats.embeddingCoverage = 0.80f;
+    stats.usedOnlineOverlay = true;
+    stats.pathDepthMaxApproximate = true;
+
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+
+    CHECK(p.weights.kg.value <= 0.10f + 1e-6f);
+    CHECK(p.kgMaxResults <= size_t{48});
+    CHECK(p.graphScoringBudgetMs <= 8);
+    CHECK(p.graphRerankTopN <= size_t{24});
+    CHECK(p.enableGraphQueryExpansion == false);
+    CHECK(p.graphEnablePathEnumeration == false);
+    CHECK(tuner.toJson()["corpus"]["used_online_overlay"].get<bool>() == true);
+}
+
+TEST_CASE("SearchTuner: adaptive runtime tuning stays steady on overlay-backed stats",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.50f;
+    stats.proseRatio = 0.40f;
+    stats.symbolDensity = 0.8f;
+    stats.embeddingCoverage = 0.80f;
+    stats.usedOnlineOverlay = true;
+
+    SearchTuner tuner(stats);
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 120.0;
+    telemetry.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
+    telemetry.topWindow = 20;
+    telemetry.stages["kg"] = {
+        .enabled = true, .durationMs = 60.0, .skipped = false, .contributed = true};
+    telemetry.stages["graph_rerank"] = {
+        .enabled = true, .durationMs = 20.0, .skipped = false, .contributed = true};
+    telemetry.fusionSources["kg"] = {
+        .enabled = true, .contributedToFinal = true, .finalScoreMass = 0.4, .finalTopDocCount = 5};
+
+    const auto before = tuner.getParams();
+    tuner.observe(telemetry);
+    const auto after = tuner.getParams();
+
+    CHECK(after.kgMaxResults == before.kgMaxResults);
+    CHECK(after.graphScoringBudgetMs == before.graphScoringBudgetMs);
+    CHECK(after.graphRerankTopN == before.graphRerankTopN);
+    CHECK(tuner.adaptiveStateToJson()["last_decision"] == "steady_overlay_stats");
+}
+
 // =============================================================================
 // Phase 8: SCIENTIFIC size guard removal tests
 // =============================================================================

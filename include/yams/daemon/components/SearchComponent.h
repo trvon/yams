@@ -94,6 +94,7 @@ public:
      * Check if corpus has grown significantly since last build.
      */
     bool hasSignificantGrowth() const;
+    bool shouldTriggerHeavyRebuild() const;
 
     /**
      * Get current configuration.

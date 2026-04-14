@@ -57,6 +57,69 @@ bool isTagMetadataKey(std::string_view key) {
     return key == "tag" || key.starts_with("tag:");
 }
 
+enum class ExtensionBucket { Other, Code, Prose, Binary };
+
+ExtensionBucket classifyExtensionBucket(std::string_view ext) {
+    const std::string normalized{ext};
+    if (storage::detail::kCodeExtensions.contains(normalized)) {
+        return ExtensionBucket::Code;
+    }
+    if (storage::detail::kProseExtensions.contains(normalized)) {
+        return ExtensionBucket::Prose;
+    }
+    if (storage::detail::kBinaryExtensions.contains(normalized)) {
+        return ExtensionBucket::Binary;
+    }
+    return ExtensionBucket::Other;
+}
+
+void applyExtensionStatsDelta(std::atomic<uint64_t>& codeCounter,
+                              std::atomic<uint64_t>& proseCounter,
+                              std::atomic<uint64_t>& binaryCounter, std::string_view ext,
+                              std::int64_t delta) {
+    auto apply = [&](std::atomic<uint64_t>& counter) {
+        if (delta >= 0) {
+            counter.fetch_add(static_cast<uint64_t>(delta), std::memory_order_relaxed);
+        } else {
+            auto current = counter.load(std::memory_order_relaxed);
+            const auto subtract = static_cast<uint64_t>(-delta);
+            while (true) {
+                const auto next = current > subtract ? current - subtract : 0;
+                if (counter.compare_exchange_weak(current, next, std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed)) {
+                    return;
+                }
+            }
+        }
+    };
+    switch (classifyExtensionBucket(ext)) {
+        case ExtensionBucket::Code:
+            apply(codeCounter);
+            break;
+        case ExtensionBucket::Prose:
+            apply(proseCounter);
+            break;
+        case ExtensionBucket::Binary:
+            apply(binaryCounter);
+            break;
+        case ExtensionBucket::Other:
+            break;
+    }
+}
+
+void updateExtensionCountMap(std::unordered_map<std::string, int64_t>& counts, std::string_view ext,
+                             std::int64_t delta) {
+    if (ext.empty() || delta == 0) {
+        return;
+    }
+    auto key = std::string(ext);
+    auto& entry = counts[key];
+    entry += delta;
+    if (entry <= 0) {
+        counts.erase(key);
+    }
+}
+
 void saturatingSubBytes(std::atomic<uint64_t>& counter, uint64_t bytes) {
     auto current = counter.load(std::memory_order_relaxed);
     while (true) {
@@ -696,6 +759,21 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
             cachedTotalSizeBytes_.fetch_add(
                 static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0)),
                 std::memory_order_relaxed);
+            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
+                                     cachedBinaryDocCount_, info.fileExtension, 1);
+            cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
+                                          std::memory_order_relaxed);
+            auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
+            const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
+            while (nextDepth > currentDepthMax &&
+                   !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
+                                                              std::memory_order_acq_rel,
+                                                              std::memory_order_relaxed)) {
+            }
+            {
+                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+                updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
+            }
             if (info.contentExtracted) {
                 cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
             }
@@ -791,6 +869,21 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
             cachedTotalSizeBytes_.fetch_add(
                 static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0)),
                 std::memory_order_relaxed);
+            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
+                                     cachedBinaryDocCount_, info.fileExtension, 1);
+            cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
+                                          std::memory_order_relaxed);
+            auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
+            const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
+            while (nextDepth > currentDepthMax &&
+                   !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
+                                                              std::memory_order_acq_rel,
+                                                              std::memory_order_relaxed)) {
+            }
+            {
+                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+                updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
+            }
             if (info.contentExtracted) {
                 cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
             }
@@ -965,12 +1058,24 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
 Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
         int64_t priorFileSize = info.fileSize;
+        std::string priorExtension = info.fileExtension;
+        int priorPathDepth = info.pathDepth;
         auto priorStmt = db.prepareCached("SELECT file_size FROM documents WHERE id = ?");
         if (priorStmt) {
             auto& stmt = *priorStmt.value();
             YAMS_TRY(stmt.bind(1, info.id));
             if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
                 priorFileSize = stmt.getInt64(0);
+            }
+        }
+        auto priorAttrsStmt =
+            db.prepareCached("SELECT file_extension, path_depth FROM documents WHERE id = ?");
+        if (priorAttrsStmt) {
+            auto& stmt = *priorAttrsStmt.value();
+            YAMS_TRY(stmt.bind(1, info.id));
+            if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
+                priorExtension = stmt.getString(0);
+                priorPathDepth = stmt.getInt(1);
             }
         }
 
@@ -1003,6 +1108,26 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
             } else {
                 saturatingSubBytes(cachedTotalSizeBytes_, prevSize - nextSize);
             }
+            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
+                                     cachedBinaryDocCount_, priorExtension, -1);
+            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
+                                     cachedBinaryDocCount_, info.fileExtension, 1);
+            saturatingSubBytes(cachedPathDepthSum_,
+                               static_cast<uint64_t>(std::max(priorPathDepth, 0)));
+            cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
+                                          std::memory_order_relaxed);
+            auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
+            const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
+            while (nextDepth > currentDepthMax &&
+                   !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
+                                                              std::memory_order_acq_rel,
+                                                              std::memory_order_relaxed)) {
+            }
+            {
+                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+                updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
+                updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
+            }
         }
         return Result<void>();
     });
@@ -1015,6 +1140,8 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         bool wasIndexed = false;
         bool wasEmbedded = false;
         uint64_t priorFileSize = 0;
+        std::string priorExtension;
+        int priorPathDepth = 0;
         {
             // Use prepareCached for better performance on repeated deletes
             // Note: wasIndexed checks extraction_status (FTS5 indexed) while wasEmbedded uses
@@ -1022,6 +1149,8 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
             auto checkStmt = db.prepareCached(R"(
                 SELECT d.content_extracted,
                        d.file_size,
+                       d.file_extension,
+                       d.path_depth,
                        CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END,
                        COALESCE(des.has_embedding, 0)
                 FROM documents d
@@ -1034,8 +1163,10 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
                 if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
                     wasExtracted = stmt.getInt(0) != 0;
                     priorFileSize = static_cast<uint64_t>(std::max<int64_t>(stmt.getInt64(1), 0));
-                    wasIndexed = stmt.getInt(2) != 0;
-                    wasEmbedded = stmt.getInt(3) != 0;
+                    priorExtension = stmt.getString(2);
+                    priorPathDepth = stmt.getInt(3);
+                    wasIndexed = stmt.getInt(4) != 0;
+                    wasEmbedded = stmt.getInt(5) != 0;
                 }
             }
         }
@@ -1059,6 +1190,14 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         if (db.changes() > 0) {
             core::saturating_sub(cachedDocumentCount_, uint64_t{1});
             saturatingSubBytes(cachedTotalSizeBytes_, priorFileSize);
+            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
+                                     cachedBinaryDocCount_, priorExtension, -1);
+            saturatingSubBytes(cachedPathDepthSum_,
+                               static_cast<uint64_t>(std::max(priorPathDepth, 0)));
+            {
+                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+                updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
+            }
             if (wasExtracted) {
                 core::saturating_sub(cachedExtractedCount_, uint64_t{1});
             }
@@ -1098,7 +1237,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
         // wasIndexed checks extraction_status (FTS5 indexed);
         // wasEmbedded checks document_embeddings_status.has_embedding.
         auto checkStmtResult = db.prepareCached(R"(
-            SELECT d.id, d.content_extracted, d.file_size,
+            SELECT d.id, d.content_extracted, d.file_size, d.file_extension, d.path_depth,
                    CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END,
                    COALESCE(des.has_embedding, 0)
             FROM documents d
@@ -1126,6 +1265,8 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             bool wasIndexed = false;
             bool wasEmbedded = false;
             uint64_t priorFileSize = 0;
+            std::string priorExtension;
+            int priorPathDepth = 0;
 
             if (auto r = checkStmt.reset(); !r) {
                 db.execute("ROLLBACK");
@@ -1138,8 +1279,10 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             if (auto stepRes = checkStmt.step(); stepRes && stepRes.value()) {
                 wasExtracted = checkStmt.getInt(1) != 0;
                 priorFileSize = static_cast<uint64_t>(std::max<int64_t>(checkStmt.getInt64(2), 0));
-                wasIndexed = checkStmt.getInt(3) != 0;
-                wasEmbedded = checkStmt.getInt(4) != 0;
+                priorExtension = checkStmt.getString(3);
+                priorPathDepth = checkStmt.getInt(4);
+                wasIndexed = checkStmt.getInt(5) != 0;
+                wasEmbedded = checkStmt.getInt(6) != 0;
             }
 
             // Delete document
@@ -1161,6 +1304,14 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                 deletedCount++;
                 core::saturating_sub(cachedDocumentCount_, uint64_t{1});
                 saturatingSubBytes(cachedTotalSizeBytes_, priorFileSize);
+                applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
+                                         cachedBinaryDocCount_, priorExtension, -1);
+                saturatingSubBytes(cachedPathDepthSum_,
+                                   static_cast<uint64_t>(std::max(priorPathDepth, 0)));
+                {
+                    std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+                    updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
+                }
                 if (wasExtracted) {
                     core::saturating_sub(cachedExtractedCount_, uint64_t{1});
                 }
@@ -3139,6 +3290,77 @@ void MetadataRepository::initializeCounters() {
             cachedEmbeddedCount_.store(static_cast<uint64_t>(embeddedResult.value()),
                                        std::memory_order_release);
         }
+        auto extensionStatsResult = executeReadQuery<std::unordered_map<std::string, int64_t>>(
+            [&](Database& db) -> Result<std::unordered_map<std::string, int64_t>> {
+                auto stmtResult = db.prepare(
+                    "SELECT file_extension, COUNT(*) FROM documents GROUP BY file_extension");
+                if (!stmtResult) {
+                    return stmtResult.error();
+                }
+                auto stmt = std::move(stmtResult).value();
+                std::unordered_map<std::string, int64_t> counts;
+                while (true) {
+                    auto stepResult = stmt.step();
+                    if (!stepResult) {
+                        return stepResult.error();
+                    }
+                    if (!stepResult.value()) {
+                        break;
+                    }
+                    counts[stmt.getString(0)] = stmt.getInt64(1);
+                }
+                return counts;
+            });
+        if (extensionStatsResult) {
+            std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+            cachedExtensionCounts_ = std::move(extensionStatsResult.value());
+            uint64_t codeCount = 0;
+            uint64_t proseCount = 0;
+            uint64_t binaryCount = 0;
+            for (const auto& [ext, count] : cachedExtensionCounts_) {
+                switch (classifyExtensionBucket(ext)) {
+                    case ExtensionBucket::Code:
+                        codeCount += static_cast<uint64_t>(std::max<int64_t>(count, 0));
+                        break;
+                    case ExtensionBucket::Prose:
+                        proseCount += static_cast<uint64_t>(std::max<int64_t>(count, 0));
+                        break;
+                    case ExtensionBucket::Binary:
+                        binaryCount += static_cast<uint64_t>(std::max<int64_t>(count, 0));
+                        break;
+                    case ExtensionBucket::Other:
+                        break;
+                }
+            }
+            cachedCodeDocCount_.store(codeCount, std::memory_order_release);
+            cachedProseDocCount_.store(proseCount, std::memory_order_release);
+            cachedBinaryDocCount_.store(binaryCount, std::memory_order_release);
+        }
+        auto pathStatsResult = executeReadQuery<
+            std::pair<int64_t, int64_t>>([&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
+            auto stmtResult = db.prepare(
+                "SELECT COALESCE(SUM(path_depth), 0), COALESCE(MAX(path_depth), 0) FROM documents");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto stmt = std::move(stmtResult).value();
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return stepResult.error();
+            }
+            if (!stepResult.value()) {
+                return std::pair<int64_t, int64_t>{0, 0};
+            }
+            return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
+        });
+        if (pathStatsResult) {
+            cachedPathDepthSum_.store(
+                static_cast<uint64_t>(std::max<int64_t>(pathStatsResult.value().first, 0)),
+                std::memory_order_release);
+            cachedPathDepthMax_.store(
+                static_cast<uint64_t>(std::max<int64_t>(pathStatsResult.value().second, 0)),
+                std::memory_order_release);
+        }
         auto tagStatsResult = executeReadQuery<std::pair<int64_t, int64_t>>(
             [&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
                 auto stmtResult = db.prepare(R"(
@@ -3165,11 +3387,13 @@ void MetadataRepository::initializeCounters() {
                 std::memory_order_release);
         }
         spdlog::info("MetadataRepository: initialized counters - total={}, bytes={}, indexed={}, "
-                     "extracted={}, embedded={}, docs_with_tags={}, tag_count={}",
+                     "extracted={}, embedded={}, docs_with_tags={}, tag_count={}, exts={}, "
+                     "path_sum={}, path_max={}",
                      cachedDocumentCount_.load(), cachedTotalSizeBytes_.load(),
                      cachedIndexedCount_.load(), cachedExtractedCount_.load(),
                      cachedEmbeddedCount_.load(), cachedDocsWithTags_.load(),
-                     cachedTagCount_.load());
+                     cachedTagCount_.load(), cachedExtensionCounts_.size(),
+                     cachedPathDepthSum_.load(), cachedPathDepthMax_.load());
     } catch (const std::exception& e) {
         spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
     }
@@ -3429,6 +3653,8 @@ MetadataRepository::getDocumentCountsByExtension() {
 Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     constexpr auto kCorpusStatsOverlayTtl = std::chrono::minutes(5);
     auto mergeOnlineOverlay = [&](storage::CorpusStats stats) {
+        const auto reconciledAtMs = stats.computedAtMs;
+        const double reconciledMinDepth = stats.pathDepthAvg - stats.pathRelativeDepthAvg;
         const auto liveDocCount =
             static_cast<int64_t>(cachedDocumentCount_.load(std::memory_order_relaxed));
         const auto liveEmbeddedCount =
@@ -3441,6 +3667,16 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             static_cast<int64_t>(cachedTagCount_.load(std::memory_order_relaxed));
         const auto liveKgCounts =
             kgStore_ ? kgStore_->getEntityCountSnapshot() : KGEntityCountSnapshot{};
+        const auto liveCodeCount =
+            static_cast<int64_t>(cachedCodeDocCount_.load(std::memory_order_relaxed));
+        const auto liveProseCount =
+            static_cast<int64_t>(cachedProseDocCount_.load(std::memory_order_relaxed));
+        const auto liveBinaryCount =
+            static_cast<int64_t>(cachedBinaryDocCount_.load(std::memory_order_relaxed));
+        const auto livePathDepthSum =
+            static_cast<int64_t>(cachedPathDepthSum_.load(std::memory_order_relaxed));
+        const auto livePathDepthMax =
+            static_cast<int64_t>(cachedPathDepthMax_.load(std::memory_order_relaxed));
 
         if (liveDocCount > 0) {
             stats.docCount = liveDocCount;
@@ -3455,15 +3691,34 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             stats.nerEntityCount = std::max<int64_t>(liveKgCounts.nerEntityCount, 0);
             stats.tagCoverage =
                 static_cast<double>(stats.docsWithTags) / static_cast<double>(stats.docCount);
+            stats.codeRatio = static_cast<double>(std::max<int64_t>(liveCodeCount, 0)) /
+                              static_cast<double>(stats.docCount);
+            stats.proseRatio = static_cast<double>(std::max<int64_t>(liveProseCount, 0)) /
+                               static_cast<double>(stats.docCount);
+            stats.binaryRatio = static_cast<double>(std::max<int64_t>(liveBinaryCount, 0)) /
+                                static_cast<double>(stats.docCount);
             stats.symbolDensity =
                 static_cast<double>(stats.symbolCount) / static_cast<double>(stats.docCount);
             stats.nativeSymbolDensity =
                 static_cast<double>(stats.nativeSymbolCount) / static_cast<double>(stats.docCount);
             stats.nerEntityDensity =
                 static_cast<double>(stats.nerEntityCount) / static_cast<double>(stats.docCount);
+            stats.pathDepthAvg = static_cast<double>(std::max<int64_t>(livePathDepthSum, 0)) /
+                                 static_cast<double>(stats.docCount);
+            stats.pathDepthMax = static_cast<double>(std::max<int64_t>(livePathDepthMax, 0));
+            // Carry the reconciled MIN(path_depth) forward. We can't track MIN as a single
+            // atomic (delete of the current-min doc would need a scan), but any insert of a
+            // path shallower than the reconciled min only lowers the true min, so clamping
+            // the relative average at zero keeps it within a valid range.
+            const double relativeDepth = stats.pathDepthAvg - reconciledMinDepth;
+            stats.pathRelativeDepthAvg = relativeDepth > 0.0 ? relativeDepth : 0.0;
             if (stats.totalSizeBytes > 0) {
                 stats.avgDocLengthBytes =
                     static_cast<double>(stats.totalSizeBytes) / static_cast<double>(stats.docCount);
+            }
+            {
+                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+                stats.extensionCounts = cachedExtensionCounts_;
             }
         } else {
             stats.docCount = 0;
@@ -3475,16 +3730,25 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             stats.symbolCount = 0;
             stats.nativeSymbolCount = 0;
             stats.nerEntityCount = 0;
+            stats.codeRatio = 0.0;
+            stats.proseRatio = 0.0;
+            stats.binaryRatio = 0.0;
             stats.tagCoverage = 0.0;
             stats.symbolDensity = 0.0;
             stats.nativeSymbolDensity = 0.0;
             stats.nerEntityDensity = 0.0;
             stats.avgDocLengthBytes = 0.0;
+            stats.pathDepthAvg = 0.0;
+            stats.pathDepthMax = 0.0;
+            stats.extensionCounts.clear();
         }
 
         stats.computedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::system_clock::now().time_since_epoch())
                                  .count();
+        stats.usedOnlineOverlay = true;
+        stats.reconciledComputedAtMs = reconciledAtMs;
+        stats.pathDepthMaxApproximate = true;
         return stats;
     };
 
@@ -3709,6 +3973,9 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             stats.computedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::system_clock::now().time_since_epoch())
                                      .count();
+            stats.usedOnlineOverlay = false;
+            stats.reconciledComputedAtMs = stats.computedAtMs;
+            stats.pathDepthMaxApproximate = false;
 
             return stats;
         });

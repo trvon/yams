@@ -2805,6 +2805,7 @@ if catch2_dep.found()
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'TSAN_OPTIONS': _test_tsan_options,
+      'YAMS_SOURCE_DIR': meson.project_source_root(),
     },
     timeout: 300  # Tests take ~200s
   )

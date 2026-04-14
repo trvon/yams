@@ -852,6 +852,13 @@ private:
     mutable std::atomic<uint64_t> cachedTotalSizeBytes_{0};
     mutable std::atomic<uint64_t> cachedTagCount_{0};
     mutable std::atomic<uint64_t> cachedDocsWithTags_{0};
+    mutable std::atomic<uint64_t> cachedCodeDocCount_{0};
+    mutable std::atomic<uint64_t> cachedProseDocCount_{0};
+    mutable std::atomic<uint64_t> cachedBinaryDocCount_{0};
+    mutable std::atomic<uint64_t> cachedPathDepthSum_{0};
+    mutable std::atomic<uint64_t> cachedPathDepthMax_{0};
+    mutable std::mutex extensionStatsMutex_;
+    mutable std::unordered_map<std::string, int64_t> cachedExtensionCounts_;
     mutable std::atomic<bool> countersInitialized_{false};
 
     // Legacy makeSelect removed; callers now use sql::QuerySpec to build SELECTs

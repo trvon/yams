@@ -342,6 +342,9 @@ TEST_CASE("CorpusStats: JSON roundtrip", "[unit][corpus_stats]") {
     original.pathDepthMax = 8.0;
     original.pathRelativeDepthAvg = 1.2;
     original.computedAtMs = 1704067200000;
+    original.usedOnlineOverlay = true;
+    original.reconciledComputedAtMs = 1704067100000;
+    original.pathDepthMaxApproximate = true;
     original.extensionCounts[".cpp"] = 300;
     original.extensionCounts[".py"] = 200;
     original.extensionCounts[".md"] = 150;
@@ -381,6 +384,9 @@ TEST_CASE("CorpusStats: JSON roundtrip", "[unit][corpus_stats]") {
     CHECK(restored.pathDepthMax == Approx(original.pathDepthMax));
     CHECK(restored.pathRelativeDepthAvg == Approx(original.pathRelativeDepthAvg));
     CHECK(restored.computedAtMs == original.computedAtMs);
+    CHECK(restored.usedOnlineOverlay == original.usedOnlineOverlay);
+    CHECK(restored.reconciledComputedAtMs == original.reconciledComputedAtMs);
+    CHECK(restored.pathDepthMaxApproximate == original.pathDepthMaxApproximate);
     CHECK(restored.extensionCounts[".cpp"] == 300);
     CHECK(restored.extensionCounts[".py"] == 200);
 }

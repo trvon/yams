@@ -6543,8 +6543,10 @@ TEST_CASE("ServiceManager: Search load metrics", "[daemon][metrics][search]") {
     }
 
     SECTION("Failed search start keeps queued count until rejection") {
+        // Pin cap to 1 so the second start is guaranteed to fail regardless of the
+        // machine-derived concurrencyLimit (varies with CPU cores).
+        constexpr std::uint32_t cap = 1;
         svc.onSearchRequestQueued();
-        const auto cap = svc.getSearchLoadMetrics().concurrencyLimit;
         REQUIRE(svc.tryStartSearchRequest(cap));
 
         svc.onSearchRequestQueued();

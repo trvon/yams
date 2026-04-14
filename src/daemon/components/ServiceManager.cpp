@@ -312,6 +312,11 @@ std::uint64_t nowUnixMillis() {
 // Open the daemon namespace for all following member definitions.
 namespace yams::daemon {
 
+namespace {
+constexpr auto kTopologyOverlayRebuildMinAge = std::chrono::minutes(5);
+constexpr std::size_t kTopologyOverlayDirtyThreshold = 64;
+} // namespace
+
 using yams::Error;
 using yams::ErrorCode;
 using yams::Result;
@@ -1533,12 +1538,12 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
             state.readiness.vectorDbInitAttempted.load();
         rd[std::string(readiness::kVectorDbReady)] = state.readiness.vectorDbReady.load();
         rd[std::string(readiness::kVectorDbDim)] = state.readiness.vectorDbDim.load();
-        j["readiness"] = rd;
+        j["readiness"] = std::move(rd);
         nlohmann::json pr;
         pr[std::string(readiness::kSearchEngine)] = state.readiness.searchProgress.load();
         pr[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexProgress.load();
         pr[std::string(readiness::kModelProvider)] = state.readiness.modelLoadProgress.load();
-        j["progress"] = pr;
+        j["progress"] = std::move(pr);
         auto sec_since_start = std::chrono::duration_cast<std::chrono::seconds>(
                                    std::chrono::steady_clock::now() - state.stats.startTime)
                                    .count();
@@ -1577,13 +1582,13 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                 state.readiness.searchProgress.load());
         add_eta(std::string(readiness::kModelProvider), state.readiness.modelProviderReady.load(),
                 state.readiness.modelLoadProgress.load());
-        j["eta_seconds"] = eta;
+        j["eta_seconds"] = std::move(eta);
         if (!state.initDurationsMs.empty()) {
             nlohmann::json dur;
             for (const auto& [k, v] : state.initDurationsMs) {
                 dur[k] = v;
             }
-            j["durations_ms"] = dur;
+            j["durations_ms"] = std::move(dur);
             std::vector<std::pair<std::string, uint64_t>> items(state.initDurationsMs.begin(),
                                                                 state.initDurationsMs.end());
             std::sort(items.begin(), items.end(),
@@ -1597,7 +1602,7 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                 top.push_back(entry);
             }
             if (!top.empty())
-                j["top_slowest"] = top;
+                j["top_slowest"] = std::move(top);
         }
         auto uptime = std::chrono::steady_clock::now() - state.stats.startTime;
         j["uptime_seconds"] = std::chrono::duration_cast<std::chrono::seconds>(uptime).count();
@@ -1657,8 +1662,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
                     int build_timeout = 30000; // 30s timeout
                     auto result = co_await searchEngineManager_.buildEngine(
-                        metadataRepo_, kgStore_, vectorDatabase_, embGen, reason, build_timeout,
-                        getWorkerExecutor());
+                        metadataRepo_, kgStore_, vectorDatabase_, std::move(embGen), reason,
+                        build_timeout, getWorkerExecutor());
 
                     if (result.has_value()) {
                         state_.readiness.searchEngineReady.store(true);
@@ -1717,7 +1722,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
     }
     {
-        std::error_code ec;
         yams::common::ensureDirectories(dataDir);
         resolvedDataDir_ = dataDir;
     }
@@ -1732,7 +1736,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     if (storageDecision.value().activeDataDir != dataDir) {
         dataDir = storageDecision.value().activeDataDir;
-        std::error_code ec;
         yams::common::ensureDirectories(dataDir);
         resolvedDataDir_ = dataDir;
     }
@@ -1854,13 +1857,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     if (db_ok) {
         metadata::ConnectionPoolConfig dbPoolCfg;
         // Size DB pool based on centralized tuning (avoid large bursts at startup)
-        size_t rec = 4;
-        try {
-            rec = std::max<size_t>(1, yams::daemon::TuneAdvisor::recommendedThreads(0.25));
-        } catch (...) {
-            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-            rec = std::max<size_t>(1, hw / 2);
-        }
+        size_t rec = [&]() {
+            try {
+                return std::max<size_t>(1, yams::daemon::TuneAdvisor::recommendedThreads(0.25));
+            } catch (...) {
+                size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+                return std::max<size_t>(1, hw / 2);
+            }
+        }();
         dbPoolCfg.minConnections = std::min<size_t>(std::max<size_t>(2, rec), 8);
         dbPoolCfg.maxConnections = 64; // Increased from 32 to handle heavy concurrent indexing
         if (const char* envMax = std::getenv("YAMS_DB_POOL_MAX"); envMax && *envMax) {
@@ -1967,7 +1971,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     // Initialize component-owned metrics (sync with DB once at startup)
                     metadataRepo->initializeCounters();
                     metadataRepo->warmValueCountsCache(); // Pre-warm common queries
-                    storeMetadataRepo(metadataRepo);
+                    storeMetadataRepo(std::move(metadataRepo));
                     spdlog::info("Metadata repository initialized successfully");
 
                     // Note: RepairManager initialization remains deferred
@@ -2039,7 +2043,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             sessionWatcherFuture_ = boost::asio::co_spawn(
                 exec,
                 [this, watcherToken]() -> boost::asio::awaitable<void> {
-                    co_await co_runSessionWatcher(watcherToken);
+                    co_await co_runSessionWatcher(std::move(watcherToken));
                 },
                 boost::asio::use_future);
         } catch (...) {
@@ -2580,7 +2584,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     co_return Result<void>();
 }
 
-boost::asio::awaitable<void> ServiceManager::co_runSessionWatcher(yams::compat::stop_token token) {
+boost::asio::awaitable<void>
+ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
     auto executor = co_await boost::asio::this_coro::executor;
 
     auto read_ms = [](const char* env, int def) {
@@ -3073,8 +3078,8 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
-            loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), embGen, "rebuild_enabled",
-            build_timeout, getWorkerExecutor());
+            loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), std::move(embGen),
+            "rebuild_enabled", build_timeout, getWorkerExecutor());
 
         if (rebuildResult.has_value()) {
             const auto& rebuilt = rebuildResult.value();
@@ -3174,8 +3179,8 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
 
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), embGen, "rebuild",
-                build_timeout, getWorkerExecutor());
+                loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), std::move(embGen),
+                "rebuild", build_timeout, getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();
@@ -3684,7 +3689,7 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
         }
     }
     auto res = co_await searchEngineManager_.buildEngine(loadMetadataRepo(), loadKgStore(),
-                                                         loadVectorDatabase(), gen,
+                                                         loadVectorDatabase(), std::move(gen),
                                                          "co_buildEngine", timeout_ms, exec);
     if (res.has_value()) {
         co_return res.value();
@@ -3863,7 +3868,7 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
             if (!dirtyRegionResult) {
                 return Result<ServiceManager::TopologyRebuildStats>(dirtyRegionResult.error());
             }
-            dirtyRegion = dirtyRegionResult.value();
+            dirtyRegion = std::move(dirtyRegionResult.value());
             if (!dirtyRegion.expandedDocumentHashes.empty()) {
                 rebuildHashes = dirtyRegion.expandedDocumentHashes;
             }
@@ -4167,6 +4172,43 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
             self->topologyRebuildScheduled_.store(false, std::memory_order_release);
             if (rebuildHashes.empty()) {
                 return;
+            }
+
+            if (auto metadataRepo = self->getMetadataRepo()) {
+                auto statsResult = metadataRepo->getCorpusStats();
+                if (statsResult && statsResult.value().usedOnlineOverlay) {
+                    const auto freshness = self->getIndexFreshnessSnapshot();
+                    const auto nowMs = nowUnixMillis();
+                    const auto overlayAgeMs =
+                        statsResult.value().reconciledComputedAtMs > 0 &&
+                                nowMs > static_cast<std::uint64_t>(
+                                            statsResult.value().reconciledComputedAtMs)
+                            ? nowMs - static_cast<std::uint64_t>(
+                                          statsResult.value().reconciledComputedAtMs)
+                            : 0;
+                    const bool overlayAged =
+                        overlayAgeMs >= static_cast<std::uint64_t>(
+                                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                kTopologyOverlayRebuildMinAge)
+                                                .count());
+                    const bool overlayHeavy =
+                        rebuildHashes.size() >= kTopologyOverlayDirtyThreshold ||
+                        freshness.lexicalDeltaRecentDocs >= kTopologyOverlayDirtyThreshold;
+                    if (!overlayHeavy && !overlayAged) {
+                        std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);
+                        const bool wasEmpty = self->topologyDirtyHashes_.empty();
+                        for (const auto& hash : rebuildHashes) {
+                            self->topologyDirtyHashes_.insert(hash);
+                        }
+                        if (wasEmpty && !rebuildHashes.empty()) {
+                            std::lock_guard<std::mutex> telemetryLock(
+                                self->topologyTelemetryMutex_);
+                            self->topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
+                        }
+                        self->requestTopologyRebuild(reason);
+                        return;
+                    }
+                }
             }
 
             auto result = self->rebuildTopologyArtifacts(reason, false, rebuildHashes);

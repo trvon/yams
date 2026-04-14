@@ -89,7 +89,7 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
 
     auto metadataIface =
         std::static_pointer_cast<yams::metadata::IMetadataRepository>(metadataRepo);
-    yams::topology::MetadataKgTopologyArtifactStore store(metadataIface, kgStore);
+    yams::topology::MetadataKgTopologyArtifactStore store(std::move(metadataIface), kgStore);
     auto latestResult = store.loadLatest();
     if (!latestResult || !latestResult.value().has_value()) {
         return routed;
@@ -175,7 +175,7 @@ std::vector<ComponentResult> buildTopologyWeakQueryComponentResults(
     if (kgStore) {
         auto metadataIface =
             std::static_pointer_cast<yams::metadata::IMetadataRepository>(metadataRepo);
-        yams::topology::MetadataKgTopologyArtifactStore store(metadataIface, kgStore);
+        yams::topology::MetadataKgTopologyArtifactStore store(std::move(metadataIface), kgStore);
         std::vector<std::string> routedHashes(routedDocumentHashes.begin(),
                                               routedDocumentHashes.end());
         auto membershipsResult = store.loadMemberships(routedHashes);
@@ -710,7 +710,7 @@ collectGraphSeedDocs(const std::vector<ComponentResult>& componentResults, size_
             continue;
         }
 
-        float sourceBoost = 1.0f;
+        float sourceBoost;
         switch (comp.source) {
             case ComponentResult::Source::Text:
             case ComponentResult::Source::GraphText:
@@ -6201,7 +6201,7 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding,
             result.rank = rank;
 
             if (auto it = hashToPath.find(vr.document_hash); it != hashToPath.end()) {
-                result.filePath = it->second;
+                result.filePath = std::string(it->second);
             }
             if (!vr.content.empty()) {
                 result.snippet = truncateSnippet(vr.content, 200);
@@ -6277,7 +6277,7 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding,
             result.rank = rank;
 
             if (auto it = hashToPath.find(vr.document_hash); it != hashToPath.end()) {
-                result.filePath = it->second;
+                result.filePath = std::string(it->second);
             }
             if (!vr.content.empty()) {
                 result.snippet = truncateSnippet(vr.content, 200);
@@ -6346,7 +6346,7 @@ SearchEngine::Impl::queryEntityVectors(const std::vector<float>& embedding,
             if (deduped.size() > limit) {
                 deduped.resize(limit);
             }
-            entityRecords = std::move(deduped);
+            entityRecords.swap(deduped);
         }
 
         if (entityRecords.empty()) {
@@ -6376,7 +6376,7 @@ SearchEngine::Impl::queryEntityVectors(const std::vector<float>& embedding,
         }
 
         for (size_t rank = 0; rank < entityRecords.size(); ++rank) {
-            const auto& er = entityRecords[rank];
+            const auto er = entityRecords[rank];
 
             ComponentResult result;
             result.documentHash = er.document_hash;
@@ -6388,7 +6388,7 @@ SearchEngine::Impl::queryEntityVectors(const std::vector<float>& embedding,
             if (!er.file_path.empty()) {
                 result.filePath = er.file_path;
             } else if (auto it = hashToPath.find(er.document_hash); it != hashToPath.end()) {
-                result.filePath = it->second;
+                result.filePath = std::string(it->second);
             }
 
             // Create snippet from entity info: qualified_name or node_key
@@ -6568,7 +6568,7 @@ SearchEngine::Impl::queryCompressedANN(const std::vector<float>& embedding,
             }
             cr.documentHash = compressedAnnDocumentHashes_[r.id];
             auto it = hashToPath.find(cr.documentHash);
-            cr.filePath = (it != hashToPath.end()) ? it->second : cr.documentHash;
+            cr.filePath = (it != hashToPath.end()) ? std::string(it->second) : cr.documentHash;
             cr.score = r.score;
             cr.rank = rank;
             cr.debugInfo["compressed_ann"] = "true";

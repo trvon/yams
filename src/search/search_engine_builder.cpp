@@ -159,10 +159,13 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.includeDebugInfo = options.config.includeDebugInfo;
             {
                 const auto& tp = runtimeTuner->getParams();
-                spdlog::info("SearchEngine auto-tuned to state={} (zoom={}, k={}, "
+                spdlog::info("SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
+                             "(zoom={}, k={}, "
                              "text={:.2f}[{}], vector={:.2f}[{}], kg={:.2f}[{}], "
                              "fusion={}, semantic_rescue={}[{}]@{:.4f})",
                              tuningStateToString(runtimeTuner->currentState()),
+                             statsResult.value().usedOnlineOverlay,
+                             statsResult.value().reconciledComputedAtMs,
                              SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
                              runtimeTuner->getRrfK(), tp.weights.text.value,
                              tuningLayerToString(tp.weights.text.source), tp.weights.vector.value,

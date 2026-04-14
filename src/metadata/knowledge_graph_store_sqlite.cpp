@@ -836,7 +836,7 @@ public:
             br = stmt.bind(idx++, static_cast<int64_t>(limit));
             if (!br)
                 return br.error();
-            br = stmt.bind(idx++, static_cast<int64_t>(offset));
+            br = stmt.bind(idx, static_cast<int64_t>(offset));
             if (!br)
                 return br.error();
 
@@ -892,7 +892,7 @@ public:
             br = stmt.bind(idx++, static_cast<int64_t>(limit));
             if (!br)
                 return br.error();
-            br = stmt.bind(idx++, static_cast<int64_t>(offset));
+            br = stmt.bind(idx, static_cast<int64_t>(offset));
             if (!br)
                 return br.error();
 
@@ -969,7 +969,7 @@ public:
                     return br.error();
             }
             // Bind limit per node
-            auto br = stmt.bind(idx++, static_cast<int64_t>(limitPerNode));
+            auto br = stmt.bind(idx, static_cast<int64_t>(limitPerNode));
             if (!br)
                 return br.error();
 
@@ -1042,7 +1042,7 @@ public:
                 if (!br)
                     return br.error();
             }
-            br = stmt.bind(idx++, static_cast<int64_t>(limit));
+            br = stmt.bind(idx, static_cast<int64_t>(limit));
             if (!br)
                 return br.error();
 
@@ -2256,7 +2256,7 @@ public:
             auto br = stmt.bind(idx++, static_cast<std::int64_t>(limit));
             if (!br)
                 return br.error();
-            br = stmt.bind(idx++, static_cast<std::int64_t>(offset));
+            br = stmt.bind(idx, static_cast<std::int64_t>(offset));
             if (!br)
                 return br.error();
 

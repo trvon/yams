@@ -92,9 +92,10 @@ struct PathTreeConfigSettings {
 
 static auto toLower = [](unsigned char c) noexcept { return static_cast<char>(std::tolower(c)); };
 
-static std::string toLowerCopy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), toLower);
-    return value;
+static std::string toLowerCopy(std::string_view value) {
+    std::string lowered(value);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), toLower);
+    return lowered;
 }
 
 static std::filesystem::path resolveConfigPath() {
@@ -432,7 +433,7 @@ public:
     explicit GrepServiceImpl(const AppContext& ctx) : ctx_(ctx) {
         auto cfg = loadPathTreeConfigSettings();
         pathTreeEnabled_ = cfg.enabled;
-        pathTreeMode_ = cfg.mode;
+        pathTreeMode_ = std::move(cfg.mode);
         pathTreePreferred_ = pathTreeEnabled_ && pathTreeMode_ == "preferred";
         spdlog::debug("[GrepService] path-tree config: enabled={} mode={}", pathTreeEnabled_,
                       pathTreeMode_);

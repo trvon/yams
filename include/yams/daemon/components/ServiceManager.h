@@ -732,7 +732,7 @@ private:
     void wireSearchEngineRuntimeAdapters(const std::shared_ptr<search::SearchEngine>& engine,
                                          const char* contextLabel);
 
-    boost::asio::awaitable<void> co_runSessionWatcher(yams::compat::stop_token token);
+    boost::asio::awaitable<void> co_runSessionWatcher(const yams::compat::stop_token& token);
 
     // Awaitable phase helpers for modern architecture
     boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,

@@ -588,6 +588,7 @@ retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
     }
 
     metadata::MetadataOpScope metadataScope("client_search");
+    (void)metadataScope;
 
     auto attempt = fn();
     if (attempt) {
@@ -831,7 +832,9 @@ public:
 
         auto searchExecutionContext =
             buildSearchExecutionContext(ctx_, normalizedReq, normalizedReq.query);
-        search::SearchExecutionContextGuard searchExecutionContextGuard(searchExecutionContext);
+        search::SearchExecutionContextGuard searchExecutionContextGuard(
+            std::move(searchExecutionContext));
+        (void)searchExecutionContextGuard;
 
         if (!parsed.scope.name.empty()) {
             if (normalizedReq.pathPattern.empty()) {

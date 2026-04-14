@@ -25,6 +25,10 @@ constexpr size_t kMaxGraphRerankTopN = 60;
 constexpr int kMinRrfK = 8;
 constexpr int kMaxRrfK = 80;
 
+bool statsAreOverlayBacked(const storage::CorpusStats& stats) {
+    return stats.usedOnlineOverlay;
+}
+
 double ewmaUpdate(double current, double sample, std::uint64_t observations) {
     if (observations <= 1) {
         return sample;
@@ -117,6 +121,18 @@ void applyAdaptiveClamp(const storage::CorpusStats& stats, TunedParams& params,
         }
     }
 
+    if (statsAreOverlayBacked(stats) && !preserveExplicitGraphConfig) {
+        params.weights.kg.set(std::min(params.weights.kg.value, 0.08f), TuningLayer::Corpus);
+        params.kgMaxResults = std::min(params.kgMaxResults, size_t{48});
+        params.graphScoringBudgetMs = std::min(params.graphScoringBudgetMs, 8);
+        params.graphRerankTopN = std::min(params.graphRerankTopN, size_t{24});
+        params.graphRerankWeight = std::min(params.graphRerankWeight, 0.16f);
+        params.graphRerankMaxBoost = std::min(params.graphRerankMaxBoost, 0.18f);
+        if (stats.pathDepthMaxApproximate) {
+            params.graphEnablePathEnumeration = false;
+        }
+    }
+
     params.weights.normalize();
 }
 
@@ -176,6 +192,21 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
     params.enableGraphQueryExpansion = (graphRichness > 0.3F);
 
     params.weights.normalize();
+
+    if (statsAreOverlayBacked(stats)) {
+        params.weights.kg.set(std::min(params.weights.kg.value, 0.10f), TuningLayer::Corpus);
+        params.kgMaxResults = std::min(params.kgMaxResults, size_t{48});
+        params.graphScoringBudgetMs = std::min(params.graphScoringBudgetMs, 8);
+        params.graphRerankTopN = std::min(params.graphRerankTopN, size_t{24});
+        params.graphRerankWeight = std::min(params.graphRerankWeight, 0.16f);
+        params.graphRerankMaxBoost = std::min(params.graphRerankMaxBoost, 0.18f);
+        params.enableGraphQueryExpansion = false;
+        if (stats.pathDepthMaxApproximate) {
+            params.graphEnablePathEnumeration = false;
+        }
+        params.weights.normalize();
+        stateReason += ", graph_damped(overlay_stats)";
+    }
 
     std::ostringstream suffix;
     suffix << ", graph=on(symbol_density=" << stats.symbolDensity
@@ -349,6 +380,11 @@ void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
         return;
     }
 
+    if (statsAreOverlayBacked(stats_)) {
+        adaptive_.lastDecision = "steady_overlay_stats";
+        return;
+    }
+
     const bool warmedUp = adaptive_.observations >= kAdaptiveWarmupObservations;
     const bool cooldownExpired = adaptive_.observations >= adaptive_.lastAdjustmentObservation +
                                                                kAdaptiveCooldownObservations;
@@ -499,6 +535,9 @@ nlohmann::json SearchTuner::toJson() const {
     j["corpus"]["tag_coverage"] = stats_.tagCoverage;
     j["corpus"]["embedding_coverage"] = stats_.embeddingCoverage;
     j["corpus"]["symbol_density"] = stats_.symbolDensity;
+    j["corpus"]["used_online_overlay"] = stats_.usedOnlineOverlay;
+    j["corpus"]["reconciled_computed_at_ms"] = stats_.reconciledComputedAtMs;
+    j["corpus"]["path_depth_max_approximate"] = stats_.pathDepthMaxApproximate;
 
     return j;
 }
@@ -573,6 +612,9 @@ TuningState SearchTuner::computeState(const storage::CorpusStats& stats, std::st
     }
     if (!hasKG) {
         reason << ", no_kg";
+    }
+    if (stats.usedOnlineOverlay) {
+        reason << ", overlay_stats";
     }
 
     outReason = reason.str();

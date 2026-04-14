@@ -63,6 +63,9 @@ struct CorpusStats {
     // --- Timestamps ---
     int64_t computedAtMs{0}; // When these stats were computed (unix ms)
     int64_t ttlMs{60000};    // Cache TTL (default 60s)
+    bool usedOnlineOverlay{false};
+    int64_t reconciledComputedAtMs{0};
+    bool pathDepthMaxApproximate{false};
 
     // --- Helpers ---
     [[nodiscard]] bool isExpired(int64_t nowMs) const noexcept {
@@ -126,6 +129,9 @@ struct CorpusStats {
         j["path_depth_max"] = pathDepthMax;
         j["path_relative_depth_avg"] = pathRelativeDepthAvg;
         j["computed_at_ms"] = computedAtMs;
+        j["used_online_overlay"] = usedOnlineOverlay;
+        j["reconciled_computed_at_ms"] = reconciledComputedAtMs;
+        j["path_depth_max_approximate"] = pathDepthMaxApproximate;
 
         // Extension breakdown (top 10)
         nlohmann::json extJson = nlohmann::json::object();
@@ -205,6 +211,12 @@ struct CorpusStats {
             stats.pathRelativeDepthAvg = j["path_relative_depth_avg"].get<double>();
         if (j.contains("computed_at_ms"))
             stats.computedAtMs = j["computed_at_ms"].get<int64_t>();
+        if (j.contains("used_online_overlay"))
+            stats.usedOnlineOverlay = j["used_online_overlay"].get<bool>();
+        if (j.contains("reconciled_computed_at_ms"))
+            stats.reconciledComputedAtMs = j["reconciled_computed_at_ms"].get<int64_t>();
+        if (j.contains("path_depth_max_approximate"))
+            stats.pathDepthMaxApproximate = j["path_depth_max_approximate"].get<bool>();
         if (j.contains("top_extensions") && j["top_extensions"].is_object()) {
             for (auto& [key, val] : j["top_extensions"].items()) {
                 stats.extensionCounts[key] = val.get<int64_t>();
