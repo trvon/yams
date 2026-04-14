@@ -63,7 +63,7 @@ class YamsNightly < Formula
   end
 
   service do
-    run [opt_bin/"yams-daemon"]
+    run [opt_bin/"yams-daemon", "--foreground"]
     keep_alive true
     log_path var/"log/yams-daemon.log"
     error_log_path var/"log/yams-daemon.log"

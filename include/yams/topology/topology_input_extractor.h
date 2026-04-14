@@ -20,6 +20,7 @@ struct TopologyExtractionConfig {
 };
 
 struct TopologyExtractionStats {
+    std::size_t seedDocuments{0};
     std::size_t documentsRequested{0};
     std::size_t documentsLoaded{0};
     std::size_t documentsReturned{0};
@@ -28,6 +29,7 @@ struct TopologyExtractionStats {
     std::size_t metadataMapsLoaded{0};
     std::size_t neighborEdgesScanned{0};
     std::size_t neighborsReturned{0};
+    std::size_t regionDocuments{0};
 };
 
 class TopologyInputExtractor {

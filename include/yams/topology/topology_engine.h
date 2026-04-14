@@ -35,6 +35,11 @@ public:
     updateArtifacts(const TopologyArtifactBatch& existing,
                     std::span<const TopologyDocumentInput> changedDocuments,
                     const TopologyBuildConfig& config, TopologyUpdateStats* stats = nullptr) = 0;
+
+    virtual Result<TopologyDirtyRegion>
+    defineDirtyRegion(const TopologyArtifactBatch& existing,
+                      std::span<const TopologyDocumentInput> changedDocuments,
+                      const TopologyBuildConfig& config) const = 0;
 };
 
 class ITopologyRouter {

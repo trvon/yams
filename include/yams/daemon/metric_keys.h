@@ -232,6 +232,11 @@ constexpr std::string_view kTopologyLastDocumentsRequested = "topology_last_docu
 constexpr std::string_view kTopologyLastDocumentsProcessed = "topology_last_documents_processed";
 constexpr std::string_view kTopologyLastClustersBuilt = "topology_last_clusters_built";
 constexpr std::string_view kTopologyLastMembershipsBuilt = "topology_last_memberships_built";
+constexpr std::string_view kTopologyLastDirtySeedCount = "topology_last_dirty_seed_count";
+constexpr std::string_view kTopologyLastDirtyRegionDocs = "topology_last_dirty_region_docs";
+constexpr std::string_view kTopologyLastCoalescedDirtySets = "topology_last_coalesced_dirty_sets";
+constexpr std::string_view kTopologyLastFallbackFullRebuilds =
+    "topology_last_fallback_full_rebuilds";
 
 } // namespace yams::daemon::metrics
 

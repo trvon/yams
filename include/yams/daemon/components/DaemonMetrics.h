@@ -374,6 +374,10 @@ struct MetricsSnapshot {
     std::uint64_t topologyLastDocumentsMissingGraphNodes{0};
     std::uint64_t topologyLastClustersBuilt{0};
     std::uint64_t topologyLastMembershipsBuilt{0};
+    std::uint64_t topologyLastDirtySeedCount{0};
+    std::uint64_t topologyLastDirtyRegionDocs{0};
+    std::uint64_t topologyLastCoalescedDirtySets{0};
+    std::uint64_t topologyLastFallbackFullRebuilds{0};
     std::string topologyLastReason;
     std::string topologyLastSnapshotId;
     std::string topologyLastAlgorithm;

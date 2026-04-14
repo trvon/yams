@@ -158,6 +158,7 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
     }
 
     TopologyExtractionStats localStats;
+    localStats.seedDocuments = config.documentHashes.size();
     localStats.documentsRequested = config.documentHashes.empty()
                                         ? static_cast<std::size_t>(std::max(config.limit, 0))
                                         : config.documentHashes.size();
@@ -242,6 +243,7 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
     }
 
     localStats.documentsReturned = extracted.size();
+    localStats.regionDocuments = extracted.size();
     if (stats != nullptr) {
         *stats = localStats;
     }

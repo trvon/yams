@@ -26,6 +26,14 @@ constexpr std::string_view kRoleKey = "topology.role";
 constexpr std::string_view kOverlapKey = "topology.overlap_cluster_ids_json";
 constexpr std::string_view kSnapshotIdKey = "topology.snapshot_id";
 
+const std::array<std::string_view, 9>& topologyMetadataKeys() {
+    static const std::array<std::string_view, 9> keys = {
+        kSnapshotIdKey,   kClusterIdKey,   kParentClusterIdKey,
+        kClusterLevelKey, kPersistenceKey, kCohesionKey,
+        kBridgeKey,       kRoleKey,        kOverlapKey};
+    return keys;
+}
+
 const char* roleToString(DocumentTopologyRole role) {
     switch (role) {
         case DocumentTopologyRole::Core:
@@ -229,6 +237,17 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         return Error{ErrorCode::InvalidArgument, "topology batch requires non-empty snapshot id"};
     }
 
+    std::optional<TopologyArtifactBatch> previousBatch;
+    if (cachedLatest_.has_value()) {
+        previousBatch = cachedLatest_;
+    } else {
+        auto latestResult = loadLatest();
+        if (!latestResult) {
+            return latestResult.error();
+        }
+        previousBatch = std::move(latestResult.value());
+    }
+
     std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
     metadataEntries.reserve(batch.memberships.size() * 9);
     for (const auto& membership : batch.memberships) {
@@ -268,6 +287,31 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         auto setResult = metadataRepo_->setMetadataBatch(metadataEntries);
         if (!setResult) {
             return setResult.error();
+        }
+    }
+
+    if (previousBatch.has_value()) {
+        std::unordered_set<std::string> currentDocumentHashes;
+        currentDocumentHashes.reserve(batch.memberships.size());
+        for (const auto& membership : batch.memberships) {
+            currentDocumentHashes.insert(membership.documentHash);
+        }
+
+        for (const auto& previousMembership : previousBatch->memberships) {
+            if (currentDocumentHashes.contains(previousMembership.documentHash)) {
+                continue;
+            }
+            auto documentResult = metadataRepo_->getDocumentByHash(previousMembership.documentHash);
+            if (!documentResult || !documentResult.value().has_value()) {
+                continue;
+            }
+            for (const auto key : topologyMetadataKeys()) {
+                auto removeResult =
+                    metadataRepo_->removeMetadata(documentResult.value()->id, std::string(key));
+                if (!removeResult) {
+                    return removeResult.error();
+                }
+            }
         }
     }
 

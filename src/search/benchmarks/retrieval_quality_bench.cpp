@@ -58,6 +58,7 @@
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/search/internal_benchmark.h>
 #include <yams/vector/vector_database.h>
@@ -91,6 +92,119 @@ namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 using namespace yams;
 using json = nlohmann::json;
+
+class BenchmarkMockModelProvider final : public yams::daemon::IModelProvider {
+public:
+    explicit BenchmarkMockModelProvider(std::size_t dim) : dim_(dim) {}
+
+    void setProgressCallback(std::function<void(const yams::daemon::ModelLoadEvent&)> cb) override {
+        progress_ = std::move(cb);
+    }
+
+    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        return generateEmbeddingFor(defaultModelName_, text);
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+        return generateBatchEmbeddingsFor(defaultModelName_, texts);
+    }
+
+    Result<std::vector<float>> generateEmbeddingFor(const std::string& modelName,
+                                                    const std::string& text) override {
+        if (!isModelLoaded(modelName)) {
+            return Error{ErrorCode::NotFound, "model not loaded"};
+        }
+        std::vector<float> embedding(dim_, 0.0f);
+        std::hash<std::string> hasher;
+        const auto seed = hasher(text);
+        for (std::size_t i = 0; i < embedding.size(); ++i) {
+            embedding[i] = static_cast<float>((seed ^ (i * 131)) % 1000) / 1000.0f;
+        }
+        return embedding;
+    }
+
+    Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddingsFor(const std::string& modelName,
+                               const std::vector<std::string>& texts) override {
+        if (!isModelLoaded(modelName)) {
+            return Error{ErrorCode::NotFound, "model not loaded"};
+        }
+        std::vector<std::vector<float>> batch;
+        batch.reserve(texts.size());
+        for (const auto& text : texts) {
+            auto embedding = generateEmbeddingFor(modelName, text);
+            if (!embedding) {
+                return embedding.error();
+            }
+            batch.push_back(std::move(embedding.value()));
+        }
+        return batch;
+    }
+
+    Result<void> loadModel(const std::string& modelName) override {
+        if (progress_) {
+            yams::daemon::ModelLoadEvent ev;
+            ev.modelName = modelName;
+            ev.phase = "loading";
+            ev.message = "benchmark mock loading";
+            progress_(ev);
+        }
+        loadedModels_.insert(modelName);
+        defaultModelName_ = modelName;
+        if (progress_) {
+            yams::daemon::ModelLoadEvent ev;
+            ev.modelName = modelName;
+            ev.phase = "completed";
+            ev.message = "benchmark mock ready";
+            progress_(ev);
+        }
+        return Result<void>();
+    }
+
+    Result<void> unloadModel(const std::string& modelName) override {
+        loadedModels_.erase(modelName);
+        return Result<void>();
+    }
+
+    bool isModelLoaded(const std::string& modelName) const override {
+        return loadedModels_.contains(modelName);
+    }
+
+    std::vector<std::string> getLoadedModels() const override {
+        return std::vector<std::string>(loadedModels_.begin(), loadedModels_.end());
+    }
+
+    size_t getLoadedModelCount() const override { return loadedModels_.size(); }
+
+    Result<yams::daemon::ModelInfo> getModelInfo(const std::string& modelName) const override {
+        if (!isModelLoaded(modelName)) {
+            return Error{ErrorCode::NotFound, "model not loaded"};
+        }
+        yams::daemon::ModelInfo info;
+        info.name = modelName;
+        info.embeddingDim = dim_;
+        return info;
+    }
+
+    size_t getEmbeddingDim(const std::string&) const override { return dim_; }
+    std::shared_ptr<yams::vector::EmbeddingGenerator>
+    getEmbeddingGenerator(const std::string& = "") override {
+        return nullptr;
+    }
+    std::string getProviderName() const override { return "BenchmarkMockProvider"; }
+    std::string getProviderVersion() const override { return "1.0"; }
+    bool isAvailable() const override { return true; }
+    size_t getMemoryUsage() const override { return 0; }
+    void releaseUnusedResources() override {}
+    void shutdown() override { loadedModels_.clear(); }
+
+private:
+    std::size_t dim_;
+    std::string defaultModelName_;
+    std::unordered_set<std::string> loadedModels_;
+    std::function<void(const yams::daemon::ModelLoadEvent&)> progress_;
+};
 
 template <typename T, typename Rep, typename Period>
 static Result<T> benchRunSync(boost::asio::awaitable<Result<T>> aw,
@@ -172,6 +286,39 @@ static std::string discoverGlinerModelPath() {
 
     spdlog::warn("[Bench] No GLiNER model found - entity extraction will use mock mode");
     return "";
+}
+
+static bool forceMockEmbeddingsForBench() {
+    const char* env = std::getenv("YAMS_BENCH_FORCE_MOCK_EMBEDDINGS");
+    return env && std::string_view(env) == "1";
+}
+
+static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, bool vectorsDisabled,
+                                           bool forceMockEmbeddings) {
+    if (!harness || !harness->daemon() || vectorsDisabled) {
+        return;
+    }
+
+    auto serviceManager = harness->daemon()->getServiceManager();
+    if (!serviceManager) {
+        return;
+    }
+
+    if (forceMockEmbeddings) {
+        std::size_t dim = 768;
+        if (auto vectorDb = serviceManager->getVectorDatabase()) {
+            dim = vectorDb->getConfig().embedding_dim;
+        }
+        auto sharedProvider = std::make_shared<BenchmarkMockModelProvider>(dim);
+        serviceManager->__test_setModelProvider(sharedProvider);
+    }
+
+    auto ready =
+        serviceManager->ensureEmbeddingModelReadySync("all-MiniLM-L6-v2", {}, 10000, false, false);
+    if (!ready) {
+        spdlog::warn("[Bench] Embedding model not ready for retrieval bench: {}",
+                     ready.error().message);
+    }
 }
 
 struct BEIRDocument {
@@ -4980,6 +5127,7 @@ struct BenchFixture {
 
         const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
         bool vectorsDisabled = disableVectors && std::string(disableVectors) == "1";
+        const bool forceMockEmbeddings = forceMockEmbeddingsForBench();
 
         auto envFlagEnabled = [](const char* value) -> bool {
             if (!value) {
@@ -5118,11 +5266,11 @@ struct BenchFixture {
 
         DaemonHarness::Options harnessOptions;
         harnessOptions.isolateState = true;
-        harnessOptions.useMockModelProvider = vectorsDisabled;
-        harnessOptions.autoLoadPlugins = !vectorsDisabled;
-        harnessOptions.configureModelPool = !vectorsDisabled;
+        harnessOptions.useMockModelProvider = vectorsDisabled || forceMockEmbeddings;
+        harnessOptions.autoLoadPlugins = !vectorsDisabled && !forceMockEmbeddings;
+        harnessOptions.configureModelPool = !vectorsDisabled && !forceMockEmbeddings;
         harnessOptions.modelPoolLazyLoading = false;
-        harnessOptions.pluginDirStrict = !vectorsDisabled;
+        harnessOptions.pluginDirStrict = !vectorsDisabled && !forceMockEmbeddings;
 
         // YAMS_BENCH_DATA_DIR: reuse a pre-ingested data directory to skip
         // corpus ingestion + embedding wait on repeated benchmark runs.
@@ -5200,7 +5348,7 @@ struct BenchFixture {
             }
         }
 
-        if (!vectorsDisabled) {
+        if (!vectorsDisabled && !forceMockEmbeddings) {
             bool resetPluginTrustFile = harnessOptions.dataDir.has_value();
             bool useIsolatedBenchmarkConfig = true;
 
@@ -5416,6 +5564,8 @@ struct BenchFixture {
         }
         if (!harness->start(daemonReadyTimeout))
             throw std::runtime_error("Failed to start daemon");
+
+        ensureBenchmarkEmbeddingsReady(harness.get(), vectorsDisabled, forceMockEmbeddings);
 
         if (useBEIR) {
             const BEIRDataset& dataset = preparedBeirDataset.value();

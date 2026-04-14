@@ -136,6 +136,47 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
     return routed;
 }
 
+std::vector<ComponentResult> buildTopologyWeakQueryComponentResults(
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const std::unordered_set<std::string>& routedDocumentHashes, const SearchEngineConfig& config) {
+    std::vector<ComponentResult> results;
+    if (!metadataRepo || routedDocumentHashes.empty()) {
+        return results;
+    }
+
+    yams::metadata::DocumentQueryOptions options;
+    options.limit = static_cast<int>(routedDocumentHashes.size());
+    options.pathsOnly = true;
+
+    auto docsResult = metadataRepo->queryDocuments(options);
+    if (!docsResult) {
+        return results;
+    }
+
+    results.reserve(routedDocumentHashes.size());
+    size_t rank = 0;
+    for (const auto& doc : docsResult.value()) {
+        if (!routedDocumentHashes.contains(doc.sha256Hash)) {
+            continue;
+        }
+
+        ComponentResult cr;
+        cr.documentHash = doc.sha256Hash;
+        cr.filePath = doc.filePath;
+        cr.score = std::clamp(config.graphExpansionFtsPenalty * 0.85f, 0.0f, 1.0f);
+        cr.source = ComponentResult::Source::GraphText;
+        cr.rank = rank++;
+        cr.snippet = std::optional<std::string>(doc.filePath);
+        cr.debugInfo["topology_routed"] = "true";
+        results.push_back(std::move(cr));
+        if (results.size() >= config.topologyWeakQueryMaxDocs) {
+            break;
+        }
+    }
+
+    return results;
+}
+
 template <typename Work>
 auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& executor)
     -> std::future<decltype(work())> {
@@ -1792,6 +1833,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     traceCollector.markStageConfigured("metadata", workingConfig.metadataWeight > 0.0f);
     traceCollector.markStageConfigured("multi_vector", workingConfig.enableMultiVectorQuery ||
                                                            workingConfig.enableGraphQueryExpansion);
+    traceCollector.markStageConfigured("topology_routing",
+                                       workingConfig.enableTopologyWeakQueryRouting);
     traceCollector.markStageConfigured("graph_rerank",
                                        workingConfig.enableGraphRerank && kgScorer_ != nullptr);
     traceCollector.markStageConfigured("reranker",
@@ -2279,6 +2322,33 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         topologyWeakQuerySeedCount, topologyWeakQueryAddedDocs,
                         tier2Candidates.size());
                 }
+
+                std::vector<ComponentResult> topologyRoutingTrace;
+                topologyRoutingTrace.reserve(topologyCandidates.size());
+                for (const auto& hash : topologyCandidates) {
+                    ComponentResult marker;
+                    marker.documentHash = hash;
+                    marker.score = 1.0f;
+                    marker.source = ComponentResult::Source::GraphText;
+                    topologyRoutingTrace.push_back(std::move(marker));
+                }
+
+                auto topologyDocResults = buildTopologyWeakQueryComponentResults(
+                    metadataRepo_, topologyCandidates, workingConfig);
+                if (!topologyDocResults.empty()) {
+                    allComponentResults.insert(allComponentResults.end(),
+                                               topologyDocResults.begin(),
+                                               topologyDocResults.end());
+                    contributing.push_back("topology_routing");
+                }
+
+                traceCollector.markStageResult("topology_routing", topologyRoutingTrace, 0,
+                                               topologyWeakQueryRoutingApplied ||
+                                                   !topologyDocResults.empty());
+            } else if (workingConfig.enableTopologyWeakQueryRouting) {
+                traceCollector.markStageSkipped("topology_routing", weakTier1Query
+                                                                        ? "no_seed_candidates"
+                                                                        : "strong_tier1_query");
             }
 
             const bool strongBudgetLexical =

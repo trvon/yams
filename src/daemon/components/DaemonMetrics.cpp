@@ -678,6 +678,10 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.topologyLastDocumentsMissingGraphNodes = topology.lastDocumentsMissingGraphNodes;
             out.topologyLastClustersBuilt = topology.lastClustersBuilt;
             out.topologyLastMembershipsBuilt = topology.lastMembershipsBuilt;
+            out.topologyLastDirtySeedCount = topology.lastDirtySeedCount;
+            out.topologyLastDirtyRegionDocs = topology.lastDirtyRegionDocs;
+            out.topologyLastCoalescedDirtySets = topology.lastCoalescedDirtySets;
+            out.topologyLastFallbackFullRebuilds = topology.lastFallbackFullRebuilds;
             out.topologyLastReason = topology.lastReason;
             out.topologyLastSnapshotId = topology.lastSnapshotId;
             out.topologyLastAlgorithm = topology.lastAlgorithm;

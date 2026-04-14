@@ -377,6 +377,10 @@ public:
         std::uint64_t neighborsReturned{0};
         std::uint64_t clustersBuilt{0};
         std::uint64_t membershipsBuilt{0};
+        std::uint64_t dirtySeedCount{0};
+        std::uint64_t dirtyRegionDocs{0};
+        std::uint64_t coalescedDirtySets{0};
+        std::uint64_t fallbackFullRebuilds{0};
         std::vector<std::string> issues;
     };
 
@@ -403,6 +407,10 @@ public:
         std::uint64_t lastDocumentsMissingGraphNodes{0};
         std::uint64_t lastClustersBuilt{0};
         std::uint64_t lastMembershipsBuilt{0};
+        std::uint64_t lastDirtySeedCount{0};
+        std::uint64_t lastDirtyRegionDocs{0};
+        std::uint64_t lastCoalescedDirtySets{0};
+        std::uint64_t lastFallbackFullRebuilds{0};
         std::string lastReason;
         std::string lastSnapshotId;
         std::string lastAlgorithm;

@@ -224,6 +224,99 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     return batch;
 }
 
+Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
+    const TopologyArtifactBatch& existing, std::span<const TopologyDocumentInput> changedDocuments,
+    const TopologyBuildConfig& config) const {
+    TopologyDirtyRegion region;
+    region.seedDocumentHashes.reserve(changedDocuments.size());
+    std::unordered_map<std::string, std::vector<std::string>> clusterMembersById;
+    std::unordered_map<std::string, std::string> clusterIdByDocument;
+    clusterMembersById.reserve(existing.clusters.size());
+    for (const auto& cluster : existing.clusters) {
+        clusterMembersById.emplace(cluster.clusterId, cluster.memberDocumentHashes);
+    }
+    clusterIdByDocument.reserve(existing.memberships.size());
+    for (const auto& membership : existing.memberships) {
+        clusterIdByDocument.emplace(membership.documentHash, membership.clusterId);
+    }
+
+    std::unordered_set<std::string> seen;
+    seen.reserve(changedDocuments.size() * 2);
+
+    for (const auto& document : changedDocuments) {
+        if (document.documentHash.empty()) {
+            continue;
+        }
+        if (seen.insert(document.documentHash).second) {
+            region.seedDocumentHashes.push_back(document.documentHash);
+            region.expandedDocumentHashes.push_back(document.documentHash);
+        }
+        if (region.seedDocumentHashes.size() >= config.maxDirtySeedCount) {
+            region.requiresWiderRebuild = true;
+            break;
+        }
+
+        if (config.dirtyRegionExpansion != DirtyRegionExpansionMode::NeighborsOnly) {
+            region.includedPriorClusterMembers = true;
+            if (auto clusterIt = clusterIdByDocument.find(document.documentHash);
+                clusterIt != clusterIdByDocument.end()) {
+                if (auto membersIt = clusterMembersById.find(clusterIt->second);
+                    membersIt != clusterMembersById.end()) {
+                    for (const auto& memberHash : membersIt->second) {
+                        if (memberHash.empty()) {
+                            continue;
+                        }
+                        if (seen.insert(memberHash).second) {
+                            region.expandedDocumentHashes.push_back(memberHash);
+                        }
+                        if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
+                            region.exceededRegionBudget = true;
+                            region.requiresWiderRebuild = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (region.requiresWiderRebuild) {
+            break;
+        }
+
+        if (config.dirtyRegionExpansion == DirtyRegionExpansionMode::NeighborsOnly ||
+            config.dirtyRegionExpansion == DirtyRegionExpansionMode::PriorClusterAndNeighbors ||
+            config.dirtyRegionExpansion == DirtyRegionExpansionMode::Adaptive) {
+            region.includedSemanticNeighbors = true;
+            for (const auto& neighbor : document.neighbors) {
+                if (neighbor.documentHash.empty()) {
+                    continue;
+                }
+                if (seen.insert(neighbor.documentHash).second) {
+                    region.expandedDocumentHashes.push_back(neighbor.documentHash);
+                }
+                if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
+                    region.exceededRegionBudget = true;
+                    region.requiresWiderRebuild = true;
+                    break;
+                }
+            }
+        }
+        if (region.requiresWiderRebuild) {
+            break;
+        }
+    }
+
+    region.bfsDepthReached =
+        (region.includedSemanticNeighbors || region.includedPriorClusterMembers) ? 1 : 0;
+    if (config.fullRebuildDocThreshold > 0 &&
+        region.expandedDocumentHashes.size() >= config.fullRebuildDocThreshold) {
+        region.requiresWiderRebuild = true;
+    }
+
+    std::sort(region.seedDocumentHashes.begin(), region.seedDocumentHashes.end());
+    std::sort(region.expandedDocumentHashes.begin(), region.expandedDocumentHashes.end());
+    return region;
+}
+
 Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     const TopologyArtifactBatch& existing, std::span<const TopologyDocumentInput> changedDocuments,
     const TopologyBuildConfig& config, TopologyUpdateStats* stats) {
@@ -250,6 +343,7 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     merged.inputKind = rebuilt.value().inputKind;
     merged.generatedAtUnixSeconds = rebuilt.value().generatedAtUnixSeconds;
 
+    std::vector<ClusterArtifact> removedClustersSnapshot;
     std::size_t removedClusters = 0;
     merged.clusters.erase(std::remove_if(merged.clusters.begin(), merged.clusters.end(),
                                          [&](const ClusterArtifact& cluster) {
@@ -261,22 +355,83 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
                                                  });
                                              if (intersects) {
                                                  ++removedClusters;
+                                                 removedClustersSnapshot.push_back(cluster);
                                              }
                                              return intersects;
                                          }),
                           merged.clusters.end());
 
+    std::unordered_set<std::string> removedClusterIds;
+    removedClusterIds.reserve(removedClustersSnapshot.size());
+    for (const auto& cluster : removedClustersSnapshot) {
+        removedClusterIds.insert(cluster.clusterId);
+    }
+
     std::size_t removedMemberships = 0;
-    merged.memberships.erase(std::remove_if(merged.memberships.begin(), merged.memberships.end(),
-                                            [&](const DocumentClusterMembership& membership) {
-                                                const bool affected = affectedHashes.contains(
-                                                    membership.documentHash);
-                                                if (affected) {
-                                                    ++removedMemberships;
-                                                }
-                                                return affected;
-                                            }),
-                             merged.memberships.end());
+    merged.memberships.erase(
+        std::remove_if(merged.memberships.begin(), merged.memberships.end(),
+                       [&](const DocumentClusterMembership& membership) {
+                           const bool removed = affectedHashes.contains(membership.documentHash) ||
+                                                removedClusterIds.contains(membership.clusterId);
+                           if (removed) {
+                               ++removedMemberships;
+                           }
+                           return removed;
+                       }),
+        merged.memberships.end());
+
+    auto tryReuseClusterId = [&](ClusterArtifact& rebuiltCluster) {
+        if (!rebuiltCluster.medoid.has_value() || rebuiltCluster.medoid->documentHash.empty()) {
+            return;
+        }
+
+        const std::string& medoidHash = rebuiltCluster.medoid->documentHash;
+        const ClusterArtifact* matchedCluster = nullptr;
+        for (const auto& oldCluster : removedClustersSnapshot) {
+            if (!oldCluster.medoid.has_value() || oldCluster.medoid->documentHash != medoidHash) {
+                continue;
+            }
+            const bool overlaps = std::any_of(
+                rebuiltCluster.memberDocumentHashes.begin(),
+                rebuiltCluster.memberDocumentHashes.end(), [&](const std::string& hash) {
+                    return std::find(oldCluster.memberDocumentHashes.begin(),
+                                     oldCluster.memberDocumentHashes.end(),
+                                     hash) != oldCluster.memberDocumentHashes.end();
+                });
+            if (!overlaps) {
+                continue;
+            }
+            if (matchedCluster != nullptr) {
+                return;
+            }
+            matchedCluster = &oldCluster;
+        }
+
+        if (matchedCluster != nullptr) {
+            rebuiltCluster.clusterId = matchedCluster->clusterId;
+            rebuiltCluster.parentClusterId = matchedCluster->parentClusterId;
+            if (rebuiltCluster.medoid.has_value()) {
+                rebuiltCluster.medoid->clusterId = matchedCluster->clusterId;
+            }
+        }
+    };
+
+    for (auto& rebuiltCluster : rebuilt.value().clusters) {
+        tryReuseClusterId(rebuiltCluster);
+    }
+
+    std::unordered_map<std::string, std::string> continuityClusterIdByDocument;
+    for (const auto& cluster : rebuilt.value().clusters) {
+        for (const auto& documentHash : cluster.memberDocumentHashes) {
+            continuityClusterIdByDocument[documentHash] = cluster.clusterId;
+        }
+    }
+    for (auto& membership : rebuilt.value().memberships) {
+        if (auto it = continuityClusterIdByDocument.find(membership.documentHash);
+            it != continuityClusterIdByDocument.end()) {
+            membership.clusterId = it->second;
+        }
+    }
 
     merged.clusters.insert(merged.clusters.end(), rebuilt.value().clusters.begin(),
                            rebuilt.value().clusters.end());
@@ -297,6 +452,10 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
         stats->clustersCreated = rebuilt.value().clusters.size();
         stats->clustersUpdated = removedClusters;
         stats->membershipsUpdated = rebuilt.value().memberships.size() + removedMemberships;
+        stats->dirtySeedCount = changedDocuments.size();
+        stats->dirtyRegionDocs = affectedHashes.size();
+        stats->coalescedDirtySets = 0;
+        stats->fallbackFullRebuilds = 0;
         stats->bridgeDocsTagged =
             std::count_if(rebuilt.value().memberships.begin(), rebuilt.value().memberships.end(),
                           [](const DocumentClusterMembership& membership) {

@@ -338,6 +338,14 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                        static_cast<size_t>(snap->topologyLastClustersBuilt));
                 setVal(metrics::kTopologyLastMembershipsBuilt,
                        static_cast<size_t>(snap->topologyLastMembershipsBuilt));
+                setVal(metrics::kTopologyLastDirtySeedCount,
+                       static_cast<size_t>(snap->topologyLastDirtySeedCount));
+                setVal(metrics::kTopologyLastDirtyRegionDocs,
+                       static_cast<size_t>(snap->topologyLastDirtyRegionDocs));
+                setVal(metrics::kTopologyLastCoalescedDirtySets,
+                       static_cast<size_t>(snap->topologyLastCoalescedDirtySets));
+                setVal(metrics::kTopologyLastFallbackFullRebuilds,
+                       static_cast<size_t>(snap->topologyLastFallbackFullRebuilds));
 
                 // File/directory add tracking
                 setVal(metrics::kFilesAdded, static_cast<size_t>(snap->filesAdded));

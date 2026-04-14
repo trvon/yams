@@ -23,6 +23,12 @@ enum class TopologyInputKind : uint8_t {
     Hybrid,
 };
 
+enum class DirtyRegionExpansionMode : uint8_t {
+    NeighborsOnly,
+    PriorClusterAndNeighbors,
+    Adaptive,
+};
+
 enum class DocumentTopologyRole : uint8_t {
     Core,
     Bridge,
@@ -49,16 +55,34 @@ struct TopologyBuildConfig {
     TopologyInputKind inputKind{TopologyInputKind::Hybrid};
     std::size_t maxDocuments{0};
     std::size_t maxNeighborsPerDocument{32};
+    std::size_t maxDirtyRegionDocs{256};
+    std::size_t maxDirtyRegionDepth{2};
+    std::size_t maxDirtySeedCount{64};
     std::size_t maxLevels{3};
     std::size_t overlapLimit{2};
     std::size_t rollingWindowDocuments{0};
+    std::size_t fullRebuildDocThreshold{4096};
+    Duration coalesceWindow{Duration{250}};
     double minEdgeScore{0.0};
     double minClusterPersistence{0.0};
     bool reciprocalOnly{true};
     bool allowOverlap{true};
     bool emitBridgeAnnotations{true};
     bool emitOutliers{true};
+    DirtyRegionExpansionMode dirtyRegionExpansion{
+        DirtyRegionExpansionMode::PriorClusterAndNeighbors};
     Duration budget{Duration{250}};
+};
+
+struct TopologyDirtyRegion {
+    std::vector<std::string> seedDocumentHashes;
+    std::vector<std::string> expandedDocumentHashes;
+    std::size_t bfsDepthReached{0};
+    bool includedPriorClusterMembers{false};
+    bool includedSemanticNeighbors{false};
+    bool coalesced{false};
+    bool exceededRegionBudget{false};
+    bool requiresWiderRebuild{false};
 };
 
 struct DocumentClusterMembership {
@@ -109,6 +133,10 @@ struct TopologyUpdateStats {
     std::size_t membershipsUpdated{0};
     std::size_t bridgeDocsTagged{0};
     std::size_t medoidsSelected{0};
+    std::size_t dirtySeedCount{0};
+    std::size_t dirtyRegionDocs{0};
+    std::size_t coalescedDirtySets{0};
+    std::size_t fallbackFullRebuilds{0};
     Duration elapsed{Duration{0}};
 };
 

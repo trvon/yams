@@ -295,102 +295,6 @@ std::optional<std::string> topologyDocumentHashFromNodeKey(std::string_view node
     return std::string{nodeKey.substr(kDocPrefix.size())};
 }
 
-std::vector<std::string> collectIncrementalTopologyClosure(
-    const std::optional<yams::topology::TopologyArtifactBatch>& latestBatch,
-    yams::metadata::KnowledgeGraphStore* kgStore, const std::vector<std::string>& seedHashes,
-    std::size_t maxNeighborsPerDocument) {
-    if (seedHashes.empty()) {
-        return {};
-    }
-
-    std::unordered_map<std::string, std::vector<std::string>> clusterMembersById;
-    std::unordered_map<std::string, std::string> clusterIdByDocument;
-    if (latestBatch.has_value()) {
-        clusterMembersById.reserve(latestBatch->clusters.size());
-        for (const auto& cluster : latestBatch->clusters) {
-            clusterMembersById.emplace(cluster.clusterId, cluster.memberDocumentHashes);
-        }
-        clusterIdByDocument.reserve(latestBatch->memberships.size());
-        for (const auto& membership : latestBatch->memberships) {
-            clusterIdByDocument.emplace(membership.documentHash, membership.clusterId);
-        }
-    }
-
-    std::queue<std::string> pending;
-    for (const auto& hash : seedHashes) {
-        if (!hash.empty()) {
-            pending.push(hash);
-        }
-    }
-
-    std::unordered_set<std::string> visited;
-    std::vector<std::string> closure;
-    while (!pending.empty()) {
-        std::string hash = std::move(pending.front());
-        pending.pop();
-        if (hash.empty() || !visited.insert(hash).second) {
-            continue;
-        }
-        closure.push_back(hash);
-
-        if (auto clusterIt = clusterIdByDocument.find(hash);
-            clusterIt != clusterIdByDocument.end()) {
-            if (auto membersIt = clusterMembersById.find(clusterIt->second);
-                membersIt != clusterMembersById.end()) {
-                for (const auto& memberHash : membersIt->second) {
-                    if (!memberHash.empty() && !visited.contains(memberHash)) {
-                        pending.push(memberHash);
-                    }
-                }
-            }
-        }
-
-        if (!kgStore) {
-            continue;
-        }
-        auto nodeResult = kgStore->getNodeByKey("doc:" + hash);
-        if (!nodeResult || !nodeResult.value().has_value()) {
-            continue;
-        }
-
-        auto edgesResult = kgStore->getEdgesBidirectional(
-            nodeResult.value()->id, std::string_view{"semantic_neighbor"},
-            std::max<std::size_t>(maxNeighborsPerDocument * 4, maxNeighborsPerDocument));
-        if (!edgesResult) {
-            continue;
-        }
-
-        std::unordered_set<std::int64_t> neighborNodeIds;
-        for (const auto& edge : edgesResult.value()) {
-            if (edge.srcNodeId == nodeResult.value()->id) {
-                neighborNodeIds.insert(edge.dstNodeId);
-            }
-            if (edge.dstNodeId == nodeResult.value()->id) {
-                neighborNodeIds.insert(edge.srcNodeId);
-            }
-        }
-        if (neighborNodeIds.empty()) {
-            continue;
-        }
-
-        std::vector<std::int64_t> neighborIds(neighborNodeIds.begin(), neighborNodeIds.end());
-        auto neighborNodes = kgStore->getNodesByIds(neighborIds);
-        if (!neighborNodes) {
-            continue;
-        }
-
-        for (const auto& neighborNode : neighborNodes.value()) {
-            auto neighborHash = topologyDocumentHashFromNodeKey(neighborNode.nodeKey);
-            if (neighborHash.has_value() && !visited.contains(*neighborHash)) {
-                pending.push(*neighborHash);
-            }
-        }
-    }
-
-    std::sort(closure.begin(), closure.end());
-    return closure;
-}
-
 std::uint64_t nowUnixSeconds() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
@@ -2223,6 +2127,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
             if (piq) {
                 piq->setDrainCallback([this]() {
+                    const bool disableDrainTopologyRebuild = []() {
+                        if (const char* env = std::getenv("YAMS_DISABLE_DRAIN_TOPOLOGY_REBUILD")) {
+                            return std::string_view(env) == "1";
+                        }
+                        return false;
+                    }();
                     if (auto graphComponent = getGraphComponent()) {
                         auto maintenance = graphComponent->maintainSemanticTopology(false);
                         if (!maintenance) {
@@ -2235,7 +2145,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                          maintenance.value().semanticEdgesPruned);
                         }
                     }
-                    requestTopologyRebuild("post_ingest_drain");
+                    if (!disableDrainTopologyRebuild) {
+                        requestTopologyRebuild("post_ingest_drain");
+                    }
                     spdlog::debug(
                         "[ServiceManager] PostIngestQueue drained, signaling SearchEngineManager");
                     searchEngineManager_.signalIndexingDrained();
@@ -3914,9 +3826,41 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
     }
 
     std::vector<std::string> rebuildHashes = documentHashes;
+    topology::TopologyDirtyRegion dirtyRegion;
+    topology::TopologyExtractionStats seedExtractionStats;
+    topology::TopologyUpdateStats updateStats;
     if (!documentHashes.empty()) {
-        rebuildHashes =
-            collectIncrementalTopologyClosure(latestBatch, kgStore.get(), documentHashes, 32);
+        topology::TopologyExtractionConfig seedConfig;
+        seedConfig.documentHashes = documentHashes;
+        seedConfig.limit = static_cast<int>(documentHashes.size());
+        seedConfig.maxNeighborsPerDocument = 32;
+        seedConfig.includeEmbeddings = true;
+        seedConfig.includeMetadata = false;
+        seedConfig.requireEmbeddings = false;
+        seedConfig.requireGraphNode = false;
+
+        topology::TopologyBuildConfig regionConfig;
+        regionConfig.mode = topology::TopologyBuildMode::Incremental;
+        regionConfig.inputKind = topology::TopologyInputKind::Hybrid;
+        regionConfig.reciprocalOnly = true;
+        regionConfig.maxNeighborsPerDocument = seedConfig.maxNeighborsPerDocument;
+
+        auto seedExtracted = extractor->extract(seedConfig, &seedExtractionStats);
+        if (!seedExtracted) {
+            return Result<ServiceManager::TopologyRebuildStats>(seedExtracted.error());
+        }
+
+        if (latestBatch.has_value()) {
+            auto dirtyRegionResult =
+                engine->defineDirtyRegion(*latestBatch, seedExtracted.value(), regionConfig);
+            if (!dirtyRegionResult) {
+                return Result<ServiceManager::TopologyRebuildStats>(dirtyRegionResult.error());
+            }
+            dirtyRegion = dirtyRegionResult.value();
+            if (!dirtyRegion.expandedDocumentHashes.empty()) {
+                rebuildHashes = dirtyRegion.expandedDocumentHashes;
+            }
+        }
     }
 
     topology::TopologyExtractionConfig extractionConfig;
@@ -3942,7 +3886,8 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
 
     Result<topology::TopologyArtifactBatch> artifactResult = [&]() {
         if (latestBatch.has_value() && !rebuildHashes.empty()) {
-            return engine->updateArtifacts(*latestBatch, extracted.value(), buildConfig);
+            return engine->updateArtifacts(*latestBatch, extracted.value(), buildConfig,
+                                           &updateStats);
         }
         return engine->buildArtifacts(extracted.value(), buildConfig);
     }();
@@ -3966,11 +3911,24 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
     stats.neighborsReturned = extractionStats.neighborsReturned;
     stats.clustersBuilt = artifacts.clusters.size();
     stats.membershipsBuilt = artifacts.memberships.size();
+    stats.dirtySeedCount = updateStats.dirtySeedCount > 0 ? updateStats.dirtySeedCount
+                                                          : seedExtractionStats.seedDocuments;
+    stats.dirtyRegionDocs = updateStats.dirtyRegionDocs > 0 ? updateStats.dirtyRegionDocs
+                                                            : extractionStats.regionDocuments;
+    stats.coalescedDirtySets = updateStats.coalescedDirtySets;
+    stats.fallbackFullRebuilds = updateStats.fallbackFullRebuilds;
 
     if (!documentHashes.empty()) {
         stats.issues.push_back("incremental topology rebuild expanded " +
                                std::to_string(documentHashes.size()) + " seed docs to " +
                                std::to_string(rebuildHashes.size()) + " docs");
+        stats.issues.push_back(
+            std::string{"dirty-region expansion="} +
+            (dirtyRegion.includedPriorClusterMembers ? "prior_cluster+" : "") +
+            (dirtyRegion.includedSemanticNeighbors ? "neighbors" : "seeds_only"));
+        if (dirtyRegion.requiresWiderRebuild) {
+            stats.issues.push_back("dirty-region requested wider rebuild fallback");
+        }
     }
 
     if (artifacts.memberships.empty()) {
@@ -4064,6 +4022,10 @@ ServiceManager::rebuildTopologyArtifacts(const std::string& reason, bool dryRun,
         topologyTelemetry_.lastDocumentsMissingGraphNodes = stats.documentsMissingGraphNodes;
         topologyTelemetry_.lastClustersBuilt = stats.clustersBuilt;
         topologyTelemetry_.lastMembershipsBuilt = stats.membershipsBuilt;
+        topologyTelemetry_.lastDirtySeedCount = stats.dirtySeedCount;
+        topologyTelemetry_.lastDirtyRegionDocs = stats.dirtyRegionDocs;
+        topologyTelemetry_.lastCoalescedDirtySets = stats.coalescedDirtySets;
+        topologyTelemetry_.lastFallbackFullRebuilds = stats.fallbackFullRebuilds;
     }
     if (stats.skipped) {
         spdlog::info("[ServiceManager] Topology rebuild skipped (reason={}, docs={}, issues={})",
@@ -4124,6 +4086,15 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
         std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
         rebuildHashes.assign(topologyDirtyHashes_.begin(), topologyDirtyHashes_.end());
         topologyDirtyHashes_.clear();
+    } else {
+        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
+        for (const auto& hash : topologyDirtyHashes_) {
+            rebuildHashes.push_back(hash);
+        }
+        topologyDirtyHashes_.clear();
+        std::sort(rebuildHashes.begin(), rebuildHashes.end());
+        rebuildHashes.erase(std::unique(rebuildHashes.begin(), rebuildHashes.end()),
+                            rebuildHashes.end());
     }
     if (rebuildHashes.empty()) {
         spdlog::debug(
