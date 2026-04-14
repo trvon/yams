@@ -14,6 +14,7 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
   )
 
   test('integration_cli', cli_integ_exe,
+    args: ['--allow-running-no-tests'],
     suite: ['integration', 'cli'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',

@@ -24,6 +24,37 @@ TEST_CASE("QueryRouter: camelCase identifiers classify as code intent",
     CHECK(match.reason == "camel_case");
 }
 
+TEST_CASE("QueryRouter: code intent routes to literal retrieval mode",
+          "[search][router][retrieval]") {
+    QueryRouter router;
+
+    const auto match =
+        router.classifyRetrievalMode("resolveGraphCandidateNodeId", QueryIntent::Code);
+
+    CHECK(match.label == QueryRetrievalMode::Literal);
+    CHECK(match.reason == "code_intent");
+}
+
+TEST_CASE("QueryRouter: prose intent routes to semantic retrieval mode",
+          "[search][router][retrieval]") {
+    QueryRouter router;
+
+    const auto match = router.classifyRetrievalMode(
+        "Can statin treatment reduce inflammatory disease risk", QueryIntent::Prose);
+
+    CHECK(match.label == QueryRetrievalMode::Semantic);
+}
+
+TEST_CASE("QueryRouter: quoted queries route to literal retrieval mode",
+          "[search][router][retrieval]") {
+    QueryRouter router;
+
+    const auto decision = router.route("\"exact phrase\"");
+
+    CHECK(decision.retrievalMode.label == QueryRetrievalMode::Literal);
+    CHECK(decision.retrievalMode.reason == "quoted_literal");
+}
+
 TEST_CASE("QueryRouter: scientific community overrides prose corpora only when needed",
           "[search][router][community]") {
     QueryRouter router;
@@ -71,6 +102,7 @@ TEST_CASE("QueryRouter: route returns both intent and community labels", "[searc
         router.route("clinical trial treatment disease evidence", QueryRouteContext{});
 
     CHECK(decision.intent.label == QueryIntent::Prose);
+    CHECK(decision.retrievalMode.label == QueryRetrievalMode::Semantic);
     REQUIRE(decision.community.has_value());
     CHECK(decision.community->label == QueryCommunity::Scientific);
 }

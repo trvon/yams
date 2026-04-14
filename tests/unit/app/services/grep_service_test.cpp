@@ -386,6 +386,9 @@ TEST_CASE("GrepService - Basic Functionality", "[grep][service][basic]") {
 
         REQUIRE(res);
         CHECK(res.value().totalMatches == 2);
+        REQUIRE(res.value().searchStats.contains("retrieval_mode"));
+        CHECK(res.value().searchStats.at("retrieval_mode") == "literal");
+        CHECK(res.value().searchStats.at("fts_literal_filter") == "off");
     }
 
     SECTION("Hybrid mode includes semantic suggestions") {
@@ -396,7 +399,7 @@ TEST_CASE("GrepService - Basic Functionality", "[grep][service][basic]") {
 
         GrepRequest req;
 
-        req.pattern = "programming";
+        req.pattern = "how to learn programming";
 
         req.regexOnly = false;
 
@@ -406,6 +409,8 @@ TEST_CASE("GrepService - Basic Functionality", "[grep][service][basic]") {
 
         REQUIRE(res);
         CHECK(res.value().semanticMatches >= 0);
+        REQUIRE(res.value().searchStats.contains("retrieval_mode"));
+        CHECK(res.value().searchStats.at("retrieval_mode") == "semantic");
     }
 
     SECTION("Path filters normalize relative segments") {

@@ -657,7 +657,8 @@ public:
         {
             YAMS_ZONE_SCOPED_N("grep_service::literal_fts_filter");
             if (req.literalText && !req.pattern.empty() && !docs.empty() &&
-                !usedFtsForInitialCandidates) {
+                retrievalMode != search::QueryRetrievalMode::Literal &&
+                retrievalMode != search::QueryRetrievalMode::Path && !usedFtsForInitialCandidates) {
                 auto sRes = retryMetadataOp(
                     [&]() { return ctx_.metadataRepo->search(req.pattern, max_docs_hot); }, 4,
                     std::chrono::milliseconds(25), &metadataTelemetry);
@@ -1659,6 +1660,13 @@ public:
         response.searchStats["retrieval_mode"] =
             search::queryRetrievalModeToString(routeDecision.retrievalMode.label);
         response.searchStats["retrieval_mode_reason"] = routeDecision.retrievalMode.reason;
+        response.searchStats["fts_candidate_mode"] =
+            usedFtsForInitialCandidates ? "initial" : "off";
+        response.searchStats["fts_literal_filter"] =
+            (req.literalText && retrievalMode != search::QueryRetrievalMode::Literal &&
+             retrievalMode != search::QueryRetrievalMode::Path)
+                ? "eligible"
+                : "off";
         for (const auto& [phaseKey, phaseValue] : phaseTimings) {
             response.searchStats[phaseKey] = std::to_string(phaseValue);
         }

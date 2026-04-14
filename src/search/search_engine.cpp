@@ -138,10 +138,27 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
 
 std::vector<ComponentResult> buildTopologyWeakQueryComponentResults(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
     const std::unordered_set<std::string>& routedDocumentHashes, const SearchEngineConfig& config) {
     std::vector<ComponentResult> results;
     if (!metadataRepo || routedDocumentHashes.empty()) {
         return results;
+    }
+
+    std::unordered_map<std::string, yams::topology::DocumentClusterMembership> membershipByHash;
+    if (kgStore) {
+        auto metadataIface =
+            std::static_pointer_cast<yams::metadata::IMetadataRepository>(metadataRepo);
+        yams::topology::MetadataKgTopologyArtifactStore store(metadataIface, kgStore);
+        std::vector<std::string> routedHashes(routedDocumentHashes.begin(),
+                                              routedDocumentHashes.end());
+        auto membershipsResult = store.loadMemberships(routedHashes);
+        if (membershipsResult) {
+            membershipByHash.reserve(membershipsResult.value().size());
+            for (auto& membership : membershipsResult.value()) {
+                membershipByHash.emplace(membership.documentHash, std::move(membership));
+            }
+        }
     }
 
     yams::metadata::DocumentQueryOptions options;
@@ -168,6 +185,31 @@ std::vector<ComponentResult> buildTopologyWeakQueryComponentResults(
         cr.rank = rank++;
         cr.snippet = std::optional<std::string>(doc.filePath);
         cr.debugInfo["topology_routed"] = "true";
+        if (auto membershipIt = membershipByHash.find(doc.sha256Hash);
+            membershipIt != membershipByHash.end()) {
+            const auto& membership = membershipIt->second;
+            cr.debugInfo["topology_cluster_id"] = membership.clusterId;
+            switch (membership.role) {
+                case yams::topology::DocumentTopologyRole::Medoid:
+                    cr.debugInfo["topology_role"] = "medoid";
+                    cr.score = std::clamp(cr.score + 0.05f, 0.0f, 1.0f);
+                    break;
+                case yams::topology::DocumentTopologyRole::Bridge:
+                    cr.debugInfo["topology_role"] = "bridge";
+                    cr.score = std::clamp(cr.score + 0.03f, 0.0f, 1.0f);
+                    break;
+                case yams::topology::DocumentTopologyRole::Outlier:
+                    cr.debugInfo["topology_role"] = "outlier";
+                    break;
+                case yams::topology::DocumentTopologyRole::Core:
+                    cr.debugInfo["topology_role"] = "core";
+                    break;
+            }
+            cr.debugInfo["topology_persistence"] =
+                fmt::format("{:.4f}", membership.persistenceScore);
+            cr.debugInfo["topology_cohesion"] = fmt::format("{:.4f}", membership.cohesionScore);
+            cr.debugInfo["topology_bridge_score"] = fmt::format("{:.4f}", membership.bridgeScore);
+        }
         results.push_back(std::move(cr));
         if (results.size() >= config.topologyWeakQueryMaxDocs) {
             break;
@@ -1637,10 +1679,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const SearchExecutionContext searchExecutionContext = currentSearchExecutionContext();
     const bool shortQueryBudgeted = searchExecutionContext.shortQueryBudgeted;
     const bool pressureBudgeted = searchExecutionContext.pressureBudgeted;
+    const bool corpusWarming = searchExecutionContext.corpusWarming;
     const bool semanticBudgetActive = shortQueryBudgeted || pressureBudgeted;
     const bool delayEmbeddingUntilTier1 = semanticBudgetActive;
     response.debugStats["semantic_budget_short_query"] = shortQueryBudgeted ? "1" : "0";
     response.debugStats["semantic_budget_pressure"] = pressureBudgeted ? "1" : "0";
+    response.debugStats["corpus_warming"] = corpusWarming ? "1" : "0";
+    response.debugStats["post_ingest_queued"] =
+        std::to_string(searchExecutionContext.postIngestQueued);
+    response.debugStats["post_ingest_inflight"] =
+        std::to_string(searchExecutionContext.postIngestInFlight);
+    response.debugStats["search_engine_ready"] =
+        searchExecutionContext.searchEngineReady ? "1" : "0";
+    response.debugStats["search_engine_awaiting_drain"] =
+        searchExecutionContext.searchEngineAwaitingDrain ? "1" : "0";
     response.debugStats["semantic_budget_delay_embedding"] = delayEmbeddingUntilTier1 ? "1" : "0";
     if (shortQueryBudgeted) {
         workingConfig.vectorMaxResults = std::min(workingConfig.vectorMaxResults, size_t{8});
@@ -1662,6 +1714,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig.graphScoringBudgetMs = std::min(workingConfig.graphScoringBudgetMs, 4);
         response.debugStats["semantic_budget_mode"] =
             shortQueryBudgeted ? "short_query+pressure" : "pressure";
+    }
+    if (corpusWarming) {
+        workingConfig.enableTopologyWeakQueryRouting = false;
+        workingConfig.enableGraphRerank = false;
+        workingConfig.graphRerankTopN = 0;
+        workingConfig.graphScoringBudgetMs = 0;
+        workingConfig.kgMaxResults = 0;
+        workingConfig.kgWeight = 0.0f;
+        response.debugStats["semantic_budget_mode"] =
+            response.debugStats.contains("semantic_budget_mode")
+                ? response.debugStats["semantic_budget_mode"] + "+warming"
+                : "warming";
     }
     relaxedVectorRetryEnabled = intent == QueryIntent::Prose && queryTokenCount >= 6 &&
                                 workingConfig.similarityThreshold > 0.40f;
@@ -2336,7 +2400,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 }
 
                 auto topologyDocResults = buildTopologyWeakQueryComponentResults(
-                    metadataRepo_, topologyCandidates, workingConfig);
+                    metadataRepo_, kgStore_, topologyCandidates, workingConfig);
                 if (!topologyDocResults.empty()) {
                     allComponentResults.insert(allComponentResults.end(),
                                                topologyDocResults.begin(),

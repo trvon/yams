@@ -516,6 +516,23 @@ TEST_CASE("SearchService: explicit keyword search does not auto-fallback to fuzz
     CHECK(result.value().type == "full-text");
 }
 
+TEST_CASE(
+    "SearchService: literal-looking queries default to keyword retrieval without fuzzy fallback",
+    "[unit][services][search]") {
+    SearchServiceFixture f;
+    auto request = f.createBasicSearchRequest("resolveGraphCandidateNodeId");
+    request.fuzzy = false;
+
+    auto result = runAwait(f.searchService->search(request));
+    REQUIRE(result);
+    CHECK(result.value().total == kZeroTotal);
+    CHECK(result.value().results.empty());
+    CHECK(result.value().type == "full-text");
+    REQUIRE(result.value().searchStats.contains("retrieval_mode"));
+    CHECK(result.value().searchStats.at("retrieval_mode") == "literal");
+    CHECK(result.value().searchStats.at("effective_type") == "keyword");
+}
+
 TEST_CASE("SearchService: explicit keyword key=value query uses metadata filters",
           "[unit][services][search]") {
     SearchServiceFixture f;

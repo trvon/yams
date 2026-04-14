@@ -239,6 +239,18 @@ search::SearchExecutionContext buildSearchExecutionContext(const AppContext& ctx
                    : metrics.concurrencyLimit);
         context.recommendedWorkers = std::max<std::uint32_t>(
             1, static_cast<std::uint32_t>(yams::daemon::TuneAdvisor::recommendedThreads(0.5, 0)));
+        if (auto postIngest = ctx.service_manager->getPostIngestQueue()) {
+            context.postIngestQueued = static_cast<std::uint32_t>(std::min<std::size_t>(
+                postIngest->size(), std::numeric_limits<std::uint32_t>::max()));
+            context.postIngestInFlight = static_cast<std::uint32_t>(std::min<std::size_t>(
+                postIngest->totalInFlight(), std::numeric_limits<std::uint32_t>::max()));
+        }
+        const auto searchSnapshot = ctx.service_manager->getSearchEngineStatusSnapshot();
+        context.searchEngineReady = searchSnapshot.state == yams::daemon::SearchEngineState::Ready;
+        context.searchEngineAwaitingDrain =
+            searchSnapshot.state == yams::daemon::SearchEngineState::AwaitingDrain;
+        context.corpusWarming = context.postIngestQueued > 0 || context.postIngestInFlight > 0 ||
+                                context.searchEngineAwaitingDrain || !context.searchEngineReady;
     }
 #endif
     if (ctx.workerExecutor) {
@@ -1008,10 +1020,20 @@ public:
                 std::to_string(searchExecutionContext.concurrencyLimit);
             resp.searchStats["search_recommended_workers"] =
                 std::to_string(searchExecutionContext.recommendedWorkers);
+            resp.searchStats["post_ingest_queued"] =
+                std::to_string(searchExecutionContext.postIngestQueued);
+            resp.searchStats["post_ingest_inflight"] =
+                std::to_string(searchExecutionContext.postIngestInFlight);
             resp.searchStats["budget_short_query"] =
                 searchExecutionContext.shortQueryBudgeted ? "true" : "false";
             resp.searchStats["budget_pressure"] =
                 searchExecutionContext.pressureBudgeted ? "true" : "false";
+            resp.searchStats["search_engine_ready"] =
+                searchExecutionContext.searchEngineReady ? "true" : "false";
+            resp.searchStats["search_engine_awaiting_drain"] =
+                searchExecutionContext.searchEngineAwaitingDrain ? "true" : "false";
+            resp.searchStats["corpus_warming"] =
+                searchExecutionContext.corpusWarming ? "true" : "false";
             resp.searchStats["query_intent"] =
                 search::queryIntentToString(routeDecision.intent.label);
             resp.searchStats["query_intent_reason"] = routeDecision.intent.reason;

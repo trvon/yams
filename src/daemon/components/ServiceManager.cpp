@@ -3884,6 +3884,25 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
         return Result<ServiceManager::TopologyRebuildStats>(extracted.error());
     }
 
+    if (!documentHashes.empty() && extracted.value().empty()) {
+        ServiceManager::TopologyRebuildStats skipped;
+        skipped.skipped = true;
+        skipped.dryRun = dryRun;
+        skipped.fullRebuild = false;
+        skipped.reason = reason;
+        skipped.documentsRequested = extractionStats.documentsRequested;
+        skipped.documentsProcessed = 0;
+        skipped.documentsMissingEmbeddings = extractionStats.documentsMissingEmbeddings;
+        skipped.documentsMissingGraphNodes = extractionStats.documentsMissingGraphNodes;
+        skipped.neighborEdgesScanned = extractionStats.neighborEdgesScanned;
+        skipped.neighborsReturned = extractionStats.neighborsReturned;
+        skipped.dirtySeedCount = seedExtractionStats.seedDocuments;
+        skipped.dirtyRegionDocs = extractionStats.regionDocuments;
+        skipped.issues.push_back(
+            "dirty-region extraction returned no ready docs; deferring topology rebuild");
+        return skipped;
+    }
+
     Result<topology::TopologyArtifactBatch> artifactResult = [&]() {
         if (latestBatch.has_value() && !rebuildHashes.empty()) {
             return engine->updateArtifacts(*latestBatch, extracted.value(), buildConfig,
@@ -4109,8 +4128,28 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
 
     auto weakSelf = weak_from_this();
     boost::asio::post(getWorkerExecutor(), [weakSelf, reason]() mutable {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         if (auto self = weakSelf.lock()) {
+            const auto ingestMetrics = self->getIngestMetricsSnapshot();
+            auto piq = std::atomic_load_explicit(&self->postIngest_, std::memory_order_acquire);
+            const auto postQueued = piq ? piq->size() : 0U;
+            const auto postInFlight = piq ? piq->totalInFlight() : 0U;
+            auto embeddingService =
+                std::atomic_load_explicit(&self->embeddingService_, std::memory_order_acquire);
+            const auto embedQueued = embeddingService ? embeddingService->queuedJobs() : 0U;
+            const auto embedInFlight = embeddingService ? embeddingService->inFlightJobs() : 0U;
+            auto* kgWriteQueue = self->getKgWriteQueue();
+            const auto kgQueued = kgWriteQueue ? kgWriteQueue->queuedBatches() : 0U;
+            const auto kgInFlight = kgWriteQueue ? kgWriteQueue->inFlight() : 0U;
+
+            if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
+                postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||
+                kgInFlight > 0) {
+                self->topologyRebuildScheduled_.store(false, std::memory_order_release);
+                self->requestTopologyRebuild(reason);
+                return;
+            }
+
             std::vector<std::string> rebuildHashes;
             {
                 std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);

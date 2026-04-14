@@ -152,6 +152,9 @@ public:
                                  int timeoutMs = 0, bool keepHot = true, bool warmup = true);
     bool startEmbeddingWarmupIfConfigured();
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
+    SearchEngineSnapshot getSearchEngineStatusSnapshot() const {
+        return searchEngineManager_.getSnapshot();
+    }
     const std::string& getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
         if (vectorSystemManager_) {

@@ -12,9 +12,14 @@ struct SearchExecutionContext {
     std::uint32_t queuedRequests{0};
     std::uint32_t concurrencyLimit{1};
     std::uint32_t recommendedWorkers{1};
+    std::uint32_t postIngestQueued{0};
+    std::uint32_t postIngestInFlight{0};
     bool allowApproximateFacets{false};
     bool shortQueryBudgeted{false};
     bool pressureBudgeted{false};
+    bool searchEngineReady{false};
+    bool searchEngineAwaitingDrain{false};
+    bool corpusWarming{false};
     std::optional<boost::asio::any_io_executor> workerExecutor;
 };
 
