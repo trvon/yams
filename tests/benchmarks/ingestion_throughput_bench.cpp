@@ -355,6 +355,10 @@ struct StatusSnapshot {
     uint64_t topologyLastDocumentsProcessed{0};
     uint64_t topologyLastClustersBuilt{0};
     uint64_t topologyLastMembershipsBuilt{0};
+    uint64_t topologyLastDirtySeedCount{0};
+    uint64_t topologyLastDirtyRegionDocs{0};
+    uint64_t topologyLastCoalescedDirtySets{0};
+    uint64_t topologyLastFallbackFullRebuilds{0};
     bool topologyArtifactsFresh{false};
     bool topologyRebuildRunning{false};
 
@@ -405,6 +409,14 @@ struct StatusSnapshot {
             getCount(yams::daemon::metrics::kTopologyLastClustersBuilt);
         snapshot.topologyLastMembershipsBuilt =
             getCount(yams::daemon::metrics::kTopologyLastMembershipsBuilt);
+        snapshot.topologyLastDirtySeedCount =
+            getCount(yams::daemon::metrics::kTopologyLastDirtySeedCount);
+        snapshot.topologyLastDirtyRegionDocs =
+            getCount(yams::daemon::metrics::kTopologyLastDirtyRegionDocs);
+        snapshot.topologyLastCoalescedDirtySets =
+            getCount(yams::daemon::metrics::kTopologyLastCoalescedDirtySets);
+        snapshot.topologyLastFallbackFullRebuilds =
+            getCount(yams::daemon::metrics::kTopologyLastFallbackFullRebuilds);
         if (auto readyIt = status.readinessStates.find(
                 std::string(yams::daemon::readiness::kTopologyArtifactsFresh));
             readyIt != status.readinessStates.end()) {
@@ -723,6 +735,11 @@ void appendMetrics(const fs::path& metricsPath, const RunConfig& run, const RunR
         {"topology_last_documents_processed", result.finalSnapshot.topologyLastDocumentsProcessed},
         {"topology_last_clusters_built", result.finalSnapshot.topologyLastClustersBuilt},
         {"topology_last_memberships_built", result.finalSnapshot.topologyLastMembershipsBuilt},
+        {"topology_last_dirty_seed_count", result.finalSnapshot.topologyLastDirtySeedCount},
+        {"topology_last_dirty_region_docs", result.finalSnapshot.topologyLastDirtyRegionDocs},
+        {"topology_last_coalesced_dirty_sets", result.finalSnapshot.topologyLastCoalescedDirtySets},
+        {"topology_last_fallback_full_rebuilds",
+         result.finalSnapshot.topologyLastFallbackFullRebuilds},
         {"drained", result.drained},
         {"command", result.command},
         {"data_dir", result.dataDir.string()},

@@ -27,12 +27,8 @@ unit_app_services = files(
   # Migrated to Catch2 - see tests/meson.build
   # 'app/services/document_service_test.cpp',
   # 'app/services/document_service_errors_test.cpp',
-  # Migrated to Catch2 - see tests/meson.build (search_service_catch2_test.cpp)
-  # 'app/services/search_service_test.cpp',
   # Migrated to Catch2 - see tests/meson.build (hybrid_search_comprehensive_test.cpp)
   # 'app/services/search_service_comprehensive_test.cpp',
-  # Migrated to Catch2 - see tests/meson.build (search_hash_edge_cases_catch2_test.cpp)
-  # 'app/services/search_hash_edge_cases_test.cpp',
   # Migrated to Catch2 - see tests/meson.build (service_utilities_test.cpp)
   # 'app/services/session_service_test.cpp',
   # 'app/services/utils_test.cpp',
@@ -209,8 +205,6 @@ unit_mcp = files(
 
 unit_metadata = files(
   # All metadata tests migrated to Catch2 - see tests/meson.build
-  # Migrated to Catch2 - see tests/meson.build (fts5_performance_stress_catch2_test.cpp)
-  # 'metadata/fts5_performance_stress_test.cpp',  # Stress test (opt-in via YAMS_RUN_STRESS_TESTS=1)
 )
 
 unit_resolve = files(

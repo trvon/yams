@@ -481,6 +481,10 @@ struct TimeSeriesSample {
     uint64_t topologyLastDocumentsProcessed{0};
     uint64_t topologyLastClustersBuilt{0};
     uint64_t topologyLastMembershipsBuilt{0};
+    uint64_t topologyLastDirtySeedCount{0};
+    uint64_t topologyLastDirtyRegionDocs{0};
+    uint64_t topologyLastCoalescedDirtySets{0};
+    uint64_t topologyLastFallbackFullRebuilds{0};
     uint64_t topologyHotspotScore{0};
     bool topologyArtifactsFresh{false};
     bool topologyRebuildRunning{false};
@@ -621,6 +625,14 @@ private:
                 getCount(std::string(metrics::kTopologyLastClustersBuilt));
             sample.topologyLastMembershipsBuilt =
                 getCount(std::string(metrics::kTopologyLastMembershipsBuilt));
+            sample.topologyLastDirtySeedCount =
+                getCount(std::string(metrics::kTopologyLastDirtySeedCount));
+            sample.topologyLastDirtyRegionDocs =
+                getCount(std::string(metrics::kTopologyLastDirtyRegionDocs));
+            sample.topologyLastCoalescedDirtySets =
+                getCount(std::string(metrics::kTopologyLastCoalescedDirtySets));
+            sample.topologyLastFallbackFullRebuilds =
+                getCount(std::string(metrics::kTopologyLastFallbackFullRebuilds));
             if (auto it = st.readinessStates.find(std::string(readiness::kTopologyArtifactsFresh));
                 it != st.readinessStates.end()) {
                 sample.topologyArtifactsFresh = it->second;
@@ -1204,7 +1216,10 @@ void writeTimeSeriesCsv(const std::vector<TimeSeriesSample>& samples,
         << "topology_rebuild_running_age_ms,topology_last_duration_ms,"
         << "topology_rebuilds_total,topology_rebuild_failures_total,"
         << "topology_last_documents_requested,topology_last_documents_processed,"
-        << "topology_last_clusters_built,topology_last_memberships_built,topology_hotspot_score,"
+        << "topology_last_clusters_built,topology_last_memberships_built,"
+        << "topology_last_dirty_seed_count,topology_last_dirty_region_docs,"
+        << "topology_last_coalesced_dirty_sets,topology_last_fallback_full_rebuilds,"
+        << "topology_hotspot_score,"
         << "rss_bytes,cpu_percent,pressure_level,"
         << "kg_dropped,symbol_dropped,entity_dropped,title_dropped,bus_post_dropped,"
         << "docs_per_sec,bytes_per_sec\n";
@@ -1224,6 +1239,8 @@ void writeTimeSeriesCsv(const std::vector<TimeSeriesSample>& samples,
             << s.topologyRebuildsTotal << "," << s.topologyRebuildFailuresTotal << ","
             << s.topologyLastDocumentsRequested << "," << s.topologyLastDocumentsProcessed << ","
             << s.topologyLastClustersBuilt << "," << s.topologyLastMembershipsBuilt << ","
+            << s.topologyLastDirtySeedCount << "," << s.topologyLastDirtyRegionDocs << ","
+            << s.topologyLastCoalescedDirtySets << "," << s.topologyLastFallbackFullRebuilds << ","
             << s.topologyHotspotScore << "," << s.rssBytes << "," << s.cpuPercent << ","
             << s.pressureLevel << "," << s.kgDropped << "," << s.symbolDropped << ","
             << s.entityDropped << "," << s.titleDropped << "," << s.busPostDropped << ","
@@ -1468,6 +1485,10 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         uint64_t endTopologyLastDocumentsProcessed = 0;
         uint64_t endTopologyLastClustersBuilt = 0;
         uint64_t endTopologyLastMembershipsBuilt = 0;
+        uint64_t endTopologyLastDirtySeedCount = 0;
+        uint64_t endTopologyLastDirtyRegionDocs = 0;
+        uint64_t endTopologyLastCoalescedDirtySets = 0;
+        uint64_t endTopologyLastFallbackFullRebuilds = 0;
         uint64_t topologyRebuildActiveSamples = 0;
         uint64_t topologyFreshSamples = 0;
 
@@ -1538,6 +1559,10 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
             endTopologyLastDocumentsProcessed = s.topologyLastDocumentsProcessed;
             endTopologyLastClustersBuilt = s.topologyLastClustersBuilt;
             endTopologyLastMembershipsBuilt = s.topologyLastMembershipsBuilt;
+            endTopologyLastDirtySeedCount = s.topologyLastDirtySeedCount;
+            endTopologyLastDirtyRegionDocs = s.topologyLastDirtyRegionDocs;
+            endTopologyLastCoalescedDirtySets = s.topologyLastCoalescedDirtySets;
+            endTopologyLastFallbackFullRebuilds = s.topologyLastFallbackFullRebuilds;
         }
 
         const uint64_t inferStartedDelta = (endEmbedInferStarted >= firstEmbedInferStarted)
@@ -1603,6 +1628,14 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
             static_cast<double>(endTopologyLastClustersBuilt);
         state.counters["topology_last_memberships_built"] =
             static_cast<double>(endTopologyLastMembershipsBuilt);
+        state.counters["topology_last_dirty_seed_count"] =
+            static_cast<double>(endTopologyLastDirtySeedCount);
+        state.counters["topology_last_dirty_region_docs"] =
+            static_cast<double>(endTopologyLastDirtyRegionDocs);
+        state.counters["topology_last_coalesced_dirty_sets"] =
+            static_cast<double>(endTopologyLastCoalescedDirtySets);
+        state.counters["topology_last_fallback_full_rebuilds"] =
+            static_cast<double>(endTopologyLastFallbackFullRebuilds);
         state.counters["topology_rebuild_active_samples"] =
             static_cast<double>(topologyRebuildActiveSamples);
         state.counters["topology_fresh_samples"] = static_cast<double>(topologyFreshSamples);

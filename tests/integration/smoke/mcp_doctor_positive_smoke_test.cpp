@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -9,11 +12,132 @@
 
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/daemon/client/asio_connection_pool.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
 #include <yams/mcp/mcp_server.h>
 
+#include "../../common/daemon_preflight.h"
 #include "../../common/env_compat.h"
-#include "common/daemon_test_fixture.h"
+#include "../../common/fixture_manager.h"
+
+namespace {
+
+/// Local daemon fixture for GTest smoke tests. Replaces the former
+/// tests/common/daemon_test_fixture.h header that was deprecated in the
+/// Catch2 migration.
+class LocalDaemonFixture : public ::testing::Test {
+protected:
+    std::filesystem::path root_;
+    std::filesystem::path storageDir_;
+    std::filesystem::path runtimeRoot_;
+    std::filesystem::path socketPath_;
+    std::unique_ptr<yams::test::FixtureManager> fixtures_;
+    std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
+    std::thread runLoopThread_;
+
+    void SetUp() override {
+        auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        root_ = std::filesystem::temp_directory_path() / ("yams_test_" + unique);
+        storageDir_ = root_ / "storage";
+        runtimeRoot_ = root_ / "runtime";
+
+        std::error_code ec;
+        std::filesystem::create_directories(storageDir_, ec);
+        ASSERT_FALSE(ec) << "Failed to create storage dir: " << ec.message();
+        std::filesystem::create_directories(runtimeRoot_, ec);
+        ASSERT_FALSE(ec) << "Failed to create runtime dir: " << ec.message();
+
+        fixtures_ = std::make_unique<yams::test::FixtureManager>(root_ / "fixtures");
+
+        yams::test::harnesses::DaemonPreflight::ensure_environment({
+            .runtime_dir = runtimeRoot_,
+            .socket_name_prefix = "yams-test-",
+            .kill_others = false,
+        });
+
+        if (const char* s = std::getenv("YAMS_SOCKET_PATH")) {
+            socketPath_ = s;
+        } else {
+            socketPath_ = runtimeRoot_ / ("yams-test-" + std::to_string(::getpid()) + ".sock");
+        }
+    }
+
+    void TearDown() override {
+        if (daemon_) {
+            daemon_->stop();
+            if (runLoopThread_.joinable()) {
+                runLoopThread_.join();
+            }
+            daemon_.reset();
+        }
+        fixtures_.reset();
+
+        yams::test::harnesses::DaemonPreflight::post_test_cleanup(runtimeRoot_);
+
+        std::error_code ec;
+        std::filesystem::remove_all(root_, ec);
+        if (ec) {
+            std::cerr << "Warning: Failed to cleanup test dir " << root_ << ": " << ec.message()
+                      << std::endl;
+        }
+
+        ::unsetenv("YAMS_SOCKET_PATH");
+        ::unsetenv("YAMS_DAEMON_SOCKET");
+
+        yams::daemon::GlobalIOContext::reset();
+        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
+    }
+
+    bool startDaemon(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+        yams::daemon::DaemonConfig cfg;
+        cfg.dataDir = storageDir_;
+        cfg.socketPath = socketPath_;
+        cfg.pidFile = root_ / "daemon.pid";
+        cfg.logFile = root_ / "daemon.log";
+
+        daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
+        auto started = daemon_->start();
+
+        if (!started) {
+            ADD_FAILURE() << "Failed to start daemon: " << started.error().message;
+            return false;
+        }
+
+        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            auto lifecycle = daemon_->getLifecycle().snapshot();
+            if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
+                return true;
+            } else if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
+                ADD_FAILURE() << "Daemon lifecycle reached Failed state: " << lifecycle.lastError;
+                return false;
+            }
+        }
+
+        ADD_FAILURE() << "Daemon failed to reach Ready state within timeout";
+        return false;
+    }
+
+    void stopDaemon() {
+        if (daemon_) {
+            daemon_->stop();
+            if (runLoopThread_.joinable()) {
+                runLoopThread_.join();
+            }
+            daemon_.reset();
+        }
+    }
+
+    const std::filesystem::path& socketPath() const { return socketPath_; }
+};
+
+} // namespace
 
 using nlohmann::json;
 using yams::mcp::ITransport;
@@ -248,25 +372,18 @@ TEST_F(MCPSmokeFixture, BasicToolSuccessShapes) {
 
 // PBI028_PHASE3_MCP_DOCOPS
 // Doc ops round-trip via MCP with a live daemon (portable; uses short /tmp socket).
-// Converted to use DaemonTestFixture for proper isolation and cleanup.
-class MCPDocOpsFixture : public yams::test::DaemonTestFixture {
+class MCPDocOpsFixture : public LocalDaemonFixture {
 protected:
     void SetUp() override {
-        DaemonTestFixture::SetUp();
-
-        // Ensure CLI pool is reset for this test
+        LocalDaemonFixture::SetUp();
         yams::cli::cli_pool_reset_for_test();
-
-        // Set daemon socket environment variables
         ::setenv("YAMS_SOCKET_PATH", socketPath().string().c_str(), 1);
         ::setenv("YAMS_DAEMON_SOCKET", socketPath().string().c_str(), 1);
     }
 
     void TearDown() override {
-        // Ensure daemon is stopped before base cleanup
         stopDaemon();
-
-        DaemonTestFixture::TearDown();
+        LocalDaemonFixture::TearDown();
     }
 };
 

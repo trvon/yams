@@ -32,15 +32,7 @@ public:
 };
 
 using yams::test::ScopedEnvVar;
-
-class SpdlogLevelGuard {
-public:
-    SpdlogLevelGuard() : previous_(spdlog::get_level()) {}
-    ~SpdlogLevelGuard() { spdlog::set_level(previous_); }
-
-private:
-    spdlog::level::level_enum previous_;
-};
+using yams::test::SpdlogLevelGuard;
 
 } // namespace
 

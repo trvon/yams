@@ -274,12 +274,13 @@ ipc_stream_bench = executable('ipc_stream_bench', files('ipc_streaming_bench.cpp
 
 alias_target('bench_ipc_stream', ipc_stream_bench)
 
-# Socket accept and metrics performance benchmark
-if gtest_dep.found()
+# Socket accept and metrics performance benchmark (Catch2-based)
+_catch2_with_main_dep_bench = dependency('catch2-with-main', required: false)
+if _catch2_with_main_dep_bench.found()
   daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('daemon_socket_accept_bench.cpp'),
     include_directories: incs,
     dependencies: [
-      gtest_dep,
+      _catch2_with_main_dep_bench,
       test_deps,
       dependency('yams_benchmarks'),
       dependency('yams_daemon'),

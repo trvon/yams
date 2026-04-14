@@ -1388,6 +1388,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         CHECK(snap->topologyLastDocumentsProcessed == 3);
         CHECK(snap->topologyLastClustersBuilt == 1);
         CHECK(snap->topologyLastMembershipsBuilt == 3);
+        CHECK(snap->topologyLastDirtySeedCount >= 1);
+        CHECK(snap->topologyLastDirtyRegionDocs >= 1);
         CHECK(snap->topologyLastRunSucceeded);
         CHECK(snap->topologyLastRunStored);
     }

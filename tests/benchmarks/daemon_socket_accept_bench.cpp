@@ -1,27 +1,31 @@
 // Benchmark/stress test for daemon socket server accept performance
 // Tests: connection accept latency, concurrent connections, metrics polling overhead
 
+#include <catch2/catch_test_macros.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <iostream>
 #include <thread>
 #include <vector>
+
 #include "../integration/daemon/test_async_helpers.h"
 #include <boost/asio/awaitable.hpp>
-#include <gtest/gtest.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
-class SocketAcceptBench : public ::testing::Test {
-protected:
+namespace {
+
+struct SocketAcceptBenchFixture {
     fs::path testRoot_;
     fs::path socketPath_;
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
 
-    void SetUp() override {
+    SocketAcceptBenchFixture() {
         auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         testRoot_ = fs::temp_directory_path() / ("yams_socket_bench_" + unique);
         fs::create_directories(testRoot_);
@@ -41,23 +45,28 @@ protected:
 
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
         auto started = daemon_->start();
-        ASSERT_TRUE(started) << started.error().message;
+        REQUIRE(started);
 
         // Wait for daemon ready
         std::this_thread::sleep_for(500ms);
     }
 
-    void TearDown() override {
+    ~SocketAcceptBenchFixture() {
         if (daemon_) {
             daemon_->stop();
         }
         std::error_code ec;
         fs::remove_all(testRoot_, ec);
     }
+
+    SocketAcceptBenchFixture(const SocketAcceptBenchFixture&) = delete;
+    SocketAcceptBenchFixture& operator=(const SocketAcceptBenchFixture&) = delete;
 };
 
-// Test: Measure time from daemon start to first successful connection
-TEST_F(SocketAcceptBench, FirstConnectionLatency) {
+} // namespace
+
+TEST_CASE_METHOD(SocketAcceptBenchFixture, "FirstConnectionLatency",
+                 "[!benchmark][daemon][socket]") {
     auto startTime = std::chrono::steady_clock::now();
 
     yams::daemon::ClientConfig ccfg;
@@ -66,20 +75,18 @@ TEST_F(SocketAcceptBench, FirstConnectionLatency) {
     ccfg.requestTimeout = 10s;
     yams::daemon::DaemonClient client(ccfg);
 
-    // First status request - measures connection + request time
     auto st = yams::test_async::res(client.status(), 10s);
     auto elapsed = std::chrono::steady_clock::now() - startTime;
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
-    ASSERT_TRUE(st) << st.error().message;
+    REQUIRE(st);
     std::cout << "First connection latency: " << elapsedMs << "ms" << std::endl;
 
-    // Should be fast (< 1 second for local daemon)
-    EXPECT_LT(elapsedMs, 1000) << "First connection took too long";
+    CHECK(elapsedMs < 1000);
 }
 
-// Test: Rapid sequential connections to measure accept throughput
-TEST_F(SocketAcceptBench, SequentialConnectionThroughput) {
+TEST_CASE_METHOD(SocketAcceptBenchFixture, "SequentialConnectionThroughput",
+                 "[!benchmark][daemon][socket]") {
     constexpr int NUM_REQUESTS = 100;
     std::vector<int64_t> latencies;
     latencies.reserve(NUM_REQUESTS);
@@ -92,7 +99,6 @@ TEST_F(SocketAcceptBench, SequentialConnectionThroughput) {
     auto overallStart = std::chrono::steady_clock::now();
 
     for (int i = 0; i < NUM_REQUESTS; ++i) {
-        // New client each iteration to test connection overhead
         yams::daemon::DaemonClient client(ccfg);
 
         auto start = std::chrono::steady_clock::now();
@@ -100,14 +106,13 @@ TEST_F(SocketAcceptBench, SequentialConnectionThroughput) {
         auto elapsed = std::chrono::steady_clock::now() - start;
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
-        ASSERT_TRUE(st) << "Request " << i << " failed: " << st.error().message;
+        REQUIRE(st);
         latencies.push_back(ms);
     }
 
     auto totalElapsed = std::chrono::steady_clock::now() - overallStart;
     auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(totalElapsed).count();
 
-    // Calculate statistics
     int64_t sum = 0, min = latencies[0], max = latencies[0];
     for (auto lat : latencies) {
         sum += lat;
@@ -115,7 +120,7 @@ TEST_F(SocketAcceptBench, SequentialConnectionThroughput) {
         max = std::max(max, lat);
     }
     double avg = static_cast<double>(sum) / NUM_REQUESTS;
-    double throughput = (NUM_REQUESTS * 1000.0) / totalMs;
+    double throughput = (NUM_REQUESTS * 1000.0) / static_cast<double>(totalMs);
 
     std::cout << "Sequential throughput:" << std::endl;
     std::cout << "  Total: " << totalMs << "ms for " << NUM_REQUESTS << " requests" << std::endl;
@@ -123,17 +128,15 @@ TEST_F(SocketAcceptBench, SequentialConnectionThroughput) {
     std::cout << "  Latency - avg: " << avg << "ms, min: " << min << "ms, max: " << max << "ms"
               << std::endl;
 
-    // Reasonable expectations for local daemon
-    EXPECT_GT(throughput, 10.0) << "Throughput too low";
-    EXPECT_LT(avg, 500.0) << "Average latency too high";
+    CHECK(throughput > 10.0);
+    CHECK(avg < 500.0);
 }
 
-// Test: Concurrent connections to stress accept queue
-TEST_F(SocketAcceptBench, ConcurrentConnectionStress) {
+TEST_CASE_METHOD(SocketAcceptBenchFixture, "ConcurrentConnectionStress",
+                 "[!benchmark][daemon][socket]") {
     constexpr int NUM_THREADS = 10;
     constexpr int REQUESTS_PER_THREAD = 10;
 
-    // Wait for daemon to be fully ready before stress test (avoid startup race)
     {
         yams::daemon::ClientConfig ccfg;
         ccfg.socketPath = socketPath_;
@@ -160,7 +163,7 @@ TEST_F(SocketAcceptBench, ConcurrentConnectionStress) {
                 std::this_thread::sleep_for(100ms);
             }
         }
-        ASSERT_TRUE(ready) << "Daemon failed to become ready within 15 seconds";
+        REQUIRE(ready);
     }
 
     std::atomic<int> successCount{0};
@@ -197,8 +200,6 @@ TEST_F(SocketAcceptBench, ConcurrentConnectionStress) {
         th.join();
     }
 
-    // Wait for all async operations to complete before shutdown
-    // Check daemon status to ensure all connections have cleaned up
     {
         yams::daemon::ClientConfig ccfg;
         ccfg.socketPath = socketPath_;
@@ -212,8 +213,6 @@ TEST_F(SocketAcceptBench, ConcurrentConnectionStress) {
                 yams::daemon::DaemonClient client(ccfg);
                 auto st = yams::test_async::res(client.status(), 5s);
                 if (st && st.value().ready) {
-                    // Check if active connections dropped to (near) zero
-                    // Some overhead connection might exist, accept <= 2 as "done"
                     auto active = st.value().activeConnections;
                     if (active <= 2) {
                         allComplete = true;
@@ -238,7 +237,7 @@ TEST_F(SocketAcceptBench, ConcurrentConnectionStress) {
     auto totalElapsed = std::chrono::steady_clock::now() - overallStart;
     auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(totalElapsed).count();
     int totalRequests = NUM_THREADS * REQUESTS_PER_THREAD;
-    double throughput = (totalRequests * 1000.0) / totalMs;
+    double throughput = (totalRequests * 1000.0) / static_cast<double>(totalMs);
 
     std::cout << "Concurrent stress:" << std::endl;
     std::cout << "  Total: " << totalMs << "ms for " << totalRequests << " requests ("
@@ -247,12 +246,12 @@ TEST_F(SocketAcceptBench, ConcurrentConnectionStress) {
               << std::endl;
     std::cout << "  Throughput: " << throughput << " req/s" << std::endl;
 
-    EXPECT_EQ(successCount.load(), totalRequests) << "Some requests failed under load";
-    EXPECT_GT(throughput, 5.0) << "Concurrent throughput too low";
+    CHECK(successCount.load() == totalRequests);
+    CHECK(throughput > 5.0);
 }
 
-// Test: Metrics polling doesn't block request handling
-TEST_F(SocketAcceptBench, MetricsPollingNoBlockage) {
+TEST_CASE_METHOD(SocketAcceptBenchFixture, "MetricsPollingNoBlockage",
+                 "[!benchmark][daemon][socket]") {
     constexpr int NUM_REQUESTS = 50;
     std::vector<int64_t> latencies;
     latencies.reserve(NUM_REQUESTS);
@@ -263,21 +262,18 @@ TEST_F(SocketAcceptBench, MetricsPollingNoBlockage) {
     ccfg.requestTimeout = 5s;
     yams::daemon::DaemonClient client(ccfg);
 
-    // Let metrics polling run for a bit
     std::this_thread::sleep_for(1s);
 
-    // Rapid-fire status requests while metrics polling is active
     for (int i = 0; i < NUM_REQUESTS; ++i) {
         auto start = std::chrono::steady_clock::now();
         auto st = yams::test_async::res(client.status(), 5s);
         auto elapsed = std::chrono::steady_clock::now() - start;
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
-        ASSERT_TRUE(st) << "Request " << i << " failed: " << st.error().message;
+        REQUIRE(st);
         latencies.push_back(ms);
     }
 
-    // Calculate p50, p95, p99
     std::sort(latencies.begin(), latencies.end());
     auto p50 = latencies[NUM_REQUESTS / 2];
     auto p95 = latencies[static_cast<size_t>(NUM_REQUESTS * 0.95)];
@@ -286,22 +282,18 @@ TEST_F(SocketAcceptBench, MetricsPollingNoBlockage) {
     std::cout << "Metrics polling impact:" << std::endl;
     std::cout << "  p50: " << p50 << "ms, p95: " << p95 << "ms, p99: " << p99 << "ms" << std::endl;
 
-    // With background polling, all requests should be fast (< 100ms)
-    EXPECT_LT(p50, 100) << "p50 latency too high - metrics blocking?";
-    EXPECT_LT(p95, 200) << "p95 latency too high - metrics blocking?";
+    CHECK(p50 < 100);
+    CHECK(p95 < 200);
 }
 
-// Test: Measure daemon readiness time
-TEST_F(SocketAcceptBench, DaemonReadinessLatency) {
-    // This test measures full startup time - already covered by SetUp()
-    // But let's verify status reflects ready state
+TEST_CASE_METHOD(SocketAcceptBenchFixture, "DaemonReadinessLatency",
+                 "[!benchmark][daemon][socket]") {
     yams::daemon::ClientConfig ccfg;
     ccfg.socketPath = socketPath_;
     ccfg.autoStart = false;
     ccfg.requestTimeout = 10s;
     yams::daemon::DaemonClient client(ccfg);
 
-    // Poll until ready or timeout
     auto deadline = std::chrono::steady_clock::now() + 30s;
     bool becameReady = false;
     int64_t readyTimeMs = 0;
@@ -318,26 +310,8 @@ TEST_F(SocketAcceptBench, DaemonReadinessLatency) {
         std::this_thread::sleep_for(100ms);
     }
 
-    ASSERT_TRUE(becameReady) << "Daemon did not become ready within timeout";
+    REQUIRE(becameReady);
     std::cout << "Daemon ready in: " << readyTimeMs << "ms" << std::endl;
 
-    // Should be ready quickly (< 10 seconds for mock provider)
-    EXPECT_LT(readyTimeMs, 10000) << "Daemon took too long to become ready";
-}
-
-// Main function for running benchmarks
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-
-    std::cout << "\n";
-    std::cout << "====================================\n";
-    std::cout << "YAMS Daemon Socket Accept Benchmarks\n";
-    std::cout << "====================================\n\n";
-
-    int result = RUN_ALL_TESTS();
-
-    std::cout << "\n====================================\n";
-    std::cout << "Benchmarks complete.\n";
-
-    return result;
+    CHECK(readyTimeMs < 10000);
 }

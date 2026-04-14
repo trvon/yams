@@ -4,13 +4,17 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <optional>
 #include <random>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 namespace yams::test {
 
@@ -141,5 +145,69 @@ public:
 private:
     std::filesystem::path dir_;
 };
+
+/**
+ * @brief Canonical SHA-256 test vectors and input byte buffers.
+ */
+struct TestVectors {
+    static constexpr std::string_view EMPTY_SHA256 =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    static constexpr std::string_view ABC_SHA256 =
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    static constexpr std::string_view HELLO_WORLD_SHA256 =
+        "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e";
+
+    static std::vector<std::byte> getEmptyData() { return {}; }
+
+    static std::vector<std::byte> getABCData() {
+        return {std::byte{'a'}, std::byte{'b'}, std::byte{'c'}};
+    }
+
+    static std::vector<std::byte> getHelloWorldData() {
+        const char* str = "Hello World";
+        return std::vector<std::byte>(reinterpret_cast<const std::byte*>(str),
+                                      reinterpret_cast<const std::byte*>(str + 11));
+    }
+};
+
+/**
+ * @brief Poll @p predicate until it returns true or @p timeout elapses.
+ * @return true if the predicate became true, false on timeout.
+ */
+inline bool wait_for_condition(std::chrono::milliseconds timeout,
+                               std::chrono::milliseconds interval,
+                               const std::function<bool()>& predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(interval);
+    }
+    return predicate();
+}
+
+#if __has_include(<spdlog/spdlog.h>)
+} // namespace yams::test
+#include <spdlog/spdlog.h>
+namespace yams::test {
+
+/**
+ * @brief RAII helper to save and restore the global spdlog log level.
+ */
+class SpdlogLevelGuard {
+public:
+    SpdlogLevelGuard() : previous_(spdlog::get_level()) {}
+    ~SpdlogLevelGuard() { spdlog::set_level(previous_); }
+
+    SpdlogLevelGuard(const SpdlogLevelGuard&) = delete;
+    SpdlogLevelGuard& operator=(const SpdlogLevelGuard&) = delete;
+
+private:
+    spdlog::level::level_enum previous_;
+};
+#endif
 
 } // namespace yams::test
