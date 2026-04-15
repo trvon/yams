@@ -974,6 +974,89 @@ TEST_CASE("MetadataRepository: hasFtsEntry reports FTS5 presence correctly",
     }
 }
 
+TEST_CASE("MetadataRepository: indexed count reflects actual FTS rows, not extraction success",
+          "[unit][metadata][repository][fts5][counts]") {
+    MetadataRepositoryFixture fix;
+    fix.repository_->initializeCounters();
+
+    DocumentInfo doc;
+    doc.sha256Hash = "indexed_count_fts_only_hash";
+    doc.fileName = "indexed_count_fts_only.txt";
+    doc.fileSize = 128;
+    doc.mimeType = "text/plain";
+    doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = doc.createdTime;
+
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE(insertResult.has_value());
+    const auto docId = insertResult.value();
+
+    REQUIRE(fix.repository_->updateDocumentExtractionStatus(docId, true, ExtractionStatus::Success)
+                .has_value());
+
+    auto indexedWithoutFts = fix.repository_->getIndexedDocumentCount();
+    REQUIRE(indexedWithoutFts.has_value());
+    CHECK(indexedWithoutFts.value() == 0);
+    CHECK(fix.repository_->getCachedIndexedCount() == 0);
+    CHECK(fix.repository_->getCachedExtractedCount() == 1);
+
+    DocumentContent content;
+    content.documentId = docId;
+    content.contentText = "fts count probe";
+    content.contentLength = static_cast<int64_t>(content.contentText.size());
+    content.extractionMethod = "test";
+    content.language = "en";
+    REQUIRE(fix.repository_->insertContent(content).has_value());
+    REQUIRE(fix.repository_
+                ->indexDocumentContent(docId, doc.fileName, content.contentText, "text/plain")
+                .has_value());
+
+    auto indexedWithFts = fix.repository_->getIndexedDocumentCount();
+    REQUIRE(indexedWithFts.has_value());
+    CHECK(indexedWithFts.value() == 1);
+    CHECK(fix.repository_->getCachedIndexedCount() == 1);
+}
+
+TEST_CASE("MetadataRepository: initializeCounters keeps extracted and indexed counts distinct",
+          "[unit][metadata][repository][fts5][counters]") {
+    MetadataRepositoryFixture fix;
+
+    DocumentInfo doc;
+    doc.sha256Hash = "counter_distinct_hash";
+    doc.fileName = "counter_distinct.txt";
+    doc.fileSize = 64;
+    doc.mimeType = "text/plain";
+    doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = doc.createdTime;
+
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE(insertResult.has_value());
+    const auto docId = insertResult.value();
+
+    REQUIRE(fix.repository_->updateDocumentExtractionStatus(docId, true, ExtractionStatus::Success)
+                .has_value());
+
+    fix.repository_->initializeCounters();
+    CHECK(fix.repository_->getCachedExtractedCount() == 1);
+    CHECK(fix.repository_->getCachedIndexedCount() == 0);
+
+    DocumentContent content;
+    content.documentId = docId;
+    content.contentText = "counter refresh content";
+    content.contentLength = static_cast<int64_t>(content.contentText.size());
+    content.extractionMethod = "test";
+    content.language = "en";
+    REQUIRE(fix.repository_->insertContent(content).has_value());
+    REQUIRE(fix.repository_
+                ->indexDocumentContent(docId, doc.fileName, content.contentText, "text/plain")
+                .has_value());
+
+    auto exactIndexed = fix.repository_->getIndexedDocumentCount();
+    REQUIRE(exactIndexed.has_value());
+    CHECK(exactIndexed.value() == 1);
+    CHECK(fix.repository_->getCachedExtractedCount() == 1);
+}
+
 TEST_CASE("MetadataRepository: getFts5IndexedRowIdSet returns indexed document IDs",
           "[unit][metadata][repository][fts5]") {
     MetadataRepositoryFixture fix;

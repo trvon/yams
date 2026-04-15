@@ -120,6 +120,29 @@ void updateExtensionCountMap(std::unordered_map<std::string, int64_t>& counts, s
     }
 }
 
+Result<int64_t> queryExactFtsIndexedDocumentCount(Database& db) {
+    auto stmtResult = db.prepare("SELECT COUNT(*) FROM documents_fts_docsize");
+    if (!stmtResult) {
+        spdlog::debug("MetadataRepository: documents_fts_docsize unavailable, falling back to "
+                      "documents_fts COUNT(*): {}",
+                      stmtResult.error().message);
+        stmtResult = db.prepare("SELECT COUNT(*) FROM documents_fts");
+        if (!stmtResult) {
+            return stmtResult.error();
+        }
+    }
+
+    auto stmt = std::move(stmtResult).value();
+    auto stepResult = stmt.step();
+    if (!stepResult) {
+        return stepResult.error();
+    }
+    if (!stepResult.value()) {
+        return int64_t{0};
+    }
+    return stmt.getInt64(0);
+}
+
 void saturatingSubBytes(std::atomic<uint64_t>& counter, uint64_t bytes) {
     auto current = counter.load(std::memory_order_relaxed);
     while (true) {
@@ -1143,15 +1166,17 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         std::string priorExtension;
         int priorPathDepth = 0;
         {
-            // Use prepareCached for better performance on repeated deletes
-            // Note: wasIndexed checks extraction_status (FTS5 indexed) while wasEmbedded uses
+            // Use prepareCached for better performance on repeated deletes.
+            // wasIndexed checks actual FTS row presence; wasEmbedded checks
             // document_embeddings_status.has_embedding.
             auto checkStmt = db.prepareCached(R"(
                 SELECT d.content_extracted,
                        d.file_size,
                        d.file_extension,
                        d.path_depth,
-                       CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END,
+                       CASE WHEN EXISTS(
+                           SELECT 1 FROM documents_fts WHERE rowid = d.id
+                       ) THEN 1 ELSE 0 END,
                        COALESCE(des.has_embedding, 0)
                 FROM documents d
                 LEFT JOIN document_embeddings_status des ON des.document_id = d.id
@@ -1234,11 +1259,13 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
         size_t deletedCount = 0;
 
         // Prepare statement for checking document flags.
-        // wasIndexed checks extraction_status (FTS5 indexed);
-        // wasEmbedded checks document_embeddings_status.has_embedding.
+        // wasIndexed checks actual FTS row presence; wasEmbedded checks
+        // document_embeddings_status.has_embedding.
         auto checkStmtResult = db.prepareCached(R"(
             SELECT d.id, d.content_extracted, d.file_size, d.file_extension, d.path_depth,
-                   CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END,
+                   CASE WHEN EXISTS(
+                       SELECT 1 FROM documents_fts WHERE rowid = d.id
+                   ) THEN 1 ELSE 0 END,
                    COALESCE(des.has_embedding, 0)
             FROM documents d
             LEFT JOIN document_embeddings_status des ON des.document_id = d.id
@@ -2690,12 +2717,19 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
                                                       const std::string& content,
                                                       const std::string& contentType) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::indexDocumentContent");
+    bool hadFtsEntry = false;
+    if (auto hasFtsBefore = hasFtsEntry(documentId); hasFtsBefore) {
+        hadFtsEntry = hasFtsBefore.value();
+    }
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         return indexDocumentContentImpl(db, documentId, title, content, contentType,
                                         /*verifyDocumentExists=*/true);
     });
 
     if (result) {
+        if (!hadFtsEntry) {
+            cachedIndexedCount_.fetch_add(1, std::memory_order_relaxed);
+        }
         noteFtsIndexedId(documentId);
         invalidateQueryCache();
     }
@@ -2706,12 +2740,19 @@ Result<void> MetadataRepository::indexDocumentContentTrusted(int64_t documentId,
                                                              const std::string& title,
                                                              const std::string& content,
                                                              const std::string& contentType) {
+    bool hadFtsEntry = false;
+    if (auto hasFtsBefore = hasFtsEntry(documentId); hasFtsBefore) {
+        hadFtsEntry = hasFtsBefore.value();
+    }
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         return indexDocumentContentImpl(db, documentId, title, content, contentType,
                                         /*verifyDocumentExists=*/false);
     });
 
     if (result) {
+        if (!hadFtsEntry) {
+            cachedIndexedCount_.fetch_add(1, std::memory_order_relaxed);
+        }
         noteFtsIndexedId(documentId);
         invalidateQueryCache();
     }
@@ -3201,22 +3242,8 @@ Result<int64_t> MetadataRepository::getDocumentCount() {
 }
 
 Result<int64_t> MetadataRepository::getIndexedDocumentCount() {
-    // Returns count of documents that have been FTS5 indexed and have content extracted
-    // This represents "search-ready" documents, NOT embedding status
-    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmtResult = db.prepare(R"(
-            SELECT COUNT(*)
-            FROM documents
-            WHERE extraction_status = 'Success'
-        )");
-        if (!stmtResult)
-            return stmtResult.error();
-        Statement stmt = std::move(stmtResult).value();
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        return stmt.getInt64(0);
-    });
+    return executeReadQuery<int64_t>(
+        [&](Database& db) -> Result<int64_t> { return queryExactFtsIndexedDocumentCount(db); });
 }
 
 Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
@@ -4349,8 +4376,8 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentI
         if (!execResult)
             return execResult.error();
 
-        // Note: cachedIndexedCount_ now tracks FTS5-indexed documents (extraction_status =
-        // 'Success') NOT embedding status. Embedding status is tracked separately via
+        // Note: cachedIndexedCount_ now tracks actual FTS5 rows, not extraction success or
+        // embedding status. Embedding status is tracked separately via
         // VectorDatabase::getVectorCount()
 
         // Update component-owned embedded-doc counter only on state transition.
@@ -4784,18 +4811,20 @@ Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t document
                                                                 ExtractionStatus status,
                                                                 const std::string& error) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Check previous status for counter updates
-        bool wasIndexed = false;
+        // Check previous extracted state for counter updates. Indexed/FTS counters are managed
+        // only when an FTS row is inserted or removed.
+        bool extractedBefore = false;
         {
             auto checkStmt = db.prepareCached(R"(
-                SELECT CASE WHEN extraction_status = 'Success' THEN 1 ELSE 0 END
+                SELECT COALESCE(content_extracted, 0)
                 FROM documents WHERE id = ?
             )");
             if (checkStmt) {
                 auto& stmt = *checkStmt.value();
-                stmt.bind(1, documentId);
-                if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
-                    wasIndexed = stmt.getInt(0) != 0;
+                if (auto bindRes = stmt.bind(1, documentId); bindRes) {
+                    if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
+                        extractedBefore = stmt.getInt(0) != 0;
+                    }
                 }
             }
         }
@@ -4822,12 +4851,10 @@ Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t document
         if (!execResult)
             return execResult.error();
 
-        // Update indexed counter when extraction status changes
-        bool isNowIndexed = (status == ExtractionStatus::Success);
-        if (!wasIndexed && isNowIndexed) {
-            cachedIndexedCount_.fetch_add(1, std::memory_order_relaxed);
-        } else if (wasIndexed && !isNowIndexed) {
-            core::saturating_sub(cachedIndexedCount_, uint64_t{1});
+        if (!extractedBefore && contentExtracted) {
+            cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
+        } else if (extractedBefore && !contentExtracted) {
+            core::saturating_sub(cachedExtractedCount_, uint64_t{1});
         }
 
         return Result<void>{};
