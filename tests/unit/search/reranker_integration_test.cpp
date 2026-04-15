@@ -1419,4 +1419,106 @@ TEST_CASE("SearchEngine: sub-phrase rescoring does not discard already-retrieved
     CHECK(returned.contains("HASH_RESCORE_GAMMA"));
 }
 
+// =============================================================================
+// P8: edge weight threaded through reciprocal community support
+// =============================================================================
+
+namespace {
+
+SearchEngineConfig makeCommunityWeightConfig() {
+    SearchEngineConfig config;
+    config.textWeight = 1.0f;
+    config.pathTreeWeight = 0.0f;
+    config.kgWeight = 0.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.graphTextWeight = 0.0f;
+    config.graphVectorWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableGraphRerank = true;
+    config.graphRerankTopN = 5;
+    config.graphRerankWeight = 1.0f;
+    config.graphRerankMaxBoost = 1.0f;
+    config.graphRerankMinSignal = 0.01f;
+    config.includeDebugInfo = true;
+    config.enableReranking = false;
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("P8: graphCommunityMinEdgeWeight filters weak reciprocal edges",
+          "[search][graph][community][p8]") {
+    SearchEngineRerankerFixture fixture;
+    const std::string pathA = "/tmp/p8_weak_alpha.md";
+    const std::string pathB = "/tmp/p8_weak_beta.md";
+    const std::string hashA = "HASH_P8_WEAK_ALPHA";
+    const std::string hashB = "HASH_P8_WEAK_BETA";
+
+    fixture.addIndexedDocument(pathA, hashA, "Alpha topic", "alpha matching content");
+    fixture.addIndexedDocument(pathB, hashB, "Beta topic", "alpha matching companion content");
+    fixture.addDocEntityByHash(hashA, "alpha");
+    fixture.addDocEntityByHash(hashB, "alpha");
+    // Deliberately weak reciprocal edge.
+    fixture.addReciprocalSemanticNeighborsByHash(hashA, hashB, /*weight=*/0.2f);
+
+    // Default (minEdgeWeight=0): weak edges still form a community.
+    {
+        auto config = makeCommunityWeightConfig();
+        auto engine =
+            createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+        REQUIRE(engine != nullptr);
+        auto response = engine->searchWithResponse("alpha", {});
+        REQUIRE(response.has_value());
+        CHECK(response.value().debugStats.at("graph_community_edge_count") == "1");
+        CHECK(response.value().debugStats.at("graph_community_supported_docs") == "2");
+    }
+
+    // minEdgeWeight > edge.weight: the reciprocal link is filtered out and
+    // no community forms — the edge count and supported doc count both drop
+    // to zero. This proves edge.weight is actually being read and compared.
+    {
+        auto config = makeCommunityWeightConfig();
+        config.graphCommunityMinEdgeWeight = 0.5f;
+        auto engine =
+            createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+        REQUIRE(engine != nullptr);
+        auto response = engine->searchWithResponse("alpha", {});
+        REQUIRE(response.has_value());
+        CHECK(response.value().debugStats.at("graph_community_edge_count") == "0");
+        CHECK(response.value().debugStats.at("graph_community_supported_docs") == "0");
+    }
+}
+
+TEST_CASE("P8: default halfLifeDays=0 preserves pre-P8 behavior for recent edges",
+          "[search][graph][community][p8]") {
+    // Sanity check: the decay code path must be a no-op when halfLife==0,
+    // regardless of whether createdTime is populated. We construct the same
+    // fixture used by the existing community-telemetry tests.
+    SearchEngineRerankerFixture fixture;
+    const std::string pathA = "/tmp/p8_decay_alpha.md";
+    const std::string pathB = "/tmp/p8_decay_beta.md";
+    const std::string hashA = "HASH_P8_DECAY_ALPHA";
+    const std::string hashB = "HASH_P8_DECAY_BETA";
+
+    fixture.addIndexedDocument(pathA, hashA, "Alpha topic", "alpha matching content");
+    fixture.addIndexedDocument(pathB, hashB, "Beta topic", "alpha matching companion content");
+    fixture.addDocEntityByHash(hashA, "alpha");
+    fixture.addDocEntityByHash(hashB, "alpha");
+    fixture.addReciprocalSemanticNeighborsByHash(hashA, hashB, /*weight=*/0.95f);
+
+    auto config = makeCommunityWeightConfig();
+    // Explicitly leave graphCommunityDecayHalfLifeDays at its default of 0.
+    REQUIRE(config.graphCommunityDecayHalfLifeDays == 0.0f);
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, fixture.kgStore(), config);
+    REQUIRE(engine != nullptr);
+    auto response = engine->searchWithResponse("alpha", {});
+    REQUIRE(response.has_value());
+    CHECK(response.value().debugStats.at("graph_community_edge_count") == "1");
+    CHECK(response.value().debugStats.at("graph_community_supported_docs") == "2");
+}
+
 } // namespace yams::search

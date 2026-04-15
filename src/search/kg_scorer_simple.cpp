@@ -625,21 +625,25 @@ private:
         for (auto q : query_nodes) {
             if (timedOut(t0))
                 break;
-            // BFS up to max_hops
-            std::queue<std::pair<std::int64_t, std::size_t>> qq;
+            // BFS up to max_hops. P8: propagate a per-path weight = min(edge.weight)
+            // along the traversal. When all edges have weight 1.0 (KGEdge default),
+            // pathWeight stays 1.0 and the contribution reduces to the pre-P8
+            // formula (decay^depth).
+            std::queue<std::tuple<std::int64_t, std::size_t, float>> qq;
             std::unordered_set<std::int64_t> visited;
-            qq.emplace(q, 0);
+            qq.emplace(q, 0, 1.0f);
             visited.insert(q);
             while (!qq.empty()) {
                 if (timedOut(t0))
                     break;
-                auto [node, depth] = qq.front();
+                auto [node, depth, pathWeight] = qq.front();
                 qq.pop();
                 if (depth > cfg_.max_hops)
                     continue;
                 if (depth > 0 && cand_nodes.find(node) != cand_nodes.end()) {
                     // Found a path of length=depth
-                    score_acc += std::pow(decay, static_cast<double>(depth));
+                    score_acc += std::pow(decay, static_cast<double>(depth)) *
+                                 static_cast<double>(pathWeight);
                     if (++paths_found >= max_paths)
                         goto end_enum;
                     // Continue search to possibly find different candidates; do not early return
@@ -656,7 +660,8 @@ private:
                             continue;
                         if (!visited.insert(e.dstNodeId).second)
                             continue;
-                        qq.emplace(e.dstNodeId, depth + 1);
+                        const float edgeW = e.weight > 0.0f ? e.weight : 0.0f;
+                        qq.emplace(e.dstNodeId, depth + 1, std::min(pathWeight, edgeW));
                     }
                 } else {
                     auto nbR = store_->neighbors(node, cfg_.max_neighbors);
@@ -665,7 +670,9 @@ private:
                     for (auto nxt : nbR.value()) {
                         if (!visited.insert(nxt).second)
                             continue;
-                        qq.emplace(nxt, depth + 1);
+                        // neighbors() returns node ids only; weight unavailable here,
+                        // so carry the parent's pathWeight unchanged.
+                        qq.emplace(nxt, depth + 1, pathWeight);
                     }
                 }
             }

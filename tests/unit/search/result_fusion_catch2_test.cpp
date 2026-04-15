@@ -248,3 +248,61 @@ TEST_CASE("ResultFusion semantic rescue keeps rescued docs competitive for reran
     CHECK(results[0].document.sha256Hash == "doc-lexical-a");
     CHECK(results[1].document.sha256Hash == "doc-semantic");
 }
+
+// P7: convex fusion — normalized per-component scores combined with component weights.
+TEST_CASE("ResultFusion CONVEX normalizes per-component scores and applies weights",
+          "[search][fusion][p7][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.maxResults = 10;
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::CONVEX;
+    // Zero-out guardrails that would otherwise drop vector-only results,
+    // and disable hybrid-agreement boost so the convex math is observable directly.
+    cfg.vectorOnlyThreshold = 0.0f;
+    cfg.vectorOnlyPenalty = 1.0f;
+    cfg.vectorBoostFactor = 0.0f;
+    cfg.textWeight = 0.60f;
+    cfg.vectorWeight = 0.40f;
+
+    ResultFusion fusion(cfg);
+    // docA: dominates Text (raw 0.80 -> norm 1.0). docB: dominates Vector (raw 0.50 -> norm 1.0).
+    // docA expected contribution = 0.60 * 1.0 = 0.60
+    // docB expected contribution = 0.40 * 1.0 = 0.40
+    // docA should therefore rank above docB.
+    std::vector<ComponentResult> components;
+    components.push_back(makeComponent("docA", 0.80f, ComponentResult::Source::Text, 0));
+    components.push_back(makeComponent("docB", 0.40f, ComponentResult::Source::Text, 1));
+    components.push_back(makeComponent("docA", 0.25f, ComponentResult::Source::Vector, 1));
+    components.push_back(makeComponent("docB", 0.50f, ComponentResult::Source::Vector, 0));
+
+    auto results = fusion.fuse(components);
+    REQUIRE(results.size() == 2U);
+    CHECK(results[0].document.sha256Hash == "docA");
+    CHECK(results[1].document.sha256Hash == "docB");
+    // docA score: textWeight*(0.80/0.80) + vectorWeight*(0.25/0.50) = 0.60 + 0.20 = 0.80
+    CHECK(std::fabs(results[0].score - 0.80) < 1e-6);
+    // docB score: textWeight*(0.40/0.80) + vectorWeight*(0.50/0.50) = 0.30 + 0.40 = 0.70
+    CHECK(std::fabs(results[1].score - 0.70) < 1e-6);
+}
+
+TEST_CASE("ResultFusion CONVEX handles empty input and zero-weight components",
+          "[search][fusion][p7][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.maxResults = 10;
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::CONVEX;
+    cfg.vectorOnlyThreshold = 0.0f;
+    cfg.vectorOnlyPenalty = 1.0f;
+    cfg.textWeight = 0.0f; // zero weight on Text — should contribute nothing
+    cfg.vectorWeight = 1.0f;
+
+    ResultFusion fusion(cfg);
+    CHECK(fusion.fuse({}).empty());
+
+    std::vector<ComponentResult> components;
+    components.push_back(makeComponent("docOnlyText", 0.90f, ComponentResult::Source::Text, 0));
+    auto results = fusion.fuse(components);
+    // Text has zero weight → doc gets a 0 score; fusion machinery may still admit it as a
+    // candidate, but when it does, the score must be 0.
+    if (!results.empty()) {
+        CHECK(std::fabs(results[0].score) < 1e-6);
+    }
+}

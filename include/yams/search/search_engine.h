@@ -218,13 +218,18 @@ struct SearchEngineConfig {
     // Benchmarking support
     bool enableProfiling = false;
 
-    // Result fusion strategy (4 strategies for simplicity)
+    // Result fusion strategy
     enum class FusionStrategy {
-        WEIGHTED_SUM,                            // Sum of weighted scores (simple baseline)
-        RECIPROCAL_RANK,                         // Standard Reciprocal Rank Fusion
-        WEIGHTED_RECIPROCAL,                     // RRF with score boost (good default)
-        COMB_MNZ                                 // CombMNZ: score * num_components (recall-focused)
+        WEIGHTED_SUM,        // Sum of weighted scores (simple baseline)
+        RECIPROCAL_RANK,     // Standard Reciprocal Rank Fusion
+        WEIGHTED_RECIPROCAL, // RRF with score boost (good default)
+        COMB_MNZ,            // CombMNZ: score * num_components (recall-focused)
+        CONVEX               // Convex combination of per-component normalized scores
     } fusionStrategy = FusionStrategy::COMB_MNZ; // Default: recall-focused
+
+    // P7: When true, SearchEngine overrides fusionStrategy to CONVEX once the
+    // SearchTuner reports convergence. Default off preserves existing behavior.
+    bool enableAdaptiveFusion = false;
 
     // Chunk-to-document aggregation strategy for vector search results.
     // Controls how multiple chunk-level vector hits from the same document are combined.
@@ -317,6 +322,8 @@ struct SearchEngineConfig {
                 return "WEIGHTED_RECIPROCAL";
             case FusionStrategy::COMB_MNZ:
                 return "COMB_MNZ";
+            case FusionStrategy::CONVEX:
+                return "CONVEX";
         }
         return "UNKNOWN";
     }
@@ -371,6 +378,15 @@ struct SearchEngineConfig {
     // candidate-set widths so identical structural support produces stable absolute scores.
     // Set <= 1.0f to fall back to the legacy candidate-set-adaptive normalizer.
     float graphCommunityReferenceSize = 8.0f;
+    // P8: temporal half-life for edge weight in reciprocal community support, in days.
+    // 0.0f (default) disables decay, preserving binary-equivalent behavior. When > 0,
+    // decayed_weight = edge.weight * exp(-ln(2) * age_days / halfLifeDays). Edges without
+    // createdTime are treated as no-decay.
+    float graphCommunityDecayHalfLifeDays = 0.0f;
+    // P8: minimum decayed edge weight required to count as a reciprocal link. Guards against
+    // arbitrarily-weak edges pulling docs into communities. Default 0 means any reciprocal edge
+    // counts (matches pre-P8 binary behavior).
+    float graphCommunityMinEdgeWeight = 0.0f;
     bool graphUseQueryConcepts = true; // Enrich graph rerank query with extracted concepts
     bool graphFallbackToTopSignal =
         true; // If no candidate clears minSignal, still boost the top positive graph hit
@@ -719,6 +735,7 @@ private:
     std::vector<SearchResult> fuseReciprocalRank(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseWeightedReciprocal(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseCombMNZ(const std::vector<ComponentResult>& results);
+    std::vector<SearchResult> fuseConvex(const std::vector<ComponentResult>& results);
 
     template <typename ScoreFunc>
     std::vector<SearchResult> fuseSinglePass(const std::vector<ComponentResult>& results,

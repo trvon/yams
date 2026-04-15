@@ -455,7 +455,8 @@ std::vector<float> computeReciprocalCommunitySupport(
     const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
     const std::vector<std::string>& candidateIds, std::size_t maxNeighbors,
     float referenceCommunitySize = 0.0f, std::size_t* supportedDocCountOut = nullptr,
-    std::size_t* edgeCountOut = nullptr, std::size_t* largestCommunityOut = nullptr) {
+    std::size_t* edgeCountOut = nullptr, std::size_t* largestCommunityOut = nullptr,
+    float decayHalfLifeDays = 0.0f, float minEdgeWeight = 0.0f) {
     std::vector<float> support(candidateIds.size(), 0.0f);
     if (!kgStore || candidateIds.size() < 2) {
         return support;
@@ -473,7 +474,30 @@ std::vector<float> computeReciprocalCommunitySupport(
         return support;
     }
 
-    std::vector<std::unordered_set<std::size_t>> outgoing(candidateIds.size());
+    // P8: compute decayed weight from (edge.weight, edge.createdTime).
+    // halfLife==0 disables decay so the effective weight is just edge.weight,
+    // which preserves pre-P8 binary behavior when minEdgeWeight==0 (any
+    // reciprocal link counts) and every incoming edge has weight>0.
+    const std::int64_t nowSeconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count();
+    const double kLn2 = 0.6931471805599453;
+    auto decayedWeight = [&](const yams::metadata::KGEdge& edge) -> float {
+        float w = edge.weight > 0.0f ? edge.weight : 0.0f;
+        if (decayHalfLifeDays > 0.0f && edge.createdTime.has_value()) {
+            const double ageSeconds = static_cast<double>(nowSeconds - *edge.createdTime);
+            if (ageSeconds > 0.0) {
+                const double ageDays = ageSeconds / 86400.0;
+                const double factor =
+                    std::exp(-kLn2 * ageDays / static_cast<double>(decayHalfLifeDays));
+                w = static_cast<float>(static_cast<double>(w) * factor);
+            }
+        }
+        return w;
+    };
+
+    // outgoingWeight[i][j] is the decayed weight of the edge from i->j, if any.
+    std::vector<std::unordered_map<std::size_t, float>> outgoingWeight(candidateIds.size());
     std::vector<std::vector<std::size_t>> reciprocalAdj(candidateIds.size());
 
     for (const auto& [nodeId, idx] : indexByNodeId) {
@@ -487,17 +511,23 @@ std::vector<float> computeReciprocalCommunitySupport(
             if (it == indexByNodeId.end() || it->second == idx) {
                 continue;
             }
-            outgoing[idx].insert(it->second);
+            const float w = decayedWeight(edge);
+            if (w < minEdgeWeight) {
+                continue;
+            }
+            auto& slot = outgoingWeight[idx][it->second];
+            slot = std::max(slot, w);
         }
     }
 
     std::size_t reciprocalEdgeCount = 0;
-    for (std::size_t i = 0; i < outgoing.size(); ++i) {
-        for (const auto neighbor : outgoing[i]) {
+    for (std::size_t i = 0; i < outgoingWeight.size(); ++i) {
+        for (const auto& [neighbor, w] : outgoingWeight[i]) {
             if (neighbor <= i) {
                 continue;
             }
-            if (outgoing[neighbor].contains(i)) {
+            auto reverseIt = outgoingWeight[neighbor].find(i);
+            if (reverseIt != outgoingWeight[neighbor].end()) {
                 reciprocalAdj[i].push_back(neighbor);
                 reciprocalAdj[neighbor].push_back(i);
                 ++reciprocalEdgeCount;
@@ -998,6 +1028,18 @@ std::vector<SearchResult> ResultFusion::fuse(const std::vector<ComponentResult>&
             return fuseWeightedReciprocal(componentResults);
         case SearchEngineConfig::FusionStrategy::COMB_MNZ:
             return fuseCombMNZ(componentResults);
+        case SearchEngineConfig::FusionStrategy::CONVEX:
+            // P7: convex combination is adaptive — any unexpected error falls
+            // back to RRF rather than surfacing failures to the user.
+            try {
+                return fuseConvex(componentResults);
+            } catch (const std::exception& e) {
+                spdlog::warn("[search] convex fusion failed ({}); falling back to RRF", e.what());
+                return fuseReciprocalRank(componentResults);
+            } catch (...) {
+                spdlog::warn("[search] convex fusion failed (unknown); falling back to RRF");
+                return fuseReciprocalRank(componentResults);
+            }
     }
     return fuseCombMNZ(componentResults); // Default fallback
 }
@@ -1429,6 +1471,41 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
 
 float ResultFusion::getComponentWeight(ComponentResult::Source source) const {
     return componentSourceWeight(config_, source);
+}
+
+// P7: Convex combination fusion.
+// Per-component scores are normalized to [0,1] (divided by that component's max),
+// then combined as sum(alpha_c * norm_score_c). Component weights come from
+// SearchEngineConfig (already populated from SearchTuner::getParams().weights via
+// TunedParams::applyTo, which is normalized to sum~1.0). Bruch et al. (2210.11934)
+// shows this beats RRF once tuner weights have converged.
+std::vector<SearchResult> ResultFusion::fuseConvex(const std::vector<ComponentResult>& results) {
+    // 1) Find per-component max score for normalization.
+    std::unordered_map<int, double> maxByComponent;
+    maxByComponent.reserve(8);
+    for (const auto& comp : results) {
+        const int key = static_cast<int>(comp.source);
+        auto& cur = maxByComponent[key];
+        const double s = static_cast<double>(comp.score);
+        if (s > cur) {
+            cur = s;
+        }
+    }
+
+    return fuseSinglePass(results, [this, &maxByComponent](const ComponentResult& comp) {
+        const double weight = static_cast<double>(getComponentWeight(comp.source));
+        if (weight <= 0.0) {
+            return 0.0;
+        }
+        const int key = static_cast<int>(comp.source);
+        auto it = maxByComponent.find(key);
+        const double maxScore = (it != maxByComponent.end()) ? it->second : 0.0;
+        if (maxScore <= 0.0) {
+            return 0.0;
+        }
+        const double norm = std::clamp(static_cast<double>(comp.score) / maxScore, 0.0, 1.0);
+        return weight * norm;
+    });
 }
 
 // ============================================================================
@@ -3320,6 +3397,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         preFusionSignals = buildPreFusionSignalMap(allComponentResults);
     }
 
+    // P7: adaptive convex-fusion switch. Once the SearchTuner reports convergence
+    // and the user has opted in via enableAdaptiveFusion, override the configured
+    // fusion strategy to CONVEX. The convex dispatch itself falls back to RRF on
+    // any exception so this is fail-soft.
+    bool adaptiveFusionApplied = false;
+    bool tunerConvergedForFusion = false;
+    if (tuner_) {
+        tunerConvergedForFusion = tuner_->hasConverged();
+    }
+    if (workingConfig.enableAdaptiveFusion && tunerConvergedForFusion &&
+        workingConfig.fusionStrategy != SearchEngineConfig::FusionStrategy::CONVEX) {
+        workingConfig.fusionStrategy = SearchEngineConfig::FusionStrategy::CONVEX;
+        adaptiveFusionApplied = true;
+    }
+    response.debugStats["fusion_strategy"] =
+        SearchEngineConfig::fusionStrategyToString(workingConfig.fusionStrategy);
+    response.debugStats["fusion_adaptive_applied"] = adaptiveFusionApplied ? "1" : "0";
+    response.debugStats["search_tuner_converged"] = tunerConvergedForFusion ? "1" : "0";
+
     ResultFusion fusion(workingConfig);
     {
         YAMS_ZONE_SCOPED_N("fusion::results");
@@ -3685,7 +3781,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     kgStore_, candidateIds,
                     std::max<std::size_t>(8, workingConfig.graphMaxNeighbors),
                     workingConfig.graphCommunityReferenceSize, &graphCommunitySupportedDocs,
-                    &graphCommunityEdges, &graphLargestCommunity);
+                    &graphCommunityEdges, &graphLargestCommunity,
+                    workingConfig.graphCommunityDecayHalfLifeDays,
+                    workingConfig.graphCommunityMinEdgeWeight);
 
                 std::vector<float> rawSignals(rerankWindow, 0.0f);
                 std::vector<float> lexicalAnchors(rerankWindow, 0.0f);

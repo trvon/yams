@@ -1101,6 +1101,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_relevance_label_store_exe = executable('catch2_relevance_label_store',
+    files('unit/search/relevance_label_store_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Compression submodule tests(CompressionPolicy, CompressionMonitor, Zstandard, LZMA, ErrorHandler, etc.)
 #Migrated from GTest as part of yams - 3s4 / yams - pmf
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
@@ -2809,6 +2818,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'search', 'benchmark', 'yams-7ez4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('relevance_label_store', catch2_relevance_label_store_exe,
+    suite: ['catch2', 'unit', 'search', 'relevance'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   heavy_submodule_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 600 : 300
