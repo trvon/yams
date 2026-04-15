@@ -23,6 +23,8 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
+#include <yams/config/config_helpers.h>
+#include <yams/search/benchmark_history_store.h>
 #include <yams/search/internal_benchmark.h>
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -3196,7 +3198,11 @@ private:
     bool benchmarkVerbose_{false};
     std::string benchmarkSaveBaseline_;
     std::string benchmarkCompareBaseline_;
+    bool benchmarkHistory_{false};
+    std::size_t benchmarkHistoryLimit_{20};
+    bool benchmarkHistoryJson_{false};
     void runBenchmark();
+    void printBenchmarkHistory();
     // Tuning helpers
     Result<void> applyTuningBaseline(bool apply);
     std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const;
@@ -3610,6 +3616,14 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
                       "Save results to file for future comparison");
     bench->add_option("--compare-baseline", benchmarkCompareBaseline_,
                       "Compare against saved baseline results");
+    bench->add_flag("--history", benchmarkHistory_,
+                    "Print persisted benchmark history and exit (no new run)");
+    bench
+        ->add_option("--history-limit", benchmarkHistoryLimit_,
+                     "Maximum number of history rows to print")
+        ->default_val(20);
+    bench->add_flag("--history-json", benchmarkHistoryJson_,
+                    "Emit history as JSON array (implies --history)");
     bench->callback([this]() {
         subcommandInvoked_ = true;
         immediateSubcommandHandled_ = true;
@@ -4329,6 +4343,12 @@ void DoctorCommand::runBenchmark() {
         using namespace yams::cli::ui;
         using namespace yams::search;
 
+        // --history / --history-json short-circuits the run and just reads the append log.
+        if (benchmarkHistory_ || benchmarkHistoryJson_) {
+            printBenchmarkHistory();
+            return;
+        }
+
         std::cout << "\n" << section_header("Search Quality Benchmark") << "\n\n";
 
         if (!cli_) {
@@ -4407,6 +4427,25 @@ void DoctorCommand::runBenchmark() {
             std::cout << benchResults.toJson().dump(2) << "\n";
         } else {
             std::cout << benchResults.summary();
+        }
+
+        // Append to persistent history so doctor --history can triage regressions.
+        try {
+            yams::search::BenchmarkHistoryStore history(yams::config::get_data_dir() /
+                                                        "benchmark_history.json");
+            yams::search::BenchmarkHistoryStore::Row row;
+            row.results = benchResults;
+            // Opaque fingerprint: queryCount + k + corpus doc count. Stable per-run
+            // label so later comparisons can bucket similar configurations.
+            row.configHash = std::to_string(config.queryCount) + "-" + std::to_string(config.k) +
+                             "-" + std::to_string(docCount.value());
+            auto appended = history.append(row);
+            if (!appended) {
+                spdlog::warn("Failed to persist benchmark history row: {}",
+                             appended.error().message);
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Benchmark history append raised: {}", e.what());
         }
 
         // Save baseline if requested
@@ -4514,6 +4553,83 @@ void DoctorCommand::runBenchmark() {
     } catch (const std::exception& e) {
         std::cout << "  " << ui::status_error(std::string("Benchmark error: ") + e.what()) << "\n";
     }
+}
+
+void DoctorCommand::printBenchmarkHistory() {
+    using namespace yams::cli::ui;
+
+    yams::search::BenchmarkHistoryStore store(yams::config::get_data_dir() /
+                                              "benchmark_history.json");
+    auto rowsResult = store.read(benchmarkHistoryLimit_);
+    if (!rowsResult) {
+        if (benchmarkHistoryJson_) {
+            std::cout << nlohmann::json{{"error", rowsResult.error().message}}.dump(2) << "\n";
+        } else {
+            std::cout << "  "
+                      << status_error("Failed to read benchmark history: " +
+                                      rowsResult.error().message)
+                      << "\n";
+        }
+        return;
+    }
+
+    const auto& rows = rowsResult.value();
+
+    if (benchmarkHistoryJson_) {
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto& row : rows) {
+            out.push_back(row.toJson());
+        }
+        std::cout << out.dump(2) << "\n";
+        return;
+    }
+
+    std::cout << "\n" << section_header("Benchmark History") << "\n\n";
+    std::cout << "  " << colorize("Path:", Ansi::CYAN) << " " << store.path().string() << "\n";
+    std::cout << "  " << colorize("Rows:", Ansi::CYAN) << " " << rows.size()
+              << (rows.size() == benchmarkHistoryLimit_ ? " (truncated)" : "") << "\n\n";
+
+    if (rows.empty()) {
+        std::cout << "  " << status_ok("No history yet — run `yams doctor benchmark` first")
+                  << "\n";
+        return;
+    }
+
+    const char* headers[] = {"Timestamp", "Queries", "MRR", "R@K", "Mean ms", "Tuning", "Trend"};
+    std::cout << "  ";
+    for (const auto* h : headers) {
+        std::cout << colorize(h, Ansi::BOLD) << "\t";
+    }
+    std::cout << "\n";
+
+    std::optional<float> prevMrr;
+    for (const auto& row : rows) {
+        const auto& r = row.results;
+        std::string trend = "→";
+        const char* trendColor = Ansi::DIM;
+        if (prevMrr) {
+            if (r.mrr > *prevMrr + 1e-4f) {
+                trend = "↑";
+                trendColor = Ansi::GREEN;
+            } else if (r.mrr < *prevMrr - 1e-4f) {
+                trend = "↓";
+                trendColor = Ansi::RED;
+            }
+        }
+        prevMrr = r.mrr;
+
+        char mrrBuf[16];
+        std::snprintf(mrrBuf, sizeof(mrrBuf), "%.3f", r.mrr);
+        char recallBuf[16];
+        std::snprintf(recallBuf, sizeof(recallBuf), "%.3f", r.recallAtK);
+        char latBuf[16];
+        std::snprintf(latBuf, sizeof(latBuf), "%.1f", r.latency.meanMs);
+
+        std::cout << "  " << r.timestamp << "\t" << r.queriesRun << "\t" << mrrBuf << "\t"
+                  << recallBuf << "\t" << latBuf << "\t" << (r.tuningState.value_or("-")) << "\t"
+                  << colorize(trend, trendColor) << "\n";
+    }
+    std::cout << "\n";
 }
 
 void DoctorCommand::runVectorsFix() {

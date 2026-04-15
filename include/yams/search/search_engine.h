@@ -366,7 +366,12 @@ struct SearchEngineConfig {
     float graphRerankMaxBoost = 0.20f;  // Per-document cap for graph-induced boost
     float graphRerankMinSignal = 0.01f; // Ignore weak KG signals below this threshold
     float graphCommunityWeight = 0.10f; // Share of raw graph signal reserved for reciprocal support
-    bool graphUseQueryConcepts = true;  // Enrich graph rerank query with extracted concepts
+    // Reference "meaningful community size" used to normalize reciprocal-community support.
+    // Normalization: clamp((component_size - 1) / (reference - 1), 0, 1). Stable across
+    // candidate-set widths so identical structural support produces stable absolute scores.
+    // Set <= 1.0f to fall back to the legacy candidate-set-adaptive normalizer.
+    float graphCommunityReferenceSize = 8.0f;
+    bool graphUseQueryConcepts = true; // Enrich graph rerank query with extracted concepts
     bool graphFallbackToTopSignal =
         true; // If no candidate clears minSignal, still boost the top positive graph hit
 

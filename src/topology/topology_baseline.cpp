@@ -389,6 +389,7 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     merged.algorithm = rebuilt.value().algorithm;
     merged.inputKind = rebuilt.value().inputKind;
     merged.generatedAtUnixSeconds = rebuilt.value().generatedAtUnixSeconds;
+    merged.topologyEpoch = existing.topologyEpoch + 1;
 
     std::vector<ClusterArtifact> removedClustersSnapshot;
     std::size_t removedClusters = 0;

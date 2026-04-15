@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <deque>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -149,6 +150,12 @@ public:
      */
     void signalIndexingDrained() { fsm_.dispatch(SearchEngineIndexingDrainedEvent{}); }
 
+    /**
+     * Configure the file path used by the adaptive SearchTuner to persist/restore
+     * its EWMA state across daemon restarts. Must be called before buildEngine().
+     */
+    void setTunerStatePath(std::filesystem::path path) { tunerStatePath_ = std::move(path); }
+
     void noteLexicalDeltaQueued(std::size_t documentCount = 1);
     void noteLexicalDeltaQueuedHash(std::string hash);
     void noteLexicalDeltaQueuedHashes(const std::vector<std::string>& hashes);
@@ -185,6 +192,7 @@ private:
     std::vector<std::string> pendingLexicalDeltaHashes_;
     std::deque<std::string> recentLexicalDeltaOrder_;
     std::unordered_set<std::string> recentLexicalDeltaSet_;
+    std::filesystem::path tunerStatePath_;
 };
 
 } // namespace yams::daemon

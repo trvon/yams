@@ -213,6 +213,9 @@ struct BenchmarkResults {
     std::optional<std::string> tuningState;
     std::optional<nlohmann::json> tunedParams;
 
+    // Resolved KG readiness policy string (for historical correlation).
+    std::optional<std::string> kgReadinessPolicy;
+
     [[nodiscard]] nlohmann::json toJson() const {
         nlohmann::json j{{"mrr", mrr},
                          {"recall_at_k", recallAtK},
@@ -229,6 +232,9 @@ struct BenchmarkResults {
         }
         if (tunedParams) {
             j["tuned_params"] = *tunedParams;
+        }
+        if (kgReadinessPolicy) {
+            j["kg_readiness_policy"] = *kgReadinessPolicy;
         }
         return j;
     }
@@ -272,6 +278,13 @@ struct BenchmarkConfig {
     float regressionThreshold = 0.05f;  // MRR drop threshold for regression alert
     float improvementThreshold = 0.05f; // MRR gain threshold for improvement alert
     QueryGeneratorConfig queryConfig;   // Query generation settings
+
+    // KG readiness policy inputs (see resolveBenchmarkKgReadinessPolicy below).
+    // useBEIR=true selects stricter RequireSignal defaults; synthetic/internal runs
+    // default to AcceptDrainedWithoutSignal when graph rerank is active.
+    bool graphRerankRequested = true;
+    bool useBEIR = false;
+    std::optional<bool> explicitRequireKgReady;
 };
 
 /**

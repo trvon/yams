@@ -309,6 +309,7 @@ public:
         snapshot.lexicalDeltaPublishedDocs = lexicalDelta.publishedDocs;
         snapshot.lexicalDeltaRecentDocs = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             lexicalDelta.recentDocs, std::numeric_limits<std::uint32_t>::max()));
+        snapshot.topologyEpoch = publishedTopologyEpoch_.load(std::memory_order_acquire);
         const auto searchSnapshot = searchEngineManager_.getSnapshot();
         snapshot.awaitingDrain = searchSnapshot.state == SearchEngineState::AwaitingDrain;
         snapshot.lexicalReady = searchSnapshot.state == SearchEngineState::Ready;
@@ -816,6 +817,7 @@ private:
     mutable std::mutex repairServiceMutex_;
     std::atomic<bool> topologyRebuildRunning_{false};
     std::atomic<bool> topologyRebuildScheduled_{false};
+    std::atomic<std::uint64_t> publishedTopologyEpoch_{0};
     mutable std::mutex topologyDirtyMutex_;
     std::unordered_set<std::string> topologyDirtyHashes_;
     mutable std::mutex topologyTelemetryMutex_;

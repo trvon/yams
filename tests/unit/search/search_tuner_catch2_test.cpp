@@ -17,6 +17,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <chrono>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/search_tuner.h>
 #include <yams/storage/corpus_stats.h>
@@ -1278,4 +1283,144 @@ TEST_CASE("TunedParams: toJson includes graph signal fields",
     CHECK(j.at("graph_structural_signal_weight").get<float>() == Approx(0.15f));
     CHECK(j.at("graph_coverage_signal_weight").get<float>() == Approx(0.15f));
     CHECK(j.at("graph_path_signal_weight").get<float>() == Approx(0.10f));
+}
+
+// =============================================================================
+// Adaptive state persistence tests (P1-C)
+// =============================================================================
+
+namespace {
+
+std::filesystem::path tunerStateTempFile(const char* suffix) {
+    auto name = std::string("yams_tuner_state_test_") +
+                std::to_string(static_cast<long long>(
+                    std::chrono::steady_clock::now().time_since_epoch().count())) +
+                "_" + std::to_string(static_cast<long long>(::getpid())) + suffix;
+    return std::filesystem::temp_directory_path() / name;
+}
+
+SearchTuner::RuntimeTelemetry makeKgHotTelemetry() {
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 40.0;
+    telemetry.finalResultCount = 10;
+    telemetry.topWindow = 10;
+    telemetry.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
+
+    SearchTuner::RuntimeStageSignal kgStage;
+    kgStage.enabled = true;
+    kgStage.attempted = true;
+    kgStage.contributed = true;
+    kgStage.durationMs = 18.0;
+    kgStage.rawHitCount = 5;
+    kgStage.uniqueDocCount = 5;
+    telemetry.stages["kg"] = kgStage;
+
+    SearchTuner::RuntimeFusionSignal kgFusion;
+    kgFusion.enabled = true;
+    kgFusion.contributedToFinal = true;
+    kgFusion.configuredWeight = 0.15;
+    kgFusion.finalScoreMass = 0.3;
+    kgFusion.finalTopDocCount = 3;
+    kgFusion.rawHitCount = 5;
+    kgFusion.uniqueDocCount = 5;
+    telemetry.fusionSources["kg"] = kgFusion;
+    return telemetry;
+}
+
+} // namespace
+
+TEST_CASE("SearchTuner: saveAdaptiveState round-trips EWMA counters",
+          "[unit][search_tuner][persist]") {
+    auto path = tunerStateTempFile(".json");
+    std::filesystem::remove(path);
+
+    CorpusStats stats;
+    stats.docCount = 5000;
+    stats.codeRatio = 0.6f;
+    stats.proseRatio = 0.3f;
+    stats.tagCoverage = 0.8f;
+    stats.embeddingCoverage = 0.9f;
+    stats.symbolDensity = 0.5;
+
+    SearchTuner writer(stats);
+    for (int i = 0; i < 5; ++i) {
+        writer.observe(makeKgHotTelemetry());
+    }
+    auto saved = writer.saveAdaptiveState(path);
+    REQUIRE(saved.has_value());
+    REQUIRE(std::filesystem::exists(path));
+
+    SearchTuner reader(stats);
+    auto loaded = reader.loadAdaptiveState(path);
+    REQUIRE(loaded.has_value());
+
+    auto original = writer.adaptiveStateToJson();
+    auto restored = reader.adaptiveStateToJson();
+    CHECK(restored.at("observations") == original.at("observations"));
+    CHECK(restored.at("ewma_latency_ms").get<double>() ==
+          Approx(original.at("ewma_latency_ms").get<double>()));
+    CHECK(restored.at("ewma_kg_latency_share").get<double>() ==
+          Approx(original.at("ewma_kg_latency_share").get<double>()));
+    CHECK(restored.at("ewma_kg_utility").get<double>() ==
+          Approx(original.at("ewma_kg_utility").get<double>()));
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("SearchTuner: loadAdaptiveState treats missing file as no-op",
+          "[unit][search_tuner][persist]") {
+    auto path = tunerStateTempFile(".json");
+    std::filesystem::remove(path);
+
+    CorpusStats stats;
+    stats.docCount = 200;
+    SearchTuner tuner(stats);
+    auto loaded = tuner.loadAdaptiveState(path);
+    REQUIRE(loaded.has_value());
+    CHECK(tuner.adaptiveStateToJson().at("observations").get<std::uint64_t>() == 0);
+}
+
+TEST_CASE("SearchTuner: loadAdaptiveState survives corrupt file", "[unit][search_tuner][persist]") {
+    auto path = tunerStateTempFile(".json");
+    {
+        std::ofstream out(path);
+        out << "not json {{{";
+    }
+
+    CorpusStats stats;
+    stats.docCount = 200;
+    SearchTuner tuner(stats);
+    auto loaded = tuner.loadAdaptiveState(path);
+    REQUIRE(loaded.has_value());
+    CHECK(tuner.adaptiveStateToJson().at("observations").get<std::uint64_t>() == 0);
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("SearchTuner: auto-persist triggers after observe threshold",
+          "[unit][search_tuner][persist]") {
+    auto path = tunerStateTempFile(".json");
+    std::filesystem::remove(path);
+
+    CorpusStats stats;
+    stats.docCount = 5000;
+    stats.codeRatio = 0.6f;
+    stats.proseRatio = 0.3f;
+    stats.symbolDensity = 0.5;
+
+    SearchTuner tuner(stats);
+    tuner.setAdaptivePersistPath(path);
+    REQUIRE_FALSE(std::filesystem::exists(path));
+
+    for (int i = 0; i < 25; ++i) {
+        tuner.observe(makeKgHotTelemetry());
+    }
+    REQUIRE(std::filesystem::exists(path));
+
+    std::ifstream in(path);
+    nlohmann::json j;
+    in >> j;
+    CHECK(j.at("observations").get<std::uint64_t>() >= 20);
+
+    std::filesystem::remove(path);
 }

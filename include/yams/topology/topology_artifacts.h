@@ -122,6 +122,10 @@ struct TopologyArtifactBatch {
     std::string algorithm;
     TopologyInputKind inputKind{TopologyInputKind::Hybrid};
     uint64_t generatedAtUnixSeconds{0};
+    // Monotonically increasing epoch stamped by the builder on every published batch.
+    // Distinct from snapshotId (which is a timestamp) so query-side code can detect
+    // topology drift against the artifacts that seeded the route.
+    uint64_t topologyEpoch{0};
     std::vector<ClusterArtifact> clusters;
     std::vector<DocumentClusterMembership> memberships;
 };

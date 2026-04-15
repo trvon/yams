@@ -19,6 +19,7 @@ struct IndexFreshnessSnapshot {
     std::uint32_t lexicalDeltaPendingDocs{0};
     std::uint64_t lexicalDeltaPublishedDocs{0};
     std::uint32_t lexicalDeltaRecentDocs{0};
+    std::uint64_t topologyEpoch{0};
     bool lexicalReady{false};
     bool vectorReady{false};
     bool kgReady{false};

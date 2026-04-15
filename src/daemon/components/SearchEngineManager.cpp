@@ -199,6 +199,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         builder->withEmbeddingGenerator(std::move(embeddingGen));
 
     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+    if (!tunerStatePath_.empty()) {
+        opts.tunerStatePath = tunerStatePath_;
+    }
     // Default daemon policy: lexical-first with adaptive semantic fallback.
     // Keep weak-query vector fanout disabled here so hybrid search stays precision-biased
     // instead of broadening semantic candidates whenever lexical evidence is sparse.

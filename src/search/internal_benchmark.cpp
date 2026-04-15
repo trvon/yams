@@ -514,6 +514,14 @@ InternalBenchmark::runWithQueries(const std::vector<SyntheticQuery>& queries,
         results.tunedParams = tuner.getParams().toJson();
     }
 
+    // Resolve KG readiness policy for historical correlation. This records intent
+    // (RequireSignal for BEIR runs that expect KG structure, AcceptDrainedWithoutSignal
+    // for synthetic corpora with low graph density, Skip otherwise) alongside MRR so
+    // later analysis can segment regressions by benchmark kind.
+    const auto kgPolicy = resolveBenchmarkKgReadinessPolicy(
+        config.graphRerankRequested, config.explicitRequireKgReady, config.useBEIR);
+    results.kgReadinessPolicy = benchmarkKgReadinessPolicyToString(kgPolicy);
+
     spdlog::info("InternalBenchmark: completed. MRR={:.4f}, Recall@{}={:.4f}", results.mrr,
                  config.k, results.recallAtK);
 

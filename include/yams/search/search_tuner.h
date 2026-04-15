@@ -1,10 +1,12 @@
 #pragma once
 
+#include <yams/core/types.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/tuning_slot.h>
 #include <yams/storage/corpus_stats.h>
 
 #include <nlohmann/json.hpp>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -548,6 +550,29 @@ public:
     [[nodiscard]] nlohmann::json toJson() const;
 
     /**
+     * @brief Enable throttled auto-persistence of adaptive EWMA state to disk.
+     *
+     * Every `kAdaptivePersistInterval` observations inside `observe()` the tuner
+     * writes its adaptive counters to `path` via atomic rename. Pass an empty
+     * path to disable.
+     */
+    void setAdaptivePersistPath(std::filesystem::path path);
+
+    /**
+     * @brief Write the current adaptive state to `path` atomically.
+     */
+    [[nodiscard]] Result<void> saveAdaptiveState(const std::filesystem::path& path) const;
+
+    /**
+     * @brief Restore adaptive EWMA counters from `path`.
+     *
+     * Missing or corrupt files are non-fatal: the tuner keeps its fresh state
+     * and a warning is logged. `TunedParams` are NOT restored — they recompute
+     * naturally once the adaptive rules reconverge on the replayed EWMAs.
+     */
+    Result<void> loadAdaptiveState(const std::filesystem::path& path);
+
+    /**
      * @brief Compute the optimal state from corpus statistics.
      *
      * Static method for external use (e.g., testing, CLI display).
@@ -590,6 +615,7 @@ private:
 
     [[nodiscard]] SearchEngineConfig buildConfigFromParamsLocked() const;
     [[nodiscard]] nlohmann::json adaptiveStateToJsonLocked() const;
+    void observeLocked(const RuntimeTelemetry& telemetry);
 
     TuningState state_;
     TunedParams baseParams_;
@@ -599,6 +625,8 @@ private:
     SearchEngineConfig baseConfig_{};
     mutable std::mutex mutex_;
     AdaptiveRuntimeState adaptive_;
+    std::filesystem::path persistPath_; // empty => auto-persist disabled
+    std::uint64_t lastPersistedObservation_ = 0;
 };
 
 } // namespace yams::search

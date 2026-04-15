@@ -79,8 +79,12 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
     const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore, std::string_view query,
     const std::unordered_set<std::string>& seedDocumentHashes,
-    const std::vector<std::string>& overlayDocumentHashes, const SearchEngineConfig& config) {
+    const std::vector<std::string>& overlayDocumentHashes, const SearchEngineConfig& config,
+    std::uint64_t expectedTopologyEpoch, bool* epochMismatch) {
     std::unordered_set<std::string> routed;
+    if (epochMismatch) {
+        *epochMismatch = false;
+    }
     if (!metadataRepo || !kgStore || seedDocumentHashes.empty() ||
         !config.enableTopologyWeakQueryRouting || config.topologyWeakQueryMaxClusters == 0 ||
         config.topologyWeakQueryMaxDocs == 0) {
@@ -92,6 +96,20 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
     yams::topology::MetadataKgTopologyArtifactStore store(std::move(metadataIface), kgStore);
     auto latestResult = store.loadLatest();
     if (!latestResult || !latestResult.value().has_value()) {
+        return routed;
+    }
+
+    // Fail-soft: if the freshness snapshot reported a different epoch than the artifacts
+    // we just loaded, the topology state drifted between request dispatch and routing.
+    // Skip the topology boost for this request and let the caller record it in stats.
+    if (expectedTopologyEpoch != 0 && latestResult.value()->topologyEpoch != 0 &&
+        latestResult.value()->topologyEpoch != expectedTopologyEpoch) {
+        if (epochMismatch) {
+            *epochMismatch = true;
+        }
+        spdlog::debug("Topology epoch mismatch: expected={}, artifacts={} — skipping weak-query "
+                      "topology boost",
+                      expectedTopologyEpoch, latestResult.value()->topologyEpoch);
         return routed;
     }
 
@@ -436,8 +454,8 @@ resolveGraphCandidateNodeId(const std::shared_ptr<yams::metadata::KnowledgeGraph
 std::vector<float> computeReciprocalCommunitySupport(
     const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
     const std::vector<std::string>& candidateIds, std::size_t maxNeighbors,
-    std::size_t* supportedDocCountOut = nullptr, std::size_t* edgeCountOut = nullptr,
-    std::size_t* largestCommunityOut = nullptr) {
+    float referenceCommunitySize = 0.0f, std::size_t* supportedDocCountOut = nullptr,
+    std::size_t* edgeCountOut = nullptr, std::size_t* largestCommunityOut = nullptr) {
     std::vector<float> support(candidateIds.size(), 0.0f);
     if (!kgStore || candidateIds.size() < 2) {
         return support;
@@ -516,9 +534,14 @@ std::vector<float> computeReciprocalCommunitySupport(
 
         supportedDocCount += component.size();
         largestCommunity = std::max(largestCommunity, component.size());
-        const float normalized = std::clamp(static_cast<float>(component.size() - 1) /
-                                                static_cast<float>(candidateIds.size() - 1),
-                                            0.0f, 1.0f);
+        // Corpus-adaptive normalization: when a reference community size is supplied, normalize
+        // against it so the absolute signal magnitude is stable across candidate-set widths.
+        // Fall back to the legacy candidate-set-adaptive denominator when no reference is given.
+        const float denom = referenceCommunitySize > 1.0f
+                                ? referenceCommunitySize - 1.0f
+                                : static_cast<float>(candidateIds.size() - 1);
+        const float normalized =
+            std::clamp(static_cast<float>(component.size() - 1) / denom, 0.0f, 1.0f);
         for (const auto member : component) {
             support[member] = std::max(support[member], normalized);
         }
@@ -1730,6 +1753,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["vector_ready"] = freshness.vectorReady ? "1" : "0";
     response.debugStats["kg_ready"] = freshness.kgReady ? "1" : "0";
     response.debugStats["topology_ready"] = freshness.topologyReady ? "1" : "0";
+    response.debugStats["topology_epoch"] = std::to_string(freshness.topologyEpoch);
     response.debugStats["topology_overlay_hashes"] = std::to_string(topologyOverlayHashes.size());
     response.debugStats["semantic_budget_delay_embedding"] = delayEmbeddingUntilTier1 ? "1" : "0";
     if (shortQueryBudgeted) {
@@ -2409,9 +2433,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             if (weakTier1Query && !tier1Candidates.empty() &&
                 workingConfig.enableTopologyWeakQueryRouting) {
+                bool topologyEpochMismatch = false;
                 const auto topologyCandidates = buildTopologyWeakQueryCandidates(
                     metadataRepo_, kgStore_, query, tier1Candidates, topologyOverlayHashes,
-                    workingConfig);
+                    workingConfig, freshness.topologyEpoch, &topologyEpochMismatch);
+                if (topologyEpochMismatch) {
+                    response.debugStats["topology_epoch_mismatch"] = "1";
+                }
                 topologyWeakQuerySeedCount = tier1Candidates.size();
                 const auto candidateCountBeforeRouting = tier2Candidates.size();
                 for (const auto& hash : topologyCandidates) {
@@ -3654,7 +3682,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 const auto communitySupport = computeReciprocalCommunitySupport(
                     kgStore_, candidateIds,
                     std::max<std::size_t>(8, workingConfig.graphMaxNeighbors),
-                    &graphCommunitySupportedDocs, &graphCommunityEdges, &graphLargestCommunity);
+                    workingConfig.graphCommunityReferenceSize, &graphCommunitySupportedDocs,
+                    &graphCommunityEdges, &graphLargestCommunity);
 
                 std::vector<float> rawSignals(rerankWindow, 0.0f);
                 std::vector<float> lexicalAnchors(rerankWindow, 0.0f);

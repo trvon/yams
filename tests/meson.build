@@ -1092,6 +1092,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_benchmark_history_store_exe = executable('catch2_benchmark_history_store',
+    files('unit/search/benchmark_history_store_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Compression submodule tests(CompressionPolicy, CompressionMonitor, Zstandard, LZMA, ErrorHandler, etc.)
 #Migrated from GTest as part of yams - 3s4 / yams - pmf
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',

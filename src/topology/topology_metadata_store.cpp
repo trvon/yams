@@ -183,7 +183,8 @@ json batchToJson(const TopologyArtifactBatch& batch) {
     json j{{"snapshot_id", batch.snapshotId},
            {"algorithm", batch.algorithm},
            {"input_kind", inputKindToString(batch.inputKind)},
-           {"generated_at_unix_seconds", batch.generatedAtUnixSeconds}};
+           {"generated_at_unix_seconds", batch.generatedAtUnixSeconds},
+           {"topology_epoch", batch.topologyEpoch}};
     j["clusters"] = json::array();
     for (const auto& cluster : batch.clusters) {
         j["clusters"].push_back(clusterToJson(cluster));
@@ -204,6 +205,7 @@ Result<TopologyArtifactBatch> batchFromJson(const json& j) {
     batch.algorithm = j.value("algorithm", "");
     batch.inputKind = inputKindFromString(j.value("input_kind", std::string{"hybrid"}));
     batch.generatedAtUnixSeconds = j.value("generated_at_unix_seconds", uint64_t{0});
+    batch.topologyEpoch = j.value("topology_epoch", uint64_t{0});
     if (j.contains("clusters") && j["clusters"].is_array()) {
         for (const auto& clusterJson : j["clusters"]) {
             batch.clusters.push_back(clusterFromJson(clusterJson));

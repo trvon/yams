@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <sstream>
+#include <system_error>
 #include <vector>
 
 namespace yams::search {
@@ -13,6 +15,7 @@ namespace {
 
 constexpr std::uint64_t kAdaptiveWarmupObservations = 5;
 constexpr std::uint64_t kAdaptiveCooldownObservations = 4;
+constexpr std::uint64_t kAdaptivePersistInterval = 20;
 constexpr double kEwmaAlpha = 0.20;
 constexpr float kMinKgWeightWhenAvailable = 0.02f;
 constexpr float kMaxKgWeight = 0.22f;
@@ -324,8 +327,28 @@ SearchEngineConfig SearchTuner::getConfig() const {
 }
 
 void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::optional<std::string> pendingSnapshot;
+    std::filesystem::path snapshotPath;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        observeLocked(telemetry);
+        if (!persistPath_.empty() &&
+            adaptive_.observations >= lastPersistedObservation_ + kAdaptivePersistInterval) {
+            pendingSnapshot = adaptiveStateToJsonLocked().dump(2);
+            snapshotPath = persistPath_;
+            lastPersistedObservation_ = adaptive_.observations;
+        }
+    }
+    if (pendingSnapshot) {
+        auto written = saveAdaptiveState(snapshotPath);
+        if (!written) {
+            spdlog::warn("SearchTuner: failed to persist adaptive state to {}: {}",
+                         snapshotPath.string(), written.error().message);
+        }
+    }
+}
 
+void SearchTuner::observeLocked(const RuntimeTelemetry& telemetry) {
     adaptive_.observations++;
     adaptive_.lastObservationChanged = false;
 
@@ -540,6 +563,104 @@ nlohmann::json SearchTuner::toJson() const {
     j["corpus"]["path_depth_max_approximate"] = stats_.pathDepthMaxApproximate;
 
     return j;
+}
+
+void SearchTuner::setAdaptivePersistPath(std::filesystem::path path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    persistPath_ = std::move(path);
+    lastPersistedObservation_ = adaptive_.observations;
+}
+
+Result<void> SearchTuner::saveAdaptiveState(const std::filesystem::path& path) const {
+    std::string contents;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        contents = adaptiveStateToJsonLocked().dump(2);
+    }
+    std::error_code ec;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+        if (ec) {
+            return Error{ErrorCode::IOError,
+                         "Cannot create parent directory: " + path.parent_path().string() + " (" +
+                             ec.message() + ")"};
+        }
+    }
+    auto tmp = path;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return Error{ErrorCode::IOError, "Cannot open temp file for write: " + tmp.string()};
+        }
+        out.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+        if (!out) {
+            return Error{ErrorCode::IOError, "Write failed for tuner state temp: " + tmp.string()};
+        }
+    }
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError, "Atomic rename failed: " + tmp.string() + " -> " +
+                                             path.string() + " (" + ec.message() + ")"};
+    }
+    return {};
+}
+
+Result<void> SearchTuner::loadAdaptiveState(const std::filesystem::path& path) {
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        return {};
+    }
+    std::ifstream in(path);
+    if (!in) {
+        return Error{ErrorCode::IOError, "Cannot open tuner state: " + path.string()};
+    }
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(in, nullptr, /*allow_exceptions=*/true,
+                                  /*ignore_comments=*/true);
+    } catch (const std::exception& e) {
+        spdlog::warn("Tuner state at {} is corrupt ({}); starting fresh", path.string(), e.what());
+        return {};
+    }
+    if (!j.is_object()) {
+        spdlog::warn("Tuner state at {} is not a JSON object; starting fresh", path.string());
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    adaptive_.observations = j.value("observations", adaptive_.observations);
+    adaptive_.lastAdjustmentObservation =
+        j.value("last_adjustment_observation", adaptive_.lastAdjustmentObservation);
+    adaptive_.lastObservationChanged =
+        j.value("changed_last_observation", adaptive_.lastObservationChanged);
+    adaptive_.lastDecision = j.value("last_decision", adaptive_.lastDecision);
+    adaptive_.ewmaLatencyMs = j.value("ewma_latency_ms", adaptive_.ewmaLatencyMs);
+    adaptive_.ewmaKgLatencyShare = j.value("ewma_kg_latency_share", adaptive_.ewmaKgLatencyShare);
+    adaptive_.ewmaKgUtility = j.value("ewma_kg_utility", adaptive_.ewmaKgUtility);
+    adaptive_.ewmaKgScoreMassShare =
+        j.value("ewma_kg_score_mass_share", adaptive_.ewmaKgScoreMassShare);
+    adaptive_.ewmaKgFinalDocShare =
+        j.value("ewma_kg_final_doc_share", adaptive_.ewmaKgFinalDocShare);
+    adaptive_.ewmaKgContributionRate =
+        j.value("ewma_kg_contribution_rate", adaptive_.ewmaKgContributionRate);
+    adaptive_.ewmaGraphRerankLatencyMs =
+        j.value("ewma_graph_rerank_latency_ms", adaptive_.ewmaGraphRerankLatencyMs);
+    adaptive_.ewmaGraphRerankSkipRate =
+        j.value("ewma_graph_rerank_skip_rate", adaptive_.ewmaGraphRerankSkipRate);
+    adaptive_.ewmaGraphRerankContributionRate =
+        j.value("ewma_graph_rerank_contribution_rate", adaptive_.ewmaGraphRerankContributionRate);
+    adaptive_.ewmaZoomDepth = j.value("ewma_zoom_depth", adaptive_.ewmaZoomDepth);
+    if (j.contains("zoom_level_counts") && j["zoom_level_counts"].is_object()) {
+        adaptive_.zoomLevelCounts.clear();
+        for (auto it = j["zoom_level_counts"].begin(); it != j["zoom_level_counts"].end(); ++it) {
+            if (it.value().is_number_unsigned()) {
+                adaptive_.zoomLevelCounts[it.key()] = it.value().get<std::uint64_t>();
+            }
+        }
+    }
+    lastPersistedObservation_ = adaptive_.observations;
+    return {};
 }
 
 TuningState SearchTuner::computeState(const storage::CorpusStats& stats) {

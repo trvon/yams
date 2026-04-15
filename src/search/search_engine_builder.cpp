@@ -908,6 +908,17 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             runtimeTuner->pinEnvOverrides(envTextPinned, envVectorPinned, envKgPinned,
                                           envSimilarityThresholdPinned);
         }
+        if (!options.tunerStatePath.empty()) {
+            auto loaded = runtimeTuner->loadAdaptiveState(options.tunerStatePath);
+            if (!loaded) {
+                spdlog::warn("SearchTuner: failed to load state from {}: {}",
+                             options.tunerStatePath.string(), loaded.error().message);
+            } else {
+                spdlog::info("SearchTuner: adaptive state loaded from {}",
+                             options.tunerStatePath.string());
+            }
+            runtimeTuner->setAdaptivePersistPath(options.tunerStatePath);
+        }
     }
 
     // Create the SearchEngine using the factory function

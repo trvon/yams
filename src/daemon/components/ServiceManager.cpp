@@ -733,6 +733,9 @@ yams::Result<void> ServiceManager::initialize() {
     // Persist resolved dataDir for downstream components/telemetry
     resolvedDataDir_ = std::move(dataDir);
 
+    // Wire the adaptive SearchTuner's state file so EWMA counters survive daemon restarts.
+    searchEngineManager_.setTunerStatePath(resolvedDataDir_ / "tuner_state.json");
+
     // Initialize WALManager (after dataDir is resolved)
     if (walManager_) {
         yams::wal::WALManager::Config walConfig;
@@ -3829,7 +3832,7 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
     auto engine = std::make_shared<topology::ConnectedComponentTopologyEngine>();
 
     std::optional<topology::TopologyArtifactBatch> latestBatch;
-    if (!documentHashes.empty()) {
+    {
         auto latestResult = store.loadLatest();
         if (!latestResult) {
             return Result<ServiceManager::TopologyRebuildStats>(latestResult.error());
@@ -3926,7 +3929,14 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
         return Result<ServiceManager::TopologyRebuildStats>(artifactResult.error());
     }
 
-    const auto& artifacts = artifactResult.value();
+    auto& artifacts = artifactResult.value();
+    if (artifacts.topologyEpoch == 0) {
+        // Stamp monotonic topology epoch. Distinct from snapshotId (a timestamp) so
+        // query-side code can detect topology drift vs the artifacts that seeded the
+        // route. updateArtifacts may already have stamped it when merging from an
+        // existing batch.
+        artifacts.topologyEpoch = latestBatch.has_value() ? latestBatch->topologyEpoch + 1 : 1;
+    }
 
     ServiceManager::TopologyRebuildStats stats;
     stats.reason = reason;
@@ -3975,6 +3985,7 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
             return Result<ServiceManager::TopologyRebuildStats>(storeResult.error());
         }
         stats.stored = true;
+        publishedTopologyEpoch_.store(artifacts.topologyEpoch, std::memory_order_release);
     }
 
     if (stats.stored && stats.fullRebuild) {

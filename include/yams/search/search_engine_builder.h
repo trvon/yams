@@ -6,6 +6,7 @@
 #include <yams/search/search_tuner.h>
 
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -73,6 +74,11 @@ public:
         // corpus types (e.g., SCIENTIFIC for BEIR datasets) where auto-detection
         // may fail due to absolute path depth calculations.
         std::optional<TuningState> tuningStateOverride = std::nullopt;
+
+        // Persist adaptive tuner EWMA state to this path across process restarts.
+        // When set, the builder loads prior state at construction time and enables
+        // throttled auto-save from SearchTuner::observe(). Empty => disabled.
+        std::filesystem::path tunerStatePath{};
 
         // Convenience: default-initialize to tuned conservative config
         static BuildOptions makeDefault() {
