@@ -154,13 +154,18 @@ TEST_CASE("RequestHandler: canceled RepairRequest streaming completes without de
 
     RequestDispatcher dispatcher(nullptr, &serviceManager, &state);
 
+    // io_context must outlive the RequestHandler: the handler's internal
+    // write_strand_exec_ holds a strand bound to io's strand_executor_service,
+    // and destroying io first would invalidate the strand before ~RequestHandler
+    // releases it.
+    boost::asio::io_context io;
+
     RequestHandler::Config handlerConfig;
     handlerConfig.enable_multiplexing = true;
     handlerConfig.enable_streaming = true;
     handlerConfig.stream_chunk_timeout = 25ms;
     auto handler = std::make_shared<RequestHandler>(&dispatcher, handlerConfig);
 
-    boost::asio::io_context io;
     boost::asio::local::stream_protocol::socket clientSock(io);
     boost::asio::local::stream_protocol::socket serverSock(io);
     boost::asio::local::connect_pair(clientSock, serverSock);

@@ -6701,25 +6701,56 @@ struct BenchFixture {
 
         // Wait for search engine to be ready (critical for hybrid search!)
         // Without this, all hybrid searches fall back to keyword-only
-        spdlog::info("Waiting for search engine to be ready...");
+        spdlog::info("Waiting for hybrid/vector search readiness...");
         const auto searchEngineDeadline = std::chrono::steady_clock::now() + 60s;
         bool searchEngineReady = false;
         while (std::chrono::steady_clock::now() < searchEngineDeadline) {
             auto statusCheck = benchRunSync(client->status(true), 5s);
             if (statusCheck) {
-                auto it = statusCheck.value().readinessStates.find("search_engine");
-                if (it != statusCheck.value().readinessStates.end() && it->second) {
+                const auto& readiness = statusCheck.value().readinessStates;
+                bool hybridReady = false;
+                if (auto it = readiness.find("search_engine_hybrid_usable");
+                    it != readiness.end()) {
+                    hybridReady = it->second;
+                } else {
+                    const bool lexicalReady = [&]() {
+                        if (auto it = readiness.find("search_engine_lexical");
+                            it != readiness.end()) {
+                            return it->second;
+                        }
+                        if (auto it = readiness.find("search_engine"); it != readiness.end()) {
+                            return it->second;
+                        }
+                        return false;
+                    }();
+                    const bool vectorReady = [&]() {
+                        if (auto it = readiness.find("search_engine_vector_usable");
+                            it != readiness.end()) {
+                            return it->second;
+                        }
+                        if (auto it = readiness.find("vector_db_ready"); it != readiness.end()) {
+                            return it->second;
+                        }
+                        if (auto it = readiness.find("vector_db"); it != readiness.end()) {
+                            return it->second;
+                        }
+                        return statusCheck.value().vectorDbReady;
+                    }();
+                    hybridReady = lexicalReady && vectorReady;
+                }
+                if (hybridReady) {
                     searchEngineReady = true;
-                    spdlog::info("Search engine is ready for hybrid search");
+                    spdlog::info("Hybrid search is ready (lexical + vector usable)");
                     break;
                 }
             }
             std::this_thread::sleep_for(500ms);
         }
         if (!searchEngineReady) {
-            spdlog::error("Search engine not ready after 60s - hybrid searches will fall back to "
-                          "keyword-only!");
-            spdlog::error("This is likely due to search engine build not completing.");
+            spdlog::error(
+                "Hybrid/vector search not ready after 60s - hybrid searches will fall back to "
+                "keyword-only!");
+            spdlog::error("This is likely due to vector publication not completing.");
         }
 
         auto effectiveKgReadinessPolicy = kgReadinessPolicy;

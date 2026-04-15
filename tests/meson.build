@@ -995,6 +995,7 @@ if catch2_dep.found()
       'unit/storage/reference_counter_catch2_test.cpp',
       'unit/storage/reference_counter_stress_catch2_test.cpp',
       'unit/storage/s3_signer_catch2_test.cpp',
+      'unit/storage/storage_backend_factory_catch2_test.cpp',
       'unit/storage/storage_runtime_resolver_catch2_test.cpp',
       'unit/storage/storage_engine_catch2_test.cpp',
     ),
@@ -1748,6 +1749,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  plain_text_extractor_exe = executable('plain_text_extractor',
+    files('unit/extraction/plain_text_extractor_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Text extraction to FTS5 pipeline test(detection->extraction->indexing->search)
   text_extraction_fts5_pipeline_exe = executable('text_extraction_fts5_pipeline',
     files('unit/extraction/text_extraction_fts5_pipeline_test.cpp'),
@@ -2186,6 +2196,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'extraction', 'html'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120  # Allow longer timeout for large file tests
+  )
+
+  test('plain_text_extractor', plain_text_extractor_exe,
+    suite: ['catch2', 'unit', 'extraction'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('text_extraction_fts5_pipeline', text_extraction_fts5_pipeline_exe,

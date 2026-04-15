@@ -71,6 +71,32 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
         return false;
     }
 
+    const auto currentCount = getCurrentDocCount();
+    const auto lastBuildCount = lastBuildDocCount_.load();
+    const auto growth = currentCount > lastBuildCount ? currentCount - lastBuildCount : 0;
+
+    if (state_.readiness.searchEngineReady.load(std::memory_order_relaxed) && growth > 0) {
+        const auto freshness = serviceManager_.getIndexFreshnessSnapshot();
+        const bool lexicalOverlayCoversGrowth = freshness.lexicalDeltaPublishedDocs >= growth ||
+                                                freshness.lexicalDeltaRecentDocs >= growth;
+        bool vectorUsable = state_.readiness.vectorDbReady.load(std::memory_order_relaxed);
+        if (!vectorUsable) {
+            try {
+                if (auto vectorDb = serviceManager_.getVectorDatabase();
+                    vectorDb && vectorDb->isInitialized() && vectorDb->getVectorCount() > 0) {
+                    vectorUsable = true;
+                }
+            } catch (...) {
+            }
+        }
+        if (lexicalOverlayCoversGrowth && vectorUsable) {
+            spdlog::info("[SearchComponent] Skipping heavy rebuild: lexical overlay published {} "
+                         "docs and vector DB is already usable",
+                         growth);
+            return false;
+        }
+    }
+
     auto metadataRepo = serviceManager_.getMetadataRepo();
     if (!metadataRepo) {
         return true;
@@ -88,9 +114,6 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
 
     const auto freshness = serviceManager_.getIndexFreshnessSnapshot();
     const auto topology = serviceManager_.getTopologyTelemetrySnapshot();
-    const auto currentCount = getCurrentDocCount();
-    const auto lastBuildCount = lastBuildDocCount_.load();
-    const auto growth = currentCount > lastBuildCount ? currentCount - lastBuildCount : 0;
     const auto minGrowth =
         std::max<std::uint64_t>(config_.growthAbsoluteThreshold * 2, kOverlayHeavyRebuildMinDocs);
     const bool overlayLarge = freshness.lexicalDeltaRecentDocs >= minGrowth || growth >= minGrowth;

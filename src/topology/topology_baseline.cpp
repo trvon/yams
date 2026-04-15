@@ -305,6 +305,53 @@ Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
         }
     }
 
+    // When a seed's semantic neighbor belongs to a prior cluster, that cluster's
+    // other members may also need re-examination — adding an edge between clusters
+    // can merge them, which requires rebuilding every member. Walk the expanded
+    // region a second time so neighbors-of-seeds contribute their prior-cluster
+    // members too. Bounded by maxDirtyRegionDocs / maxDirtyRegionDepth.
+    if (!region.requiresWiderRebuild &&
+        (config.dirtyRegionExpansion == DirtyRegionExpansionMode::PriorClusterAndNeighbors ||
+         config.dirtyRegionExpansion == DirtyRegionExpansionMode::Adaptive) &&
+        config.maxDirtyRegionDepth >= 2) {
+        std::vector<std::string> secondWave;
+        secondWave.reserve(region.expandedDocumentHashes.size());
+        for (const auto& hash : region.expandedDocumentHashes) {
+            if (std::find(region.seedDocumentHashes.begin(), region.seedDocumentHashes.end(),
+                          hash) != region.seedDocumentHashes.end()) {
+                continue;
+            }
+            secondWave.push_back(hash);
+        }
+        for (const auto& hash : secondWave) {
+            auto clusterIt = clusterIdByDocument.find(hash);
+            if (clusterIt == clusterIdByDocument.end()) {
+                continue;
+            }
+            auto membersIt = clusterMembersById.find(clusterIt->second);
+            if (membersIt == clusterMembersById.end()) {
+                continue;
+            }
+            region.includedPriorClusterMembers = true;
+            for (const auto& memberHash : membersIt->second) {
+                if (memberHash.empty()) {
+                    continue;
+                }
+                if (seen.insert(memberHash).second) {
+                    region.expandedDocumentHashes.push_back(memberHash);
+                }
+                if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
+                    region.exceededRegionBudget = true;
+                    region.requiresWiderRebuild = true;
+                    break;
+                }
+            }
+            if (region.requiresWiderRebuild) {
+                break;
+            }
+        }
+    }
+
     region.bfsDepthReached =
         (region.includedSemanticNeighbors || region.includedPriorClusterMembers) ? 1 : 0;
     if (config.fullRebuildDocThreshold > 0 &&

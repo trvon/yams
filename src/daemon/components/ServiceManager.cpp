@@ -4194,7 +4194,14 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                     const bool overlayHeavy =
                         rebuildHashes.size() >= kTopologyOverlayDirtyThreshold ||
                         freshness.lexicalDeltaRecentDocs >= kTopologyOverlayDirtyThreshold;
-                    if (!overlayHeavy && !overlayAged) {
+                    // Test-only escape hatch: allow small/immediate rebuilds to bypass
+                    // the 5-minute overlay-age gate. Production never sets this.
+                    const bool forceImmediate = []() {
+                        if (const char* v = std::getenv("YAMS_TEST_FORCE_TOPOLOGY_REBUILD"))
+                            return v[0] != '\0' && v[0] != '0';
+                        return false;
+                    }();
+                    if (!overlayHeavy && !overlayAged && !forceImmediate) {
                         std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);
                         const bool wasEmpty = self->topologyDirtyHashes_.empty();
                         for (const auto& hash : rebuildHashes) {

@@ -1257,6 +1257,11 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                                               std::optional<std::string>{"1"});
     yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
                                                 std::optional<std::string>{"1"});
+    // The 3-doc rebuild count and 10s wait are both below the production overlay
+    // gate (64 docs / 5 minutes). Force immediate rebuild so the async path actually
+    // runs instead of deferring.
+    yams::test::ScopedEnvVar forceImmediateTopology("YAMS_TEST_FORCE_TOPOLOGY_REBUILD",
+                                                    std::optional<std::string>{"1"});
 
     config_.enableAutoRepair = false;
     config_.autoLoadPlugins = false;

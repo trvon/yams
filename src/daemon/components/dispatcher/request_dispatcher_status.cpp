@@ -23,6 +23,12 @@
 
 namespace yams::daemon {
 
+namespace {
+constexpr std::string_view kSearchEngineLexicalReady = "search_engine_lexical";
+constexpr std::string_view kSearchEngineHybridUsable = "search_engine_hybrid_usable";
+constexpr std::string_view kSearchEngineVectorUsable = "search_engine_vector_usable";
+} // namespace
+
 boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const StatusRequest& req) {
     // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
@@ -78,6 +84,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.vectorDbInitAttempted;
             res.readinessStates[std::string(readiness::kVectorDbReady)] = res.vectorDbReady;
             res.readinessStates[std::string(readiness::kVectorDbDim)] = (res.vectorDbDim > 0);
+            res.readinessStates[std::string(kSearchEngineLexicalReady)] =
+                res.readinessStates[std::string(readiness::kSearchEngine)];
             // Embedding runtime details (best-effort)
             res.embeddingAvailable = snap->embeddingAvailable;
             res.embeddingBackend = snap->embeddingBackend;
@@ -622,6 +630,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.readinessStates[std::string(readiness::kVectorDb)] = res.vectorDbReady;
             } catch (...) {
             }
+            try {
+                const bool lexicalReady =
+                    res.readinessStates[std::string(readiness::kSearchEngine)];
+                const bool hybridUsable = lexicalReady && res.vectorDbReady;
+                res.readinessStates[std::string(kSearchEngineLexicalReady)] = lexicalReady;
+                res.readinessStates[std::string(kSearchEngineVectorUsable)] = res.vectorDbReady;
+                res.readinessStates[std::string(kSearchEngineHybridUsable)] = hybridUsable;
+            } catch (...) {
+            }
         }
         if (includeExtendedStatus) {
             spdlog::debug("[StatusRequest] About to check search engine degradation");
@@ -821,6 +838,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.readinessStates.emplace(std::string(key), value);
             }
         }
+        if (auto it = res.readinessStates.find(std::string(kSearchEngineLexicalReady));
+            it == res.readinessStates.end()) {
+            const bool lexicalReady = res.readinessStates[std::string(readiness::kSearchEngine)];
+            const bool vectorReady = res.readinessStates[std::string(readiness::kVectorDbReady)];
+            res.readinessStates.emplace(std::string(kSearchEngineLexicalReady), lexicalReady);
+            res.readinessStates.emplace(std::string(kSearchEngineVectorUsable), vectorReady);
+            res.readinessStates.emplace(std::string(kSearchEngineHybridUsable),
+                                        lexicalReady && vectorReady);
+        }
 
         // Proto status transport still omits several newer structured fields.
         // Mirror them into requestCounts so clients/benchmarks can recover the
@@ -872,6 +898,25 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 yams::daemon::dispatch::build_plugins_json(serviceManager_);
             response.additionalStats["plugins_loaded"] = std::to_string(pluginsCount);
             response.additionalStats["plugins_json"] = pluginsJson;
+        }
+        try {
+            if (serviceManager_) {
+                if (auto metaRepo = serviceManager_->getMetadataRepo()) {
+                    if (auto totalResult = metaRepo->getDocumentCount(); totalResult) {
+                        response.totalDocuments =
+                            static_cast<size_t>(std::max<int64_t>(totalResult.value(), 0));
+                    }
+                    if (auto indexedResult = metaRepo->getIndexedDocumentCount(); indexedResult) {
+                        response.indexedDocuments =
+                            static_cast<size_t>(std::max<int64_t>(indexedResult.value(), 0));
+                    }
+                    if (auto corpusResult = metaRepo->getCorpusStats(); corpusResult) {
+                        response.totalSize = static_cast<size_t>(
+                            std::max<int64_t>(corpusResult.value().totalSizeBytes, 0));
+                    }
+                }
+            }
+        } catch (...) {
         }
         // Internal bus + tuning toggles (doctor hints)
         try {
