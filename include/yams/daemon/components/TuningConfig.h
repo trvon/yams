@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace yams::daemon {
 
@@ -24,6 +25,11 @@ struct TuningConfig {
     // Controller cadence and stability parameters
     std::uint32_t controlIntervalMs{1000};
     std::uint32_t holdMs{3000};
+
+    // P3.1: Topology engine algorithm key, resolved via topology::makeEngine.
+    // Default "connected" preserves pre-P3 behavior (connected-components engine).
+    // Unknown values fall back to "connected" at resolve time.
+    std::string topologyAlgorithm{"connected"};
 };
 
 } // namespace yams::daemon

@@ -130,6 +130,7 @@ public:
 
     // Start background task coroutines (must be called after shared_ptr construction)
     void startBackgroundTasks();
+    void startDeferredMetadataWarmup();
 
     std::shared_ptr<api::IContentStore> getContentStore() const {
         return std::atomic_load_explicit(&contentStore_, std::memory_order_acquire);
@@ -769,6 +770,7 @@ private:
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;
     std::unique_ptr<CheckpointManager> checkpointManager_;
     std::unique_ptr<class BackgroundTaskManager> backgroundTaskManager_;
+    std::atomic<bool> deferredMetadataWarmupStarted_{false};
 
     // Worker pool metrics
     std::atomic<std::size_t> poolActive_{0};

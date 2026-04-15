@@ -7,12 +7,16 @@
 #include <yams/storage/corpus_stats.h>
 
 #include <nlohmann/json.hpp>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace yams::search {
 
@@ -441,37 +445,158 @@ struct TunedParams {
  *                tuner.stateReason());
  * @endcode
  */
-class SearchTuner {
+struct RuntimeStageSignal {
+    bool enabled = false;
+    bool attempted = false;
+    bool contributed = false;
+    bool skipped = false;
+    double durationMs = 0.0;
+    std::size_t rawHitCount = 0;
+    std::size_t uniqueDocCount = 0;
+};
+
+struct RuntimeFusionSignal {
+    bool enabled = false;
+    bool contributedToFinal = false;
+    double configuredWeight = 0.0;
+    double finalScoreMass = 0.0;
+    std::size_t finalTopDocCount = 0;
+    std::size_t rawHitCount = 0;
+    std::size_t uniqueDocCount = 0;
+};
+
+struct RuntimeTelemetry {
+    double latencyMs = 0.0;
+    std::size_t finalResultCount = 0;
+    std::size_t topWindow = 0;
+    SearchEngineConfig::NavigationZoomLevel zoomLevel =
+        SearchEngineConfig::NavigationZoomLevel::Auto;
+    std::map<std::string, RuntimeStageSignal> stages;
+    std::map<std::string, RuntimeFusionSignal> fusionSources;
+};
+
+/**
+ * @brief Per-query context vector consumed by tuning policies.
+ *
+ * R1 introduced this as an empty struct. R2 populates corpus-slow +
+ * query-fast features and epoch fingerprints. Implementations before R4
+ * ignore every field; they keep running on `SearchTuner`'s existing
+ * `CorpusStats` snapshot. R4+ policies condition `getParams(ctx)` on the
+ * discretized form of this vector (see `bucketize()` in R3).
+ *
+ * Field semantics:
+ *  - Corpus-slow features: captured from `CorpusStats` at engine build or
+ *    per-query (recompute is O(1) once stats are cached). Normalized to
+ *    the raw ratio / density units exposed by `CorpusStats`.
+ *  - Query-fast features: derived from the query string alone so they are
+ *    cheap to compute on the hot path.
+ *  - Epoch fingerprints: embedded in the R3 bucket hash so a new corpus
+ *    epoch or topology epoch produces a new bucket, invalidating stale
+ *    per-bucket learning without discarding the whole policy state.
+ */
+struct TuningContext {
+    // Corpus-slow features (snapshot at engine build / stats refresh).
+    double docCountLog10 = 0.0;
+    double codeRatio = 0.0;
+    double proseRatio = 0.0;
+    double embeddingCoverage = 0.0;
+    double nativeSymbolDensity = 0.0;
+    double pathRelativeDepthAvg = 0.0;
+    double binaryRatio = 0.0;
+    // kgEdgeDensity approximated as `CorpusStats::symbolDensity` in R2
+    // (entities per doc). R7+ will replace with true KG edge-count / doc
+    // once the KG store exposes an edge-count summary statistic.
+    double kgEdgeDensity = 0.0;
+
+    // Query-fast features (per query).
+    double queryTokenCountLog2 = 0.0;
+    std::uint8_t queryHasVectorPath = 0;
+    std::uint8_t queryHasKgAnchors = 0;
+
+    // Epoch fingerprints for cache / bucket invalidation.
+    std::uint64_t corpusEpoch = 0;
+    std::uint64_t topologyEpoch = 0;
+};
+
+/**
+ * @brief Populate corpus-slow fields of a `TuningContext` from
+ *        `CorpusStats`. Query-fast fields and epochs are untouched.
+ *
+ * Safe to call with an empty/default CorpusStats — the zero-initialized
+ * result is a well-defined "unknown corpus" context that policies must
+ * treat as cold-start.
+ */
+inline void fillCorpusFeatures(TuningContext& ctx, const storage::CorpusStats& stats) noexcept {
+    const double docs = static_cast<double>(stats.docCount);
+    ctx.docCountLog10 = docs > 0.0 ? std::log10(docs) : 0.0;
+    ctx.codeRatio = stats.codeRatio;
+    ctx.proseRatio = stats.proseRatio;
+    ctx.embeddingCoverage = stats.embeddingCoverage;
+    ctx.nativeSymbolDensity = stats.nativeSymbolDensity;
+    ctx.pathRelativeDepthAvg = stats.pathRelativeDepthAvg;
+    ctx.binaryRatio = stats.binaryRatio;
+    ctx.kgEdgeDensity = stats.symbolDensity;
+    ctx.corpusEpoch = static_cast<std::uint64_t>(stats.computedAtMs);
+}
+
+/**
+ * @brief Populate the query-fast token-count feature from a query string.
+ *        Whitespace-split token count, log2-transformed. Empty query is
+ *        clamped to 0 (not -inf).
+ */
+inline void fillQueryTokenFeature(TuningContext& ctx, std::string_view query) noexcept {
+    std::size_t tokens = 0;
+    bool inToken = false;
+    for (char c : query) {
+        const bool ws = (c == ' ' || c == '\t' || c == '\n' || c == '\r');
+        if (!ws) {
+            if (!inToken) {
+                ++tokens;
+                inToken = true;
+            }
+        } else {
+            inToken = false;
+        }
+    }
+    ctx.queryTokenCountLog2 = tokens > 0 ? std::log2(static_cast<double>(tokens)) : 0.0;
+}
+
+/**
+ * @brief Abstract base for search-tuning policies.
+ *
+ * R1 extracts this interface with `SearchTuner` as the only
+ * implementation (the "rules / cold-start" policy). R4+ adds a
+ * contextual-bandit policy alongside; R5 composes them behind an
+ * orchestrator. All methods must be safe to call concurrently with
+ * query traffic — implementations own any internal locking.
+ */
+class ITuningPolicy {
 public:
-    struct RuntimeStageSignal {
-        bool enabled = false;
-        bool attempted = false;
-        bool contributed = false;
-        bool skipped = false;
-        double durationMs = 0.0;
-        std::size_t rawHitCount = 0;
-        std::size_t uniqueDocCount = 0;
-    };
+    virtual ~ITuningPolicy() = default;
 
-    struct RuntimeFusionSignal {
-        bool enabled = false;
-        bool contributedToFinal = false;
-        double configuredWeight = 0.0;
-        double finalScoreMass = 0.0;
-        std::size_t finalTopDocCount = 0;
-        std::size_t rawHitCount = 0;
-        std::size_t uniqueDocCount = 0;
-    };
+    [[nodiscard]] virtual TunedParams getParams(const TuningContext& ctx) const = 0;
 
-    struct RuntimeTelemetry {
-        double latencyMs = 0.0;
-        std::size_t finalResultCount = 0;
-        std::size_t topWindow = 0;
-        SearchEngineConfig::NavigationZoomLevel zoomLevel =
-            SearchEngineConfig::NavigationZoomLevel::Auto;
-        std::map<std::string, RuntimeStageSignal> stages;
-        std::map<std::string, RuntimeFusionSignal> fusionSources;
-    };
+    virtual void observe(const TuningContext& ctx, const RuntimeTelemetry& telemetry) = 0;
+
+    virtual void observeRelevanceFeedback(const RelevanceSession& session) = 0;
+
+    [[nodiscard]] virtual bool hasConverged() const noexcept = 0;
+
+    virtual Result<void> loadState(const std::filesystem::path& path) = 0;
+
+    [[nodiscard]] virtual Result<void> saveState(const std::filesystem::path& path) const = 0;
+};
+
+using TuningPolicyPtr = std::shared_ptr<ITuningPolicy>;
+
+class SearchTuner : public ITuningPolicy {
+public:
+    // Backward-compat type aliases — the nested names were the public API
+    // before R1 extracted them to namespace scope. Preserved so every call
+    // site that writes `SearchTuner::RuntimeTelemetry` keeps compiling.
+    using RuntimeStageSignal = ::yams::search::RuntimeStageSignal;
+    using RuntimeFusionSignal = ::yams::search::RuntimeFusionSignal;
+    using RuntimeTelemetry = ::yams::search::RuntimeTelemetry;
 
     /**
      * @brief Construct a tuner from corpus statistics.
@@ -500,6 +625,15 @@ public:
      * @brief Get the tuned parameter set for the current state.
      */
     [[nodiscard]] const TunedParams& getParams() const noexcept { return params_; }
+
+    /**
+     * @brief The corpus statistics snapshot this tuner was built from.
+     *
+     * Used by callers (e.g. SearchEngine) to build per-query
+     * `TuningContext` vectors without re-querying the metadata repo on
+     * the hot path.
+     */
+    [[nodiscard]] const storage::CorpusStats& corpusStats() const noexcept { return stats_; }
 
     /**
      * @brief Reset adaptive baseline from an externally finalized config.
@@ -533,7 +667,7 @@ public:
      *
      * Empty sessions are ignored.
      */
-    void observeRelevanceFeedback(const RelevanceSession& session);
+    void observeRelevanceFeedback(const RelevanceSession& session) override;
 
     /**
      * @brief Whether the adaptive EWMA state has stabilized.
@@ -546,7 +680,7 @@ public:
      * A tuner is "converged" when it has at least `minObservations` observations
      * AND it has not adjusted parameters within the last cooldown window.
      */
-    [[nodiscard]] bool hasConverged(std::size_t minObservations = 200) const noexcept;
+    [[nodiscard]] bool hasConverged(std::size_t minObservations) const noexcept;
 
     /**
      * @brief Pin weight slots that were overridden via environment variables.
@@ -618,6 +752,33 @@ public:
      */
     [[nodiscard]] static TuningState computeState(const storage::CorpusStats& stats,
                                                   std::string& outReason);
+
+    // ---- ITuningPolicy overrides --------------------------------------
+    //
+    // R1: context is ignored; the rules policy runs on the corpus-stats
+    // snapshot captured at construction time, exactly as before. R2 will
+    // start consuming fields from `ctx`.
+
+    [[nodiscard]] TunedParams getParams(const TuningContext& /*ctx*/) const override {
+        return params_;
+    }
+
+    void observe(const TuningContext& /*ctx*/, const RuntimeTelemetry& telemetry) override {
+        observe(telemetry);
+    }
+
+    // Inherits `observeRelevanceFeedback(const RelevanceSession&)` from the
+    // non-virtual signature defined above; it already matches the interface.
+
+    [[nodiscard]] bool hasConverged() const noexcept override { return hasConverged(200); }
+
+    Result<void> loadState(const std::filesystem::path& path) override {
+        return loadAdaptiveState(path);
+    }
+
+    [[nodiscard]] Result<void> saveState(const std::filesystem::path& path) const override {
+        return saveAdaptiveState(path);
+    }
 
 private:
     struct AdaptiveRuntimeState {

@@ -177,7 +177,7 @@ struct MetricsSnapshot {
 
     // Document counts (cached from metadata repo, avoid live DB queries on hot path)
     std::uint64_t documentsTotal{0};
-    std::uint64_t documentsIndexed{0}; // Docs with FTS5 indexed + content extracted
+    std::uint64_t documentsIndexed{0}; // Exact FTS5 row count
     std::uint64_t documentsContentExtracted{0};
     std::uint64_t documentsEmbedded{0}; // Docs with vector embeddings (from VectorDatabase)
 

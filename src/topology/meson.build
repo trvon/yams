@@ -7,6 +7,7 @@ yams_vector = dependency('yams_vector', required: false)
 yams_topology = static_library('yams_topology',
   [
     'topology_baseline.cpp',
+    'topology_factory.cpp',
     'topology_input_extractor.cpp',
     'topology_metadata_store.cpp',
     'topology_offline_analyzer.cpp',

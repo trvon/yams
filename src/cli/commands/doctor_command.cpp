@@ -8,6 +8,7 @@
 #include <yams/cli/plugin_util.h>
 #include <yams/cli/recommendation_util.h>
 #include <yams/cli/result_helpers.h>
+#include <yams/cli/tune_runner.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
@@ -4586,231 +4587,17 @@ void DoctorCommand::runBenchmark() {
     }
 }
 
-namespace {
-
-bool isStdinTtyLocal() {
-#ifdef _WIN32
-    return _isatty(_fileno(stdin)) != 0;
-#else
-    return ::isatty(fileno(stdin)) != 0;
-#endif
-}
-
-std::string iso8601UtcNow() {
-    const auto now = std::chrono::system_clock::now();
-    const std::time_t t = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#ifdef _WIN32
-    gmtime_s(&tm, &t);
-#else
-    gmtime_r(&t, &tm);
-#endif
-    std::ostringstream os;
-    os << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-    return os.str();
-}
-
-std::string truncatePreview(const std::string& s, std::size_t max) {
-    if (s.size() <= max) {
-        return s;
-    }
-    return s.substr(0, max) + "...";
-}
-
-} // namespace
-
 void DoctorCommand::runTune() {
-    using namespace yams::cli::ui;
-    using namespace yams::search;
+    std::cerr << "[deprecated] `yams doctor tune` is moving to `yams tune`. "
+                 "This alias will be removed in a future release.\n";
 
-    std::cout << "\n" << section_header("Interactive Relevance Tuner") << "\n\n";
-
-    if (tuneNonInteractive_ || !isStdinTtyLocal()) {
-        std::cout
-            << "  " << status_ok("Non-interactive mode")
-            << "\n  This command presents top-K search results and asks you to label relevance.\n"
-            << "  Run from a terminal (TTY) to start labeling. Synthetic queries are generated\n"
-            << "  from your own corpus, and labeled sessions are appended to\n"
-            << "  " << (yams::config::get_data_dir() / "relevance_labels.jsonl").string() << "\n";
-        return;
-    }
-
-    if (!cli_) {
-        std::cout << "  " << status_error("CLI context unavailable") << "\n";
-        return;
-    }
-
-    try {
-        auto ensured = cli_->ensureStorageInitialized();
-        if (!ensured) {
-            std::cout << "  " << status_error("Storage init failed: " + ensured.error().message)
-                      << "\n";
-            return;
-        }
-
-        auto appCtx = cli_->getAppContext();
-        if (!appCtx || !appCtx->searchEngine || !appCtx->metadataRepo) {
-            std::cout << "  " << status_error("Search engine or metadata repo unavailable") << "\n";
-            return;
-        }
-
-        SyntheticQueryGenerator gen(appCtx->metadataRepo);
-        auto docCount = gen.getAvailableDocumentCount();
-        if (!docCount || docCount.value() == 0) {
-            std::cout << "  " << status_ok("No documents indexed yet — add content before tuning.")
-                      << "\n";
-            return;
-        }
-
-        QueryGeneratorConfig qcfg;
-        qcfg.queryCount = tuneQueries_;
-        if (tuneSeed_ != 0) {
-            qcfg.seed = tuneSeed_;
-        } else {
-            qcfg.seed = static_cast<std::uint64_t>(
-                std::chrono::system_clock::now().time_since_epoch().count());
-        }
-
-        auto queriesResult = gen.generate(qcfg);
-        if (!queriesResult || queriesResult.value().empty()) {
-            std::cout << "  "
-                      << status_error("Could not generate synthetic queries from the corpus")
-                      << "\n";
-            return;
-        }
-        auto queries = std::move(queriesResult.value());
-
-        std::cout << "  " << colorize("Corpus:", Ansi::CYAN) << " "
-                  << format_number(docCount.value()) << " documents\n";
-        std::cout << "  " << colorize("Queries to label:", Ansi::CYAN) << " " << queries.size()
-                  << "   " << colorize("Top-K per query:", Ansi::CYAN) << " " << tuneK_ << "\n\n";
-        std::cout << "  Label each result: [y]es / [n]o / [s]kip / [q]uit session\n\n";
-
-        RelevanceSession session;
-        session.timestamp = iso8601UtcNow();
-        session.source = "interactive";
-        session.k = tuneK_;
-        session.configHash = std::to_string(queries.size()) + "-" + std::to_string(tuneK_) + "-" +
-                             std::to_string(docCount.value());
-
-        SearchParams params;
-        params.limit = static_cast<int>(tuneK_);
-
-        bool userQuit = false;
-        for (std::size_t qi = 0; qi < queries.size() && !userQuit; ++qi) {
-            const auto& sq = queries[qi];
-            std::cout << colorize("Query " + std::to_string(qi + 1) + "/" +
-                                      std::to_string(queries.size()) + ":",
-                                  Ansi::BOLD)
-                      << " " << sq.text << "\n";
-
-            auto searchRes = appCtx->searchEngine->search(sq.text, params);
-            if (!searchRes) {
-                std::cout << "  " << status_error("Search failed: " + searchRes.error().message)
-                          << "\n\n";
-                continue;
-            }
-
-            const auto& results = searchRes.value();
-            LabeledQuery lq;
-            lq.queryText = sq.text;
-
-            if (results.empty()) {
-                std::cout << "  " << status_ok("(no results)") << "\n\n";
-                session.queries.push_back(std::move(lq));
-                continue;
-            }
-
-            const std::size_t labelCount = std::min<std::size_t>(tuneK_, results.size());
-            for (std::size_t i = 0; i < labelCount && !userQuit; ++i) {
-                const auto& r = results[i];
-                const auto& doc = r.document;
-                lq.rankedDocHashes.push_back(doc.sha256Hash);
-
-                std::cout << "  [" << (i + 1) << "] " << colorize(doc.filePath, Ansi::CYAN) << "\n";
-                if (!r.snippet.empty()) {
-                    std::cout << "      " << truncatePreview(r.snippet, 180) << "\n";
-                }
-                std::cout << "      score=" << std::fixed << std::setprecision(3) << r.score
-                          << "   label [y/n/s/q]? " << std::flush;
-
-                std::string input;
-                if (!std::getline(std::cin, input)) {
-                    userQuit = true;
-                    break;
-                }
-                char c =
-                    input.empty()
-                        ? 's'
-                        : static_cast<char>(std::tolower(static_cast<unsigned char>(input[0])));
-                RelevanceLabel label = RelevanceLabel::Unknown;
-                switch (c) {
-                    case 'y':
-                        label = RelevanceLabel::Relevant;
-                        break;
-                    case 'n':
-                        label = RelevanceLabel::NotRelevant;
-                        break;
-                    case 'q':
-                        userQuit = true;
-                        label = RelevanceLabel::Unknown;
-                        break;
-                    default:
-                        label = RelevanceLabel::Unknown;
-                        break;
-                }
-                lq.labels.push_back(label);
-            }
-
-            // Position-discounted precision: sum(y_i / log2(i+2)) / max-at-K.
-            double gain = 0.0;
-            double maxGain = 0.0;
-            for (std::size_t i = 0; i < lq.labels.size(); ++i) {
-                const double disc = 1.0 / std::log2(static_cast<double>(i + 2));
-                maxGain += disc;
-                if (lq.labels[i] == RelevanceLabel::Relevant) {
-                    gain += disc;
-                }
-            }
-            lq.reward = (maxGain > 0.0) ? (gain / maxGain) : 0.0;
-            std::cout << "  -> reward=" << std::fixed << std::setprecision(3) << lq.reward
-                      << "\n\n";
-            session.queries.push_back(std::move(lq));
-        }
-
-        // Persist (always — even partial sessions from a quit).
-        const auto labelsPath = yams::config::get_data_dir() / "relevance_labels.jsonl";
-        RelevanceLabelStore store(labelsPath);
-        auto appended = store.append(session);
-        if (!appended) {
-            std::cout << "  "
-                      << status_error("Failed to persist session: " + appended.error().message)
-                      << "\n";
-        } else {
-            std::cout << "  " << status_ok("Session saved to " + labelsPath.string()) << "\n";
-        }
-
-        // Feed the tuner if one is installed on the engine.
-        try {
-            if (auto tuner = appCtx->searchEngine->getSearchTuner()) {
-                tuner->observeRelevanceFeedback(session);
-                std::cout << "  " << status_ok("Forwarded to SearchTuner") << "\n";
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("observeRelevanceFeedback raised: {}", e.what());
-        }
-
-        std::cout << "\n  " << colorize("Mean reward:", Ansi::CYAN) << " " << std::fixed
-                  << std::setprecision(3) << session.meanReward() << "   "
-                  << colorize("Queries labeled:", Ansi::CYAN) << " " << session.queries.size()
-                  << "\n";
-
-        if (tuneJson_) {
-            std::cout << "\n" << session.toJson().dump(2) << "\n";
-        }
-    } catch (const std::exception& e) {
-        std::cout << "  " << ui::status_error(std::string("Tune error: ") + e.what()) << "\n";
-    }
+    yams::cli::TuneOptions opts;
+    opts.queries = tuneQueries_;
+    opts.k = tuneK_;
+    opts.seed = tuneSeed_;
+    opts.json = tuneJson_;
+    opts.nonInteractive = tuneNonInteractive_;
+    yams::cli::runInteractiveTune(cli_, opts);
 }
 
 void DoctorCommand::printBenchmarkHistory() {

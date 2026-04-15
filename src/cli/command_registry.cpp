@@ -32,6 +32,7 @@ std::unique_ptr<ICommand> createDoctorCommand();
 std::unique_ptr<ICommand> createGraphCommand();
 std::unique_ptr<ICommand> createDiffCommand();
 std::unique_ptr<ICommand> createTreeCommand();
+std::unique_ptr<ICommand> createTuneCommand();
 #ifdef YAMS_BUILD_MCP_SERVER
 std::unique_ptr<ICommand> createServeCommand();
 #endif
@@ -68,6 +69,8 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
     cli->registerCommand(::yams::cli::createGraphCommand());
     // New: snapshot diff command (PBI-043)
     cli->registerCommand(::yams::cli::createDiffCommand());
+    // Top-level interactive relevance tuner (F1+T)
+    cli->registerCommand(::yams::cli::createTuneCommand());
 #ifdef YAMS_BUILD_MCP_SERVER
     cli->registerCommand(CommandRegistry::createServeCommand());
 #endif

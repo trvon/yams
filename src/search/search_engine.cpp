@@ -13,6 +13,7 @@
 #include <yams/search/search_execution_context.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
+#include <yams/search/tuning_features.h>
 #include <yams/search/tuning_pipeline.h>
 #include <yams/search/turboquant_packed_reranker.h>
 #include <yams/search/vector_reranker.h>
@@ -1765,11 +1766,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig = tuner_->getConfig();
     }
 
+    // R2: construct a TuningContext populated with corpus-slow features,
+    // query token stats, and the topology epoch fingerprint. The context is
+    // passed to both getParams() and observe() so the contextual policy
+    // (R4+) can condition on it. SearchTuner (rules) ignores the context.
+    TuningContext tuningCtx;
+    if (tuner_) {
+        fillCorpusFeatures(tuningCtx, tuner_->corpusStats());
+    }
+    fillQueryTokenFeature(tuningCtx, query);
+    {
+        const auto snapshot = currentSearchExecutionContext();
+        tuningCtx.topologyEpoch = snapshot.freshness.topologyEpoch;
+    }
+
     std::optional<TuningState> baselineState;
     TunedParams baseParams;
     if (tuner_) {
         baselineState = tuner_->currentState();
-        baseParams = tuner_->getParams();
+        baseParams = tuner_->getParams(tuningCtx);
     } else {
         baseParams = seedTunedParamsFromConfig(workingConfig);
     }
@@ -5463,13 +5478,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         // if trace data is malformed
         }
 
-        tuner_->observe(telemetry);
+        tuner_->observe(tuningCtx, telemetry);
         const auto tunerState = tuner_->adaptiveStateToJson();
         response.debugStats["tuner_adaptive_active"] = "1";
         response.debugStats["tuner_decision_reason"] =
             tunerState.value("last_decision", std::string{"unknown"});
         response.debugStats["tuner_adjustments_json"] = tunerState.dump();
         response.debugStats["tuner_runtime_config_json"] = tuner_->getParams().toJson().dump();
+        // R3: emit the stable bucket key so users can see which context
+        // bucket drove a given query's policy decision. The rules policy
+        // ignores the bucket; R5's orchestrator reads it for per-bucket
+        // handoff gating.
+        response.debugStats["tuner_context_bucket"] = bucketize(tuningCtx);
+        response.debugStats["tuner_backend"] = "rules";
     } else {
         response.debugStats["tuner_adaptive_active"] = "0";
     }

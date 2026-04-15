@@ -7,6 +7,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <system_error>
 
 #include "../../common/test_helpers_catch2.h"
 
@@ -55,6 +56,19 @@ struct ServiceManagerFixture {
             std::error_code ec;
             fs::remove_all(testDir_, ec);
         }
+    }
+};
+
+struct ScopedCurrentPath {
+    fs::path original_;
+
+    explicit ScopedCurrentPath(const fs::path& target) : original_(fs::current_path()) {
+        fs::current_path(target);
+    }
+
+    ~ScopedCurrentPath() {
+        std::error_code ec;
+        fs::current_path(original_, ec);
     }
 };
 
@@ -214,6 +228,25 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     // Second init should succeed and not throw bad executor
     auto r2 = sm->initialize();
     REQUIRE(r2);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager initializes WAL under configured data directory",
+                 "[daemon][service_manager][wal]") {
+    const auto runRoot = testDir_ / "cwd";
+    fs::create_directories(runRoot);
+    ScopedCurrentPath cwdGuard(runRoot);
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+
+    const auto expectedWalDir = config_.dataDir / "wal";
+    REQUIRE(fs::exists(expectedWalDir));
+    REQUIRE(fs::is_directory(expectedWalDir));
+
+    const auto misplacedWalDir = runRoot / "wal";
+    CHECK_FALSE(fs::exists(misplacedWalDir));
 }
 
 } // namespace yams::daemon::test

@@ -1070,6 +1070,16 @@ if catch2_dep.found()
     install: false,
   )
 
+#R3 Tuning features + reward(featurize / bucketize / combineReward)
+  catch2_tuning_features_exe = executable('catch2_tuning_features',
+    files('unit/search/tuning_features_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #SearchTuner tests(Phase 2 of Epic yams - 7ez4 : Adaptive Search Engine Tuning via Corpus-Aware FSM)
 #Tests FSM state transitions, TunedParams matrix, and SearchEngineConfig generation
   catch2_search_tuner_exe = executable('catch2_search_tuner',
@@ -1522,6 +1532,15 @@ if catch2_dep.found()
 
   catch2_topology_baseline_exe = executable('catch2_topology_baseline',
     files('unit/topology/topology_baseline_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_topology_factory_exe = executable('catch2_topology_factory',
+    files('unit/topology/topology_factory_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2104,6 +2123,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'topology'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('topology_factory', catch2_topology_factory_exe,
+    suite: ['catch2', 'unit', 'topology'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('fuzzy_index_prioritization', catch2_fuzzy_index_prioritization_exe,
@@ -2801,6 +2826,13 @@ if catch2_dep.found()
 
 #TuningSlot provenance tests
   test('tuning_slot', catch2_tuning_slot_exe,
+    suite: ['catch2', 'unit', 'search', 'tuner'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+#R3 tuning features + reward tests
+  test('tuning_features', catch2_tuning_features_exe,
     suite: ['catch2', 'unit', 'search', 'tuner'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30

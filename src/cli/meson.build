@@ -9,6 +9,7 @@ yams_cli_sources = [
   'plugin_util.cpp',
   'doctor_checks.cpp',
   'init_assets.cpp',
+  'tune_runner.cpp',
   'commands/add_command.cpp',
   'commands/get_command.cpp',
   'commands/restore_command.cpp',
@@ -39,6 +40,7 @@ yams_cli_sources = [
   'commands/dr_command.cpp',
   'commands/graph_command.cpp',
   'commands/diff_command.cpp',
+  'commands/tune_command.cpp',
 ]
 
 if get_option('build-mcp-server')

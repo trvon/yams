@@ -98,6 +98,7 @@
 #include <yams/search/search_engine_builder.h>
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_factory.h>
 #include <yams/topology/topology_input_extractor.h>
 #include <yams/topology/topology_metadata_store.h>
 #include <yams/topology/topology_offline_analyzer.h>
@@ -205,8 +206,8 @@ void prewarmReadPool(const std::shared_ptr<yams::metadata::ConnectionPool>& read
         try {
             auto& db = **conn;
             for (const char* sql :
-                 {"SELECT COUNT(*) FROM documents", "SELECT COUNT(*) FROM documents_fts",
-                  "SELECT COUNT(*) FROM metadata"}) {
+                 {"SELECT 1 FROM documents LIMIT 1", "SELECT rowid FROM documents_fts LIMIT 1",
+                  "SELECT 1 FROM metadata LIMIT 1"}) {
                 auto stmtResult = db.prepareCached(sql);
                 if (!stmtResult) {
                     continue;
@@ -219,7 +220,7 @@ void prewarmReadPool(const std::shared_ptr<yams::metadata::ConnectionPool>& read
         }
     }
 
-    spdlog::info("Read pool prewarm complete: warmed {} connection(s)", warmed);
+    spdlog::info("Read pool lightweight prewarm complete: warmed {} connection(s)", warmed);
 }
 
 inline void setOnnxShutdownMarker(bool enabled) {
@@ -741,6 +742,7 @@ yams::Result<void> ServiceManager::initialize() {
         yams::wal::WALManager::Config walConfig;
         walConfig.walDirectory = resolvedDataDir_ / "wal";
         try {
+            walManager_ = std::make_shared<yams::wal::WALManager>(walConfig);
             if (auto result = walManager_->initialize(); !result) {
                 spdlog::warn("[ServiceManager] WALManager initialization failed: {}",
                              result.error().message);
@@ -1973,7 +1975,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     state_.readiness.metadataRepoReady = true;
                     // Initialize component-owned metrics (sync with DB once at startup)
                     metadataRepo->initializeCounters();
-                    metadataRepo->warmValueCountsCache(); // Pre-warm common queries
                     storeMetadataRepo(std::move(metadataRepo));
                     spdlog::info("Metadata repository initialized successfully");
 
@@ -2585,6 +2586,37 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
 
     co_return Result<void>();
+}
+
+void ServiceManager::startDeferredMetadataWarmup() {
+    if (deferredMetadataWarmupStarted_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    auto metadataRepo = getMetadataRepo();
+    if (!metadataRepo) {
+        spdlog::debug("[ServiceManager] Deferred metadata warmup skipped: metadata repository "
+                      "unavailable");
+        return;
+    }
+
+    auto weakSelf = weak_from_this();
+    boost::asio::post(getWorkerExecutor(), [weakSelf, metadataRepo = std::move(metadataRepo)]() {
+        auto self = weakSelf.lock();
+        if (!self) {
+            return;
+        }
+
+        try {
+            spdlog::info("[ServiceManager] Deferred metadata warmup started");
+            metadataRepo->warmValueCountsCache();
+            spdlog::info("[ServiceManager] Deferred metadata warmup finished");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Deferred metadata warmup failed: {}", e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] Deferred metadata warmup failed");
+        }
+    });
 }
 
 boost::asio::awaitable<void>
@@ -3829,7 +3861,15 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
     topology::MetadataKgTopologyArtifactStore store(metadataIface, kgStore);
     auto extractor =
         std::make_shared<topology::TopologyInputExtractor>(metadataIface, kgStore, vectorDb);
-    auto engine = std::make_shared<topology::ConnectedComponentTopologyEngine>();
+    // P3.1: select topology engine via the factory. Unknown/empty keys resolve
+    // to "connected", preserving the previous hardcoded behavior.
+    const std::string_view algorithmKey =
+        topology::resolveFactoryKey(tuningConfig_.topologyAlgorithm);
+    auto engine = topology::makeEngine(algorithmKey);
+    if (algorithmKey != tuningConfig_.topologyAlgorithm) {
+        spdlog::info("[topology] requested algorithm '{}' not registered; using '{}'",
+                     tuningConfig_.topologyAlgorithm, algorithmKey);
+    }
 
     std::optional<topology::TopologyArtifactBatch> latestBatch;
     {
@@ -3958,6 +3998,9 @@ ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
                                                             : extractionStats.regionDocuments;
     stats.coalescedDirtySets = updateStats.coalescedDirtySets;
     stats.fallbackFullRebuilds = updateStats.fallbackFullRebuilds;
+    // P3.1: surface the factory key so downstream diagnostics (benchmark history,
+    // structured logs) can correlate artifact labels with the algorithm requested.
+    stats.issues.push_back(std::string{"topology_algorithm="} + std::string{algorithmKey});
 
     if (!documentHashes.empty()) {
         stats.issues.push_back("incremental topology rebuild expanded " +

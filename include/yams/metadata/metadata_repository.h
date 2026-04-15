@@ -410,7 +410,7 @@ public:
 
     // Statistics
     virtual Result<int64_t> getDocumentCount() = 0;
-    virtual Result<int64_t> getIndexedDocumentCount() = 0;          // Embeddings-based
+    virtual Result<int64_t> getIndexedDocumentCount() = 0;          // Exact FTS5 row count
     virtual Result<int64_t> getContentExtractedDocumentCount() = 0; // New: content_extracted flag
     virtual Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() = 0;
     // Count documents by extraction status
@@ -704,7 +704,7 @@ public:
 
     // Statistics
     Result<int64_t> getDocumentCount() override;
-    Result<int64_t> getIndexedDocumentCount() override;          // FTS5 indexed docs
+    Result<int64_t> getIndexedDocumentCount() override;          // Exact FTS5 indexed docs
     Result<int64_t> getContentExtractedDocumentCount() override; // New
     Result<int64_t> getEmbeddedDocumentCount();
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override;
@@ -727,7 +727,7 @@ public:
     }
     void initializeCounters(); // Called once during startup to sync with DB
 
-    /// Warm the metadata value counts cache for common keys (called on startup)
+    /// Warm the metadata value counts cache for common keys (best-effort, non-critical path)
     void warmValueCountsCache();
 
     // Batch operations for search/grep performance (eliminates N queries → 1 query)

@@ -686,6 +686,14 @@ void YamsDaemon::runLoop() {
                     lifecycleFsm_.dispatch(HealthyEvent{});
                 }
                 try {
+                    serviceManager_->startDeferredMetadataWarmup();
+                } catch (const std::exception& e) {
+                    spdlog::warn("[InitWaiter] Failed to start deferred metadata warmup: {}",
+                                 e.what());
+                } catch (...) {
+                    spdlog::warn("[InitWaiter] Failed to start deferred metadata warmup");
+                }
+                try {
                     std::shared_ptr<DaemonMetrics> m;
                     {
                         std::lock_guard<std::mutex> lk(metricsMutex_);
