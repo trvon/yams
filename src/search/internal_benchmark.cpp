@@ -498,10 +498,18 @@ InternalBenchmark::runWithQueries(const std::vector<SyntheticQuery>& queries,
         results.executions = std::move(executions);
     }
 
-    // Capture tuning state if available
-    auto corpusStats = metadataRepo_->getCorpusStats();
-    if (corpusStats) {
-        SearchTuner tuner(corpusStats.value());
+    // Capture tuning state if available. Extract the CorpusStats out of the Result
+    // wrapper before proceeding; keeping the Result alive across the tuner work has
+    // triggered a -O2-only stack-discriminator corruption on macOS arm64.
+    std::optional<storage::CorpusStats> corpusStats;
+    {
+        auto statsResult = metadataRepo_->getCorpusStats();
+        if (statsResult.has_value()) {
+            corpusStats = std::move(statsResult).value();
+        }
+    }
+    if (corpusStats.has_value()) {
+        SearchTuner tuner(*corpusStats);
         results.tuningState = tuningStateToString(tuner.currentState());
         results.tunedParams = tuner.getParams().toJson();
     }

@@ -16,6 +16,7 @@
 #include <yams/search/internal_benchmark.h>
 #include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine.h>
+#include <yams/search/search_execution_context.h>
 #include <yams/search/search_tuner.h>
 #include <yams/vector/vector_database.h>
 
@@ -465,6 +466,17 @@ public:
         kgStore_ =
             std::shared_ptr<yams::metadata::KnowledgeGraphStore>(std::move(kgResult).value());
         repo_->setKnowledgeGraphStore(kgStore_);
+
+        // Simulate a warmed-up corpus so searchInternal doesn't force-disable
+        // graph rerank / KG / topology features via the corpusWarming() gate.
+        // Without this, the default freshness has lexicalReady=false and every
+        // search runs as if the index were still filling.
+        auto execContext = search::defaultSearchExecutionContext();
+        execContext.freshness.lexicalReady = true;
+        execContext.freshness.vectorReady = true;
+        execContext.freshness.kgReady = true;
+        execContext.freshness.topologyReady = true;
+        contextGuard_.emplace(std::move(execContext));
     }
 
     ~SearchEngineRerankerFixture() {
@@ -570,6 +582,7 @@ private:
     std::unique_ptr<yams::metadata::ConnectionPool> pool_;
     std::shared_ptr<yams::metadata::MetadataRepository> repo_;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;
+    std::optional<search::SearchExecutionContextGuard> contextGuard_;
 };
 
 using yams::test::ScopedEnvVar;

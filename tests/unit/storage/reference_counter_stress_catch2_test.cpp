@@ -328,6 +328,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture,
         txn->increment(generateHash(10'000 + i), 4096);
 
         std::atomic<bool> stopObserver{false};
+        std::atomic<bool> observedOnce{false};
         std::thread observer([&]() {
             while (!stopObserver.load(std::memory_order_relaxed)) {
                 if (txn->isActive()) {
@@ -335,6 +336,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture,
                 } else {
                     activeFalse.fetch_add(1, std::memory_order_relaxed);
                 }
+                observedOnce.store(true, std::memory_order_release);
             }
 
             if (txn->isActive()) {
@@ -343,6 +345,12 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture,
                 activeFalse.fetch_add(1, std::memory_order_relaxed);
             }
         });
+
+        // Guarantee the observer logs at least one pre-commit sample so the
+        // activeTrue counter is non-zero independent of thread-start scheduling.
+        while (!observedOnce.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
 
         if ((i % 2) == 0) {
             auto commitResult = txn->commit();
