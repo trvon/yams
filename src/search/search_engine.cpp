@@ -1502,6 +1502,8 @@ public:
 
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner) { tuner_ = std::move(tuner); }
 
+    std::shared_ptr<SearchTuner> getSearchTuner() const { return tuner_; }
+
     void invalidateCompressedANNIndex() {
         if (compressedAnnIndex_) {
             compressedAnnIndex_->invalidate();
@@ -6808,6 +6810,10 @@ void SearchEngine::setReranker(std::shared_ptr<IReranker> reranker) {
 
 void SearchEngine::setSearchTuner(std::shared_ptr<SearchTuner> tuner) {
     pImpl_->setSearchTuner(std::move(tuner));
+}
+
+std::shared_ptr<SearchTuner> SearchEngine::getSearchTuner() const {
+    return pImpl_->getSearchTuner();
 }
 
 void SearchEngine::invalidateCompressedANNIndex() {

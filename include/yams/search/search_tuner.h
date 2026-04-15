@@ -1,11 +1,13 @@
 #pragma once
 
 #include <yams/core/types.h>
+#include <yams/search/relevance_label_store.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/tuning_slot.h>
 #include <yams/storage/corpus_stats.h>
 
 #include <nlohmann/json.hpp>
+#include <cstddef>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -522,6 +524,31 @@ public:
     void observe(const RuntimeTelemetry& telemetry);
 
     /**
+     * @brief Observe a user-labeled relevance session.
+     *
+     * The per-query reward (position-discounted precision) is aggregated into
+     * a second EWMA channel that sits alongside the runtime-telemetry EWMAs.
+     * This lets downstream consumers (MAB tuner, convex fusion) see "is the
+     * user happy with what we're returning" as a first-class signal.
+     *
+     * Empty sessions are ignored.
+     */
+    void observeRelevanceFeedback(const RelevanceSession& session);
+
+    /**
+     * @brief Whether the adaptive EWMA state has stabilized.
+     *
+     * Used to gate opt-in features (P6 MAB, P7 convex fusion) that should only
+     * engage once the rule-based tuner has settled. The default threshold of
+     * 200 observations roughly corresponds to a few thousand queries of real
+     * traffic; callers can pass a lower bound for short-lived sessions.
+     *
+     * A tuner is "converged" when it has at least `minObservations` observations
+     * AND it has not adjusted parameters within the last cooldown window.
+     */
+    [[nodiscard]] bool hasConverged(std::size_t minObservations = 200) const noexcept;
+
+    /**
      * @brief Pin weight slots that were overridden via environment variables.
      *
      * Call after seedRuntimeConfig(). Pinned slots cannot be modified by
@@ -606,6 +633,14 @@ private:
         double ewmaGraphRerankSkipRate = 0.0;
         double ewmaGraphRerankContributionRate = 0.0;
         double ewmaZoomDepth = 0.0;
+        // User-labeled reward channel (P6/F1). `ewmaRelevanceReward` is the
+        // EWMA of per-query position-discounted precision from `yams tune`
+        // sessions. `relevanceSessions` counts how many labeled sessions have
+        // fed into the EWMA so far.
+        double ewmaRelevanceReward = 0.0;
+        std::uint64_t relevanceSessions = 0;
+        std::uint64_t relevanceQueries = 0;
+        std::string lastRelevanceTimestamp;
         bool lastObservationChanged = false;
         SearchEngineConfig::NavigationZoomLevel lastZoomLevel =
             SearchEngineConfig::NavigationZoomLevel::Auto;

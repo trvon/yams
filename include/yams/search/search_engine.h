@@ -1473,6 +1473,11 @@ public:
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner);
 
     /**
+     * @brief Access the installed runtime SearchTuner, if any.
+     */
+    std::shared_ptr<SearchTuner> getSearchTuner() const;
+
+    /**
      * @brief Invalidate the compressed ANN index so the next query rebuilds it.
      *
      * Call this after inserting or updating vectors in the VectorDatabase to

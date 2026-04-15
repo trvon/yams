@@ -326,6 +326,51 @@ SearchEngineConfig SearchTuner::getConfig() const {
     return buildConfigFromParamsLocked();
 }
 
+void SearchTuner::observeRelevanceFeedback(const RelevanceSession& session) {
+    if (session.queries.empty()) {
+        return;
+    }
+    std::optional<std::string> pendingSnapshot;
+    std::filesystem::path snapshotPath;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Aggregate reward per-query into the EWMA. This keeps the channel
+        // comparable in cadence to the runtime-telemetry EWMA (one update per
+        // query). We use `observations` as the EWMA step counter so that a
+        // brand-new tuner (observations==0) will take the first sample as-is.
+        for (const auto& q : session.queries) {
+            ++adaptive_.relevanceQueries;
+            adaptive_.ewmaRelevanceReward =
+                ewmaUpdate(adaptive_.ewmaRelevanceReward, std::clamp(q.reward, 0.0, 1.0),
+                           adaptive_.relevanceQueries);
+        }
+        ++adaptive_.relevanceSessions;
+        adaptive_.lastRelevanceTimestamp = session.timestamp;
+
+        if (!persistPath_.empty()) {
+            pendingSnapshot = adaptiveStateToJsonLocked().dump(2);
+            snapshotPath = persistPath_;
+            lastPersistedObservation_ = adaptive_.observations;
+        }
+    }
+    if (pendingSnapshot) {
+        auto written = saveAdaptiveState(snapshotPath);
+        if (!written) {
+            spdlog::warn("SearchTuner: failed to persist adaptive state to {}: {}",
+                         snapshotPath.string(), written.error().message);
+        }
+    }
+}
+
+bool SearchTuner::hasConverged(std::size_t minObservations) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (adaptive_.observations < minObservations) {
+        return false;
+    }
+    const std::uint64_t cooldown = adaptive_.observations - adaptive_.lastAdjustmentObservation;
+    return cooldown >= kAdaptiveCooldownObservations;
+}
+
 void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
     std::optional<std::string> pendingSnapshot;
     std::filesystem::path snapshotPath;
@@ -527,6 +572,10 @@ nlohmann::json SearchTuner::adaptiveStateToJsonLocked() const {
         {"ewma_graph_rerank_skip_rate", adaptive_.ewmaGraphRerankSkipRate},
         {"ewma_graph_rerank_contribution_rate", adaptive_.ewmaGraphRerankContributionRate},
         {"ewma_zoom_depth", adaptive_.ewmaZoomDepth},
+        {"ewma_relevance_reward", adaptive_.ewmaRelevanceReward},
+        {"relevance_sessions", adaptive_.relevanceSessions},
+        {"relevance_queries", adaptive_.relevanceQueries},
+        {"last_relevance_timestamp", adaptive_.lastRelevanceTimestamp},
         {"last_zoom_level",
          SearchEngineConfig::navigationZoomLevelToString(adaptive_.lastZoomLevel)},
         {"zoom_level_counts", zoomLevelCountJson(adaptive_.zoomLevelCounts)},
@@ -651,6 +700,11 @@ Result<void> SearchTuner::loadAdaptiveState(const std::filesystem::path& path) {
     adaptive_.ewmaGraphRerankContributionRate =
         j.value("ewma_graph_rerank_contribution_rate", adaptive_.ewmaGraphRerankContributionRate);
     adaptive_.ewmaZoomDepth = j.value("ewma_zoom_depth", adaptive_.ewmaZoomDepth);
+    adaptive_.ewmaRelevanceReward = j.value("ewma_relevance_reward", adaptive_.ewmaRelevanceReward);
+    adaptive_.relevanceSessions = j.value("relevance_sessions", adaptive_.relevanceSessions);
+    adaptive_.relevanceQueries = j.value("relevance_queries", adaptive_.relevanceQueries);
+    adaptive_.lastRelevanceTimestamp =
+        j.value("last_relevance_timestamp", adaptive_.lastRelevanceTimestamp);
     if (j.contains("zoom_level_counts") && j["zoom_level_counts"].is_object()) {
         adaptive_.zoomLevelCounts.clear();
         for (auto it = j["zoom_level_counts"].begin(); it != j["zoom_level_counts"].end(); ++it) {
