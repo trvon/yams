@@ -256,6 +256,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             } catch (...) {
             }
 
+            setVal(metrics::kRepairRunning, snap->repairRunning ? 1 : 0);
+            setVal(metrics::kRepairInProgress, snap->repairInProgress ? 1 : 0);
+            setVal(metrics::kRepairQueueDepth, snap->repairQueueDepth);
+            setVal(metrics::kRepairFailedOperations, snap->repairFailedOperations);
+
             if (includeExtendedStatus) {
                 setVal(metrics::kPostIngestProcessed, snap->postIngestProcessed);
                 setVal(metrics::kPostIngestFailed, snap->postIngestFailed);
