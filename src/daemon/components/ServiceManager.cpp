@@ -601,6 +601,13 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
 ServiceManager::~ServiceManager() {
     shutdown();
+    if (ingestService_) {
+        try {
+            ingestService_->stop();
+        } catch (...) {
+        }
+        ingestService_.reset();
+    }
 }
 
 yams::Result<void> ServiceManager::initialize() {

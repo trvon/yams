@@ -635,8 +635,6 @@ private:
     std::shared_ptr<app::services::IGraphQueryService> graphQueryServiceOverride_;
     std::shared_ptr<IModelProvider> modelProvider_;
 
-    std::unique_ptr<IngestService> ingestService_;
-
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;
     // NOTE: ExternalPluginHost moved to PluginManager (PBI-093)
@@ -652,6 +650,7 @@ private:
     boost::asio::cancellation_signal shutdownSignal_;
 
     std::unique_ptr<WorkCoordinator> workCoordinator_;
+    std::unique_ptr<IngestService> ingestService_;
     std::unique_ptr<RequestExecutor> requestExecutor_;
 
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
