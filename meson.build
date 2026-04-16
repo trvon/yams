@@ -571,6 +571,18 @@ if not _tl_expected_dep.found()
 endif
 meson.override_dependency('tl-expected', _tl_expected_dep)
 
+# --- tinyfsm global resolution ---
+# tinyfsm is a single-header FSM library vendored under third_party/.
+# Added as a project-wide include because daemon FSM headers are included
+# transitively by many targets via ServiceManager.h.
+_tinyfsm_inc = include_directories('third_party/tinyfsm/include', is_system: true)
+add_project_arguments(
+  '-isystem', meson.project_source_root() / 'third_party' / 'tinyfsm' / 'include',
+  language: 'cpp',
+)
+_tinyfsm_dep = declare_dependency(include_directories: _tinyfsm_inc)
+meson.override_dependency('tinyfsm', _tinyfsm_dep)
+
 # --- libarchive global resolution ---
 # Homebrew on macOS installs libarchive as keg-only; pkg-config won't find it
 # without the Conan-generated pkg_config_path. Resolve once and override only

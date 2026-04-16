@@ -1,114 +1,184 @@
-#include <spdlog/spdlog.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+
+#include <spdlog/spdlog.h>
+#include <tinyfsm.hpp>
+
+namespace yams::daemon {
+namespace detail {
+
+struct LCUnknown;
+struct LCStarting;
+struct LCInitializing;
+struct LCReady;
+struct LCDegraded;
+struct LCFailed;
+struct LCStopping;
+struct LCStopped;
+
+struct LifecycleMachine : tinyfsm::MooreMachine<LifecycleMachine> {
+    static LifecycleSnapshot snap;
+
+    virtual void react(const BootstrappedEvent&) {}
+    virtual void react(const HealthyEvent&) {}
+    virtual void react(const DegradedEvent&) {}
+    virtual void react(const StoppedEvent&) {}
+
+    virtual void react(const FailureEvent& ev);
+    virtual void react(const ShutdownRequestedEvent&);
+
+protected:
+    void applyEntry(LifecycleState next) {
+        auto prev = snap.state;
+        snap.state = next;
+        snap.lastTransition = std::chrono::steady_clock::now();
+        if (prev != next || !snap.lastError.empty()) {
+            spdlog::info("Lifecycle transition: {} -> {}{}", static_cast<int>(prev),
+                         static_cast<int>(next),
+                         snap.lastError.empty() ? "" : (std::string{" error="} + snap.lastError));
+        }
+    }
+};
+
+LifecycleSnapshot LifecycleMachine::snap{};
+
+struct LCUnknown : LifecycleMachine {
+    void entry() override {
+        snap.lastError.clear();
+        applyEntry(LifecycleState::Unknown);
+    }
+    void react(const BootstrappedEvent&) override {
+        spdlog::info("BootstrappedEvent received, current state={}", static_cast<int>(snap.state));
+        transit<LCInitializing>();
+    }
+};
+
+struct LCStarting : LifecycleMachine {
+    void entry() override {
+        snap.lastError.clear();
+        applyEntry(LifecycleState::Starting);
+    }
+    void react(const BootstrappedEvent&) override {
+        spdlog::info("BootstrappedEvent received, current state={}", static_cast<int>(snap.state));
+        transit<LCInitializing>();
+    }
+};
+
+struct LCInitializing : LifecycleMachine {
+    void entry() override {
+        snap.lastError.clear();
+        applyEntry(LifecycleState::Initializing);
+    }
+    void react(const HealthyEvent&) override {
+        spdlog::info("HealthyEvent received, current state={}", static_cast<int>(snap.state));
+        transit<LCReady>();
+    }
+    void react(const DegradedEvent&) override { transit<LCDegraded>(); }
+};
+
+struct LCReady : LifecycleMachine {
+    void entry() override {
+        snap.lastError.clear();
+        applyEntry(LifecycleState::Ready);
+    }
+    void react(const DegradedEvent&) override { transit<LCDegraded>(); }
+};
+
+struct LCDegraded : LifecycleMachine {
+    void entry() override { applyEntry(LifecycleState::Degraded); }
+    void react(const HealthyEvent&) override {
+        spdlog::info("HealthyEvent received, current state={}", static_cast<int>(snap.state));
+        transit<LCReady>();
+    }
+};
+
+struct LCFailed : LifecycleMachine {
+    void entry() override { applyEntry(LifecycleState::Failed); }
+    void react(const FailureEvent&) override {}
+    void react(const StoppedEvent&) override { transit<LCStopped>(); }
+};
+
+struct LCStopping : LifecycleMachine {
+    void entry() override {
+        snap.lastError.clear();
+        applyEntry(LifecycleState::Stopping);
+    }
+    void react(const FailureEvent&) override {}
+    void react(const ShutdownRequestedEvent&) override {}
+    void react(const StoppedEvent&) override { transit<LCStopped>(); }
+};
+
+struct LCStopped : LifecycleMachine {
+    void entry() override {
+        snap.lastError.clear();
+        applyEntry(LifecycleState::Stopped);
+    }
+    void react(const FailureEvent&) override {}
+    void react(const ShutdownRequestedEvent&) override {}
+};
+
+void LifecycleMachine::react(const FailureEvent& ev) {
+    snap.lastError = ev.error;
+    transit<LCFailed>();
+}
+
+void LifecycleMachine::react(const ShutdownRequestedEvent&) {
+    transit<LCStopping>();
+}
+
+} // namespace detail
+} // namespace yams::daemon
+
+FSM_INITIAL_STATE(yams::daemon::detail::LifecycleMachine, yams::daemon::detail::LCUnknown)
 
 namespace yams::daemon {
 
-void DaemonLifecycleFsm::transitionTo(LifecycleState next, std::optional<std::string> err) {
+DaemonLifecycleFsm::DaemonLifecycleFsm() {
     MutexLock lock(mutex_);
-    if (snapshot_.state == next && (!err || snapshot_.lastError == *err)) {
-        spdlog::debug("Lifecycle transition no-op: already in state {}", static_cast<int>(next));
-        return; // no-op
-    }
-    auto prev = snapshot_.state;
-    snapshot_.state = next;
-    snapshot_.lastError = err.value_or("");
-    snapshot_.lastTransition = std::chrono::steady_clock::now();
-    spdlog::info("Lifecycle transition: {} -> {}{}", static_cast<int>(prev), static_cast<int>(next),
-                 snapshot_.lastError.empty() ? "" : (std::string{" error="} + snapshot_.lastError));
+    detail::LifecycleMachine::snap = {};
+    detail::LifecycleMachine::start();
 }
 
-void DaemonLifecycleFsm::tick() {
-    // Currently no time-based auto transitions; placeholder for future degraded->ready recovery,
-    // etc.
+LifecycleSnapshot DaemonLifecycleFsm::snapshot() const {
+    MutexLock lock(mutex_);
+    return detail::LifecycleMachine::snap;
 }
 
-void DaemonLifecycleFsm::dispatch(const BootstrappedEvent&) {
-    const auto current = snapshot();
-    spdlog::info("BootstrappedEvent received, current state={}", static_cast<int>(current.state));
-    switch (current.state) {
-        case LifecycleState::Unknown:
-        case LifecycleState::Starting:
-            transitionTo(LifecycleState::Initializing);
-            break;
-        default:
-            spdlog::warn("BootstrappedEvent ignored, state {} not Unknown(0) or Starting(1)",
-                         static_cast<int>(current.state));
-            break;
-    }
+void DaemonLifecycleFsm::tick() {}
+
+void DaemonLifecycleFsm::dispatch(const BootstrappedEvent& ev) {
+    MutexLock lock(mutex_);
+    detail::LifecycleMachine::dispatch(ev);
 }
 
-void DaemonLifecycleFsm::dispatch(const HealthyEvent&) {
-    const auto current = snapshot();
-    spdlog::info("HealthyEvent received, current state={}", static_cast<int>(current.state));
-    switch (current.state) {
-        case LifecycleState::Initializing:
-        case LifecycleState::Degraded:
-            transitionTo(LifecycleState::Ready);
-            break;
-        default:
-            spdlog::warn("HealthyEvent ignored, state {} not Initializing(2) or Degraded(4)",
-                         static_cast<int>(current.state));
-            break;
-    }
+void DaemonLifecycleFsm::dispatch(const HealthyEvent& ev) {
+    MutexLock lock(mutex_);
+    detail::LifecycleMachine::dispatch(ev);
 }
 
-void DaemonLifecycleFsm::dispatch(const DegradedEvent&) {
-    const auto current = snapshot();
-    switch (current.state) {
-        case LifecycleState::Ready:
-        case LifecycleState::Initializing:
-            transitionTo(LifecycleState::Degraded);
-            break;
-        default:
-            break;
-    }
+void DaemonLifecycleFsm::dispatch(const DegradedEvent& ev) {
+    MutexLock lock(mutex_);
+    detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const FailureEvent& ev) {
-    const auto current = snapshot();
-    switch (current.state) {
-        case LifecycleState::Unknown:
-        case LifecycleState::Starting:
-        case LifecycleState::Initializing:
-        case LifecycleState::Ready:
-        case LifecycleState::Degraded:
-            transitionTo(LifecycleState::Failed, ev.error);
-            break;
-        default:
-            break;
-    }
+    MutexLock lock(mutex_);
+    detail::LifecycleMachine::dispatch(ev);
 }
 
-void DaemonLifecycleFsm::dispatch(const ShutdownRequestedEvent&) {
-    const auto current = snapshot();
-    switch (current.state) {
-        case LifecycleState::Unknown:
-        case LifecycleState::Starting:
-        case LifecycleState::Initializing:
-        case LifecycleState::Ready:
-        case LifecycleState::Degraded:
-        case LifecycleState::Failed:
-            transitionTo(LifecycleState::Stopping);
-            break;
-        default:
-            break;
-    }
+void DaemonLifecycleFsm::dispatch(const ShutdownRequestedEvent& ev) {
+    MutexLock lock(mutex_);
+    detail::LifecycleMachine::dispatch(ev);
 }
 
-void DaemonLifecycleFsm::dispatch(const StoppedEvent&) {
-    const auto current = snapshot();
-    switch (current.state) {
-        case LifecycleState::Stopping:
-        case LifecycleState::Failed:
-            transitionTo(LifecycleState::Stopped);
-            break;
-        default:
-            break;
-    }
+void DaemonLifecycleFsm::dispatch(const StoppedEvent& ev) {
+    MutexLock lock(mutex_);
+    detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::reset() {
-    transitionTo(LifecycleState::Unknown);
+    MutexLock lock(mutex_);
+    detail::LifecycleMachine::snap = {};
+    detail::LifecycleMachine::start();
 }
 
 void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degraded,
@@ -122,7 +192,6 @@ void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degr
         spdlog::warn("Subsystem '{}' degraded: {}{}", name, degraded ? "true" : "false",
                      reason.empty() ? "" : (std::string{" reason="} + reason));
     } else if (degraded && !reason.empty()) {
-        // Update reason when degraded remains true
         degradeReasons_[name] = reason;
     }
 }

@@ -3,6 +3,8 @@
 #include <mutex>
 #include <string>
 
+#include <tinyfsm.hpp>
+
 namespace yams::daemon {
 
 enum class EmbeddingProviderState {
@@ -37,7 +39,6 @@ struct LoadFailureEvent {
 struct ProviderDegradedEvent {
     std::string reason;
 };
-// Recovery events for production resilience
 struct ModelReloadRequestedEvent {
     std::string modelName;
 };
@@ -45,85 +46,146 @@ struct ProviderRecoveryEvent {
     std::string reason;
 };
 
+namespace detail {
+
+struct EPUnavailable;
+struct EPProviderAdopted;
+struct EPModelLoading;
+struct EPModelReady;
+struct EPDegraded;
+struct EPFailed;
+
+struct EmbeddingProviderMachine : tinyfsm::MooreMachine<EmbeddingProviderMachine> {
+    inline static ProviderSnapshot snap{};
+
+    virtual void react(const ProviderAdoptedEvent&);
+    virtual void react(const ModelLoadStartedEvent&);
+    virtual void react(const ModelLoadedEvent&);
+    virtual void react(const LoadFailureEvent&);
+    virtual void react(const ProviderDegradedEvent&);
+    virtual void react(const ModelReloadRequestedEvent&) {}
+    virtual void react(const ProviderRecoveryEvent&) {}
+};
+
+struct EPUnavailable : EmbeddingProviderMachine {
+    void entry() override { snap.state = EmbeddingProviderState::Unavailable; }
+};
+
+struct EPProviderAdopted : EmbeddingProviderMachine {
+    void entry() override { snap.state = EmbeddingProviderState::ProviderAdopted; }
+};
+
+struct EPModelLoading : EmbeddingProviderMachine {
+    void entry() override { snap.state = EmbeddingProviderState::ModelLoading; }
+};
+
+struct EPModelReady : EmbeddingProviderMachine {
+    void entry() override { snap.state = EmbeddingProviderState::ModelReady; }
+};
+
+struct EPDegraded : EmbeddingProviderMachine {
+    void entry() override { snap.state = EmbeddingProviderState::Degraded; }
+    void react(const ModelReloadRequestedEvent& ev) override {
+        snap.modelName = ev.modelName;
+        snap.lastError.clear();
+        transit<EPModelLoading>();
+    }
+    void react(const ProviderRecoveryEvent&) override {
+        snap.lastError.clear();
+        transit<EPProviderAdopted>();
+    }
+};
+
+struct EPFailed : EmbeddingProviderMachine {
+    void entry() override { snap.state = EmbeddingProviderState::Failed; }
+    void react(const ModelReloadRequestedEvent& ev) override {
+        snap.modelName = ev.modelName;
+        snap.lastError.clear();
+        transit<EPModelLoading>();
+    }
+    void react(const ProviderRecoveryEvent&) override {
+        snap.lastError.clear();
+        transit<EPProviderAdopted>();
+    }
+};
+
+inline void EmbeddingProviderMachine::react(const ProviderAdoptedEvent&) {
+    transit<EPProviderAdopted>();
+}
+
+inline void EmbeddingProviderMachine::react(const ModelLoadStartedEvent& ev) {
+    snap.modelName = ev.modelName;
+    transit<EPModelLoading>();
+}
+
+inline void EmbeddingProviderMachine::react(const ModelLoadedEvent& ev) {
+    snap.modelName = ev.modelName;
+    snap.embeddingDimension = ev.dimension;
+    snap.lastError.clear();
+    transit<EPModelReady>();
+}
+
+inline void EmbeddingProviderMachine::react(const LoadFailureEvent& ev) {
+    snap.lastError = ev.error;
+    transit<EPFailed>();
+}
+
+inline void EmbeddingProviderMachine::react(const ProviderDegradedEvent& ev) {
+    snap.lastError = ev.reason;
+    transit<EPDegraded>();
+}
+
+} // namespace detail
+} // namespace yams::daemon
+
+namespace tinyfsm {
+template <> inline void Fsm<yams::daemon::detail::EmbeddingProviderMachine>::set_initial_state() {
+    current_state_ptr = &_state_instance<yams::daemon::detail::EPUnavailable>::value;
+}
+} // namespace tinyfsm
+
+namespace yams::daemon {
+
 class EmbeddingProviderFsm {
 public:
-    ProviderSnapshot snapshot() const {
+    EmbeddingProviderFsm() {
         std::lock_guard<std::mutex> lock(mutex_);
-        return snap_;
+        detail::EmbeddingProviderMachine::snap = {};
+        detail::EmbeddingProviderMachine::start();
     }
 
-    void dispatch(const ProviderAdoptedEvent&) {
+    ProviderSnapshot snapshot() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        transitionTo(EmbeddingProviderState::ProviderAdopted);
+        return detail::EmbeddingProviderMachine::snap;
     }
-    void dispatch(const ModelLoadStartedEvent& ev) {
+
+    template <typename E> void dispatch(const E& ev) {
         std::lock_guard<std::mutex> lock(mutex_);
-        snap_.modelName = ev.modelName;
-        transitionTo(EmbeddingProviderState::ModelLoading);
-    }
-    void dispatch(const ModelLoadedEvent& ev) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        snap_.modelName = ev.modelName;
-        snap_.embeddingDimension = ev.dimension;
-        snap_.lastError.clear();
-        transitionTo(EmbeddingProviderState::ModelReady);
-    }
-    void dispatch(const LoadFailureEvent& ev) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        snap_.lastError = ev.error;
-        transitionTo(EmbeddingProviderState::Failed);
-    }
-    void dispatch(const ProviderDegradedEvent& ev) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        snap_.lastError = ev.reason;
-        transitionTo(EmbeddingProviderState::Degraded);
-    }
-    // Recovery events - allow transition from Failed/Degraded back to operational states
-    void dispatch(const ModelReloadRequestedEvent& ev) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Allow recovery from Failed or Degraded states
-        if (snap_.state == EmbeddingProviderState::Failed ||
-            snap_.state == EmbeddingProviderState::Degraded) {
-            snap_.modelName = ev.modelName;
-            snap_.lastError.clear();
-            transitionTo(EmbeddingProviderState::ModelLoading);
-        }
-    }
-    void dispatch(const ProviderRecoveryEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Allow recovery from Failed or Degraded states
-        if (snap_.state == EmbeddingProviderState::Failed ||
-            snap_.state == EmbeddingProviderState::Degraded) {
-            snap_.lastError.clear();
-            transitionTo(EmbeddingProviderState::ProviderAdopted);
-        }
+        detail::EmbeddingProviderMachine::dispatch(ev);
     }
 
     bool isReady() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.state == EmbeddingProviderState::ModelReady;
+        return detail::EmbeddingProviderMachine::snap.state == EmbeddingProviderState::ModelReady;
     }
+
     bool isDegraded() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.state == EmbeddingProviderState::Degraded;
+        return detail::EmbeddingProviderMachine::snap.state == EmbeddingProviderState::Degraded;
     }
+
     bool isLoadingOrReady() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.state == EmbeddingProviderState::ModelLoading ||
-               snap_.state == EmbeddingProviderState::ModelReady;
+        auto s = detail::EmbeddingProviderMachine::snap.state;
+        return s == EmbeddingProviderState::ModelLoading || s == EmbeddingProviderState::ModelReady;
     }
+
     std::size_t dimension() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.embeddingDimension;
+        return detail::EmbeddingProviderMachine::snap.embeddingDimension;
     }
 
 private:
-    void transitionTo(EmbeddingProviderState next) {
-        // Note: mutex_ already held by caller
-        snap_.state = next;
-    }
-
-    ProviderSnapshot snap_{};
     mutable std::mutex mutex_;
 };
 

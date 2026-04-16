@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [Unreleased]
+
+### Added
+
+* New top-level `yams tune` command for interactive relevance tuning over the user's own corpus. Subcommands: default (interactive labeling), `status`, `reset [--policy rules|contextual|all]`, and `replay` (R6 stub). See [docs/cli/tune.md](docs/cli/tune.md) and [docs/guides/interactive-tuning.md](docs/guides/interactive-tuning.md).
+
+### Deprecated
+
+* `yams doctor tune` now prints a deprecation notice on stderr and forwards to `yams tune`. The alias will be removed in a future release.
+
 ## [0.12.1](https://github.com/trvon/yams/compare/v0.11.0...v0.12.0) (2026-04-02)
 
 ### Added
