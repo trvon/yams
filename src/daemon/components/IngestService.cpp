@@ -154,22 +154,29 @@ void IngestService::start() {
     boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
 }
 
+void IngestService::notifyLifecycle() {
+    std::lock_guard<std::mutex> lock(lifecycleMutex_);
+    lifecycleCv_.notify_all();
+}
+
 void IngestService::stop() {
     stop_.store(true);
+    notifyLifecycle();
     spdlog::info("[IngestService] Stop requested");
 
-    constexpr auto kWaitStep = std::chrono::milliseconds(5);
     constexpr auto kWaitBudget = std::chrono::milliseconds(15000);
-    auto waited = std::chrono::milliseconds(0);
-    while (running_.load(std::memory_order_acquire) && waited < kWaitBudget) {
-        std::this_thread::sleep_for(kWaitStep);
-        waited += kWaitStep;
+    auto deadline = std::chrono::steady_clock::now() + kWaitBudget;
+    bool exited = false;
+    {
+        std::unique_lock<std::mutex> lock(lifecycleMutex_);
+        exited = lifecycleCv_.wait_until(
+            lock, deadline, [this]() { return !running_.load(std::memory_order_acquire); });
     }
 
-    if (running_.load(std::memory_order_acquire)) {
+    if (!exited) {
         spdlog::warn("[IngestService] Stop timed out after {}ms waiting for channel poller to "
                      "exit",
-                     waited.count());
+                     kWaitBudget.count());
     } else {
         startGuard_.store(false, std::memory_order_release);
     }
@@ -180,11 +187,15 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     struct RunningGuard {
         std::atomic<bool>& running;
         std::atomic<bool>& startGuard;
+        IngestService* self;
         ~RunningGuard() {
             running.store(false, std::memory_order_release);
             startGuard.store(false, std::memory_order_release);
+            if (self) {
+                self->notifyLifecycle();
+            }
         }
-    } runningGuard{running_, startGuard_};
+    } runningGuard{running_, startGuard_, this};
 
     const std::size_t channelCapacity =
         static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());

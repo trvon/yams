@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <deque>
 #include <functional>
@@ -453,6 +454,13 @@ private:
     std::array<std::atomic<bool>, kStageCount> stageStarted_{};
     std::array<std::atomic<bool>, kStageCount> stagePaused_{};
     std::array<std::atomic<std::size_t>, kStageCount> stageInFlight_{};
+
+    mutable std::mutex lifecycleMutex_;
+    std::condition_variable lifecycleCv_;
+    void notifyLifecycle() {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        lifecycleCv_.notify_all();
+    }
 
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};

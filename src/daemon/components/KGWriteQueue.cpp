@@ -63,12 +63,15 @@ void KGWriteQueue::shutdown() {
     }
 
     spdlog::info("[KGWriteQueue] Shutting down...");
-    // Note: writerLoop will exit on next poll when it sees stop_ = true
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        drainCv_.notify_all();
+    }
 
-    // Wait for pending batches to drain (with timeout)
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-    while (queuedBatches() > 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    {
+        std::unique_lock<std::mutex> lock(queueMutex_);
+        drainCv_.wait_until(lock, deadline, [this]() { return pendingBatches_.empty(); });
     }
 
     if (queuedBatches() > 0) {
@@ -122,6 +125,9 @@ boost::asio::awaitable<void> KGWriteQueue::writerLoop() {
                 }
                 pendingBatches_.erase(pendingBatches_.begin(),
                                       pendingBatches_.begin() + static_cast<long>(count));
+                if (pendingBatches_.empty()) {
+                    drainCv_.notify_all();
+                }
             }
         }
 

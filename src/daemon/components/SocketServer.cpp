@@ -321,9 +321,11 @@ Result<void> SocketServer::stop() {
             spdlog::info("Closed {} active connections", closed);
 
             auto shutdownDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-            while (activeConnections_.load(std::memory_order_relaxed) > 0 &&
-                   std::chrono::steady_clock::now() < shutdownDeadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            {
+                std::unique_lock<std::mutex> lock(shutdownMutex_);
+                shutdownCv_.wait_until(lock, shutdownDeadline, [this]() {
+                    return activeConnections_.load(std::memory_order_relaxed) == 0;
+                });
             }
             const auto remaining = activeConnections_.load(std::memory_order_relaxed);
             if (remaining > 0) {
@@ -801,6 +803,10 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                 server->proxyActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
             } else {
                 server->mainActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
+            }
+            if (current == 0) {
+                std::lock_guard<std::mutex> lock(server->shutdownMutex_);
+                server->shutdownCv_.notify_all();
             }
             if (server->state_) {
                 server->state_->stats.activeConnections.store(current);

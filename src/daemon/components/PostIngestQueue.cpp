@@ -309,10 +309,9 @@ PostIngestQueue::~PostIngestQueue() {
     stop();
     // Wait for all in-flight operations to complete before destroying members.
     // This prevents data races where workers access members during destruction.
-    constexpr int maxWaitMs = 1000;
-    for (int i = 0; i < maxWaitMs && totalInFlight() > 0; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+    std::unique_lock<std::mutex> lock(lifecycleMutex_);
+    lifecycleCv_.wait_until(lock, deadline, [this]() { return totalInFlight() == 0; });
 }
 
 void PostIngestQueue::start() {
@@ -348,18 +347,18 @@ void PostIngestQueue::start() {
     spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
     boost::asio::co_spawn(coordinator_->getExecutor(), titlePoller(), boost::asio::detached);
 
-    constexpr int maxWaitMs = 100;
-    for (int i = 0; i < maxWaitMs; ++i) {
-        bool allStarted = true;
+    auto startupDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    auto allPollersStarted = [this]() {
         for (std::size_t s = 0; s < kStageCount; ++s) {
-            if (!stageStarted_[s].load()) {
-                allStarted = false;
-                break;
+            if (!stageStarted_[s].load(std::memory_order_acquire)) {
+                return false;
             }
         }
-        if (allStarted)
-            break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return true;
+    };
+    {
+        std::unique_lock<std::mutex> lock(lifecycleMutex_);
+        lifecycleCv_.wait_until(lock, startupDeadline, allPollersStarted);
     }
 
     spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, entity={}, "
@@ -370,6 +369,7 @@ void PostIngestQueue::start() {
 
 void PostIngestQueue::stop() {
     stop_.store(true);
+    notifyLifecycle();
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
@@ -388,12 +388,13 @@ void PostIngestQueue::stop() {
     };
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-    while (std::chrono::steady_clock::now() < deadline) {
+    {
+        std::unique_lock<std::mutex> lock(lifecycleMutex_);
+        lifecycleCv_.wait_until(lock, deadline,
+                                [&]() { return allPollersStopped() && totalInFlight() == 0; });
         if (allPollersStopped() && totalInFlight() == 0) {
             startGuard_.store(false, std::memory_order_release);
-            break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
 
@@ -728,6 +729,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     };
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::PostIngestTask& t) -> std::string { return t.hash; };
     cfg.batchMode = true;
@@ -1180,6 +1182,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     };
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::KgJob& j) -> std::string { return j.hash; };
 
@@ -1212,6 +1215,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     };
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::SymbolExtractionJob& j) -> std::string {
         return j.hash;
@@ -1417,6 +1421,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     };
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
     cfg.executor =
         entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::EntityExtractionJob& j) -> std::string {
@@ -1771,6 +1776,7 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     };
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::TitleExtractionJob& j) -> std::string {
         return j.hash;

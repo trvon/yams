@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -55,10 +57,16 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
     }
     daemon_->spawnShutdownThread([d = daemon_, graceful, inTestMode]() {
         std::atomic<bool> shutdownComplete{false};
+        std::mutex watchdogMutex;
+        std::condition_variable watchdogCv;
         std::thread watchdog;
         int timeoutMs = 15000;
         auto finalizeWatchdog = [&]() {
             shutdownComplete.store(true, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lock(watchdogMutex);
+                watchdogCv.notify_all();
+            }
             if (watchdog.joinable()) {
                 watchdog.join();
             }
@@ -80,25 +88,27 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
 
             if (!inTestMode) {
                 if (timeoutMs > 0) {
-                    watchdog = std::thread([timeoutMs, &shutdownComplete]() {
-                        auto deadline =
-                            std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-                        while (std::chrono::steady_clock::now() < deadline) {
+                    watchdog =
+                        std::thread([timeoutMs, &shutdownComplete, &watchdogMutex, &watchdogCv]() {
+                            auto deadline = std::chrono::steady_clock::now() +
+                                            std::chrono::milliseconds(timeoutMs);
+                            std::unique_lock<std::mutex> lock(watchdogMutex);
+                            watchdogCv.wait_until(lock, deadline, [&]() {
+                                return shutdownComplete.load(std::memory_order_acquire);
+                            });
                             if (shutdownComplete.load(std::memory_order_acquire)) {
                                 return;
                             }
-                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        }
-                        try {
-                            spdlog::error("Shutdown exceeded {}ms; forcing process exit",
-                                          timeoutMs);
-                        } catch (...) {
-                        }
+                            try {
+                                spdlog::error("Shutdown exceeded {}ms; forcing process exit",
+                                              timeoutMs);
+                            } catch (...) {
+                            }
 #if !defined(_WIN32)
-                        raise(SIGKILL);
+                            raise(SIGKILL);
 #endif
-                        std::_Exit(1);
-                    });
+                            std::_Exit(1);
+                        });
                 }
             }
 

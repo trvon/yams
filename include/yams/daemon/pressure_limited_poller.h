@@ -99,6 +99,9 @@ template <typename Task> struct PressureLimitedPollerConfig {
     std::function<bool(GradientLimiter*, const std::string&, const std::string&)> tryAcquireFn;
     std::function<void(const std::string&, bool)> completeJobFn;
     std::function<void()> checkDrainFn;
+    // Invoked on poller lifecycle transitions (start entry, stop exit, inflight decrement)
+    // so owners can wake condition variables observing these state changes.
+    std::function<void()> notifyLifecycleFn;
     boost::asio::any_io_executor executor;
 
     // Single-item processing
@@ -130,6 +133,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     cfg.startedFlag->store(true);
+    if (cfg.notifyLifecycleFn) {
+        cfg.notifyLifecycleFn();
+    }
     spdlog::info("[PostIngestQueue] {} poller started", cfg.stageName);
 
     constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);
@@ -262,6 +268,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                             cfg.completeJobFn(h, true);
                         }
                         cfg.inFlightCounter->fetch_sub(batchCount);
+                        if (cfg.notifyLifecycleFn) {
+                            cfg.notifyLifecycleFn();
+                        }
                         cfg.checkDrainFn();
                     });
                 } else if (batchLimiterAcquired) {
@@ -290,6 +299,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                         cfg.processFn(job);
                         cfg.completeJobFn(hash, true);
                         cfg.inFlightCounter->fetch_sub(1);
+                        if (cfg.notifyLifecycleFn) {
+                            cfg.notifyLifecycleFn();
+                        }
                         cfg.checkDrainFn();
                     });
                 }
@@ -320,6 +332,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
 
     if (cfg.startedFlag) {
         cfg.startedFlag->store(false, std::memory_order_release);
+    }
+    if (cfg.notifyLifecycleFn) {
+        cfg.notifyLifecycleFn();
     }
     spdlog::info("[PostIngestQueue] {} poller exited", cfg.stageName);
     co_return;

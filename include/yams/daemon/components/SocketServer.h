@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -151,6 +152,9 @@ private:
     std::atomic<uint64_t> totalConnections_{0};
     std::atomic<uint64_t> connectionToken_{0};
     std::atomic<uint64_t> forcedCloseCount_{0}; // Connections closed due to lifetime exceeded
+
+    mutable std::mutex shutdownMutex_;
+    std::condition_variable shutdownCv_;
 
     std::shared_ptr<std::atomic<std::size_t>> writerBudget_;
 

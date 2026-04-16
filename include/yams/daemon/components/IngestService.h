@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
@@ -20,6 +22,7 @@ public:
 
 private:
     boost::asio::awaitable<void> channelPoller();
+    void notifyLifecycle();
 
     ServiceManager* sm_;
     WorkCoordinator* coordinator_;
@@ -27,6 +30,8 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> startGuard_{false};
     std::atomic<bool> running_{false};
+    std::mutex lifecycleMutex_;
+    std::condition_variable lifecycleCv_;
 };
 
 } // namespace yams::daemon

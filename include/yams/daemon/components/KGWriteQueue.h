@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -173,6 +174,7 @@ private:
 
     // Thread-safe queue using a mutex-protected vector.
     mutable std::mutex queueMutex_;
+    mutable std::condition_variable drainCv_;
     std::vector<std::unique_ptr<DeferredKGBatch>> pendingBatches_;
 
     std::atomic<bool> stop_{false};
