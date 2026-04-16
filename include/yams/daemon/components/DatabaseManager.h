@@ -138,6 +138,18 @@ public:
     }
 
     /**
+     * @brief Adopt an already-open Database handle.
+     *
+     * ServiceManager currently opens the database directly (Phase 6a was
+     * partial). Publishing the handle here lets initializePools() satisfy
+     * its "database open" precondition so the MetadataRepository gets
+     * constructed.
+     */
+    void setDatabase(std::shared_ptr<metadata::Database> database) {
+        database_ = std::move(database);
+    }
+
+    /**
      * @brief Store the content store shared_ptr (atomic release).
      */
     void setContentStore(std::shared_ptr<api::IContentStore> store) {

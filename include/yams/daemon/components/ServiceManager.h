@@ -49,6 +49,7 @@
 #include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/daemon/components/EmbeddingLifecycleManager.h>
 #include <yams/daemon/components/IngestMetricsPublisher.h>
+#include <yams/daemon/components/AsyncInitOrchestrator.h>
 #include <yams/daemon/components/RepairServiceHost.h>
 #include <yams/daemon/components/RequestExecutor.h>
 #include <yams/daemon/components/SearchAdmissionController.h>
@@ -131,7 +132,7 @@ public:
 
     void prepareForRestart() {
         serviceFsm_.reset();
-        asyncInitStopSource_ = yams::compat::stop_source{};
+        asyncInit_.resetForRestart();
     }
 
     // Start background task coroutines (must be called after shared_ptr construction)
@@ -398,8 +399,7 @@ public:
     std::future<void> sessionWatcherFuture_;
 
     // Stop source for cancelling async initialization coroutine during shutdown
-    yams::compat::stop_source asyncInitStopSource_;
-    std::future<void> asyncInitFuture_;
+    AsyncInitOrchestrator asyncInit_;
 
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
     AbiPluginHost* getAbiPluginHost() const { return abiHost_.get(); }
@@ -588,7 +588,10 @@ public:
         }
     }
     Result<bool> __test_forceVectorDbInitOnce(const std::filesystem::path& dataDir) {
-        return initializeVectorDatabaseOnce(dataDir);
+        if (vectorSystemManager_) {
+            return vectorSystemManager_->initializeOnce(dataDir);
+        }
+        return Result<bool>(false);
     }
 
 private:
@@ -640,7 +643,6 @@ private:
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;
     std::unique_ptr<CheckpointManager> checkpointManager_;
     std::unique_ptr<class BackgroundTaskManager> backgroundTaskManager_;
-    std::atomic<bool> deferredMetadataWarmupStarted_{false};
 
     SearchAdmissionController searchAdmission_;
     IngestMetricsPublisher metricsPublisher_;
@@ -655,7 +657,6 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
-    std::atomic<bool> asyncInitStarted_{false};
     std::filesystem::path resolvedDataDir_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
@@ -666,10 +667,6 @@ private:
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     TuningConfig tuningConfig_{};
-
-    std::atomic<bool> vectorDbInitAttempted_{false};
-
-    Result<bool> initializeVectorDatabaseOnce(const std::filesystem::path& dataDir);
 
     std::atomic<bool> shutdownInvoked_{false};
 

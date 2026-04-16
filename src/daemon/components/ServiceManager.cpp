@@ -749,8 +749,7 @@ yams::Result<void> ServiceManager::initialize() {
 
 void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                                     std::atomic<bool>* barrierSet) {
-    bool expected = false;
-    if (!asyncInitStarted_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    if (!asyncInit_.tryStart()) {
         spdlog::warn("ServiceManager::startAsyncInit() called more than once, ignoring");
         return;
     }
@@ -787,7 +786,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
     boost::asio::post(workCoordinator_->getExecutor(), [self, barrierPromise]() {
         spdlog::debug("ServiceManager: Async init sync point reached, spawning coroutine");
 
-        self->asyncInitFuture_ = boost::asio::co_spawn(
+        self->asyncInit_.setFuture(boost::asio::co_spawn(
             self->workCoordinator_->getExecutor(),
             [self, barrierPromise]() -> boost::asio::awaitable<void> {
                 auto localSelf = self;
@@ -803,7 +802,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                     }
                 }
 
-                auto token = localSelf->asyncInitStopSource_.get_token();
+                auto token = localSelf->asyncInit_.getStopToken();
 
                 try {
                     auto result = co_await localSelf->initializeAsyncAwaitable(token);
@@ -825,7 +824,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                     }
                 }
             },
-            boost::asio::use_future);
+            boost::asio::use_future));
     });
 }
 
@@ -863,24 +862,10 @@ void ServiceManager::shutdown() {
     // Phase 0: Signal async init coroutine to stop and wait for it to complete
     // This prevents the coroutine from accessing resources we're about to tear down
     spdlog::info("[ServiceManager] Phase 0: Requesting async init stop");
-    if (asyncInitStopSource_.stop_possible()) {
-        asyncInitStopSource_.request_stop();
-    }
-    try {
-        if (asyncInitFuture_.valid()) {
-            auto status = asyncInitFuture_.wait_for(std::chrono::seconds(5));
-            if (status == std::future_status::timeout) {
-                spdlog::warn("[ServiceManager] Phase 0: Async init future timed out");
-            } else {
-                asyncInitFuture_.get();
-                spdlog::info("[ServiceManager] Phase 0: Async init completed");
-            }
-            asyncInitFuture_ = std::future<void>();
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] Phase 0: Async init wait failed: {}", e.what());
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 0: Async init wait failed");
+    if (asyncInit_.requestStopAndWait(std::chrono::seconds(5))) {
+        spdlog::info("[ServiceManager] Phase 0: Async init completed");
+    } else {
+        spdlog::warn("[ServiceManager] Phase 0: Async init future timed out");
     }
 
     // Phase 1: Stop background task consumers FIRST (before io_context stop)
@@ -1327,19 +1312,6 @@ void ServiceManager::shutdown() {
     setOnnxShutdownMarker(false);
 }
 
-// Single-attempt vector database initialization. Safe to call multiple times; only
-// the first invocation performs work. Subsequent calls are cheap no-ops.
-// NOTE: Implementation delegated to VectorSystemManager (PBI-088 decomposition)
-yams::Result<bool>
-ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDir) {
-    if (vectorSystemManager_) {
-        return vectorSystemManager_->initializeOnce(dataDir);
-    }
-    // Fallback if VectorSystemManager not available (shouldn't happen in normal flow)
-    spdlog::warn("[VectorInit] VectorSystemManager not initialized");
-    return Result<bool>(false);
-}
-
 // Best-effort: write bootstrap status JSON so CLI can show progress before IPC is ready
 static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                                      const yams::daemon::StateComponent& state) {
@@ -1691,6 +1663,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // Phase: Connection pool + repo (owned by DatabaseManager)
     if (db_ok && databaseManager_) {
+        databaseManager_->setDatabase(database_);
         bool poolsOk = databaseManager_->initializePools(dbPath);
         if (!poolsOk) {
             spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
@@ -2050,7 +2023,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     spdlog::info("[ServiceManager] Phase: Vector DB Init (post-plugins, sync).");
     {
-        auto vdbRes = initializeVectorDatabaseOnce(dataDir);
+        auto vdbRes = vectorSystemManager_ ? vectorSystemManager_->initializeOnce(dataDir)
+                                           : Result<bool>(false);
         if (!vdbRes) {
             spdlog::warn("[ServiceManager] Vector DB init failed: {}", vdbRes.error().message);
         } else if (vdbRes.value()) {
@@ -2219,6 +2193,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 spdlog::warn("[SearchBuild] Failed to get embedding generator: {}", e.what());
             }
         }
+        try {
+            serviceFsm_.dispatch(SearchEngineBuildStartedEvent{});
+        } catch (...) {
+        }
         auto buildResult = co_await searchEngineManager_.buildEngine(
             getMetadataRepo(), getKgStore(), getVectorDatabase(), embGen, "initial", build_timeout,
             getWorkerExecutor());
@@ -2265,6 +2243,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
             writeBootstrapStatusFile(config_, state_);
             spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded");
+            try {
+                serviceFsm_.dispatch(
+                    InitializationFailedEvent{"initial search engine build not ready"});
+            } catch (...) {
+            }
         }
     } catch (const std::exception& e) {
         spdlog::warn("Exception wiring SearchEngine: {}", e.what());
@@ -2279,7 +2262,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 }
 
 void ServiceManager::startDeferredMetadataWarmup() {
-    if (deferredMetadataWarmupStarted_.exchange(true, std::memory_order_acq_rel)) {
+    if (!asyncInit_.tryBeginMetadataWarmup()) {
         return;
     }
 
