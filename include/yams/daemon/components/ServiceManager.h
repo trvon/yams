@@ -138,7 +138,12 @@ public:
     void startDeferredMetadataWarmup();
 
     std::shared_ptr<api::IContentStore> getContentStore() const {
-        return std::atomic_load_explicit(&contentStore_, std::memory_order_acquire);
+        if (databaseManager_) {
+            auto store = databaseManager_->getContentStore();
+            if (store)
+                return store;
+        }
+        return nullptr;
     }
     std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const {
         // PBI-088: Delegate to DatabaseManager if available
@@ -193,12 +198,16 @@ public:
     };
     SearchLoadMetrics getSearchLoadMetrics() const;
     std::shared_ptr<metadata::ConnectionPool> getWriteConnectionPool() const {
-        std::lock_guard<std::mutex> lk(poolMutex_);
-        return connectionPool_;
+        if (databaseManager_) {
+            return databaseManager_->getConnectionPool();
+        }
+        return nullptr;
     }
     std::shared_ptr<metadata::ConnectionPool> getReadConnectionPool() const {
-        std::lock_guard<std::mutex> lk(poolMutex_);
-        return readConnectionPool_;
+        if (databaseManager_) {
+            return databaseManager_->getReadConnectionPool();
+        }
+        return nullptr;
     }
     void onSearchRequestQueued() { searchAdmission_.onQueued(); }
     bool tryStartSearchRequest(std::uint32_t concurrencyCap) {
@@ -295,9 +304,6 @@ public:
     }
 
     PluginStatusSnapshot getPluginStatusSnapshot() const;
-    void setCachedModelProviderModelCount(std::uint32_t count) {
-        cachedModelProviderModelCount_.store(count, std::memory_order_relaxed);
-    }
     void refreshPluginStatusSnapshot();
     boost::asio::any_io_executor getWorkerExecutor() const;
     std::function<void(bool)> getWorkerJobSignal();
@@ -352,11 +358,17 @@ public:
     std::shared_ptr<GraphComponent> getGraphComponent() const { return graphComponent_; }
 
     // ContentStore diagnostics
-    const std::string& getContentStoreError() const { return contentStoreError_; }
+    std::string getContentStoreError() const {
+        if (databaseManager_) {
+            return databaseManager_->getContentStoreError();
+        }
+        return std::string{};
+    }
 
     // WAL metrics provider (may return zeros until a WALManager is attached)
     std::shared_ptr<WalMetricsProvider> getWalMetricsProvider() const {
-        return walMetricsProvider_;
+        return databaseManager_ ? databaseManager_->getWalMetricsProvider()
+                                : std::shared_ptr<WalMetricsProvider>{};
     }
     std::shared_ptr<yams::integrity::RepairManager> getRepairManager() const {
         return repairManager_;
@@ -383,9 +395,9 @@ public:
     TopologyManager& getTopologyManager() { return topologyManager_; }
 
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
-        if (!walMetricsProvider_)
-            walMetricsProvider_ = std::make_shared<WalMetricsProvider>();
-        walMetricsProvider_->setManager(std::move(wal));
+        if (databaseManager_) {
+            databaseManager_->attachWalManager(std::move(wal));
+        }
     }
 
     // Session watchers: polling mtime/size for pinned directories
@@ -489,8 +501,6 @@ public:
         auto vectorDb = loadVectorDatabase();
         return vectorDb ? vectorDb->getConfig().database_path : std::string{};
     }
-    void persistTrustedPluginPath(const std::filesystem::path& path, bool remove) const;
-
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");
     Result<size_t> adoptContentExtractorsFromHosts();
     Result<size_t> adoptSymbolExtractorsFromHosts();
@@ -535,7 +545,9 @@ public:
         storeMetadataRepo(std::move(repo));
     }
     void __test_setContentStore(std::shared_ptr<api::IContentStore> store) {
-        std::atomic_store_explicit(&contentStore_, std::move(store), std::memory_order_release);
+        if (databaseManager_) {
+            databaseManager_->setContentStore(std::move(store));
+        }
     }
     void __test_setRetrievalSessionManager(std::unique_ptr<RetrievalSessionManager> sessions) {
         retrievalSessions_ = std::move(sessions);
@@ -650,14 +662,9 @@ private:
 
     const DaemonConfig& config_;
     StateComponent& state_;
-    mutable std::mutex configPersistMutex_{};
-    mutable std::mutex poolMutex_{}; // Guards connectionPool_ / readConnectionPool_
 
     // All the services managed by this component
-    std::shared_ptr<api::IContentStore> contentStore_;
     std::shared_ptr<metadata::Database> database_;
-    std::shared_ptr<metadata::ConnectionPool> connectionPool_;     // GUARDED_BY(poolMutex_)
-    std::shared_ptr<metadata::ConnectionPool> readConnectionPool_; // GUARDED_BY(poolMutex_)
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<GraphComponent> graphComponent_;
@@ -686,7 +693,6 @@ private:
     boost::asio::cancellation_signal shutdownSignal_;
 
     std::unique_ptr<WorkCoordinator> workCoordinator_;
-    std::unique_ptr<WorkCoordinator> entityWorkCoordinator_;
     std::unique_ptr<RequestExecutor> requestExecutor_;
     std::unique_ptr<boost::asio::thread_pool> cliRequestPool_;
 
@@ -695,8 +701,6 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
     std::atomic<bool> asyncInitStarted_{false};
     std::filesystem::path resolvedDataDir_;
-    std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
-    std::shared_ptr<yams::wal::WALManager> walManager_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
@@ -711,8 +715,6 @@ private:
     std::atomic<bool> vectorDbInitAttempted_{false};
 
     Result<bool> initializeVectorDatabaseOnce(const std::filesystem::path& dataDir);
-
-    std::string contentStoreError_;
 
     std::atomic<bool> shutdownInvoked_{false};
 
@@ -732,7 +734,6 @@ private:
 
     mutable std::shared_mutex pluginStatusMutex_;
     PluginStatusSnapshot pluginStatusSnapshot_{};
-    std::atomic<std::uint32_t> cachedModelProviderModelCount_{0};
 };
 
 } // namespace yams::daemon

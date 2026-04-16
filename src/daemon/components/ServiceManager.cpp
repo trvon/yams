@@ -132,58 +132,8 @@ inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
 }
 
-size_t readPoolPrewarmTarget(size_t defaultTarget) {
-    if (const char* env = std::getenv("YAMS_DB_READ_POOL_PREWARM"); env && *env) {
-        try {
-            return static_cast<size_t>(std::stoul(env));
-        } catch (...) {
-        }
-    }
-    return defaultTarget;
-}
-
 size_t readCliRequestPoolThreads() {
     return static_cast<size_t>(yams::daemon::TuneAdvisor::cliRequestPoolThreads());
-}
-
-void prewarmReadPool(const std::shared_ptr<yams::metadata::ConnectionPool>& readPool,
-                     size_t targetConnections) {
-    if (!readPool || targetConnections == 0) {
-        return;
-    }
-
-    std::vector<std::unique_ptr<yams::metadata::PooledConnection>> held;
-    held.reserve(targetConnections);
-
-    for (size_t i = 0; i < targetConnections; ++i) {
-        auto connResult = readPool->acquire(std::chrono::milliseconds(150),
-                                            yams::metadata::ConnectionPriority::High);
-        if (!connResult) {
-            break;
-        }
-        held.push_back(std::move(connResult).value());
-    }
-
-    size_t warmed = 0;
-    for (auto& conn : held) {
-        try {
-            auto& db = **conn;
-            for (const char* sql :
-                 {"SELECT 1 FROM documents LIMIT 1", "SELECT rowid FROM documents_fts LIMIT 1",
-                  "SELECT 1 FROM metadata LIMIT 1"}) {
-                auto stmtResult = db.prepareCached(sql);
-                if (!stmtResult) {
-                    continue;
-                }
-                auto stmt = std::move(stmtResult).value();
-                (void)stmt->step();
-            }
-            ++warmed;
-        } catch (...) {
-        }
-    }
-
-    spdlog::info("Read pool lightweight prewarm complete: warmed {} connection(s)", warmed);
 }
 
 inline void setOnnxShutdownMarker(bool enabled) {
@@ -315,7 +265,7 @@ void ServiceManager::refreshPluginStatusSnapshot() {
         const bool providerReady = state_.readiness.modelProviderReady.load();
         const auto providerError =
             lifecycleFsm_.degradationReason("embeddings"); // Use lifecycleFsm instead
-        const auto modelsLoaded = cachedModelProviderModelCount_.load(std::memory_order_relaxed);
+        const std::uint32_t modelsLoaded = 0;
         // Helper lambda to add plugin records
         auto addPluginRecords = [&](const std::vector<PluginDescriptor>& loaded,
                                     [[maybe_unused]] const std::string& pluginType) {
@@ -627,15 +577,6 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             databaseManager_ = std::make_unique<DatabaseManager>(dbDeps);
             spdlog::debug("[ServiceManager] DatabaseManager created");
 
-            // Create WALManager (will be initialized later with resolved dataDir)
-            try {
-                walManager_ = std::make_shared<yams::wal::WALManager>();
-                spdlog::debug("[ServiceManager] WALManager created");
-            } catch (const std::exception& e) {
-                spdlog::warn("[ServiceManager] Failed to create WALManager: {}", e.what());
-                // Continue without WAL - metrics will return zeros
-            }
-
             // Create CheckpointManager
             CheckpointManager::Config checkpointConfig;
             checkpointConfig.checkpoint_interval =
@@ -718,26 +659,9 @@ yams::Result<void> ServiceManager::initialize() {
     // Wire the adaptive SearchTuner's state file so EWMA counters survive daemon restarts.
     searchEngineManager_.setTunerStatePath(resolvedDataDir_ / "tuner_state.json");
 
-    // Initialize WALManager (after dataDir is resolved)
-    if (walManager_) {
-        yams::wal::WALManager::Config walConfig;
-        walConfig.walDirectory = resolvedDataDir_ / "wal";
-        try {
-            walManager_ = std::make_shared<yams::wal::WALManager>(walConfig);
-            if (auto result = walManager_->initialize(); !result) {
-                spdlog::warn("[ServiceManager] WALManager initialization failed: {}",
-                             result.error().message);
-                walManager_.reset();
-            } else {
-                spdlog::info("[ServiceManager] WALManager initialized");
-                // Attach to WalMetricsProvider for metrics collection
-                attachWalManager(walManager_);
-                spdlog::debug("[ServiceManager] WALManager attached to metrics provider");
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] WALManager initialization threw: {}", e.what());
-            walManager_.reset();
-        }
+    // Initialize WALManager via DatabaseManager (owns lifecycle + metrics provider)
+    if (databaseManager_) {
+        databaseManager_->initializeWal(resolvedDataDir_);
     }
 
     // Log plugin scan directories for troubleshooting
@@ -1334,8 +1258,9 @@ void ServiceManager::shutdown() {
     searchEngineManager_.clearEngine();
     std::atomic_store_explicit(&vectorDatabase_, std::shared_ptr<vector::VectorDatabase>{},
                                std::memory_order_release);
-    std::atomic_store_explicit(&contentStore_, std::shared_ptr<api::IContentStore>{},
-                               std::memory_order_release);
+    if (databaseManager_) {
+        databaseManager_->setContentStore(nullptr);
+    }
     searchComponent_.reset();
     try {
         if (databaseManager_) {
@@ -1347,30 +1272,14 @@ void ServiceManager::shutdown() {
         spdlog::warn("[ServiceManager] Phase 6.9.5: Exception resetting DatabaseManager");
     }
 
-    spdlog::info("[ServiceManager] Phase 7: Shutting down database");
+    spdlog::info("[ServiceManager] Phase 7: Database shutdown delegated to DatabaseManager");
     try {
-        std::shared_ptr<metadata::ConnectionPool> readPool;
-        std::shared_ptr<metadata::ConnectionPool> writePool;
-        {
-            std::lock_guard<std::mutex> lk(poolMutex_);
-            readPool = std::move(readConnectionPool_);
-            writePool = std::move(connectionPool_);
-        }
-        if (readPool) {
-            readPool->shutdown();
-        }
-        if (writePool) {
-            writePool->shutdown();
-        }
         if (database_) {
             database_->close();
             database_.reset();
-        } else {
-            spdlog::info("[ServiceManager] Phase 7.2: No database to close");
         }
-        spdlog::info("[ServiceManager] Phase 7: Database shutdown complete");
     } catch (const std::exception& e) {
-        spdlog::error("[ServiceManager] Phase 7: Database shutdown failed: {}", e.what());
+        spdlog::error("[ServiceManager] Phase 7: Legacy database close failed: {}", e.what());
     }
 
     // Release all remaining resources
@@ -1378,9 +1287,7 @@ void ServiceManager::shutdown() {
     storeMetadataRepo(std::shared_ptr<metadata::MetadataRepository>{});
     spdlog::info("[ServiceManager] Phase 9.2: Metadata repository reset");
     spdlog::info("[ServiceManager] Phase 8.3: Vector search uses VectorDatabase directly");
-    std::atomic_store_explicit(&contentStore_, std::shared_ptr<api::IContentStore>{},
-                               std::memory_order_release);
-    spdlog::info("[ServiceManager] Phase 8.4: Content store reset");
+    spdlog::info("[ServiceManager] Phase 8.4: Content store owned by DatabaseManager");
     searchComponent_.reset();
     spdlog::info("[ServiceManager] Phase 8.4.1: Search component reset");
     graphQueryServiceOverride_.reset();
@@ -1431,20 +1338,8 @@ void ServiceManager::shutdown() {
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 9.3: Exception resetting DatabaseManager");
     }
-    try {
-        if (walManager_) {
-            auto result = walManager_->shutdown();
-            if (!result) {
-                spdlog::warn("[ServiceManager] Phase 9.4: WALManager shutdown failed: {}",
-                             result.error().message);
-            } else {
-                spdlog::info("[ServiceManager] Phase 9.4: WALManager shutdown complete");
-            }
-            walManager_.reset();
-        }
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 9.4: Exception resetting WALManager");
-    }
+    // Phase 9.4: WALManager shutdown is now handled by DatabaseManager::shutdown()
+    // (invoked in Phase 9.3 above).
 
     spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
     try {
@@ -1763,17 +1658,18 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             state_.initDurationsMs);
         if (storeRes) {
             auto& uniqueStore = const_cast<T&>(storeRes.value());
-            // Use atomic_store for thread-safe write (read by main thread via getContentStore())
-            std::atomic_store_explicit(
-                &contentStore_, std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()),
-                std::memory_order_release);
+            if (databaseManager_) {
+                databaseManager_->setContentStore(
+                    std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()));
+            }
             state_.readiness.contentStoreReady = true;
             writeBootstrapStatusFile(config_, state_);
         } else {
             spdlog::warn("ContentStore initialization failed: {}", storeRes.error().message);
-            // Record error and fail initialization so lifecycle reflects the failure
             try {
-                contentStoreError_ = storeRes.error().message;
+                if (databaseManager_) {
+                    databaseManager_->setContentStoreError(storeRes.error().message);
+                }
             } catch (...) {
             }
             co_return Error{ErrorCode::IOError,
@@ -1842,160 +1738,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Database Migrated.");
 
-    // Phase: Connection pool + repo
-    if (db_ok) {
-        metadata::ConnectionPoolConfig dbPoolCfg;
-        // Size DB pool based on centralized tuning (avoid large bursts at startup)
-        size_t rec = [&]() {
-            try {
-                return std::max<size_t>(1, yams::daemon::TuneAdvisor::recommendedThreads(0.25));
-            } catch (...) {
-                size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-                return std::max<size_t>(1, hw / 2);
-            }
-        }();
-        dbPoolCfg.minConnections = std::min<size_t>(std::max<size_t>(2, rec), 8);
-        dbPoolCfg.maxConnections = 64; // Increased from 32 to handle heavy concurrent indexing
-        if (const char* envMax = std::getenv("YAMS_DB_POOL_MAX"); envMax && *envMax) {
-            try {
-                auto v = static_cast<size_t>(std::stoul(envMax));
-                if (v >= dbPoolCfg.minConnections)
-                    dbPoolCfg.maxConnections = v;
-            } catch (...) {
-            }
-        }
-        if (const char* envMin = std::getenv("YAMS_DB_POOL_MIN"); envMin && *envMin) {
-            try {
-                auto v = static_cast<size_t>(std::stoul(envMin));
-                if (v > 0)
-                    dbPoolCfg.minConnections = v;
-            } catch (...) {
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lk(poolMutex_);
-            connectionPool_ =
-                std::make_shared<metadata::ConnectionPool>(dbPath.string(), dbPoolCfg);
-        }
-        TuneAdvisor::setStoragePoolSize(static_cast<uint32_t>(dbPoolCfg.maxConnections));
-        TuneAdvisor::setEnableParallelIngest(true);
-        auto poolInit = init::record_duration(
-            "db_pool", [&]() { return connectionPool_->initialize(); }, state_.initDurationsMs);
-        if (!poolInit) {
-            spdlog::warn("Connection pool init failed: {} — continuing degraded",
-                         poolInit.error().message);
+    // Phase: Connection pool + repo (owned by DatabaseManager)
+    if (db_ok && databaseManager_) {
+        bool poolsOk = databaseManager_->initializePools(dbPath);
+        if (poolsOk) {
+            // Mirror metadataRepo_ for any legacy loadMetadataRepo() fallbacks
+            storeMetadataRepo(databaseManager_->getMetadataRepo());
         } else {
-            // Dual pool is enabled by default for better read/write separation.
-            // Set YAMS_DB_DUAL_POOL=0 to disable.
-            bool dualPoolEnabled = true;
-            if (const char* envDual = std::getenv("YAMS_DB_DUAL_POOL"); envDual && *envDual) {
-                std::string value(envDual);
-                std::transform(value.begin(), value.end(), value.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                dualPoolEnabled =
-                    (value != "0" && value != "false" && value != "off" && value != "no");
-            }
-
-            if (dualPoolEnabled) {
-                auto readCfg = dbPoolCfg;
-                readCfg.readOnly = true;
-                {
-                    const size_t kMaxReadConnections =
-                        yams::daemon::TuneAdvisor::readPoolMaxConnections(readCfg.maxConnections);
-                    if (readCfg.maxConnections > kMaxReadConnections) {
-                        readCfg.maxConnections = kMaxReadConnections;
-                        spdlog::info("Read pool max capped to {} (I/O concurrency limit)",
-                                     kMaxReadConnections);
-                    }
-                }
-                if (const char* envReadMax = std::getenv("YAMS_DB_READ_POOL_MAX");
-                    envReadMax && *envReadMax) {
-                    try {
-                        auto v = static_cast<size_t>(std::stoul(envReadMax));
-                        if (v >= readCfg.minConnections)
-                            readCfg.maxConnections = v;
-                    } catch (...) {
-                    }
-                }
-
-                if (const char* envReadMin = std::getenv("YAMS_DB_READ_POOL_MIN");
-                    envReadMin && *envReadMin) {
-                    try {
-                        auto v = static_cast<size_t>(std::stoul(envReadMin));
-                        if (v > 0)
-                            readCfg.minConnections = v;
-                    } catch (...) {
-                    }
-                }
-
-                {
-                    std::lock_guard<std::mutex> lk(poolMutex_);
-                    readConnectionPool_ =
-                        std::make_shared<metadata::ConnectionPool>(dbPath.string(), readCfg);
-                }
-                auto readPoolInit = init::record_duration(
-                    "db_read_pool", [&]() { return readConnectionPool_->initialize(); },
-                    state_.initDurationsMs);
-                if (!readPoolInit) {
-                    spdlog::warn(
-                        "Read connection pool init failed (falling back to single pool): {}",
-                        readPoolInit.error().message);
-                    {
-                        std::lock_guard<std::mutex> lk(poolMutex_);
-                        readConnectionPool_.reset();
-                    }
-                } else {
-                    const size_t defaultPrewarm = std::min<size_t>(readCfg.maxConnections, 8);
-                    prewarmReadPool(readConnectionPool_, readPoolPrewarmTarget(defaultPrewarm));
-                    spdlog::info("Dual DB pool mode enabled (write/work + read-only)");
-                }
-            }
-
-            auto repoRes = init::record_duration(
-                std::string(readiness::kMetadataRepo),
-                [&]() -> yams::Result<void> {
-                    auto metadataRepo = std::make_shared<metadata::MetadataRepository>(
-                        *connectionPool_, readConnectionPool_.get());
-                    state_.readiness.metadataRepoReady = true;
-                    // Initialize component-owned metrics (sync with DB once at startup)
-                    metadataRepo->initializeCounters();
-                    storeMetadataRepo(std::move(metadataRepo));
-                    spdlog::info("Metadata repository initialized successfully");
-
-                    // Note: RepairManager initialization remains deferred
-                    // since it needs access to storage engine which is not directly
-                    // exposed by IContentStore interface
-
-                    return yams::Result<void>();
-                },
-                state_.initDurationsMs);
-            if (!repoRes) {
-                spdlog::warn("Metadata repository init failed: {}", repoRes.error().message);
-            } else {
-                auto journalRes = connectionPool_->withConnection(
-                    [](metadata::Database& db) -> Result<std::string> {
-                        auto stmtRes = db.prepare("PRAGMA journal_mode");
-                        if (!stmtRes) {
-                            return stmtRes.error();
-                        }
-                        auto stmt = std::move(stmtRes).value();
-                        auto stepRes = stmt.step();
-                        if (!stepRes) {
-                            return stepRes.error();
-                        }
-                        if (!stepRes.value()) {
-                            return Error{ErrorCode::NotFound,
-                                         "PRAGMA journal_mode returned no rows"};
-                        }
-                        return stmt.getString(0);
-                    });
-                if (journalRes) {
-                    spdlog::info("Metadata DB journal_mode={}", journalRes.value());
-                } else {
-                    spdlog::warn("Failed to read Metadata DB journal_mode: {}",
-                                 journalRes.error().message);
-                }
-            }
+            spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
         }
         writeBootstrapStatusFile(config_, state_);
     }
@@ -2052,11 +1802,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         (void)taThreads; // Retrieved for future use in post-ingest configuration
         // Initialize KG store on daemon side using connection pool if available
         try {
-            if (connectionPool_) {
+            auto writePool = getWriteConnectionPool();
+            if (writePool) {
                 metadata::KnowledgeGraphStoreConfig kgCfg;
                 kgCfg.enable_alias_fts = true;
                 kgCfg.enable_wal = true;
-                auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*connectionPool_, kgCfg);
+                auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*writePool, kgCfg);
                 if (kgRes) {
                     auto uniqueKg = std::move(kgRes).value();
                     // Promote to shared_ptr for broader use and store as member
