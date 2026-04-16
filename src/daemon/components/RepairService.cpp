@@ -260,9 +260,43 @@ queueWithBackoff(std::shared_ptr<SpscQueue<JobT>> queue, JobT&& job,
 // Construction / Destruction / Lifecycle
 // ============================================================================
 
+RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
+    RepairServiceContext ctx;
+    if (!services)
+        return ctx;
+    ctx.getMetadataRepo = [services] { return services->getMetadataRepo(); };
+    ctx.getContentStore = [services] { return services->getContentStore(); };
+    ctx.getVectorDatabase = [services] { return services->getVectorDatabase(); };
+    ctx.getKgStore = [services] { return services->getKgStore(); };
+    ctx.getGraphComponent = [services] { return services->getGraphComponent(); };
+    ctx.getPostIngestQueue = [services] { return services->getPostIngestQueue(); };
+    ctx.getRepairManager = [services] { return services->getRepairManager(); };
+    ctx.getModelProvider = [services] { return services->getModelProvider(); };
+    ctx.getContentExtractors =
+        [services]() -> const std::vector<std::shared_ptr<extraction::IContentExtractor>>& {
+        return services->getContentExtractors();
+    };
+    ctx.getSymbolExtractors =
+        [services]() -> const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& {
+        return services->getSymbolExtractors();
+    };
+    ctx.resolvePreferredModel = [services] { return services->resolvePreferredModel(); };
+    ctx.getEmbeddingModelName = [services] { return services->getEmbeddingModelName(); };
+    ctx.rebuildTopologyArtifacts = [services](const std::string& reason, bool dryRun,
+                                              const std::vector<std::string>& hashes) {
+        return services->rebuildTopologyArtifacts(reason, dryRun, hashes);
+    };
+    return ctx;
+}
+
 RepairService::RepairService(ServiceManager* services, StateComponent* state,
                              std::function<size_t()> activeConnFn, Config cfg)
-    : services_(services), state_(state), activeConnFn_(std::move(activeConnFn)),
+    : RepairService(makeRepairServiceContext(services), state, std::move(activeConnFn),
+                    std::move(cfg)) {}
+
+RepairService::RepairService(RepairServiceContext ctx, StateComponent* state,
+                             std::function<size_t()> activeConnFn, Config cfg)
+    : ctx_(std::move(ctx)), state_(state), activeConnFn_(std::move(activeConnFn)),
       cfg_(std::move(cfg)), shutdownState_(std::make_shared<ShutdownState>()) {}
 
 RepairService::~RepairService() {
@@ -270,23 +304,23 @@ RepairService::~RepairService() {
 }
 
 std::shared_ptr<metadata::IMetadataRepository> RepairService::getMetadataRepoForRepair() const {
-    if (!services_)
+    if (!ctx_.getMetadataRepo)
         return nullptr;
-    return std::static_pointer_cast<metadata::IMetadataRepository>(services_->getMetadataRepo());
+    return std::static_pointer_cast<metadata::IMetadataRepository>(ctx_.getMetadataRepo());
 }
 
 std::shared_ptr<GraphComponent> RepairService::getGraphComponentForScheduling() const {
-    return services_ ? services_->getGraphComponent() : nullptr;
+    return ctx_.getGraphComponent ? ctx_.getGraphComponent() : nullptr;
 }
 
 std::shared_ptr<metadata::KnowledgeGraphStore> RepairService::getKgStoreForScheduling() const {
-    return services_ ? services_->getKgStore() : nullptr;
+    return ctx_.getKgStore ? ctx_.getKgStore() : nullptr;
 }
 
 const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&
 RepairService::getSymbolExtractorsForScheduling() const {
     static const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> kEmpty;
-    return services_ ? services_->getSymbolExtractors() : kEmpty;
+    return ctx_.getSymbolExtractors ? ctx_.getSymbolExtractors() : kEmpty;
 }
 
 void RepairService::start() {
@@ -374,8 +408,8 @@ void RepairService::onDocumentAdded(const DocumentAddedEvent& event) {
         return;
 
     // If PostIngestQueue is handling this document, skip
-    if (services_) {
-        auto piq = services_->getPostIngestQueue();
+    if (ctx_.getPostIngestQueue) {
+        auto piq = ctx_.getPostIngestQueue();
         if (piq && piq->started()) {
             spdlog::debug("RepairService: skipping DocumentAdded {} -- handled by PostIngestQueue",
                           event.hash);
@@ -396,7 +430,7 @@ void RepairService::onDocumentAdded(const DocumentAddedEvent& event) {
 
     // Opportunistically schedule symbol/entity extraction
     try {
-        if (services_) {
+        {
             auto gc = getGraphComponentForScheduling();
             const auto& symbolExtractors = getSymbolExtractorsForScheduling();
             if (gc && !symbolExtractors.empty()) {
@@ -600,7 +634,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             state_->stats.repairIdleTicks++;
 
         auto [missingEmbeddings, missingFts5] = detectMissingWork(batch);
-        auto meta_repo = services_ ? services_->getMetadataRepo() : nullptr;
+        auto meta_repo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
 
         // Check ResourceGovernor before queuing repair work.
         // Under elevated pressure the ingestion pipeline is already competing for
@@ -716,7 +750,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
 boost::asio::awaitable<void> RepairService::spawnInitialScan() {
     try {
-        auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+        auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
         if (!meta)
             co_return;
 
@@ -806,8 +840,8 @@ boost::asio::awaitable<void> RepairService::processPathTreeRepair() {
     using namespace std::chrono_literals;
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
-    auto repairMgr = services_ ? services_->getRepairManager() : nullptr;
-    auto metaRepo = services_ ? services_->getMetadataRepo() : nullptr;
+    auto repairMgr = ctx_.getRepairManager ? ctx_.getRepairManager() : nullptr;
+    auto metaRepo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!repairMgr || !metaRepo)
         co_return;
 
@@ -856,7 +890,7 @@ void RepairService::performVectorCleanup() {
     if (vectorsDisabledByEnv())
         return;
     try {
-        auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+        auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
         if (vectorDb) {
             auto cleanup = vectorDb->cleanupOrphanRows();
             if (cleanup)
@@ -909,14 +943,15 @@ RepairService::MissingWorkFlags RepairService::analyzeMissingWorkForHash(
 RepairService::MissingWorkResult
 RepairService::detectMissingWork(const std::vector<std::string>& batch) {
     MissingWorkResult result;
-    auto content = services_ ? services_->getContentStore() : nullptr;
-    auto meta_repo = services_ ? services_->getMetadataRepo() : nullptr;
+    auto content = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
+    auto meta_repo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!(content && meta_repo))
         return result;
 
     const bool checkEmbeddings = !vectorsDisabledByEnv();
     static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
-    const auto& customExtractors = services_ ? services_->getContentExtractors() : kEmptyExtractors;
+    const auto& customExtractors =
+        ctx_.getContentExtractors ? ctx_.getContentExtractors() : kEmptyExtractors;
 
     std::vector<MissingWorkFlags> flags(batch.size());
     std::vector<std::exception_ptr> errors(batch.size());
@@ -951,12 +986,12 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
     }
 
     if (!result.missingEmbeddings.empty()) {
-        auto provider = services_ ? services_->getModelProvider() : nullptr;
-        auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+        auto provider = ctx_.getModelProvider ? ctx_.getModelProvider() : nullptr;
+        auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
         if (provider && provider->isAvailable()) {
             size_t modelDim = 0;
-            if (services_) {
-                const auto preferredModel = services_->resolvePreferredModel();
+            if (ctx_.resolvePreferredModel) {
+                const auto preferredModel = ctx_.resolvePreferredModel();
                 if (!preferredModel.empty())
                     modelDim = provider->getEmbeddingDim(preferredModel);
             }
@@ -1433,7 +1468,7 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
 std::vector<RepairService::StuckDocumentInfo>
 RepairService::detectStuckDocuments(int32_t maxRetries) {
     std::vector<StuckDocumentInfo> stuck;
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta)
         return stuck;
 
@@ -1521,7 +1556,7 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
         return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
     };
 
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
         result.message = "Metadata repository not available";
         co_return result;
@@ -1617,7 +1652,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
     RepairOperationResult result;
     result.operation = "stuck_docs";
 
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
         result.message = "Metadata repository not available";
         return result;
@@ -1727,8 +1762,8 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
     RepairOperationResult result;
     result.operation = "orphans";
 
-    auto store = services_ ? services_->getContentStore() : nullptr;
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto store = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!store || !meta) {
         result.message = "Store or metadata not available";
         return result;
@@ -1783,7 +1818,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
     RepairOperationResult result;
     result.operation = "mime";
 
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
         result.message = "Metadata not available";
         return result;
@@ -1795,7 +1830,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         return result;
     }
 
-    auto store = services_ ? services_->getContentStore() : nullptr;
+    auto store = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
     (void)detection::FileTypeDetector::initializeWithMagicNumbers();
     auto& detector = detection::FileTypeDetector::instance();
 
@@ -1856,7 +1891,7 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
     RepairOperationResult result;
     result.operation = "downloads";
 
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
         result.message = "Metadata not available";
         return result;
@@ -1943,7 +1978,7 @@ RepairOperationResult RepairService::applySemanticDedupe(const RepairRequest& re
     RepairOperationResult result;
     result.operation = "dedupe";
 
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
         result.message = "Metadata not available";
         return result;
@@ -2062,7 +2097,7 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
     RepairOperationResult result;
     result.operation = "path_tree";
 
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
         result.message = "Metadata not available";
         return result;
@@ -2109,9 +2144,9 @@ RepairOperationResult RepairService::repairKnowledgeGraph(const RepairRequest& r
     RepairOperationResult result;
     result.operation = "graph";
 
-    auto graphComponent = services_ ? services_->getGraphComponent() : nullptr;
-    auto kgStore = services_ ? services_->getKgStore() : nullptr;
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto graphComponent = ctx_.getGraphComponent ? ctx_.getGraphComponent() : nullptr;
+    auto kgStore = ctx_.getKgStore ? ctx_.getKgStore() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!graphComponent || !kgStore || !meta) {
         result.message = "Knowledge graph components not available";
         return result;
@@ -2176,15 +2211,15 @@ RepairOperationResult RepairService::rebuildTopologyArtifacts(const RepairReques
     RepairOperationResult result;
     result.operation = "topology";
 
-    if (!services_) {
+    if (!ctx_.rebuildTopologyArtifacts) {
         result.failed = 1;
-        result.message = "ServiceManager unavailable";
+        result.message = "Topology rebuild callback unavailable";
         return result;
     }
 
-    auto rebuildResult = services_->rebuildTopologyArtifacts(
+    auto rebuildResult = ctx_.rebuildTopologyArtifacts(
         req.dryRun ? std::string{"repair.topology.dry_run"} : std::string{"repair.topology"},
-        req.dryRun);
+        req.dryRun, {});
     if (!rebuildResult) {
         result.failed = 1;
         result.message = "Topology rebuild failed: " + rebuildResult.error().message;
@@ -2224,7 +2259,7 @@ RepairService::repairLegacyPathNodesInPlace(bool dryRun, bool verbose, ProgressF
     (void)verbose;
 
     PathNodeMigrationStats stats;
-    auto kgStore = services_ ? services_->getKgStore() : nullptr;
+    auto kgStore = ctx_.getKgStore ? ctx_.getKgStore() : nullptr;
     if (!kgStore) {
         stats.errors = 1;
         stats.issues.push_back("Knowledge graph store unavailable");
@@ -2449,8 +2484,8 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
                                                                     const ProgressFn& progress) {
     (void)verbose;
     KgCleanupStats stats;
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
-    auto kgStore = services_ ? services_->getKgStore() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
+    auto kgStore = ctx_.getKgStore ? ctx_.getKgStore() : nullptr;
     if (!meta || !kgStore) {
         stats.errors = 1;
         stats.issues.push_back("Metadata or KG store unavailable");
@@ -2820,8 +2855,8 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     const bool dryRun = req.dryRun;
     const bool force = req.force;
 
-    auto store = services_ ? services_->getContentStore() : nullptr;
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto store = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!store || !meta) {
         result.message = "Store or metadata not available";
         return result;
@@ -2846,7 +2881,8 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     }
 
     static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
-    const auto& customExtractors = services_ ? services_->getContentExtractors() : kEmptyExtractors;
+    const auto& customExtractors =
+        ctx_.getContentExtractors ? ctx_.getContentExtractors() : kEmptyExtractors;
 
     // Pre-load all FTS5 rowids so the incremental skip check below is O(1)
     // per document instead of one SQL round-trip each.
@@ -2991,7 +3027,7 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
         return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
     };
 
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
         result.message = "Metadata not available";
         co_return result;
@@ -3077,15 +3113,15 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
     }
 
     std::string modelName = req.embeddingModel;
-    if (modelName.empty() && services_) {
+    if (modelName.empty() && ctx_.resolvePreferredModel) {
         try {
-            modelName = services_->resolvePreferredModel();
+            modelName = ctx_.resolvePreferredModel();
         } catch (...) {
         }
     }
-    if (modelName.empty() && services_) {
+    if (modelName.empty() && ctx_.getEmbeddingModelName) {
         try {
-            modelName = services_->getEmbeddingModelName();
+            modelName = ctx_.getEmbeddingModelName();
         } catch (...) {
         }
     }
@@ -3175,7 +3211,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
     };
 
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
         result.message = "Metadata not available";
         return result;
@@ -3272,15 +3308,15 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     }
 
     std::string modelName = req.embeddingModel;
-    if (modelName.empty() && services_) {
+    if (modelName.empty() && ctx_.resolvePreferredModel) {
         try {
-            modelName = services_->resolvePreferredModel();
+            modelName = ctx_.resolvePreferredModel();
         } catch (...) {
         }
     }
-    if (modelName.empty() && services_) {
+    if (modelName.empty() && ctx_.getEmbeddingModelName) {
         try {
-            modelName = services_->getEmbeddingModelName();
+            modelName = ctx_.getEmbeddingModelName();
         } catch (...) {
         }
     }

@@ -132,10 +132,6 @@ inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
 }
 
-size_t readCliRequestPoolThreads() {
-    return static_cast<size_t>(yams::daemon::TuneAdvisor::cliRequestPoolThreads());
-}
-
 inline void setOnnxShutdownMarker(bool enabled) {
 #ifdef _WIN32
     _putenv_s("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", enabled ? "1" : "");
@@ -382,11 +378,6 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
     try {
         spdlog::debug("ServiceManager constructor start");
-        if (!cliRequestPool_) {
-            const auto cliThreads = readCliRequestPoolThreads();
-            cliRequestPool_ = std::make_unique<boost::asio::thread_pool>(cliThreads);
-            spdlog::info("[ServiceManager] CLI request pool created with {} thread(s)", cliThreads);
-        }
         refreshPluginStatusSnapshot();
 
 #ifdef YAMS_TESTING
@@ -962,19 +953,6 @@ void ServiceManager::shutdown() {
             spdlog::warn("[ServiceManager] Phase 3.5: Request executor stop failed: {}", e.what());
         }
     }
-    if (cliRequestPool_) {
-        try {
-            cliRequestPool_->stop();
-            cliRequestPool_->join();
-            cliRequestPool_.reset();
-            spdlog::info("[ServiceManager] Phase 3.5: CLI request pool stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 3.5: CLI request pool stop failed: {}", e.what());
-        } catch (...) {
-            spdlog::warn("[ServiceManager] Phase 3.5: CLI request pool stop failed");
-        }
-    }
-
     // Phase 3.6: Stop CheckpointManager before WorkCoordinator
     spdlog::info("[ServiceManager] Phase 3.6: Stopping CheckpointManager");
     if (checkpointManager_) {
@@ -1188,17 +1166,6 @@ void ServiceManager::shutdown() {
 
     // Shutdown search engine
     spdlog::info("[ServiceManager] Phase 6.7: Resetting search engine");
-    {
-        auto currentEngine = std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
-        if (currentEngine) {
-            std::atomic_store_explicit(&searchEngine_, std::shared_ptr<search::SearchEngine>{},
-                                       std::memory_order_release);
-            currentEngine.reset();
-            spdlog::info("[ServiceManager] Phase 6.7: Search engine reset");
-        } else {
-            spdlog::info("[ServiceManager] Phase 6.7: No search engine to reset");
-        }
-    }
     searchEngineManager_.clearEngine();
 
     // Shutdown retrieval sessions
@@ -1230,7 +1197,7 @@ void ServiceManager::shutdown() {
     // Release DB-owning service graph before pool shutdown so outstanding shared_ptr owners do not
     // keep old SQLite handles alive across daemon cycles.
     spdlog::info("[ServiceManager] Phase 6.9.5: Releasing repo/content holders before DB shutdown");
-    if (auto metadataRepo = loadMetadataRepo()) {
+    if (auto metadataRepo = getMetadataRepo()) {
         try {
             metadataRepo->shutdown();
         } catch (const std::exception& e) {
@@ -1241,8 +1208,6 @@ void ServiceManager::shutdown() {
                 "[ServiceManager] Phase 6.9.5: MetadataRepository shutdown failed: unknown");
         }
     }
-    storeMetadataRepo(std::shared_ptr<metadata::MetadataRepository>{});
-    storeKgStore(std::shared_ptr<metadata::KnowledgeGraphStore>{});
     storeGraphComponent(std::shared_ptr<GraphComponent>{});
     graphQueryServiceOverride_.reset();
     embeddingLifecycle_.resetReranker();
@@ -1250,14 +1215,7 @@ void ServiceManager::shutdown() {
     contentExtractors_.clear();
     symbolExtractors_.clear();
     cachedQueryConceptExtractor_ = {};
-    {
-        std::unique_lock lk(searchEngineMutex_);
-        std::atomic_store_explicit(&searchEngine_, std::shared_ptr<search::SearchEngine>{},
-                                   std::memory_order_release);
-    }
     searchEngineManager_.clearEngine();
-    std::atomic_store_explicit(&vectorDatabase_, std::shared_ptr<vector::VectorDatabase>{},
-                               std::memory_order_release);
     if (databaseManager_) {
         databaseManager_->setContentStore(nullptr);
     }
@@ -1284,8 +1242,6 @@ void ServiceManager::shutdown() {
 
     // Release all remaining resources
     spdlog::info("[ServiceManager] Phase 8: Releasing remaining resources");
-    storeMetadataRepo(std::shared_ptr<metadata::MetadataRepository>{});
-    spdlog::info("[ServiceManager] Phase 9.2: Metadata repository reset");
     spdlog::info("[ServiceManager] Phase 8.3: Vector search uses VectorDatabase directly");
     spdlog::info("[ServiceManager] Phase 8.4: Content store owned by DatabaseManager");
     searchComponent_.reset();
@@ -1377,12 +1333,7 @@ void ServiceManager::shutdown() {
 yams::Result<bool>
 ServiceManager::initializeVectorDatabaseOnce(const std::filesystem::path& dataDir) {
     if (vectorSystemManager_) {
-        auto result = vectorSystemManager_->initializeOnce(dataDir);
-        if (result && result.value()) {
-            // Sync local members from VectorSystemManager for backward compatibility
-            storeVectorDatabase(vectorSystemManager_->getVectorDatabase());
-        }
-        return result;
+        return vectorSystemManager_->initializeOnce(dataDir);
     }
     // Fallback if VectorSystemManager not available (shouldn't happen in normal flow)
     spdlog::warn("[VectorInit] VectorSystemManager not initialized");
@@ -1546,8 +1497,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
                     int build_timeout = 30000; // 30s timeout
                     auto result = co_await searchEngineManager_.buildEngine(
-                        metadataRepo_, kgStore_, vectorDatabase_, std::move(embGen), reason,
-                        build_timeout, getWorkerExecutor());
+                        getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
+                        reason, build_timeout, getWorkerExecutor());
 
                     if (result.has_value()) {
                         state_.readiness.searchEngineReady.store(true);
@@ -1741,10 +1692,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Phase: Connection pool + repo (owned by DatabaseManager)
     if (db_ok && databaseManager_) {
         bool poolsOk = databaseManager_->initializePools(dbPath);
-        if (poolsOk) {
-            // Mirror metadataRepo_ for any legacy loadMetadataRepo() fallbacks
-            storeMetadataRepo(databaseManager_->getMetadataRepo());
-        } else {
+        if (!poolsOk) {
             spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
         }
         writeBootstrapStatusFile(config_, state_);
@@ -1813,9 +1761,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     // Promote to shared_ptr for broader use and store as member
                     auto kgStore =
                         std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(uniqueKg));
-                    storeKgStore(kgStore);
+                    if (databaseManager_) {
+                        databaseManager_->setKgStore(kgStore);
+                    }
                     // PBI-043-12: Wire KG store to metadata repository for tree diff integration
-                    auto metadataRepo = loadMetadataRepo();
+                    auto metadataRepo = getMetadataRepo();
                     if (metadataRepo) {
                         metadataRepo->setKnowledgeGraphStore(kgStore);
                         spdlog::info(
@@ -1847,7 +1797,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
         auto newPostIngest = std::make_shared<PostIngestQueue>(
-            getContentStore(), loadMetadataRepo(), contentExtractors_, loadKgStore(),
+            getContentStore(), getMetadataRepo(), contentExtractors_, getKgStore(),
             loadGraphComponent(), workCoordinator_.get(), nullptr, qcap);
         newPostIngest->start();
 
@@ -1919,14 +1869,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         (void)taThreads; // Retrieved for future use in embedding service configuration
         auto embeddingService = std::make_shared<EmbeddingService>(
-            getContentStore(), loadMetadataRepo(), workCoordinator_.get());
+            getContentStore(), getMetadataRepo(), workCoordinator_.get());
 
         auto initRes = embeddingService->initialize();
         if (initRes) {
             embeddingService->setProviders(
                 [this]() { return this->loadModelProvider(); },
                 [this]() { return this->resolvePreferredModel(); },
-                [this]() { return this->loadVectorDatabase(); },
+                [this]() { return this->getVectorDatabase(); },
                 [this]() { return this->getKgStore(); },
                 [this](const std::string& model,
                        std::function<void(const ModelLoadEvent&)> progress) {
@@ -1990,7 +1940,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // VectorIndexManager removed - using VectorDatabase directly for vector search.
     // Do not mark the vector index ready here; VectorSystemManager determines that after
     // preparing any persisted or rebuilt HNSW structures.
-    if (loadVectorDatabase()) {
+    if (getVectorDatabase()) {
         writeBootstrapStatusFile(config_, state_);
     }
     spdlog::info("[ServiceManager] Phase: Vector search uses VectorDatabase directly.");
@@ -2106,13 +2056,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
             // Log vector count from database
-            if (auto vectorDatabase = loadVectorDatabase()) {
+            if (auto vectorDatabase = getVectorDatabase()) {
                 auto dbVectorCount = vectorDatabase->getVectorCount();
                 if (dbVectorCount > 0) {
                     spdlog::info("[VectorInit] Found {} vectors in database", dbVectorCount);
                 }
 
-                if (auto metadataRepo = loadMetadataRepo()) {
+                if (auto metadataRepo = getMetadataRepo()) {
                     auto embeddedHashes = vectorDatabase->getEmbeddedDocumentHashes();
                     const auto metadataEmbeddedCount =
                         static_cast<int64_t>(metadataRepo->getCachedEmbeddedCount());
@@ -2171,7 +2121,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     if (embeddingLifecycle_.preloadOnStartup()) {
         size_t vdim = 0;
         try {
-            if (auto vectorDatabase = loadVectorDatabase())
+            if (auto vectorDatabase = getVectorDatabase())
                 vdim = vectorDatabase->getConfig().embedding_dim;
         } catch (...) {
         }
@@ -2188,11 +2138,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     try {
         state_.readiness.searchProgress = 10;
         writeBootstrapStatusFile(config_, state_);
-        if (loadMetadataRepo()) {
+        if (getMetadataRepo()) {
             state_.readiness.searchProgress = 40;
             writeBootstrapStatusFile(config_, state_);
         }
-        if (loadVectorDatabase()) {
+        if (getVectorDatabase()) {
             state_.readiness.searchProgress = 70;
             writeBootstrapStatusFile(config_, state_);
         }
@@ -2206,7 +2156,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         if (vectorsDisabled) {
             spdlog::info(
                 "[SearchBuild] Vector search disabled via env flag; building text-only engine");
-        } else if (auto vectorDatabase = loadVectorDatabase()) {
+        } else if (auto vectorDatabase = getVectorDatabase()) {
             try {
                 // Use VectorDatabase directly - it knows the actual DB size
                 auto vectorCount = vectorDatabase->getVectorCount();
@@ -2246,7 +2196,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
                 spdlog::info("[SearchBuild] Got embedding generator: {}", embGen != nullptr);
 
-                if (auto vectorDatabase = loadVectorDatabase()) {
+                if (auto vectorDatabase = getVectorDatabase()) {
                     std::string activeModelName = embeddingLifecycle_.modelName();
                     if (activeModelName.empty()) {
                         auto loadedModels = modelProvider->getLoadedModels();
@@ -2270,22 +2220,18 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
         }
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), embGen, "initial",
-            build_timeout, getWorkerExecutor());
+            getMetadataRepo(), getKgStore(), getVectorDatabase(), embGen, "initial", build_timeout,
+            getWorkerExecutor());
 
         if (buildResult.has_value()) {
             const auto& built = buildResult.value();
-            {
-                std::unique_lock lk(searchEngineMutex_); // Exclusive write
-                std::atomic_store_explicit(&searchEngine_, built, std::memory_order_release);
-            }
             wireSearchEngineRuntimeAdapters(built, "SearchBuild");
 
             // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
             // Track doc count at build time for re-tuning decisions
-            if (auto metadataRepo = loadMetadataRepo()) {
+            if (auto metadataRepo = getMetadataRepo()) {
                 auto countRes = metadataRepo->getDocumentCount();
                 if (countRes) {
                     if (searchComponent_) {
@@ -2746,9 +2692,6 @@ boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
     if (requestExecutor_) {
         return requestExecutor_->getExecutor();
     }
-    if (cliRequestPool_) {
-        return cliRequestPool_->get_executor();
-    }
     return getWorkerExecutor();
 }
 
@@ -2871,21 +2814,17 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
-            loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), std::move(embGen),
+            getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
             "rebuild_enabled", build_timeout, getWorkerExecutor());
 
         if (rebuildResult.has_value()) {
             const auto& rebuilt = rebuildResult.value();
-            {
-                std::unique_lock lk(searchEngineMutex_);
-                std::atomic_store_explicit(&searchEngine_, rebuilt, std::memory_order_release);
-            }
             wireSearchEngineRuntimeAdapters(rebuilt, "Rebuild");
 
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
             // Track doc count at build time for re-tuning decisions
-            if (auto metadataRepo = loadMetadataRepo()) {
+            if (auto metadataRepo = getMetadataRepo()) {
                 auto countRes = metadataRepo->getDocumentCount();
                 if (countRes) {
                     if (searchComponent_) {
@@ -2973,22 +2912,18 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
 
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                loadMetadataRepo(), loadKgStore(), loadVectorDatabase(), std::move(embGen),
-                "rebuild", build_timeout, getWorkerExecutor());
+                getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen), "rebuild",
+                build_timeout, getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();
-                {
-                    std::unique_lock lk(searchEngineMutex_); // Exclusive write
-                    std::atomic_store_explicit(&searchEngine_, rebuilt, std::memory_order_release);
-                }
                 wireSearchEngineRuntimeAdapters(rebuilt, "Rebuild");
 
                 // Update readiness indicators after successful rebuild
                 state_.readiness.searchEngineReady = true;
                 state_.readiness.searchProgress = 100;
                 // Track doc count at build time for re-tuning decisions
-                if (auto metadataRepo = loadMetadataRepo()) {
+                if (auto metadataRepo = getMetadataRepo()) {
                     auto countRes = metadataRepo->getDocumentCount();
                     if (countRes) {
                         if (searchComponent_) {
@@ -3019,25 +2954,18 @@ std::function<void(bool)> ServiceManager::getWorkerJobSignal() {
 }
 
 std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() const {
-    // Use try_lock to avoid blocking indefinitely during search engine rebuilds
-    std::shared_lock lock(searchEngineMutex_, std::try_to_lock);
-    if (!lock.owns_lock()) {
-        spdlog::debug(
-            "getSearchEngineSnapshot: mutex busy (rebuild in progress?), returning cached");
-        return std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
-    }
-    return std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
+    return searchEngineManager_.getEngine();
 }
 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
     ctx.store = getContentStore(); // Thread-safe via atomic_load
-    auto metadataRepo = loadMetadataRepo();
+    auto metadataRepo = getMetadataRepo();
     ctx.metadataRepo = metadataRepo;
     ctx.searchEngine = getSearchEngineSnapshot();
     ctx.vectorDatabase = getVectorDatabase();
-    ctx.kgStore = loadKgStore(); // PBI-043: tree diff KG integration
+    ctx.kgStore = getKgStore(); // PBI-043: tree diff KG integration
     auto graphComponent = loadGraphComponent();
     ctx.graphQueryService = graphQueryServiceOverride_
                                 ? graphQueryServiceOverride_
@@ -3187,8 +3115,8 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
         } catch (...) {
         }
     }
-    auto res = co_await searchEngineManager_.buildEngine(loadMetadataRepo(), loadKgStore(),
-                                                         loadVectorDatabase(), std::move(gen),
+    auto res = co_await searchEngineManager_.buildEngine(getMetadataRepo(), getKgStore(),
+                                                         getVectorDatabase(), std::move(gen),
                                                          "co_buildEngine", timeout_ms, exec);
     if (res.has_value()) {
         co_return res.value();
@@ -3397,36 +3325,17 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
 }
 
 void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
-    std::lock_guard<std::mutex> lk(repairServiceMutex_);
-    if (std::atomic_load_explicit(&repairService_, std::memory_order_acquire)) {
-        spdlog::debug("[ServiceManager] RepairService already started");
-        return;
-    }
-    RepairService::Config rcfg;
+    RepairServiceHost::Config rcfg;
     rcfg.enable = true;
     rcfg.dataDir = resolvedDataDir_;
     rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
     rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
-
-    auto rs = std::make_shared<RepairService>(this, &state_, std::move(activeConnFn), rcfg);
-    std::atomic_store_explicit(&repairService_, rs, std::memory_order_release);
-    rs->start();
-    spdlog::info("[ServiceManager] RepairService started");
+    repairServiceHost_.start(std::move(rcfg), &state_, std::move(activeConnFn),
+                             makeRepairServiceContext(this));
 }
 
 void ServiceManager::stopRepairService() {
-    std::shared_ptr<RepairService> rs;
-    {
-        std::lock_guard<std::mutex> lk(repairServiceMutex_);
-        rs = std::atomic_load_explicit(&repairService_, std::memory_order_acquire);
-        if (!rs) {
-            return;
-        }
-        std::atomic_store_explicit(&repairService_, std::shared_ptr<RepairService>{},
-                                   std::memory_order_release);
-    }
-    rs->stop();
-    spdlog::info("[ServiceManager] RepairService stopped");
+    repairServiceHost_.stop();
 }
 
 } // namespace yams::daemon

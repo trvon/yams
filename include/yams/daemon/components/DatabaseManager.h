@@ -125,6 +125,19 @@ public:
     std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const { return kgStore_; }
 
     /**
+     * @brief Publish a ServiceManager-constructed KG store into DatabaseManager.
+     * Used when ServiceManager initialization creates the KG store from the
+     * shared write pool (outside initializeRepositories/initializePools).
+     */
+    void setKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
+        kgStore_ = std::move(store);
+    }
+
+    void setMetadataRepo(std::shared_ptr<metadata::MetadataRepository> repo) {
+        metadataRepo_ = std::move(repo);
+    }
+
+    /**
      * @brief Store the content store shared_ptr (atomic release).
      */
     void setContentStore(std::shared_ptr<api::IContentStore> store) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <yams/core/types.h>
+#include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <atomic>
@@ -11,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <unordered_set>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
@@ -29,12 +32,56 @@ namespace yams::extraction {
 class IContentExtractor;
 } // namespace yams::extraction
 
+namespace yams::vector {
+class VectorDatabase;
+} // namespace yams::vector
+
+namespace yams::integrity {
+class RepairManager;
+} // namespace yams::integrity
+
 namespace yams::daemon {
 
 class ServiceManager;
 struct StateComponent;
 class GraphComponent;
 class AbiSymbolExtractorAdapter;
+class PostIngestQueue;
+class IModelProvider;
+
+/**
+ * @brief Callback-based dependency bundle for RepairService.
+ *
+ * Decouples RepairService from ServiceManager so the service can be
+ * constructed with any set of accessor lambdas. Every field may return
+ * nullptr / empty — callers must null-check.
+ */
+struct RepairServiceContext {
+    std::function<std::shared_ptr<metadata::MetadataRepository>()> getMetadataRepo;
+    std::function<std::shared_ptr<api::IContentStore>()> getContentStore;
+    std::function<std::shared_ptr<vector::VectorDatabase>()> getVectorDatabase;
+    std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore;
+    std::function<std::shared_ptr<GraphComponent>()> getGraphComponent;
+    std::function<std::shared_ptr<PostIngestQueue>()> getPostIngestQueue;
+    std::function<std::shared_ptr<integrity::RepairManager>()> getRepairManager;
+    std::function<std::shared_ptr<IModelProvider>()> getModelProvider;
+    std::function<const std::vector<std::shared_ptr<extraction::IContentExtractor>>&()>
+        getContentExtractors;
+    std::function<const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&()>
+        getSymbolExtractors;
+    std::function<std::string()> resolvePreferredModel;
+    std::function<std::string()> getEmbeddingModelName;
+    std::function<Result<TopologyManager::RebuildStats>(const std::string&, bool,
+                                                        const std::vector<std::string>&)>
+        rebuildTopologyArtifacts;
+};
+
+/**
+ * @brief Build a RepairServiceContext that forwards every accessor through
+ * a live ServiceManager. Used by the existing constructor shim so callers
+ * that still pass a ServiceManager* get identical behavior.
+ */
+RepairServiceContext makeRepairServiceContext(ServiceManager* services);
 
 /**
  * @brief Centralized repair service that owns all repair logic.
@@ -77,6 +124,8 @@ public:
     using ProgressFn = std::function<void(const RepairEvent&)>;
 
     RepairService(ServiceManager* services, StateComponent* state,
+                  std::function<size_t()> activeConnFn, Config cfg);
+    RepairService(RepairServiceContext ctx, StateComponent* state,
                   std::function<size_t()> activeConnFn, Config cfg);
     virtual ~RepairService();
 
@@ -238,7 +287,7 @@ private:
     void updateProgressPct();
 
     // ── Members ──
-    ServiceManager* services_;
+    RepairServiceContext ctx_;
     StateComponent* state_;
     std::function<size_t()> activeConnFn_;
     Config cfg_;

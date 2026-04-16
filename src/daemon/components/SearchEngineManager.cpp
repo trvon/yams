@@ -260,12 +260,12 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                     auto r = builder->buildEmbedded(opts);
                     if (r) {
                         auto newEngine = r.value();
-                        // Set executor for async component execution (embedding, etc.)
                         newEngine->setExecutor(workerExecutor);
                         {
                             std::unique_lock lock(engineMutex_);
                             engine_ = newEngine;
                         }
+                        refreshSnapshot();
                         result = RetT(newEngine);
                     } else {
                         result = RetT(Error{ErrorCode::InternalError, r.error().message});

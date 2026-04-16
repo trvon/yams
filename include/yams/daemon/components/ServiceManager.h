@@ -49,6 +49,7 @@
 #include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/daemon/components/EmbeddingLifecycleManager.h>
 #include <yams/daemon/components/IngestMetricsPublisher.h>
+#include <yams/daemon/components/RepairServiceHost.h>
 #include <yams/daemon/components/RequestExecutor.h>
 #include <yams/daemon/components/SearchAdmissionController.h>
 #include <yams/daemon/components/TopologyManager.h>
@@ -146,13 +147,7 @@ public:
         return nullptr;
     }
     std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const {
-        // PBI-088: Delegate to DatabaseManager if available
-        if (databaseManager_) {
-            auto repo = databaseManager_->getMetadataRepo();
-            if (repo)
-                return repo;
-        }
-        return loadMetadataRepo(); // Fallback to old member
+        return databaseManager_ ? databaseManager_->getMetadataRepo() : nullptr;
     }
     std::shared_ptr<IModelProvider> getModelProvider() const { return loadModelProvider(); }
     Result<std::string>
@@ -173,12 +168,7 @@ public:
     }
     const std::string& getEmbeddingModelName() const { return embeddingLifecycle_.modelName(); }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
-        if (vectorSystemManager_) {
-            auto db = vectorSystemManager_->getVectorDatabase();
-            if (db)
-                return db;
-        }
-        return loadVectorDatabase(); // Fallback to old member
+        return vectorSystemManager_ ? vectorSystemManager_->getVectorDatabase() : nullptr;
     }
     std::shared_ptr<WorkerPool> getWorkerPool() const { return nullptr; }
     WorkCoordinator* getWorkCoordinator() const { return workCoordinator_.get(); }
@@ -343,12 +333,7 @@ public:
 
     // Knowledge Graph Store (PBI-059)
     std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const {
-        if (databaseManager_) {
-            auto store = databaseManager_->getKgStore();
-            if (store)
-                return store;
-        }
-        return loadKgStore(); // Fallback to old member
+        return databaseManager_ ? databaseManager_->getKgStore() : nullptr;
     }
 
     // KG Write Queue - serializes KG writes to eliminate lock contention
@@ -375,7 +360,7 @@ public:
     }
 
     std::shared_ptr<RepairService> getRepairServiceShared() const {
-        return std::atomic_load_explicit(&repairService_, std::memory_order_acquire);
+        return repairServiceHost_.get();
     }
     void startRepairService(std::function<size_t()> activeConnFn);
     void stopRepairService();
@@ -498,7 +483,7 @@ public:
         return db ? db->path() : std::string{};
     }
     std::string getVectorDatabasePath() const {
-        auto vectorDb = loadVectorDatabase();
+        auto vectorDb = getVectorDatabase();
         return vectorDb ? vectorDb->getConfig().database_path : std::string{};
     }
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");
@@ -542,7 +527,9 @@ public:
         storeModelProvider(std::move(provider));
     }
     void __test_setMetadataRepo(std::shared_ptr<metadata::MetadataRepository> repo) {
-        storeMetadataRepo(std::move(repo));
+        if (databaseManager_) {
+            databaseManager_->setMetadataRepo(std::move(repo));
+        }
     }
     void __test_setContentStore(std::shared_ptr<api::IContentStore> store) {
         if (databaseManager_) {
@@ -605,22 +592,6 @@ public:
     }
 
 private:
-    std::shared_ptr<metadata::MetadataRepository> loadMetadataRepo() const {
-        return std::atomic_load_explicit(&metadataRepo_, std::memory_order_acquire);
-    }
-
-    void storeMetadataRepo(std::shared_ptr<metadata::MetadataRepository> repo) {
-        std::atomic_store_explicit(&metadataRepo_, std::move(repo), std::memory_order_release);
-    }
-
-    std::shared_ptr<metadata::KnowledgeGraphStore> loadKgStore() const {
-        return std::atomic_load_explicit(&kgStore_, std::memory_order_acquire);
-    }
-
-    void storeKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
-        std::atomic_store_explicit(&kgStore_, std::move(store), std::memory_order_release);
-    }
-
     std::shared_ptr<GraphComponent> loadGraphComponent() const {
         return std::atomic_load_explicit(&graphComponent_, std::memory_order_acquire);
     }
@@ -628,14 +599,6 @@ private:
     void storeGraphComponent(std::shared_ptr<GraphComponent> component) {
         std::atomic_store_explicit(&graphComponent_, std::move(component),
                                    std::memory_order_release);
-    }
-
-    std::shared_ptr<vector::VectorDatabase> loadVectorDatabase() const {
-        return std::atomic_load_explicit(&vectorDatabase_, std::memory_order_acquire);
-    }
-
-    void storeVectorDatabase(std::shared_ptr<vector::VectorDatabase> db) {
-        std::atomic_store_explicit(&vectorDatabase_, std::move(db), std::memory_order_release);
     }
 
     std::shared_ptr<IModelProvider> loadModelProvider() const {
@@ -665,11 +628,8 @@ private:
 
     // All the services managed by this component
     std::shared_ptr<metadata::Database> database_;
-    std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
-    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<GraphComponent> graphComponent_;
     std::shared_ptr<app::services::IGraphQueryService> graphQueryServiceOverride_;
-    std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<IModelProvider> modelProvider_;
 
     std::unique_ptr<IngestService> ingestService_;
@@ -687,14 +647,10 @@ private:
 
     EmbeddingLifecycleManager embeddingLifecycle_;
 
-    std::shared_ptr<yams::search::SearchEngine> searchEngine_;
-    mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, searchEngineMutex_);
-
     boost::asio::cancellation_signal shutdownSignal_;
 
     std::unique_ptr<WorkCoordinator> workCoordinator_;
     std::unique_ptr<RequestExecutor> requestExecutor_;
-    std::unique_ptr<boost::asio::thread_pool> cliRequestPool_;
 
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
@@ -705,8 +661,7 @@ private:
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<KGWriteQueue> kgWriteQueue_;
-    std::shared_ptr<RepairService> repairService_;
-    mutable std::mutex repairServiceMutex_;
+    RepairServiceHost repairServiceHost_;
     TopologyManager topologyManager_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
