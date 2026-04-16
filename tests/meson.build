@@ -381,6 +381,42 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_search_admission_controller_exe = executable('catch2_search_admission_controller',
+    files('unit/daemon/search_admission_controller_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_ingest_metrics_publisher_exe = executable('catch2_ingest_metrics_publisher',
+    files('unit/daemon/ingest_metrics_publisher_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_topology_manager_exe = executable('catch2_topology_manager',
+    files('unit/daemon/topology_manager_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_embedding_lifecycle_exe = executable('catch2_embedding_lifecycle',
+    files('unit/daemon/embedding_lifecycle_manager_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_daemon_protocol_exe = executable('catch2_daemon_protocol',
     files(
       'unit/daemon/daemon_protocol_test.cpp',
@@ -2411,6 +2447,34 @@ if catch2_dep.found()
 
   test('admission_policy', catch2_admission_policy_exe,
     suite: ['catch2', 'unit', 'daemon', 'admission-policy'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('search_admission_controller', catch2_search_admission_controller_exe,
+    suite: ['catch2', 'unit', 'daemon', 'search-admission'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('ingest_metrics_publisher', catch2_ingest_metrics_publisher_exe,
+    suite: ['catch2', 'unit', 'daemon', 'ingest-metrics'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('topology_manager', catch2_topology_manager_exe,
+    suite: ['catch2', 'unit', 'daemon', 'topology-manager'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('embedding_lifecycle', catch2_embedding_lifecycle_exe,
+    suite: ['catch2', 'unit', 'daemon', 'embedding-lifecycle'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false

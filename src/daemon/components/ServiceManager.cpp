@@ -97,47 +97,10 @@
 #include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/storage/storage_runtime_resolver.h>
-#include <yams/topology/topology_baseline.h>
-#include <yams/topology/topology_factory.h>
-#include <yams/topology/topology_input_extractor.h>
-#include <yams/topology/topology_metadata_store.h>
-#include <yams/topology/topology_offline_analyzer.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
 namespace {
-int resolveEmbeddingLoadTimeoutMs(int requestedMs) {
-    int timeoutMs = requestedMs > 0 ? requestedMs : 30000;
-    if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
-        try {
-            timeoutMs = std::stoi(env);
-        } catch (...) {
-        }
-    }
-    return std::max(1000, timeoutMs);
-}
-
-std::string makeHotLoadOptions(bool hot) {
-    return hot ? std::string{"{\"hot\":true}"} : std::string{"{\"hot\":false}"};
-}
-
-const std::vector<std::string>& embeddingWarmupTexts() {
-    static const std::vector<std::string> texts = {"warmup text one", "warmup text two",
-                                                   "warmup text three", "warmup text four"};
-    return texts;
-}
-
-void emitModelLoadProgress(const std::function<void(const yams::daemon::ModelLoadEvent&)>& progress,
-                           const std::string& modelName, std::string phase, std::string message) {
-    if (!progress) {
-        return;
-    }
-    yams::daemon::ModelLoadEvent ev;
-    ev.modelName = modelName;
-    ev.phase = std::move(phase);
-    ev.message = std::move(message);
-    progress(ev);
-}
 
 bool isEphemeralDataDir(const std::filesystem::path& path) {
     namespace fs = std::filesystem;
@@ -341,7 +304,7 @@ void ServiceManager::refreshPluginStatusSnapshot() {
         snapshot.host = getPluginHostFsmSnapshot();
         bool providerDegraded = false;
         try {
-            auto es = embeddingFsm_.snapshot();
+            auto es = embeddingLifecycle_.fsmSnapshot();
             providerDegraded = (es.state == EmbeddingProviderState::Degraded ||
                                 es.state == EmbeddingProviderState::Failed);
         } catch (const std::exception& e) {
@@ -360,8 +323,8 @@ void ServiceManager::refreshPluginStatusSnapshot() {
                 PluginStatusRecord rec;
                 rec.name = d.name;
                 rec.interfaces = d.interfaces;
-                rec.isProvider =
-                    (!adoptedProviderPluginName_.empty() && adoptedProviderPluginName_ == d.name);
+                rec.isProvider = (!embeddingLifecycle_.adoptedPluginName().empty() &&
+                                  embeddingLifecycle_.adoptedPluginName() == d.name);
                 if (rec.isProvider) {
                     rec.ready = providerReady;
                     rec.degraded = providerDegraded;
@@ -406,11 +369,21 @@ void ServiceManager::refreshPluginStatusSnapshot() {
 
 ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state,
                                DaemonLifecycleFsm& lifecycleFsm)
-    : config_(config), state_(state), lifecycleFsm_(lifecycleFsm) {
+    : config_(config), state_(state),
+      embeddingLifecycle_(EmbeddingLifecycleManager::Dependencies{
+          [this]() { return loadModelProvider(); },
+          [this]() -> std::shared_ptr<EmbeddingService> {
+              return std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+          },
+          &config_, &resolvedDataDir_}),
+      topologyManager_(TopologyManager::Dependencies{[this]() { return getMetadataRepo(); },
+                                                     [this]() { return getKgStore(); },
+                                                     [this]() { return getVectorDatabase(); }}),
+      lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
     tuningConfig_ = config_.tuning;
 
-    ingestWorkerTarget_.store(1, std::memory_order_relaxed);
+    metricsPublisher_.setWorkerTarget(1);
 
     // If post_ingest_threads_max is still the default, calculate a better one.
     if (tuningConfig_.postIngestThreadsMax == 8) {
@@ -450,6 +423,14 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     }
 
     try {
+        requestExecutor_ = std::make_unique<RequestExecutor>();
+        requestExecutor_->start();
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to initialize RequestExecutor: {}", e.what());
+        throw;
+    }
+
+    try {
         spdlog::debug("ServiceManager constructor start");
         if (!cliRequestPool_) {
             const auto cliThreads = readCliRequestPoolThreads();
@@ -469,7 +450,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 return v == "0" || v == "false" || v == "off" || v == "no";
             };
             if (!falsy(std::getenv("YAMS_EMBED_ON_ADD"))) {
-                embeddingsAutoOnAdd_ = true;
+                embeddingLifecycle_.setAutoOnAdd(true);
                 spdlog::debug("YAMS_TESTING: defaulting embeddingsAutoOnAdd_=true");
             }
         } catch (...) {
@@ -1046,7 +1027,17 @@ void ServiceManager::shutdown() {
     // Phase 3: (Removed - work guard now managed by WorkCoordinator)
     spdlog::info("[ServiceManager] Phase 3: Skipped (work guard managed by WorkCoordinator)");
 
-    // Phase 3.5: Stop CLI request pool to avoid starving shutdown
+    // Phase 3.5: Stop request executor and CLI request pool
+    if (requestExecutor_) {
+        try {
+            requestExecutor_->stop();
+            requestExecutor_->join();
+            requestExecutor_.reset();
+            spdlog::info("[ServiceManager] Phase 3.5: Request executor stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.5: Request executor stop failed: {}", e.what());
+        }
+    }
     if (cliRequestPool_) {
         try {
             cliRequestPool_->stop();
@@ -1269,14 +1260,7 @@ void ServiceManager::shutdown() {
     } else {
         spdlog::info("[ServiceManager] Phase 6.6: No model provider to shut down");
     }
-    {
-        std::lock_guard lk(embeddingModelReadyMutex_);
-        embeddingModelReadyActive_ = false;
-        embeddingModelReadyActiveModel_.clear();
-        warmedEmbeddingModels_.clear();
-        hotEmbeddingModel_.clear();
-        embeddingModelReadyCv_.notify_all();
-    }
+    embeddingLifecycle_.resetWarmupState();
 
     // Shutdown search engine
     spdlog::info("[ServiceManager] Phase 6.7: Resetting search engine");
@@ -1337,7 +1321,7 @@ void ServiceManager::shutdown() {
     storeKgStore(std::shared_ptr<metadata::KnowledgeGraphStore>{});
     storeGraphComponent(std::shared_ptr<GraphComponent>{});
     graphQueryServiceOverride_.reset();
-    rerankerAdapter_.reset();
+    embeddingLifecycle_.resetReranker();
     repairManager_.reset();
     contentExtractors_.clear();
     symbolExtractors_.clear();
@@ -1400,7 +1384,7 @@ void ServiceManager::shutdown() {
     searchComponent_.reset();
     spdlog::info("[ServiceManager] Phase 8.4.1: Search component reset");
     graphQueryServiceOverride_.reset();
-    rerankerAdapter_.reset();
+    embeddingLifecycle_.resetReranker();
     repairManager_.reset();
     contentExtractors_.clear();
     symbolExtractors_.clear();
@@ -1657,10 +1641,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     auto modelProvider = loadModelProvider();
                     if (includeVector && modelProvider) {
                         try {
-                            embGen =
-                                embeddingModelName_.empty()
-                                    ? modelProvider->getEmbeddingGenerator()
-                                    : modelProvider->getEmbeddingGenerator(embeddingModelName_);
+                            embGen = embeddingLifecycle_.modelName().empty()
+                                         ? modelProvider->getEmbeddingGenerator()
+                                         : modelProvider->getEmbeddingGenerator(
+                                               embeddingLifecycle_.modelName());
                         } catch (...) {
                         }
                     }
@@ -2275,8 +2259,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
 
         // Detect embedding preload flag early so we can use it during plugin adoption
-        embeddingPreloadOnStartup_ = detectEmbeddingPreloadFlag();
-        spdlog::info("ServiceManager: embeddingPreloadOnStartup={}", embeddingPreloadOnStartup_);
+        embeddingLifecycle_.setPreloadOnStartup(detectEmbeddingPreloadFlag());
+        spdlog::info("ServiceManager: embeddingPreloadOnStartup={}",
+                     embeddingLifecycle_.preloadOnStartup());
 
         if (enableAutoload) {
             auto loadResult = co_await init::await_step(
@@ -2407,7 +2392,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
                 if (auto modelProvider = loadModelProvider();
                     modelProvider && modelProvider->isAvailable()) {
-                    std::string activeModelName = embeddingModelName_;
+                    std::string activeModelName = embeddingLifecycle_.modelName();
                     if (activeModelName.empty()) {
                         auto loadedModels = modelProvider->getLoadedModels();
                         if (!loadedModels.empty()) {
@@ -2432,7 +2417,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
 
     // Only schedule warmup if vector DB is present with non-zero dim
-    if (embeddingPreloadOnStartup_) {
+    if (embeddingLifecycle_.preloadOnStartup()) {
         size_t vdim = 0;
         try {
             if (auto vectorDatabase = loadVectorDatabase())
@@ -2441,7 +2426,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         if (vdim == 0) {
             spdlog::info("[Warmup] deferred: vector DB not ready or dim=0");
-            embeddingPreloadOnStartup_ = false;
+            embeddingLifecycle_.setPreloadOnStartup(false);
         } else {
             spdlog::info("[Warmup] embeddings.preload_on_startup detected -> background warmup "
                          "will run after Ready");
@@ -2501,16 +2486,17 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::info("[SearchBuild] Checking embedding generator: modelProvider_={} isAvailable={} "
                      "modelName='{}'",
                      modelProvider != nullptr, modelProvider ? modelProvider->isAvailable() : false,
-                     embeddingModelName_);
+                     embeddingLifecycle_.modelName());
         if (modelProvider && modelProvider->isAvailable()) {
             try {
-                embGen = embeddingModelName_.empty()
-                             ? modelProvider->getEmbeddingGenerator()
-                             : modelProvider->getEmbeddingGenerator(embeddingModelName_);
+                embGen =
+                    embeddingLifecycle_.modelName().empty()
+                        ? modelProvider->getEmbeddingGenerator()
+                        : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
                 spdlog::info("[SearchBuild] Got embedding generator: {}", embGen != nullptr);
 
                 if (auto vectorDatabase = loadVectorDatabase()) {
-                    std::string activeModelName = embeddingModelName_;
+                    std::string activeModelName = embeddingLifecycle_.modelName();
                     if (activeModelName.empty()) {
                         auto loadedModels = modelProvider->getLoadedModels();
                         if (!loadedModels.empty()) {
@@ -2896,16 +2882,17 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
             // Sync local members from PluginManager for backward compatibility
             auto modelProvider = pluginManager_->getModelProvider();
             storeModelProvider(modelProvider);
-            embeddingModelName_ = pluginManager_->getEmbeddingModelName();
+            embeddingLifecycle_.setModelName(pluginManager_->getEmbeddingModelName());
             state_.readiness.modelProviderReady = (modelProvider != nullptr);
             spdlog::info("[ServiceManager] Synced model provider: model='{}', provider={}",
-                         embeddingModelName_, modelProvider ? "valid" : "null");
+                         embeddingLifecycle_.modelName(), modelProvider ? "valid" : "null");
 
             // Initialize reranker adapter using model provider's scoreDocuments capability
             // This is a lazy-init adapter - it fetches the provider on each call
-            if (!rerankerAdapter_) {
-                rerankerAdapter_ = std::make_shared<yams::search::ModelProviderRerankerAdapter>(
-                    [this]() { return this->loadModelProvider(); });
+            if (!embeddingLifecycle_.reranker()) {
+                embeddingLifecycle_.setReranker(
+                    std::make_shared<yams::search::ModelProviderRerankerAdapter>(
+                        [this]() { return this->loadModelProvider(); }));
                 spdlog::info("[Reranker] Initialized model provider reranker adapter");
             }
         }
@@ -3005,6 +2992,9 @@ boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
 }
 
 boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
+    if (requestExecutor_) {
+        return requestExecutor_->getExecutor();
+    }
     if (cliRequestPool_) {
         return cliRequestPool_->get_executor();
     }
@@ -3025,8 +3015,9 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
         spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
     }
 
-    if (rerankerAdapter_ && rerankerAdapter_->isReady()) {
-        engine->setReranker(rerankerAdapter_);
+    auto reranker = embeddingLifecycle_.reranker();
+    if (reranker && reranker->isReady()) {
+        engine->setReranker(reranker);
         spdlog::debug("[{}] Cross-encoder reranker wired to search engine", contextLabel);
     }
 
@@ -3119,9 +3110,10 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
         auto modelProvider = loadModelProvider();
         if (modelProvider && modelProvider->isAvailable()) {
             try {
-                embGen = embeddingModelName_.empty()
-                             ? modelProvider->getEmbeddingGenerator()
-                             : modelProvider->getEmbeddingGenerator(embeddingModelName_);
+                embGen =
+                    embeddingLifecycle_.modelName().empty()
+                        ? modelProvider->getEmbeddingGenerator()
+                        : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
             } catch (...) {
             }
         }
@@ -3187,14 +3179,14 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
     } catch (...) {
     }
 
-    if (embeddingFsm_.isLoadingOrReady()) {
+    if (embeddingLifecycle_.isLoadingOrReady()) {
         spdlog::debug("preloadPreferredModelIfConfigured: local FSM already loading or ready");
         co_return;
     }
 
     // Signal started
     try {
-        embeddingFsm_.dispatch(ModelLoadStartedEvent{resolvePreferredModel()});
+        embeddingLifecycle_.fsm().dispatch(ModelLoadStartedEvent{resolvePreferredModel()});
     } catch (...) {
     }
 
@@ -3220,9 +3212,10 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
             auto modelProvider = loadModelProvider();
             if (modelProvider && modelProvider->isAvailable()) {
                 try {
-                    embGen = embeddingModelName_.empty()
-                                 ? modelProvider->getEmbeddingGenerator()
-                                 : modelProvider->getEmbeddingGenerator(embeddingModelName_);
+                    embGen =
+                        embeddingLifecycle_.modelName().empty()
+                            ? modelProvider->getEmbeddingGenerator()
+                            : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
                 } catch (...) {
                 }
             }
@@ -3271,15 +3264,7 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
     }
 }
 std::function<void(bool)> ServiceManager::getWorkerJobSignal() {
-    return [this](bool start) {
-        if (start) {
-            poolActive_.fetch_add(1, std::memory_order_relaxed);
-            poolPosted_.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            poolActive_.fetch_sub(1, std::memory_order_relaxed);
-            poolCompleted_.fetch_add(1, std::memory_order_relaxed);
-        }
-    };
+    return metricsPublisher_.workerJobSignal();
 }
 
 std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() const {
@@ -3348,9 +3333,9 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
 
 size_t ServiceManager::getWorkerQueueDepth() const {
     // A simple estimate of the queue depth based on job tracking counters.
-    auto posted = static_cast<int64_t>(poolPosted_.load(std::memory_order_relaxed));
-    auto completed = static_cast<int64_t>(poolCompleted_.load(std::memory_order_relaxed));
-    auto active = static_cast<int64_t>(poolActive_.load(std::memory_order_relaxed));
+    auto posted = static_cast<int64_t>(metricsPublisher_.workerPosted());
+    auto completed = static_cast<int64_t>(metricsPublisher_.workerCompleted());
+    auto active = static_cast<int64_t>(metricsPublisher_.workerActive());
 
     if (posted > completed + active) {
         return static_cast<size_t>(posted - completed - active);
@@ -3361,8 +3346,8 @@ size_t ServiceManager::getWorkerQueueDepth() const {
 ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
     SearchLoadMetrics metrics;
 
-    metrics.active = searchActive_.load(std::memory_order_relaxed);
-    metrics.queued = searchQueued_.load(std::memory_order_relaxed);
+    metrics.active = searchAdmission_.active();
+    metrics.queued = searchAdmission_.queued();
     metrics.concurrencyLimit = ResourceGovernor::instance().maxSearchConcurrency();
 
     // Get search engine statistics if available
@@ -3390,289 +3375,6 @@ ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
     return metrics;
 }
 
-bool ServiceManager::detectEmbeddingPreloadFlag() const {
-    return ConfigResolver::detectEmbeddingPreloadFlag(config_);
-}
-
-size_t ServiceManager::getEmbeddingDimension() const {
-    auto modelProvider = loadModelProvider();
-    if (!modelProvider || !modelProvider->isAvailable())
-        return 0;
-    try {
-        std::string modelName = resolvePreferredModel();
-        if (modelName.empty())
-            return 0;
-        return modelProvider->getEmbeddingDim(modelName);
-    } catch (...) {
-        return 0;
-    }
-}
-
-std::size_t ServiceManager::getEmbeddingInFlightJobs() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->inFlightJobs();
-    }
-    return 0;
-}
-
-std::size_t ServiceManager::getEmbeddingQueuedJobs() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->queuedJobs();
-    }
-    return 0;
-}
-
-std::size_t ServiceManager::getEmbeddingActiveInferSubBatches() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->activeInferSubBatches();
-    }
-    return 0;
-}
-
-uint64_t ServiceManager::getEmbeddingInferOldestMs() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->inferOldestActiveMs();
-    }
-    return 0;
-}
-
-uint64_t ServiceManager::getEmbeddingInferStartedCount() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->inferSubBatchStartedCount();
-    }
-    return 0;
-}
-
-uint64_t ServiceManager::getEmbeddingInferCompletedCount() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->inferSubBatchCompletedCount();
-    }
-    return 0;
-}
-
-uint64_t ServiceManager::getEmbeddingInferLastMs() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->inferSubBatchLastDurationMs();
-    }
-    return 0;
-}
-
-uint64_t ServiceManager::getEmbeddingInferMaxMs() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->inferSubBatchMaxDurationMs();
-    }
-    return 0;
-}
-
-uint64_t ServiceManager::getEmbeddingInferWarnCount() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->inferSubBatchWarnCount();
-    }
-    return 0;
-}
-
-uint64_t ServiceManager::getEmbeddingSemanticEdgesCreated() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->semanticEdgesCreated();
-    }
-    return 0;
-}
-
-uint64_t ServiceManager::getEmbeddingSemanticDocsProcessed() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->semanticDocsProcessed();
-    }
-    return 0;
-}
-
-uint64_t ServiceManager::getEmbeddingSemanticUpdateErrors() const {
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        return embeddingService->semanticUpdateErrors();
-    }
-    return 0;
-}
-
-Result<std::string>
-ServiceManager::ensureEmbeddingModelReadySync(const std::string& requestedModel,
-                                              std::function<void(const ModelLoadEvent&)> progress,
-                                              int timeoutMs, bool keepHot, bool warmup) {
-    auto provider = loadModelProvider();
-    if (!provider || !provider->isAvailable()) {
-        return Error{ErrorCode::InvalidState, "Model provider not available"};
-    }
-
-    std::string model = requestedModel;
-    if (model.empty()) {
-        try {
-            model = resolvePreferredModel();
-        } catch (...) {
-        }
-    }
-    if (model.empty()) {
-        model = embeddingModelName_;
-    }
-    if (model.empty()) {
-        try {
-            auto loaded = provider->getLoadedModels();
-            if (!loaded.empty()) {
-                model = loaded.front();
-            }
-        } catch (...) {
-        }
-    }
-    if (model.empty()) {
-        return Error{ErrorCode::NotFound, "No embedding model configured"};
-    }
-
-    const auto timeout = std::chrono::milliseconds(resolveEmbeddingLoadTimeoutMs(timeoutMs));
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-
-    auto isReadyUnderLock = [&]() {
-        bool loaded = false;
-        try {
-            loaded = provider->isModelLoaded(model);
-        } catch (...) {
-            loaded = false;
-        }
-        if (!loaded) {
-            warmedEmbeddingModels_.erase(model);
-            if (hotEmbeddingModel_ == model) {
-                hotEmbeddingModel_.clear();
-            }
-            return false;
-        }
-        return !warmup || warmedEmbeddingModels_.contains(model);
-    };
-
-    {
-        std::unique_lock lk(embeddingModelReadyMutex_);
-        while (embeddingModelReadyActive_) {
-            if (!embeddingModelReadyCv_.wait_until(
-                    lk, deadline, [this]() { return !embeddingModelReadyActive_; })) {
-                return Error{ErrorCode::Timeout,
-                             "Timed out waiting for another embedding model warmup"};
-            }
-        }
-
-        if (isReadyUnderLock()) {
-            if (keepHot) {
-                hotEmbeddingModel_ = model;
-            }
-            return model;
-        }
-
-        embeddingModelReadyActive_ = true;
-        embeddingModelReadyActiveModel_ = model;
-    }
-
-    struct ReadyGuard {
-        ServiceManager* self;
-        ~ReadyGuard() {
-            std::lock_guard lk(self->embeddingModelReadyMutex_);
-            self->embeddingModelReadyActive_ = false;
-            self->embeddingModelReadyActiveModel_.clear();
-            self->embeddingModelReadyCv_.notify_all();
-        }
-    } readyGuard{this};
-
-    const auto providerProgress = [progress, model](const ModelLoadEvent& ev) {
-        if (!progress) {
-            return;
-        }
-        if (!ev.modelName.empty() && ev.modelName != model) {
-            return;
-        }
-        progress(ev);
-    };
-    provider->setProgressCallback(providerProgress);
-    auto progressReset = std::unique_ptr<void, std::function<void(void*)>>(
-        reinterpret_cast<void*>(1), [provider](void*) {
-            try {
-                provider->setProgressCallback({});
-            } catch (...) {
-            }
-        });
-
-    bool appliedHotDuringLoad = false;
-    if (!provider->isModelLoaded(model)) {
-        emitModelLoadProgress(progress, model, "loading", "Loading embedding model");
-        Result<void> loadResult;
-        if (keepHot) {
-            loadResult = provider->loadModelWithOptions(model, makeHotLoadOptions(true));
-            appliedHotDuringLoad = true;
-        } else {
-            loadResult = provider->loadModel(model);
-        }
-        if (!loadResult) {
-            emitModelLoadProgress(progress, model, "failed",
-                                  "Failed to load embedding model: " + loadResult.error().message);
-            return loadResult.error();
-        }
-    }
-
-    if (warmup) {
-        bool needsWarm = false;
-        {
-            std::lock_guard lk(embeddingModelReadyMutex_);
-            needsWarm = !warmedEmbeddingModels_.contains(model);
-        }
-        if (needsWarm) {
-            emitModelLoadProgress(progress, model, "warming", "Warming embedding model");
-            auto warmupResult = provider->generateBatchEmbeddingsFor(model, embeddingWarmupTexts());
-            if (!warmupResult) {
-                emitModelLoadProgress(progress, model, "failed",
-                                      "Embedding model warmup failed: " +
-                                          warmupResult.error().message);
-                return warmupResult.error();
-            }
-            std::lock_guard lk(embeddingModelReadyMutex_);
-            warmedEmbeddingModels_.insert(model);
-        }
-    }
-
-    if (keepHot) {
-        std::string previousHot;
-        {
-            std::lock_guard lk(embeddingModelReadyMutex_);
-            previousHot = hotEmbeddingModel_;
-            hotEmbeddingModel_ = model;
-        }
-        if (!previousHot.empty() && previousHot != model && provider->isModelLoaded(previousHot)) {
-            (void)provider->loadModelWithOptions(previousHot, makeHotLoadOptions(false));
-        }
-        if (!appliedHotDuringLoad && provider->isModelLoaded(model)) {
-            (void)provider->loadModelWithOptions(model, makeHotLoadOptions(true));
-        }
-    }
-
-    emitModelLoadProgress(progress, model, "completed", "Embedding model ready");
-    return model;
-}
-
 boost::asio::awaitable<Result<std::string>>
 ServiceManager::co_ensureEmbeddingModelReady(const std::string& requestedModel,
                                              std::function<void(const ModelLoadEvent&)> progress,
@@ -3686,10 +3388,10 @@ ServiceManager::co_ensureEmbeddingModelReady(const std::string& requestedModel,
 }
 
 bool ServiceManager::startEmbeddingWarmupIfConfigured() {
-    if (!embeddingPreloadOnStartup_) {
+    if (!embeddingLifecycle_.preloadOnStartup()) {
         return false;
     }
-    embeddingPreloadOnStartup_ = false;
+    embeddingLifecycle_.setPreloadOnStartup(false);
 
     std::shared_ptr<ServiceManager> self;
     try {
@@ -3720,10 +3422,6 @@ bool ServiceManager::startEmbeddingWarmupIfConfigured() {
     return true;
 }
 
-std::string ServiceManager::resolvePreferredModel() const {
-    return ConfigResolver::resolvePreferredModel(config_, resolvedDataDir_);
-}
-
 boost::asio::awaitable<std::shared_ptr<yams::search::SearchEngine>>
 ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& /*token*/,
                                bool includeEmbeddingGenerator) {
@@ -3732,9 +3430,9 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
     auto modelProvider = loadModelProvider();
     if (includeEmbeddingGenerator && modelProvider && modelProvider->isAvailable()) {
         try {
-            gen = embeddingModelName_.empty()
+            gen = embeddingLifecycle_.modelName().empty()
                       ? modelProvider->getEmbeddingGenerator()
-                      : modelProvider->getEmbeddingGenerator(embeddingModelName_);
+                      : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
         } catch (...) {
         }
     }
@@ -3795,10 +3493,11 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
             pluginManager_->__test_setEmbeddingDegraded(degraded, error);
         } else {
             if (degraded) {
-                embeddingFsm_.dispatch(
+                embeddingLifecycle_.fsm().dispatch(
                     ProviderDegradedEvent{error.empty() ? std::string{"test"} : error});
             } else {
-                embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, 0});
+                embeddingLifecycle_.fsm().dispatch(
+                    ModelLoadedEvent{embeddingLifecycle_.modelName(), 0});
             }
         }
     } catch (...) {
@@ -3811,15 +3510,7 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
         return;
     }
 
-    if (!hash.empty()) {
-        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
-        const bool wasEmpty = topologyDirtyHashes_.empty();
-        topologyDirtyHashes_.insert(hash);
-        if (wasEmpty) {
-            std::lock_guard<std::mutex> telemetryLock(topologyTelemetryMutex_);
-            topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
-        }
-    }
+    topologyManager_.markDirty(hash);
 
     PostIngestQueue::Task task{hash, mime};
     searchEngineManager_.noteLexicalDeltaQueued();
@@ -3845,379 +3536,32 @@ void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hash
     }
     if (!tasks.empty()) {
         searchEngineManager_.noteLexicalDeltaQueued(tasks.size());
-        {
-            std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
-            const bool wasEmpty = topologyDirtyHashes_.empty();
-            for (const auto& task : tasks) {
-                topologyDirtyHashes_.insert(task.hash);
-            }
-            if (wasEmpty) {
-                std::lock_guard<std::mutex> telemetryLock(topologyTelemetryMutex_);
-                topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
-            }
-        }
+        topologyManager_.markDirtyBatch(hashes);
         piq->enqueueBatch(std::move(tasks));
     }
 }
 
 Result<ServiceManager::TopologyRebuildStats>
-ServiceManager::runTopologyRebuild(const std::string& reason, bool dryRun,
-                                   const std::vector<std::string>& documentHashes) {
-    auto metadataRepo = getMetadataRepo();
-    auto kgStore = getKgStore();
-    auto vectorDb = getVectorDatabase();
-    if (!metadataRepo || !kgStore || !vectorDb) {
-        return Result<ServiceManager::TopologyRebuildStats>(
-            Error{ErrorCode::InvalidState,
-                  "topology rebuild requires metadata, KG store, and vector database"});
-    }
-
-    auto metadataIface = std::static_pointer_cast<metadata::IMetadataRepository>(metadataRepo);
-    topology::MetadataKgTopologyArtifactStore store(metadataIface, kgStore);
-    auto extractor =
-        std::make_shared<topology::TopologyInputExtractor>(metadataIface, kgStore, vectorDb);
-    // P3.1: select topology engine via the factory. Unknown/empty keys resolve
-    // to "connected", preserving the previous hardcoded behavior.
-    const std::string_view algorithmKey =
-        topology::resolveFactoryKey(tuningConfig_.topologyAlgorithm);
-    auto engine = topology::makeEngine(algorithmKey);
-    if (algorithmKey != tuningConfig_.topologyAlgorithm) {
-        spdlog::info("[topology] requested algorithm '{}' not registered; using '{}'",
-                     tuningConfig_.topologyAlgorithm, algorithmKey);
-    }
-
-    std::optional<topology::TopologyArtifactBatch> latestBatch;
-    {
-        auto latestResult = store.loadLatest();
-        if (!latestResult) {
-            return Result<ServiceManager::TopologyRebuildStats>(latestResult.error());
-        }
-        latestBatch = std::move(latestResult.value());
-    }
-
-    std::vector<std::string> rebuildHashes = documentHashes;
-    topology::TopologyDirtyRegion dirtyRegion;
-    topology::TopologyExtractionStats seedExtractionStats;
-    topology::TopologyUpdateStats updateStats;
-    if (!documentHashes.empty()) {
-        topology::TopologyExtractionConfig seedConfig;
-        seedConfig.documentHashes = documentHashes;
-        seedConfig.limit = static_cast<int>(documentHashes.size());
-        seedConfig.maxNeighborsPerDocument = 32;
-        seedConfig.includeEmbeddings = true;
-        seedConfig.includeMetadata = false;
-        seedConfig.requireEmbeddings = false;
-        seedConfig.requireGraphNode = false;
-
-        topology::TopologyBuildConfig regionConfig;
-        regionConfig.mode = topology::TopologyBuildMode::Incremental;
-        regionConfig.inputKind = topology::TopologyInputKind::Hybrid;
-        regionConfig.reciprocalOnly = true;
-        regionConfig.maxNeighborsPerDocument = seedConfig.maxNeighborsPerDocument;
-
-        auto seedExtracted = extractor->extract(seedConfig, &seedExtractionStats);
-        if (!seedExtracted) {
-            return Result<ServiceManager::TopologyRebuildStats>(seedExtracted.error());
-        }
-
-        if (latestBatch.has_value()) {
-            auto dirtyRegionResult =
-                engine->defineDirtyRegion(*latestBatch, seedExtracted.value(), regionConfig);
-            if (!dirtyRegionResult) {
-                return Result<ServiceManager::TopologyRebuildStats>(dirtyRegionResult.error());
-            }
-            dirtyRegion = std::move(dirtyRegionResult.value());
-            if (!dirtyRegion.expandedDocumentHashes.empty()) {
-                rebuildHashes = dirtyRegion.expandedDocumentHashes;
-            }
-        }
-    }
-
-    topology::TopologyExtractionConfig extractionConfig;
-    extractionConfig.documentHashes = rebuildHashes;
-    extractionConfig.limit = rebuildHashes.empty() ? 0 : static_cast<int>(rebuildHashes.size());
-    extractionConfig.maxNeighborsPerDocument = 32;
-    extractionConfig.includeEmbeddings = true;
-    extractionConfig.includeMetadata = true;
-    extractionConfig.requireEmbeddings = true;
-    extractionConfig.requireGraphNode = true;
-
-    topology::TopologyBuildConfig buildConfig;
-    buildConfig.mode = topology::TopologyBuildMode::Approximate;
-    buildConfig.inputKind = topology::TopologyInputKind::Hybrid;
-    buildConfig.reciprocalOnly = true;
-    buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
-
-    topology::TopologyExtractionStats extractionStats;
-    auto extracted = extractor->extract(extractionConfig, &extractionStats);
-    if (!extracted) {
-        return Result<ServiceManager::TopologyRebuildStats>(extracted.error());
-    }
-
-    if (!documentHashes.empty() && extracted.value().empty()) {
-        ServiceManager::TopologyRebuildStats skipped;
-        skipped.skipped = true;
-        skipped.dryRun = dryRun;
-        skipped.fullRebuild = false;
-        skipped.reason = reason;
-        skipped.documentsRequested = extractionStats.documentsRequested;
-        skipped.documentsProcessed = 0;
-        skipped.documentsMissingEmbeddings = extractionStats.documentsMissingEmbeddings;
-        skipped.documentsMissingGraphNodes = extractionStats.documentsMissingGraphNodes;
-        skipped.neighborEdgesScanned = extractionStats.neighborEdgesScanned;
-        skipped.neighborsReturned = extractionStats.neighborsReturned;
-        skipped.dirtySeedCount = seedExtractionStats.seedDocuments;
-        skipped.dirtyRegionDocs = extractionStats.regionDocuments;
-        skipped.issues.push_back(
-            "dirty-region extraction returned no ready docs; deferring topology rebuild");
-        return skipped;
-    }
-
-    Result<topology::TopologyArtifactBatch> artifactResult = [&]() {
-        if (latestBatch.has_value() && !rebuildHashes.empty()) {
-            return engine->updateArtifacts(*latestBatch, extracted.value(), buildConfig,
-                                           &updateStats);
-        }
-        return engine->buildArtifacts(extracted.value(), buildConfig);
-    }();
-    if (!artifactResult) {
-        return Result<ServiceManager::TopologyRebuildStats>(artifactResult.error());
-    }
-
-    auto& artifacts = artifactResult.value();
-    if (artifacts.topologyEpoch == 0) {
-        // Stamp monotonic topology epoch. Distinct from snapshotId (a timestamp) so
-        // query-side code can detect topology drift vs the artifacts that seeded the
-        // route. updateArtifacts may already have stamped it when merging from an
-        // existing batch.
-        artifacts.topologyEpoch = latestBatch.has_value() ? latestBatch->topologyEpoch + 1 : 1;
-    }
-
-    ServiceManager::TopologyRebuildStats stats;
-    stats.reason = reason;
-    stats.dryRun = dryRun;
-    stats.fullRebuild = documentHashes.empty();
-    stats.snapshotId = artifacts.snapshotId;
-    stats.algorithm = artifacts.algorithm;
-    stats.documentsRequested = extractionStats.documentsRequested;
-    stats.documentsProcessed = extractionStats.documentsReturned;
-    stats.documentsMissingEmbeddings = extractionStats.documentsMissingEmbeddings;
-    stats.documentsMissingGraphNodes = extractionStats.documentsMissingGraphNodes;
-    stats.neighborEdgesScanned = extractionStats.neighborEdgesScanned;
-    stats.neighborsReturned = extractionStats.neighborsReturned;
-    stats.clustersBuilt = artifacts.clusters.size();
-    stats.membershipsBuilt = artifacts.memberships.size();
-    stats.dirtySeedCount = updateStats.dirtySeedCount > 0 ? updateStats.dirtySeedCount
-                                                          : seedExtractionStats.seedDocuments;
-    stats.dirtyRegionDocs = updateStats.dirtyRegionDocs > 0 ? updateStats.dirtyRegionDocs
-                                                            : extractionStats.regionDocuments;
-    stats.coalescedDirtySets = updateStats.coalescedDirtySets;
-    stats.fallbackFullRebuilds = updateStats.fallbackFullRebuilds;
-    // P3.1: surface the factory key so downstream diagnostics (benchmark history,
-    // structured logs) can correlate artifact labels with the algorithm requested.
-    stats.issues.push_back(std::string{"topology_algorithm="} + std::string{algorithmKey});
-
-    if (!documentHashes.empty()) {
-        stats.issues.push_back("incremental topology rebuild expanded " +
-                               std::to_string(documentHashes.size()) + " seed docs to " +
-                               std::to_string(rebuildHashes.size()) + " docs");
-        stats.issues.push_back(
-            std::string{"dirty-region expansion="} +
-            (dirtyRegion.includedPriorClusterMembers ? "prior_cluster+" : "") +
-            (dirtyRegion.includedSemanticNeighbors ? "neighbors" : "seeds_only"));
-        if (dirtyRegion.requiresWiderRebuild) {
-            stats.issues.push_back("dirty-region requested wider rebuild fallback");
-        }
-    }
-
-    if (artifacts.memberships.empty()) {
-        stats.skipped = true;
-        stats.issues.push_back(
-            "topology rebuild produced no memberships; graph nodes or embeddings may be missing");
-        return stats;
-    }
-
-    if (!dryRun) {
-        auto storeResult = store.storeBatch(artifacts);
-        if (!storeResult) {
-            return Result<ServiceManager::TopologyRebuildStats>(storeResult.error());
-        }
-        stats.stored = true;
-        publishedTopologyEpoch_.store(artifacts.topologyEpoch, std::memory_order_release);
-    }
-
-    if (stats.stored && stats.fullRebuild) {
-        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
-        topologyDirtyHashes_.clear();
-        std::lock_guard<std::mutex> telemetryLock(topologyTelemetryMutex_);
-        topologyTelemetry_.dirtySinceUnixMillis = 0;
-    }
-
-    return stats;
-}
-
-Result<ServiceManager::TopologyRebuildStats>
 ServiceManager::rebuildTopologyArtifacts(const std::string& reason, bool dryRun,
                                          const std::vector<std::string>& documentHashes) {
-    bool expected = false;
-    if (!topologyRebuildRunning_.compare_exchange_strong(expected, true,
-                                                         std::memory_order_acq_rel)) {
-        TopologyRebuildStats skipped;
-        skipped.skipped = true;
-        skipped.dryRun = dryRun;
-        skipped.fullRebuild = documentHashes.empty();
-        skipped.reason = reason;
-        skipped.issues.push_back("topology rebuild already in progress");
-        return skipped;
-    }
-
-    struct Guard {
-        std::atomic<bool>& running;
-        ~Guard() { running.store(false, std::memory_order_release); }
-    } guard{topologyRebuildRunning_};
-
-    const auto startedAt = std::chrono::steady_clock::now();
-    {
-        std::lock_guard<std::mutex> lock(topologyTelemetryMutex_);
-        ++topologyTelemetry_.rebuildsTotal;
-        topologyTelemetry_.lastReason = reason;
-        topologyTelemetry_.lastRunSucceeded = false;
-        topologyTelemetry_.lastRunSkipped = false;
-        topologyTelemetry_.lastRunStored = false;
-        topologyTelemetry_.lastRunFullRebuild = documentHashes.empty();
-        topologyTelemetry_.lastStartedUnixSeconds = nowUnixSeconds();
-        topologyTelemetry_.lastDocumentsRequested = documentHashes.size();
-    }
-
-    auto result = runTopologyRebuild(reason, dryRun, documentHashes);
-    if (!result) {
-        spdlog::warn("[ServiceManager] Topology rebuild failed (reason={}): {}", reason,
-                     result.error().message);
-        std::lock_guard<std::mutex> lock(topologyTelemetryMutex_);
-        ++topologyTelemetry_.rebuildFailuresTotal;
-        topologyTelemetry_.lastDurationMs =
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::steady_clock::now() - startedAt)
-                                           .count());
-        return Result<ServiceManager::TopologyRebuildStats>(result.error());
-    }
-
-    const auto& stats = result.value();
-    {
-        std::lock_guard<std::mutex> lock(topologyTelemetryMutex_);
-        topologyTelemetry_.lastRunSucceeded = !stats.skipped;
-        topologyTelemetry_.lastRunSkipped = stats.skipped;
-        topologyTelemetry_.lastRunStored = stats.stored;
-        topologyTelemetry_.lastRunFullRebuild = stats.fullRebuild;
-        topologyTelemetry_.lastCompletedUnixSeconds = nowUnixSeconds();
-        topologyTelemetry_.lastDurationMs =
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::steady_clock::now() - startedAt)
-                                           .count());
-        topologyTelemetry_.lastSnapshotId = stats.snapshotId;
-        topologyTelemetry_.lastAlgorithm = stats.algorithm;
-        topologyTelemetry_.lastDocumentsRequested = stats.documentsRequested;
-        topologyTelemetry_.lastDocumentsProcessed = stats.documentsProcessed;
-        topologyTelemetry_.lastDocumentsMissingEmbeddings = stats.documentsMissingEmbeddings;
-        topologyTelemetry_.lastDocumentsMissingGraphNodes = stats.documentsMissingGraphNodes;
-        topologyTelemetry_.lastClustersBuilt = stats.clustersBuilt;
-        topologyTelemetry_.lastMembershipsBuilt = stats.membershipsBuilt;
-        topologyTelemetry_.lastDirtySeedCount = stats.dirtySeedCount;
-        topologyTelemetry_.lastDirtyRegionDocs = stats.dirtyRegionDocs;
-        topologyTelemetry_.lastCoalescedDirtySets = stats.coalescedDirtySets;
-        topologyTelemetry_.lastFallbackFullRebuilds = stats.fallbackFullRebuilds;
-    }
-    if (stats.skipped) {
-        spdlog::info("[ServiceManager] Topology rebuild skipped (reason={}, docs={}, issues={})",
-                     reason, stats.documentsProcessed,
-                     stats.issues.empty() ? 0 : stats.issues.size());
-    } else {
-        spdlog::info("[ServiceManager] Topology rebuild complete (reason={}, docs={}, clusters={}, "
-                     "memberships={}, stored={}, snapshot={})",
-                     reason, stats.documentsProcessed, stats.clustersBuilt, stats.membershipsBuilt,
-                     stats.stored ? 1 : 0, stats.snapshotId);
-    }
-    return result;
-}
-
-ServiceManager::TopologyTelemetrySnapshot ServiceManager::getTopologyTelemetrySnapshot() const {
-    TopologyTelemetrySnapshot snapshot;
-    {
-        std::lock_guard<std::mutex> lock(topologyTelemetryMutex_);
-        snapshot = topologyTelemetry_;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
-        snapshot.dirtyDocumentCount = topologyDirtyHashes_.size();
-    }
-
-    snapshot.rebuildRunning = topologyRebuildRunning_.load(std::memory_order_acquire);
-    const auto nowMs = nowUnixMillis();
-    if (snapshot.lastCompletedUnixSeconds > 0) {
-        const auto completedMs = snapshot.lastCompletedUnixSeconds * 1000ULL;
-        snapshot.lastSuccessAgeMs = nowMs > completedMs ? nowMs - completedMs : 0;
-    }
-    if (snapshot.dirtyDocumentCount > 0 && snapshot.dirtySinceUnixMillis > 0) {
-        snapshot.rebuildLagMs =
-            nowMs > snapshot.dirtySinceUnixMillis ? nowMs - snapshot.dirtySinceUnixMillis : 0;
-    } else {
-        snapshot.rebuildLagMs = 0;
-    }
-    if (snapshot.rebuildRunning && snapshot.lastStartedUnixSeconds > 0) {
-        const auto startedMs = snapshot.lastStartedUnixSeconds * 1000ULL;
-        snapshot.rebuildRunningAgeMs = nowMs > startedMs ? nowMs - startedMs : 0;
-    } else {
-        snapshot.rebuildRunningAgeMs = 0;
-    }
-    snapshot.artifactsFresh = !snapshot.rebuildRunning && snapshot.dirtyDocumentCount == 0 &&
-                              snapshot.lastRunStored && snapshot.lastCompletedUnixSeconds > 0;
-    return snapshot;
+    return topologyManager_.rebuildArtifacts(reason, dryRun, documentHashes,
+                                             tuningConfig_.topologyAlgorithm);
 }
 
 void ServiceManager::requestTopologyRebuild(const std::string& reason,
                                             const std::vector<std::string>& documentHashes) {
-    if (shutdownInvoked_.load(std::memory_order_acquire)) {
+    if (shutdownInvoked_.load(std::memory_order_acquire))
         return;
-    }
 
-    bool hasDirty = false;
-    {
-        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
-        const bool wasEmpty = topologyDirtyHashes_.empty();
-        for (const auto& hash : documentHashes) {
-            if (!hash.empty()) {
-                topologyDirtyHashes_.insert(hash);
-            }
-        }
-        hasDirty = !topologyDirtyHashes_.empty();
-        if (wasEmpty && !topologyDirtyHashes_.empty()) {
-            std::lock_guard<std::mutex> telemetryLock(topologyTelemetryMutex_);
-            topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
-        }
-    }
-
-    if (!hasDirty) {
+    topologyManager_.markDirtyBatch(documentHashes);
+    if (!topologyManager_.hasDirtyHashes())
         return;
-    }
 
-    // Gate async scheduling on FSM reaching Ready. Commit 036e5e7d wired
-    // embedding batch completion to this path via setTopologyRebuildRequester;
-    // during startup the embedding preload fires here before buildEngine() has
-    // a chance to complete, and the posted worker task (with its 1s sleep and
-    // self-rescheduling on in-flight queues) competes with the buildEngine
-    // coroutine on the worker executor, delaying SearchEngineBuiltEvent and
-    // the FSM → Ready transition. Dirty hashes stay accumulated; the drain
-    // runs once from the Ready dispatch site.
-    if (!serviceFsm_.isReady()) {
+    if (!serviceFsm_.isReady())
         return;
-    }
 
-    bool expected = false;
-    if (!topologyRebuildScheduled_.compare_exchange_strong(expected, true,
-                                                           std::memory_order_acq_rel)) {
+    if (!topologyManager_.tryScheduleRebuild())
         return;
-    }
 
     auto weakSelf = weak_from_this();
     auto executor = getWorkerExecutor();
@@ -4226,9 +3570,8 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
     debounceTimer->async_wait([weakSelf, reason,
                                debounceTimer](const boost::system::error_code& ec) mutable {
         if (ec) {
-            if (auto self = weakSelf.lock()) {
-                self->topologyRebuildScheduled_.store(false, std::memory_order_release);
-            }
+            if (auto self = weakSelf.lock())
+                self->topologyManager_.clearScheduled();
             return;
         }
         if (auto self = weakSelf.lock()) {
@@ -4247,22 +3590,15 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
             if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
                 postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||
                 kgInFlight > 0) {
-                self->topologyRebuildScheduled_.store(false, std::memory_order_release);
+                self->topologyManager_.clearScheduled();
                 self->requestTopologyRebuild(reason);
                 return;
             }
 
-            std::vector<std::string> rebuildHashes;
-            {
-                std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);
-                rebuildHashes.assign(self->topologyDirtyHashes_.begin(),
-                                     self->topologyDirtyHashes_.end());
-                self->topologyDirtyHashes_.clear();
-            }
-            self->topologyRebuildScheduled_.store(false, std::memory_order_release);
-            if (rebuildHashes.empty()) {
+            auto rebuildHashes = self->topologyManager_.drainDirtyHashes();
+            self->topologyManager_.clearScheduled();
+            if (rebuildHashes.empty())
                 return;
-            }
 
             if (auto metadataRepo = self->getMetadataRepo()) {
                 auto statsResult = metadataRepo->getCorpusStats();
@@ -4284,24 +3620,13 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                     const bool overlayHeavy =
                         rebuildHashes.size() >= kTopologyOverlayDirtyThreshold ||
                         freshness.lexicalDeltaRecentDocs >= kTopologyOverlayDirtyThreshold;
-                    // Test-only escape hatch: allow small/immediate rebuilds to bypass
-                    // the 5-minute overlay-age gate. Production never sets this.
                     const bool forceImmediate = []() {
                         if (const char* v = std::getenv("YAMS_TEST_FORCE_TOPOLOGY_REBUILD"))
                             return v[0] != '\0' && v[0] != '0';
                         return false;
                     }();
                     if (!overlayHeavy && !overlayAged && !forceImmediate) {
-                        std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);
-                        const bool wasEmpty = self->topologyDirtyHashes_.empty();
-                        for (const auto& hash : rebuildHashes) {
-                            self->topologyDirtyHashes_.insert(hash);
-                        }
-                        if (wasEmpty && !rebuildHashes.empty()) {
-                            std::lock_guard<std::mutex> telemetryLock(
-                                self->topologyTelemetryMutex_);
-                            self->topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
-                        }
+                        self->topologyManager_.restoreDirtyHashes(rebuildHashes);
                         self->requestTopologyRebuild(reason);
                         return;
                     }
@@ -4312,30 +3637,9 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
             if (!result) {
                 spdlog::warn("[ServiceManager] Async topology rebuild failed (reason={}): {}",
                              reason, result.error().message);
-                std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);
-                const bool wasEmpty = self->topologyDirtyHashes_.empty();
-                for (const auto& hash : rebuildHashes) {
-                    self->topologyDirtyHashes_.insert(hash);
-                }
-                if (wasEmpty && !rebuildHashes.empty()) {
-                    std::lock_guard<std::mutex> telemetryLock(self->topologyTelemetryMutex_);
-                    self->topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
-                }
+                self->topologyManager_.restoreDirtyHashes(rebuildHashes);
             } else if (result.value().skipped) {
-                std::lock_guard<std::mutex> lock(self->topologyDirtyMutex_);
-                const bool wasEmpty = self->topologyDirtyHashes_.empty();
-                for (const auto& hash : rebuildHashes) {
-                    self->topologyDirtyHashes_.insert(hash);
-                }
-                if (wasEmpty && !rebuildHashes.empty()) {
-                    std::lock_guard<std::mutex> telemetryLock(self->topologyTelemetryMutex_);
-                    self->topologyTelemetry_.dirtySinceUnixMillis = nowUnixMillis();
-                }
-            } else {
-                std::lock_guard<std::mutex> telemetryLock(self->topologyTelemetryMutex_);
-                if (self->topologyDirtyHashes_.empty()) {
-                    self->topologyTelemetry_.dirtySinceUnixMillis = 0;
-                }
+                self->topologyManager_.restoreDirtyHashes(rebuildHashes);
             }
         }
     });

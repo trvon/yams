@@ -73,35 +73,6 @@ bool is_client_disconnect(const std::string& msg) {
            msg.find("Broken pipe") != std::string::npos || msg.find("EPIPE") != std::string::npos ||
            msg.find("ECONNRESET") != std::string::npos;
 }
-// CLI priority requests use a dedicated thread pool to ensure responsiveness
-// even when the worker pool is saturated with heavy operations (e.g., ingestion).
-// Search is intentionally excluded from that small pool by `is_heavy_request()` below so
-// sustained search traffic does not bottleneck on the CLI pool before reaching worker capacity.
-bool is_cli_priority_request(const Request& request) {
-    // Retrieval operations expected to stay responsive for interactive use.
-    if (std::holds_alternative<SearchRequest>(request) ||
-        std::holds_alternative<GetRequest>(request) ||
-        std::holds_alternative<GetInitRequest>(request) ||
-        std::holds_alternative<GetChunkRequest>(request) ||
-        std::holds_alternative<GetEndRequest>(request) ||
-        std::holds_alternative<CatRequest>(request) ||
-        std::holds_alternative<PruneRequest>(request)) {
-        return true;
-    }
-    // Daemon health/control operations - must remain responsive under load
-    if (std::holds_alternative<StatusRequest>(request) ||
-        std::holds_alternative<PingRequest>(request) ||
-        std::holds_alternative<ShutdownRequest>(request)) {
-        return true;
-    }
-    return false;
-}
-
-bool is_heavy_request(const Request& request) {
-    return std::holds_alternative<SearchRequest>(request) ||
-           std::holds_alternative<GrepRequest>(request) ||
-           std::holds_alternative<ListRequest>(request);
-}
 bool stream_trace_enabled_local() {
     return false;
 }
@@ -718,14 +689,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             auto request_id = message.requestId;
                             auto expects_streaming = message.expectsStreamingResponse;
                             auto routed_request = std::move(*request_ptr);
-                            auto spawn_exec = config_.worker_executor ? config_.worker_executor
-                                                                      : sock->get_executor();
-                            if (config_.cli_executor && !is_heavy_request(routed_request) &&
-                                is_cli_priority_request(routed_request)) {
-                                spawn_exec = config_.cli_executor;
-                                spdlog::debug("[MUX_SPAWN] req_id={} using CLI executor",
-                                              request_id);
-                            }
+                            auto spawn_exec = config_.cli_executor ? config_.cli_executor
+                                                                   : (config_.worker_executor
+                                                                          ? config_.worker_executor
+                                                                          : sock->get_executor());
                             if (stream_trace) {
                                 spdlog::info(
                                     "stream-trace: [conn={}] spawning req_id={} type={} expects={}",

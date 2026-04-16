@@ -846,9 +846,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
         handlerConfig.enable_streaming = true;
         handlerConfig.enable_multiplexing = true;
-        // Multiplexed request coroutines are co_spawned on worker_executor
-        // (WorkCoordinator). offload_to_worker posts heavy SQL to the same pool.
-        // Thread count is governed by YAMS_WORK_COORDINATOR_THREADS / TuneAdvisor.
+        // Request coroutines run on the dedicated RequestExecutor (cli_executor).
         if (dispatcher_) {
             try {
                 handlerConfig.worker_executor = dispatcher_->getWorkerExecutor();

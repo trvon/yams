@@ -47,6 +47,11 @@
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
+#include <yams/daemon/components/EmbeddingLifecycleManager.h>
+#include <yams/daemon/components/IngestMetricsPublisher.h>
+#include <yams/daemon/components/RequestExecutor.h>
+#include <yams/daemon/components/SearchAdmissionController.h>
+#include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
@@ -148,7 +153,10 @@ public:
     Result<std::string>
     ensureEmbeddingModelReadySync(const std::string& requestedModel,
                                   std::function<void(const ModelLoadEvent&)> progress = {},
-                                  int timeoutMs = 0, bool keepHot = true, bool warmup = true);
+                                  int timeoutMs = 0, bool keepHot = true, bool warmup = true) {
+        return embeddingLifecycle_.ensureModelReadySync(requestedModel, std::move(progress),
+                                                        timeoutMs, keepHot, warmup);
+    }
     boost::asio::awaitable<Result<std::string>>
     co_ensureEmbeddingModelReady(const std::string& requestedModel,
                                  std::function<void(const ModelLoadEvent&)> progress = {},
@@ -158,7 +166,7 @@ public:
     SearchEngineSnapshot getSearchEngineStatusSnapshot() const {
         return searchEngineManager_.getSnapshot();
     }
-    const std::string& getEmbeddingModelName() const { return embeddingModelName_; }
+    const std::string& getEmbeddingModelName() const { return embeddingLifecycle_.modelName(); }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
         if (vectorSystemManager_) {
             auto db = vectorSystemManager_->getVectorDatabase();
@@ -192,49 +200,17 @@ public:
         std::lock_guard<std::mutex> lk(poolMutex_);
         return readConnectionPool_;
     }
-    void onSearchRequestQueued() { searchQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void onSearchRequestQueued() { searchAdmission_.onQueued(); }
     bool tryStartSearchRequest(std::uint32_t concurrencyCap) {
-        if (concurrencyCap == 0) {
-            std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
-            while (queued > 0 && !searchQueued_.compare_exchange_weak(queued, queued - 1,
-                                                                      std::memory_order_relaxed)) {
-            }
-            searchActive_.fetch_add(1, std::memory_order_relaxed);
-            return true;
-        }
-        std::uint32_t active = searchActive_.load(std::memory_order_relaxed);
-        while (true) {
-            if (active >= concurrencyCap) {
-                return false;
-            }
-            if (searchActive_.compare_exchange_weak(active, active + 1,
-                                                    std::memory_order_relaxed)) {
-                std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
-                while (queued > 0 && !searchQueued_.compare_exchange_weak(
-                                         queued, queued - 1, std::memory_order_relaxed)) {
-                }
-                return true;
-            }
-        }
+        return searchAdmission_.tryStart(concurrencyCap);
     }
-    void onSearchRequestFinished() {
-        std::uint32_t active = searchActive_.load(std::memory_order_relaxed);
-        while (active > 0 && !searchActive_.compare_exchange_weak(active, active - 1,
-                                                                  std::memory_order_relaxed)) {
-        }
-    }
-    void onSearchRequestRejected() {
-        std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
-        while (queued > 0 && !searchQueued_.compare_exchange_weak(queued, queued - 1,
-                                                                  std::memory_order_relaxed)) {
-        }
-    }
-    std::uint32_t getSearchActiveRequests() const {
-        return searchActive_.load(std::memory_order_relaxed);
-    }
-    void onSnapshotPersisted() { snapshotsPersisted_.fetch_add(1, std::memory_order_relaxed); }
+    void onSearchRequestFinished() { searchAdmission_.onFinished(); }
+    void onSearchRequestRejected() { searchAdmission_.onRejected(); }
+    std::uint32_t getSearchActiveRequests() const { return searchAdmission_.active(); }
+    SearchAdmissionController& getSearchAdmissionController() { return searchAdmission_; }
+    void onSnapshotPersisted() { metricsPublisher_.onSnapshotPersisted(); }
     std::uint64_t getSnapshotsPersistedCount() const {
-        return snapshotsPersisted_.load(std::memory_order_relaxed);
+        return metricsPublisher_.snapshotsPersistedCount();
     }
     struct IngestMetricsSnapshot {
         std::size_t queued;
@@ -261,29 +237,17 @@ public:
     };
 
     void publishIngestMetrics(std::size_t queued, std::size_t active) {
-        ingestQueued_.store(queued, std::memory_order_relaxed);
-        ingestActive_.store(active, std::memory_order_relaxed);
+        metricsPublisher_.publishIngest(queued, active);
     }
-    void publishIngestQueued(std::size_t queued) {
-        ingestQueued_.store(queued, std::memory_order_relaxed);
-    }
-    void publishIngestActive(std::size_t active) {
-        ingestActive_.store(active, std::memory_order_relaxed);
-    }
-    void setIngestWorkerTarget(std::size_t target) {
-        if (target < 1)
-            target = 1;
-        ingestWorkerTarget_.store(target, std::memory_order_relaxed);
-    }
-    std::size_t ingestWorkerTarget() const {
-        auto v = ingestWorkerTarget_.load(std::memory_order_relaxed);
-        return v == 0 ? 1 : v;
-    }
+    void publishIngestQueued(std::size_t queued) { metricsPublisher_.publishQueued(queued); }
+    void publishIngestActive(std::size_t active) { metricsPublisher_.publishActive(active); }
+    void setIngestWorkerTarget(std::size_t target) { metricsPublisher_.setWorkerTarget(target); }
+    std::size_t ingestWorkerTarget() const { return metricsPublisher_.workerTarget(); }
     IngestMetricsSnapshot getIngestMetricsSnapshot() const {
-        return {ingestQueued_.load(std::memory_order_relaxed),
-                ingestActive_.load(std::memory_order_relaxed),
-                ingestWorkerTarget_.load(std::memory_order_relaxed)};
+        auto s = metricsPublisher_.snapshot();
+        return {s.queued, s.active, s.target};
     }
+    IngestMetricsPublisher& getIngestMetricsPublisher() { return metricsPublisher_; }
     void enqueuePostIngest(const std::string& hash, const std::string& mime);
     void enqueuePostIngestBatch(const std::vector<std::string>& hashes, const std::string& mime);
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
@@ -310,7 +274,7 @@ public:
         snapshot.lexicalDeltaPublishedDocs = lexicalDelta.publishedDocs;
         snapshot.lexicalDeltaRecentDocs = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             lexicalDelta.recentDocs, std::numeric_limits<std::uint32_t>::max()));
-        snapshot.topologyEpoch = publishedTopologyEpoch_.load(std::memory_order_acquire);
+        snapshot.topologyEpoch = topologyManager_.publishedEpoch();
         const auto searchSnapshot = searchEngineManager_.getSnapshot();
         snapshot.awaitingDrain = searchSnapshot.state == SearchEngineState::AwaitingDrain;
         snapshot.lexicalReady = searchSnapshot.state == SearchEngineState::Ready;
@@ -324,16 +288,7 @@ public:
         return searchEngineManager_.getRecentLexicalDeltaHashes();
     }
     std::vector<std::string> getTopologyOverlayHashes(std::size_t limit = 64) const {
-        std::vector<std::string> hashes;
-        std::lock_guard<std::mutex> lock(topologyDirtyMutex_);
-        hashes.reserve(std::min(limit, topologyDirtyHashes_.size()));
-        for (const auto& hash : topologyDirtyHashes_) {
-            if (hashes.size() >= limit) {
-                break;
-            }
-            hashes.push_back(hash);
-        }
-        return hashes;
+        return topologyManager_.getOverlayHashes(limit);
     }
     yams::search::SearchEngine* getCachedSearchEngine() const {
         return searchEngineManager_.getCachedEngine();
@@ -413,70 +368,19 @@ public:
     void startRepairService(std::function<size_t()> activeConnFn);
     void stopRepairService();
 
-    struct TopologyRebuildStats {
-        bool skipped{false};
-        bool dryRun{false};
-        bool fullRebuild{true};
-        bool stored{false};
-        std::string reason;
-        std::string snapshotId;
-        std::string algorithm;
-        std::uint64_t documentsRequested{0};
-        std::uint64_t documentsProcessed{0};
-        std::uint64_t documentsMissingEmbeddings{0};
-        std::uint64_t documentsMissingGraphNodes{0};
-        std::uint64_t neighborEdgesScanned{0};
-        std::uint64_t neighborsReturned{0};
-        std::uint64_t clustersBuilt{0};
-        std::uint64_t membershipsBuilt{0};
-        std::uint64_t dirtySeedCount{0};
-        std::uint64_t dirtyRegionDocs{0};
-        std::uint64_t coalescedDirtySets{0};
-        std::uint64_t fallbackFullRebuilds{0};
-        std::vector<std::string> issues;
-    };
-
-    struct TopologyTelemetrySnapshot {
-        bool rebuildRunning{false};
-        bool artifactsFresh{false};
-        bool lastRunSucceeded{false};
-        bool lastRunSkipped{false};
-        bool lastRunFullRebuild{true};
-        bool lastRunStored{false};
-        std::uint64_t dirtyDocumentCount{0};
-        std::uint64_t dirtySinceUnixMillis{0};
-        std::uint64_t lastStartedUnixSeconds{0};
-        std::uint64_t lastCompletedUnixSeconds{0};
-        std::uint64_t lastSuccessAgeMs{0};
-        std::uint64_t rebuildLagMs{0};
-        std::uint64_t rebuildRunningAgeMs{0};
-        std::uint64_t lastDurationMs{0};
-        std::uint64_t rebuildsTotal{0};
-        std::uint64_t rebuildFailuresTotal{0};
-        std::uint64_t lastDocumentsRequested{0};
-        std::uint64_t lastDocumentsProcessed{0};
-        std::uint64_t lastDocumentsMissingEmbeddings{0};
-        std::uint64_t lastDocumentsMissingGraphNodes{0};
-        std::uint64_t lastClustersBuilt{0};
-        std::uint64_t lastMembershipsBuilt{0};
-        std::uint64_t lastDirtySeedCount{0};
-        std::uint64_t lastDirtyRegionDocs{0};
-        std::uint64_t lastCoalescedDirtySets{0};
-        std::uint64_t lastFallbackFullRebuilds{0};
-        std::string lastReason;
-        std::string lastSnapshotId;
-        std::string lastAlgorithm;
-    };
+    using TopologyRebuildStats = TopologyManager::RebuildStats;
+    using TopologyTelemetrySnapshot = TopologyManager::TelemetrySnapshot;
 
     Result<TopologyRebuildStats>
     rebuildTopologyArtifacts(const std::string& reason, bool dryRun = false,
                              const std::vector<std::string>& documentHashes = {});
     void requestTopologyRebuild(const std::string& reason,
                                 const std::vector<std::string>& documentHashes = {});
-    TopologyTelemetrySnapshot getTopologyTelemetrySnapshot() const;
-    bool isTopologyRebuildInProgress() const {
-        return topologyRebuildRunning_.load(std::memory_order_acquire);
+    TopologyTelemetrySnapshot getTopologyTelemetrySnapshot() const {
+        return topologyManager_.getTelemetrySnapshot();
     }
+    bool isTopologyRebuildInProgress() const { return topologyManager_.isRebuildInProgress(); }
+    TopologyManager& getTopologyManager() { return topologyManager_; }
 
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
         if (!walMetricsProvider_)
@@ -512,29 +416,37 @@ public:
     DatabaseManager* getDatabaseManager() const { return databaseManager_.get(); }
     SearchComponent* getSearchComponent() const { return searchComponent_.get(); }
 
-    // Worker pool metrics accessors
-    std::size_t getWorkerActive() const { return poolActive_.load(std::memory_order_relaxed); }
-    std::size_t getWorkerPosted() const { return poolPosted_.load(std::memory_order_relaxed); }
-    std::size_t getWorkerCompleted() const {
-        return poolCompleted_.load(std::memory_order_relaxed);
-    }
+    std::size_t getWorkerActive() const { return metricsPublisher_.workerActive(); }
+    std::size_t getWorkerPosted() const { return metricsPublisher_.workerPosted(); }
+    std::size_t getWorkerCompleted() const { return metricsPublisher_.workerCompleted(); }
     std::size_t getWorkerThreads() const {
         return workCoordinator_ ? workCoordinator_->getWorkerCount() : 0;
     }
 
-    // Embedding service metrics accessors
-    std::size_t getEmbeddingInFlightJobs() const;
-    std::size_t getEmbeddingQueuedJobs() const;
-    std::size_t getEmbeddingActiveInferSubBatches() const;
-    uint64_t getEmbeddingInferOldestMs() const;
-    uint64_t getEmbeddingInferStartedCount() const;
-    uint64_t getEmbeddingInferCompletedCount() const;
-    uint64_t getEmbeddingInferLastMs() const;
-    uint64_t getEmbeddingInferMaxMs() const;
-    uint64_t getEmbeddingInferWarnCount() const;
-    uint64_t getEmbeddingSemanticEdgesCreated() const;
-    uint64_t getEmbeddingSemanticDocsProcessed() const;
-    uint64_t getEmbeddingSemanticUpdateErrors() const;
+    std::size_t getEmbeddingInFlightJobs() const { return embeddingLifecycle_.inFlightJobs(); }
+    std::size_t getEmbeddingQueuedJobs() const { return embeddingLifecycle_.queuedJobs(); }
+    std::size_t getEmbeddingActiveInferSubBatches() const {
+        return embeddingLifecycle_.activeInferSubBatches();
+    }
+    uint64_t getEmbeddingInferOldestMs() const { return embeddingLifecycle_.inferOldestMs(); }
+    uint64_t getEmbeddingInferStartedCount() const {
+        return embeddingLifecycle_.inferStartedCount();
+    }
+    uint64_t getEmbeddingInferCompletedCount() const {
+        return embeddingLifecycle_.inferCompletedCount();
+    }
+    uint64_t getEmbeddingInferLastMs() const { return embeddingLifecycle_.inferLastMs(); }
+    uint64_t getEmbeddingInferMaxMs() const { return embeddingLifecycle_.inferMaxMs(); }
+    uint64_t getEmbeddingInferWarnCount() const { return embeddingLifecycle_.inferWarnCount(); }
+    uint64_t getEmbeddingSemanticEdgesCreated() const {
+        return embeddingLifecycle_.semanticEdgesCreated();
+    }
+    uint64_t getEmbeddingSemanticDocsProcessed() const {
+        return embeddingLifecycle_.semanticDocsProcessed();
+    }
+    uint64_t getEmbeddingSemanticUpdateErrors() const {
+        return embeddingLifecycle_.semanticUpdateErrors();
+    }
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
 
@@ -555,7 +467,7 @@ public:
         if (pluginManager_) {
             return pluginManager_->getEmbeddingProviderFsmSnapshot();
         }
-        return embeddingFsm_.snapshot();
+        return embeddingLifecycle_.fsmSnapshot();
     }
     PluginHostSnapshot getPluginHostFsmSnapshot() const {
         if (pluginManager_) {
@@ -583,28 +495,20 @@ public:
     Result<size_t> adoptContentExtractorsFromHosts();
     Result<size_t> adoptSymbolExtractorsFromHosts();
     Result<size_t> adoptEntityExtractorsFromHosts();
-    bool isEmbeddingsAutoOnAdd() const { return embeddingsAutoOnAdd_; }
+    bool isEmbeddingsAutoOnAdd() const { return embeddingLifecycle_.isAutoOnAdd(); }
 
     boost::asio::awaitable<Result<size_t>> autoloadPluginsNow();
     boost::asio::awaitable<void> preloadPreferredModelIfConfigured();
 
-    std::string resolvePreferredModel() const;
-
-    void alignVectorComponentDimensions();
-
-    // Model provider degraded state accessors (FSM-first)
-    bool isModelProviderDegraded() const {
-        try {
-            auto snap = embeddingFsm_.snapshot();
-            return snap.state == EmbeddingProviderState::Degraded ||
-                   snap.state == EmbeddingProviderState::Failed;
-        } catch (...) {
-            return false;
-        }
+    std::string resolvePreferredModel() const {
+        return embeddingLifecycle_.resolvePreferredModel();
     }
-    // Deprecated: Use lifecycleFsm_.degradationReason("embeddings") instead
+
+    bool isModelProviderDegraded() const { return embeddingLifecycle_.isDegraded(); }
     std::string lastModelError() const;
-    const std::string& adoptedProviderPluginName() const { return adoptedProviderPluginName_; }
+    const std::string& adoptedProviderPluginName() const {
+        return embeddingLifecycle_.adoptedPluginName();
+    }
     // Clear embedding subsystem degradation
     void clearModelProviderError();
 
@@ -641,7 +545,7 @@ public:
         graphQueryServiceOverride_ = std::move(graphQueryService);
     }
     void __test_setAdoptedProviderPluginName(const std::string& name) {
-        adoptedProviderPluginName_ = name;
+        embeddingLifecycle_.setAdoptedPluginName(name);
     }
     void __test_setModelProviderDegraded(bool degraded, const std::string& error = {});
 
@@ -730,20 +634,19 @@ private:
         std::atomic_store_explicit(&modelProvider_, std::move(provider), std::memory_order_release);
     }
 
-    size_t getEmbeddingDimension() const;
+    size_t getEmbeddingDimension() const { return embeddingLifecycle_.getEmbeddingDimension(); }
     void wireSearchEngineRuntimeAdapters(const std::shared_ptr<search::SearchEngine>& engine,
                                          const char* contextLabel);
 
     boost::asio::awaitable<void> co_runSessionWatcher(const yams::compat::stop_token& token);
 
-    // Awaitable phase helpers for modern architecture
     boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
                                                  int timeout_ms, yams::compat::stop_token token);
     boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
     boost::asio::awaitable<std::shared_ptr<yams::search::SearchEngine>>
     co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& token,
                    bool includeEmbeddingGenerator = true);
-    bool detectEmbeddingPreloadFlag() const;
+    bool detectEmbeddingPreloadFlag() const { return embeddingLifecycle_.detectPreloadFlag(); }
 
     const DaemonConfig& config_;
     StateComponent& state_;
@@ -772,36 +675,19 @@ private:
     std::unique_ptr<class BackgroundTaskManager> backgroundTaskManager_;
     std::atomic<bool> deferredMetadataWarmupStarted_{false};
 
-    // Worker pool metrics
-    std::atomic<std::size_t> poolActive_{0};
-    std::atomic<std::size_t> poolPosted_{0};
-    std::atomic<std::size_t> poolCompleted_{0};
+    SearchAdmissionController searchAdmission_;
+    IngestMetricsPublisher metricsPublisher_;
 
-    std::atomic<std::size_t> ingestQueued_{0};
-    std::atomic<std::size_t> ingestActive_{0};
-    std::atomic<std::size_t> ingestWorkerTarget_{1};
-    std::atomic<std::uint32_t> searchActive_{0};
-    std::atomic<std::uint32_t> searchQueued_{0};
-    std::atomic<std::uint64_t> snapshotsPersisted_{0};
-
-    bool embeddingPreloadOnStartup_{false};
-    mutable std::mutex embeddingModelReadyMutex_{};
-    std::condition_variable embeddingModelReadyCv_{};
-    bool embeddingModelReadyActive_{false};
-    std::string embeddingModelReadyActiveModel_;
-    std::unordered_set<std::string> warmedEmbeddingModels_;
-    std::string hotEmbeddingModel_;
+    EmbeddingLifecycleManager embeddingLifecycle_;
 
     std::shared_ptr<yams::search::SearchEngine> searchEngine_;
-    mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, searchEngineMutex_); // Allow concurrent reads
-
-    // Cross-encoder reranker for improved search ranking
-    std::shared_ptr<yams::search::IReranker> rerankerAdapter_;
+    mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, searchEngineMutex_);
 
     boost::asio::cancellation_signal shutdownSignal_;
 
     std::unique_ptr<WorkCoordinator> workCoordinator_;
     std::unique_ptr<WorkCoordinator> entityWorkCoordinator_;
+    std::unique_ptr<RequestExecutor> requestExecutor_;
     std::unique_ptr<boost::asio::thread_pool> cliRequestPool_;
 
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
@@ -817,42 +703,22 @@ private:
     std::unique_ptr<KGWriteQueue> kgWriteQueue_;
     std::shared_ptr<RepairService> repairService_;
     mutable std::mutex repairServiceMutex_;
-    std::atomic<bool> topologyRebuildRunning_{false};
-    std::atomic<bool> topologyRebuildScheduled_{false};
-    std::atomic<std::uint64_t> publishedTopologyEpoch_{0};
-    mutable std::mutex topologyDirtyMutex_;
-    std::unordered_set<std::string> topologyDirtyHashes_;
-    mutable std::mutex topologyTelemetryMutex_;
-    TopologyTelemetrySnapshot topologyTelemetry_;
+    TopologyManager topologyManager_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
-    bool embeddingsAutoOnAdd_{false};
-    // Centralized tuning config (persistable via config file; avoids envs).
     TuningConfig tuningConfig_{};
 
-    // Guard to ensure vector database initialization executes at most once per daemon lifetime
     std::atomic<bool> vectorDbInitAttempted_{false};
 
     Result<bool> initializeVectorDatabaseOnce(const std::filesystem::path& dataDir);
-    Result<TopologyRebuildStats> runTopologyRebuild(const std::string& reason, bool dryRun,
-                                                    const std::vector<std::string>& documentHashes);
 
-    std::string adoptedProviderPluginName_;
-
-    // Diagnostics: embedding model name
-    std::string embeddingModelName_;
-
-    // Diagnostics: track last content store init error (empty when none)
     std::string contentStoreError_;
 
-    // Idempotence: guard against double shutdown (stop() plus destructor)
     std::atomic<bool> shutdownInvoked_{false};
 
-    // Reference to parent daemon's lifecycle FSM (for subsystem degradation tracking)
     DaemonLifecycleFsm& lifecycleFsm_;
 
     ServiceManagerFsm serviceFsm_{};
-    EmbeddingProviderFsm embeddingFsm_{};
 
     SearchEngineManager searchEngineManager_;
     std::unique_ptr<SearchComponent> searchComponent_;
