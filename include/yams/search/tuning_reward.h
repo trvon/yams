@@ -18,6 +18,9 @@ enum class RewardSource : std::uint8_t {
     Mixed = 2,  // Labels present but downweighted; proxy contributed non-trivially.
 };
 
+// Reserved for R5 debugStats["mab_reward_source"] emission and the R6
+// replay-harness diagnostics. Not yet called from production code —
+// dead-code scans can skip this helper.
 [[nodiscard]] constexpr std::string_view rewardSourceLabel(RewardSource s) noexcept {
     switch (s) {
         case RewardSource::Labels:

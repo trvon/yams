@@ -714,8 +714,8 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
                                              "Daemon not started (socket not found at '" +
                                                  opts_.socketPath.string() + "').")};
         } else {
-            spdlog::warn("[ConnectionPool::create_connection] socket_res is error: {}",
-                         socket_res.error().message);
+            spdlog::debug("[ConnectionPool::create_connection] socket_res is error: {}",
+                          socket_res.error().message);
             // Preserve the underlying error (refused, timeout, etc.) instead of collapsing to
             // nullptr.
             const auto& msg = socket_res.error().message;

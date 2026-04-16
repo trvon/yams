@@ -260,6 +260,17 @@ yams daemon log | grep -i "execution provider"
 | Windows: Boost build failures | Install v143 toolset, clean cache |
 | Windows: Missing recipes | Export qpdf and onnxruntime recipes |
 
+## First-run tuning
+
+After ingesting a corpus, the search tuner starts in cold-start rules mode
+and does not adapt until it has evidence. Run `yams tune` interactively to
+label a few top-K results from your own corpus; labels persist to
+`<data_dir>/relevance_labels.jsonl` and feed the tuner's reward signal.
+
+See [docs/guides/interactive-tuning.md](../guides/interactive-tuning.md) for
+the walkthrough and [docs/cli/tune.md](../cli/tune.md) for the command
+reference. `yams doctor tune` remains as a deprecated alias.
+
 ## Notes
 
 - Use Release for benchmarking; Debug + sanitizers for development

@@ -3807,6 +3807,28 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
         }
     }
 
+    // Cold-start shortcut: if live counters are primed (initializeCounters
+    // ran during startup) but the cache hasn't been populated yet, synthesize
+    // a stats object from the in-memory atomics instead of running the full
+    // documents-table reconcile below. On a 32k-doc corpus the reconcile costs
+    // ~5s and was previously gating the Search Engine build critical path.
+    // The synthesized stats are marked stale so the next call after
+    // kCorpusStatsOverlayTtl (5 min) promotes to a reconciled snapshot.
+    if (cachedDocumentCount_.load(std::memory_order_relaxed) > 0) {
+        storage::CorpusStats baseline;
+        auto merged = mergeOnlineOverlay(baseline);
+        {
+            std::unique_lock<std::shared_mutex> writeLock(corpusStatsMutex_);
+            if (!cachedCorpusStats_) {
+                cachedCorpusStats_ = std::make_unique<storage::CorpusStats>(merged);
+                corpusStatsCachedAt_ = std::chrono::steady_clock::now();
+                corpusStatsDocCount_ = cachedDocumentCount_.load(std::memory_order_relaxed);
+                corpusStatsStale_.store(true, std::memory_order_release);
+            }
+        }
+        return merged;
+    }
+
     // Cache miss or stale - compute fresh stats
     auto result =
         executeReadQuery<storage::CorpusStats>([&](Database& db) -> Result<storage::CorpusStats> {

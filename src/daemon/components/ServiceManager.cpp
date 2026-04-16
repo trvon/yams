@@ -2567,6 +2567,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 serviceFsm_.dispatch(SearchEngineBuiltEvent{});
             } catch (...) {
             }
+            // Drain any topology-rebuild requests that accumulated during
+            // startup (embedding preload fires setTopologyRebuildRequester
+            // before Ready; requestTopologyRebuild short-circuits until now).
+            try {
+                requestTopologyRebuild("ready_drain");
+            } catch (...) {
+            }
         } else {
             // Do not leave UI stuck below 100% when we are running degraded.
             try {
@@ -2611,6 +2618,14 @@ void ServiceManager::startDeferredMetadataWarmup() {
             spdlog::info("[ServiceManager] Deferred metadata warmup started");
             metadataRepo->warmValueCountsCache();
             spdlog::info("[ServiceManager] Deferred metadata warmup finished");
+
+            auto lexicalResult = metadataRepo->ensureSymSpellInitialized();
+            if (!lexicalResult) {
+                spdlog::warn("[ServiceManager] Deferred lexical warmup failed: {}",
+                             lexicalResult.error().message);
+            } else {
+                spdlog::info("[ServiceManager] Deferred lexical warmup finished");
+            }
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Deferred metadata warmup failed: {}", e.what());
         } catch (...) {
@@ -4186,6 +4201,18 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
         return;
     }
 
+    // Gate async scheduling on FSM reaching Ready. Commit 036e5e7d wired
+    // embedding batch completion to this path via setTopologyRebuildRequester;
+    // during startup the embedding preload fires here before buildEngine() has
+    // a chance to complete, and the posted worker task (with its 1s sleep and
+    // self-rescheduling on in-flight queues) competes with the buildEngine
+    // coroutine on the worker executor, delaying SearchEngineBuiltEvent and
+    // the FSM → Ready transition. Dirty hashes stay accumulated; the drain
+    // runs once from the Ready dispatch site.
+    if (!serviceFsm_.isReady()) {
+        return;
+    }
+
     bool expected = false;
     if (!topologyRebuildScheduled_.compare_exchange_strong(expected, true,
                                                            std::memory_order_acq_rel)) {
@@ -4193,8 +4220,17 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
     }
 
     auto weakSelf = weak_from_this();
-    boost::asio::post(getWorkerExecutor(), [weakSelf, reason]() mutable {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    auto executor = getWorkerExecutor();
+    auto debounceTimer = std::make_shared<boost::asio::steady_timer>(executor);
+    debounceTimer->expires_after(std::chrono::milliseconds(1000));
+    debounceTimer->async_wait([weakSelf, reason,
+                               debounceTimer](const boost::system::error_code& ec) mutable {
+        if (ec) {
+            if (auto self = weakSelf.lock()) {
+                self->topologyRebuildScheduled_.store(false, std::memory_order_release);
+            }
+            return;
+        }
         if (auto self = weakSelf.lock()) {
             const auto ingestMetrics = self->getIngestMetricsSnapshot();
             auto piq = std::atomic_load_explicit(&self->postIngest_, std::memory_order_acquire);

@@ -84,8 +84,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.vectorDbInitAttempted;
             res.readinessStates[std::string(readiness::kVectorDbReady)] = res.vectorDbReady;
             res.readinessStates[std::string(readiness::kVectorDbDim)] = (res.vectorDbDim > 0);
-            res.readinessStates[std::string(kSearchEngineLexicalReady)] =
-                res.readinessStates[std::string(readiness::kSearchEngine)];
             // Embedding runtime details (best-effort)
             res.embeddingAvailable = snap->embeddingAvailable;
             res.embeddingBackend = snap->embeddingBackend;
@@ -320,9 +318,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 setVal(metrics::kRepairRunning, snap->repairRunning ? 1 : 0);
                 setVal(metrics::kRepairInProgress, snap->repairInProgress ? 1 : 0);
 
-                // Topology rebuild telemetry
-                setReady(readiness::kTopologyArtifactsFresh, snap->topologyArtifactsFresh);
-                setReady(readiness::kTopologyRebuildRunning, snap->topologyRebuildRunning);
+                // Topology rebuild telemetry. These are operational/background states,
+                // not core readiness gates, so publish them as metrics only.
                 setVal(metrics::kTopologyRebuildRunning, snap->topologyRebuildRunning ? 1 : 0);
                 setVal(metrics::kTopologyDirtyDocuments,
                        static_cast<size_t>(snap->topologyDirtyDocuments));

@@ -2007,6 +2007,13 @@ private:
                     (s.readinessStates.contains("plugins") && s.readinessStates.at("plugins"))) {
                     return true;
                 }
+                if (lowerKey == "topology_artifacts_fresh" ||
+                    lowerKey == "topology artifacts fresh" ||
+                    lowerKey == "topology_rebuild_running" ||
+                    lowerKey == "topology rebuild running" || lowerKey == "vector_index" ||
+                    lowerKey == "vector index") {
+                    return true;
+                }
                 return false;
             };
             for (const auto& [key, ready] : s.readinessStates) {
@@ -2205,6 +2212,13 @@ private:
                     if ((lowerKey == "plugins ready" || lowerKey == "plugins_ready") &&
                         (status.readinessStates.contains("plugins") &&
                          status.readinessStates.at("plugins"))) {
+                        return true;
+                    }
+                    if (lowerKey == "topology artifacts fresh" ||
+                        lowerKey == "topology_artifacts_fresh" ||
+                        lowerKey == "topology rebuild running" ||
+                        lowerKey == "topology_rebuild_running" || lowerKey == "vector index" ||
+                        lowerKey == "vector_index") {
                         return true;
                     }
                     return false;
@@ -2844,6 +2858,13 @@ private:
                     if ((lowerLabel == "plugins ready" || lowerLabel == "plugins_ready") &&
                         (status.readinessStates.contains("plugins") &&
                          status.readinessStates.at("plugins"))) {
+                        return true;
+                    }
+                    if (lowerLabel == "topology artifacts fresh" ||
+                        lowerLabel == "topology_artifacts_fresh" ||
+                        lowerLabel == "topology rebuild running" ||
+                        lowerLabel == "topology_rebuild_running" || lowerLabel == "vector index" ||
+                        lowerLabel == "vector_index") {
                         return true;
                     }
                     return false;

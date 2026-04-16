@@ -1766,6 +1766,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig = tuner_->getConfig();
     }
 
+    // Snapshot the per-query search execution context once so the tuner
+    // and the downstream budget / freshness reads see the same
+    // topologyEpoch (previous version loaded twice and could observe a
+    // torn read under concurrent topology rebuilds).
+    const SearchExecutionContext searchExecutionContext = currentSearchExecutionContext();
+
     // R2: construct a TuningContext populated with corpus-slow features,
     // query token stats, and the topology epoch fingerprint. The context is
     // passed to both getParams() and observe() so the contextual policy
@@ -1775,10 +1781,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         fillCorpusFeatures(tuningCtx, tuner_->corpusStats());
     }
     fillQueryTokenFeature(tuningCtx, query);
-    {
-        const auto snapshot = currentSearchExecutionContext();
-        tuningCtx.topologyEpoch = snapshot.freshness.topologyEpoch;
-    }
+    tuningCtx.topologyEpoch = searchExecutionContext.freshness.topologyEpoch;
 
     std::optional<TuningState> baselineState;
     TunedParams baseParams;
@@ -1808,6 +1811,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const bool zoomLevelInferredFromIntent = policy.zoomLevelInferredFromIntent;
     workingConfig = std::move(policy.config);
 
+    // R2/audit: route-derived query-fast features populated after
+    // classification so R4+ contextual policies see real signals instead
+    // of zero-defaulted fields. Vector-path = any retrieval mode that
+    // touches the semantic tier; KG anchors = a community route matched
+    // or an explicit override landed.
+    tuningCtx.queryHasVectorPath = (retrievalMode == QueryRetrievalMode::Semantic ||
+                                    retrievalMode == QueryRetrievalMode::Hybrid)
+                                       ? std::uint8_t{1}
+                                       : std::uint8_t{0};
+    tuningCtx.queryHasKgAnchors =
+        (routeDecision.community.has_value() || policy.communityOverride.has_value())
+            ? std::uint8_t{1}
+            : std::uint8_t{0};
+
     if (policy.communityOverride.has_value() && baselineState.has_value()) {
         const std::string overrideState = tuningStateToString(*policy.communityOverride);
         response.debugStats["community_override"] = overrideState;
@@ -1819,7 +1836,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     // Long prose queries can miss the semantic tier entirely when the default threshold
     // is tuned for code/navigation queries. Retry only after a zero-hit semantic search.
     const size_t queryTokenCount = tokenizeLower(query).size();
-    const SearchExecutionContext searchExecutionContext = currentSearchExecutionContext();
     const bool shortQueryBudgeted = searchExecutionContext.shortQueryBudgeted;
     const bool pressureBudgeted = searchExecutionContext.pressureBudgeted;
     const auto& freshness = searchExecutionContext.freshness;

@@ -728,10 +728,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.readinessStates[std::string(readiness::kPlugins)] =
             state_->readiness.pluginsReady.load();
         out.readinessStates[std::string(readiness::kRepairService)] = out.repairRunning;
-        out.readinessStates[std::string(readiness::kTopologyArtifactsFresh)] =
-            out.topologyArtifactsFresh;
-        out.readinessStates[std::string(readiness::kTopologyRebuildRunning)] =
-            out.topologyRebuildRunning;
+        // Topology freshness/rebuild state is useful telemetry, but not a daemon-readiness gate.
+        // Keep it in the detailed metrics fields, not in the readiness summary.
         // Only include search init progress while not fully ready or when progress < 100%
         const bool searchReady = state_->readiness.searchEngineReady.load();
         const int searchPct = std::clamp<int>(state_->readiness.searchProgress.load(), 0, 100);

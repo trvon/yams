@@ -24,6 +24,7 @@
 - Snapshot management with Merkle tree diffs and rename detection
 - WAL-backed durability, high-throughput I/O, thread-safe
 - Portable CLI, MCP server, and plugin architecture (ONNX, S3, PDF extraction)
+- Interactive relevance tuning: `yams tune` labels top-K results from your own corpus to shape retrieval ([guide](docs/guides/interactive-tuning.md))
 
 ## Links
 - SourceHut: https://sr.ht/~trvon/yams/

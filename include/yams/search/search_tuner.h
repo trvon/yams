@@ -587,6 +587,9 @@ public:
     [[nodiscard]] virtual Result<void> saveState(const std::filesystem::path& path) const = 0;
 };
 
+// Reserved for R5 orchestrator (rules-vs-contextual handoff). Kept as a
+// forward-declared alias so R5 can land without another round of call-site
+// churn through SearchEngine / ServiceManager. Dead-code scans can skip.
 using TuningPolicyPtr = std::shared_ptr<ITuningPolicy>;
 
 class SearchTuner : public ITuningPolicy {

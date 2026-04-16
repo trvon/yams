@@ -71,6 +71,32 @@ TEST_CASE("featurize: saturation clamps to [-1, 1]", "[unit][tuning_features]") 
     CHECK(f[10] == Approx(1.0));
 }
 
+TEST_CASE("featurize: route flags propagate independently", "[unit][tuning_features]") {
+    // Index 9 = queryHasVectorPath, 10 = queryHasKgAnchors. They map
+    // 0 → -1 and 1 → +1. Audit fix (R1/R2/R3 follow-up) ensures the
+    // search engine writes these from routeDecision instead of leaving
+    // them at 0 — this test pins that feature-slot contract so R4's
+    // LinUCB trains against a non-constant signal.
+    TuningContext ctx;
+    ctx.queryHasVectorPath = 1;
+    ctx.queryHasKgAnchors = 0;
+    const auto vectorOnly = featurize(ctx);
+    CHECK(vectorOnly[9] == Approx(1.0));
+    CHECK(vectorOnly[10] == Approx(-1.0));
+
+    ctx.queryHasVectorPath = 0;
+    ctx.queryHasKgAnchors = 1;
+    const auto kgOnly = featurize(ctx);
+    CHECK(kgOnly[9] == Approx(-1.0));
+    CHECK(kgOnly[10] == Approx(1.0));
+
+    ctx.queryHasVectorPath = 1;
+    ctx.queryHasKgAnchors = 1;
+    const auto both = featurize(ctx);
+    CHECK(both[9] == Approx(1.0));
+    CHECK(both[10] == Approx(1.0));
+}
+
 TEST_CASE("featurize: midpoint ratios map near zero", "[unit][tuning_features]") {
     TuningContext ctx;
     ctx.codeRatio = 0.5;
