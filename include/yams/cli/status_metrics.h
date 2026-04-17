@@ -1,11 +1,53 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
+#include <optional>
 #include <string_view>
 
+#include <yams/cli/daemon_helpers.h>
+#include <yams/core/types.h>
+#include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/metric_keys.h>
 
 namespace yams::cli {
+
+struct DaemonRepairState {
+    bool inProgress = false;
+    bool serviceRunning = false;
+    std::optional<std::uint64_t> queueDepth;
+};
+
+inline DaemonRepairState extractRepairState(const daemon::StatusResponse& status) {
+    DaemonRepairState state;
+    auto findCount = [&](std::string_view key) -> const std::size_t* {
+        auto entry = status.requestCounts.find(std::string(key));
+        return entry != status.requestCounts.end() ? &entry->second : nullptr;
+    };
+    if (const auto* value = findCount(daemon::metrics::kRepairInProgress)) {
+        state.inProgress = (*value != 0);
+    }
+    if (const auto* value = findCount(daemon::metrics::kRepairRunning)) {
+        state.serviceRunning = (*value != 0);
+    }
+    if (const auto* value = findCount(daemon::metrics::kRepairQueueDepth)) {
+        state.queueDepth = static_cast<std::uint64_t>(*value);
+    }
+    return state;
+}
+
+inline Result<DaemonRepairState>
+probeDaemonRepairState(daemon::DaemonClient& client,
+                       std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+    daemon::StatusRequest sreq;
+    sreq.detailed = false;
+    auto sres = run_result<daemon::StatusResponse>(client.call(sreq), timeout);
+    if (!sres) {
+        return sres.error();
+    }
+    return extractRepairState(sres.value());
+}
 
 inline daemon::StatusResponse::SearchMetrics
 effectiveSearchMetrics(const daemon::StatusResponse& status) {

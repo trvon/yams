@@ -14,6 +14,7 @@
 
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/status_metrics.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/core/types.h>
@@ -160,6 +161,22 @@ public:
                              " (is the daemon running?)"};
         }
         auto leaseHandle = std::move(leaseRes.value());
+
+        // Pre-flight: if the daemon is already running a repair (on-demand or auto-repair
+        // fast/warm/cold tier), fail fast with a clear message instead of sitting on a
+        // silently-queued RPC that may not emit progress for minutes.
+        if (auto repairState = probeDaemonRepairState(**leaseHandle); repairState) {
+            if (repairState.value().inProgress) {
+                std::cout << "\n"
+                          << ui::status_info(
+                                 "A repair operation is already running. "
+                                 "Please wait for it to finish before starting another.")
+                          << "\n";
+                return Result<void>();
+            }
+        } else {
+            spdlog::debug("repair pre-flight status probe failed: {}", repairState.error().message);
+        }
 
         // State for rendering progress
         std::string lastOperation;

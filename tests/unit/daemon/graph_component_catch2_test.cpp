@@ -843,6 +843,104 @@ TEST_CASE("GraphComponent: Repair graph emits progress during orphan cleanup and
     CHECK(preLoopEmits >= 3);
 }
 
+TEST_CASE("KnowledgeGraphStore: deleteOrphanedEdges batches multi-thousand row cleanup",
+          "[daemon][graph][maintenance][batching]") {
+    GraphComponentTestFixture fixture;
+
+    constexpr std::int64_t kOrphanEdges = 2500;
+    auto seedRes = fixture.pool->withConnection([&](Database& db) -> yams::Result<void> {
+        auto fkOff = db.execute("PRAGMA foreign_keys = OFF");
+        if (!fkOff)
+            return fkOff.error();
+        auto stmtR = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, relation, weight) "
+                                "VALUES (?, ?, 'orphan_rel', 1.0)");
+        if (!stmtR)
+            return stmtR.error();
+        auto stmt = std::move(stmtR).value();
+        auto txRes = db.transaction([&]() -> yams::Result<void> {
+            for (std::int64_t i = 0; i < kOrphanEdges; ++i) {
+                auto cb = stmt.clearBindings();
+                if (!cb)
+                    return cb.error();
+                auto br = stmt.bind(1, 900000 + i);
+                if (!br)
+                    return br.error();
+                br = stmt.bind(2, 900000 + i + 1);
+                if (!br)
+                    return br.error();
+                auto ex = stmt.execute();
+                if (!ex)
+                    return ex.error();
+                auto rr = stmt.reset();
+                if (!rr)
+                    return rr;
+            }
+            return yams::Result<void>();
+        });
+        auto fkOn = db.execute("PRAGMA foreign_keys = ON");
+        if (!fkOn)
+            return fkOn.error();
+        return txRes;
+    });
+    REQUIRE(seedRes.has_value());
+
+    auto deleted = fixture.kgStore->deleteOrphanedEdges();
+    REQUIRE(deleted.has_value());
+    CHECK(deleted.value() == kOrphanEdges);
+
+    auto secondPass = fixture.kgStore->deleteOrphanedEdges();
+    REQUIRE(secondPass.has_value());
+    CHECK(secondPass.value() == 0);
+}
+
+TEST_CASE("KnowledgeGraphStore: deleteOrphanedDocEntities batches multi-thousand row cleanup",
+          "[daemon][graph][maintenance][batching]") {
+    GraphComponentTestFixture fixture;
+
+    constexpr std::int64_t kOrphanRows = 2500;
+    auto seedRes = fixture.pool->withConnection([&](Database& db) -> yams::Result<void> {
+        auto fkOff = db.execute("PRAGMA foreign_keys = OFF");
+        if (!fkOff)
+            return fkOff.error();
+        auto stmtR = db.prepare(
+            "INSERT INTO kg_doc_entities (document_id, entity_text, node_id, confidence, "
+            "extractor) VALUES (?, 'orphan', NULL, 1.0, 'test')");
+        if (!stmtR)
+            return stmtR.error();
+        auto stmt = std::move(stmtR).value();
+        auto txRes = db.transaction([&]() -> yams::Result<void> {
+            for (std::int64_t i = 0; i < kOrphanRows; ++i) {
+                auto cb = stmt.clearBindings();
+                if (!cb)
+                    return cb.error();
+                auto br = stmt.bind(1, 800000 + i);
+                if (!br)
+                    return br.error();
+                auto ex = stmt.execute();
+                if (!ex)
+                    return ex.error();
+                auto rr = stmt.reset();
+                if (!rr)
+                    return rr;
+            }
+            return yams::Result<void>();
+        });
+        auto fkOn = db.execute("PRAGMA foreign_keys = ON");
+        if (!fkOn)
+            return fkOn.error();
+        return txRes;
+    });
+    REQUIRE(seedRes.has_value());
+
+    auto deleted = fixture.kgStore->deleteOrphanedDocEntities();
+    REQUIRE(deleted.has_value());
+    CHECK(deleted.value() == kOrphanRows);
+
+    auto secondPass = fixture.kgStore->deleteOrphanedDocEntities();
+    REQUIRE(secondPass.has_value());
+    CHECK(secondPass.value() == 0);
+}
+
 TEST_CASE("GraphComponent: Validate graph (stub)", "[daemon][graph][maintenance]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);

@@ -24,13 +24,13 @@ struct SocketAcceptBenchFixture {
     fs::path testRoot_;
     fs::path socketPath_;
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
+    std::thread runLoopThread_;
 
     SocketAcceptBenchFixture() {
         auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         testRoot_ = fs::temp_directory_path() / ("yams_socket_bench_" + unique);
         fs::create_directories(testRoot_);
 
-        // Short socket path for AF_UNIX
         socketPath_ = fs::path("/tmp") / ("yams-bench-" + unique + ".sock");
 
         yams::daemon::DaemonConfig cfg;
@@ -47,13 +47,29 @@ struct SocketAcceptBenchFixture {
         auto started = daemon_->start();
         REQUIRE(started);
 
-        // Wait for daemon ready
-        std::this_thread::sleep_for(500ms);
+        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
+
+        auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(100ms);
+            yams::daemon::ClientConfig probeCfg;
+            probeCfg.socketPath = socketPath_;
+            probeCfg.autoStart = false;
+            probeCfg.requestTimeout = 1s;
+            yams::daemon::DaemonClient probe(probeCfg);
+            auto st = yams::test_async::res(probe.status(), 1s);
+            if (st && st.value().ready) {
+                break;
+            }
+        }
     }
 
     ~SocketAcceptBenchFixture() {
         if (daemon_) {
             daemon_->stop();
+        }
+        if (runLoopThread_.joinable()) {
+            runLoopThread_.join();
         }
         std::error_code ec;
         fs::remove_all(testRoot_, ec);

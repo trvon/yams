@@ -1486,45 +1486,75 @@ public:
     }
 
     Result<std::int64_t> deleteOrphanedEdges() override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
-            auto stmtR = db.prepare(R"(
-                DELETE FROM kg_edges
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.src_node_id
-                ) OR NOT EXISTS (
-                    SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.dst_node_id
-                )
-            )");
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-            auto execR = stmt.execute();
-            if (!execR)
-                return execR.error();
-            auto deleted = db.changes();
-            spdlog::debug("deleteOrphanedEdges: deleted {} edges", deleted);
-            return deleted;
-        });
+        constexpr std::int64_t kBatchSize = 1000;
+        std::int64_t totalDeleted = 0;
+        while (true) {
+            auto batchRes = pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+                auto stmtR = db.prepare(R"(
+                    DELETE FROM kg_edges WHERE rowid IN (
+                        SELECT rowid FROM kg_edges
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.src_node_id
+                        ) OR NOT EXISTS (
+                            SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.dst_node_id
+                        )
+                        LIMIT ?
+                    )
+                )");
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
+                auto br = stmt.bind(1, kBatchSize);
+                if (!br)
+                    return br.error();
+                auto execR = stmt.execute();
+                if (!execR)
+                    return execR.error();
+                return static_cast<std::int64_t>(db.changes());
+            });
+            if (!batchRes)
+                return batchRes.error();
+            totalDeleted += batchRes.value();
+            if (batchRes.value() < kBatchSize)
+                break;
+        }
+        spdlog::debug("deleteOrphanedEdges: deleted {} edges", totalDeleted);
+        return totalDeleted;
     }
 
     Result<std::int64_t> deleteOrphanedDocEntities() override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
-            auto stmtR = db.prepare(R"(
-                DELETE FROM kg_doc_entities
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM documents d WHERE d.id = kg_doc_entities.document_id
-                )
-            )");
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-            auto execR = stmt.execute();
-            if (!execR)
-                return execR.error();
-            auto deleted = db.changes();
-            spdlog::debug("deleteOrphanedDocEntities: deleted {} rows", deleted);
-            return deleted;
-        });
+        constexpr std::int64_t kBatchSize = 1000;
+        std::int64_t totalDeleted = 0;
+        while (true) {
+            auto batchRes = pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+                auto stmtR = db.prepare(R"(
+                    DELETE FROM kg_doc_entities WHERE rowid IN (
+                        SELECT rowid FROM kg_doc_entities
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM documents d WHERE d.id = kg_doc_entities.document_id
+                        )
+                        LIMIT ?
+                    )
+                )");
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
+                auto br = stmt.bind(1, kBatchSize);
+                if (!br)
+                    return br.error();
+                auto execR = stmt.execute();
+                if (!execR)
+                    return execR.error();
+                return static_cast<std::int64_t>(db.changes());
+            });
+            if (!batchRes)
+                return batchRes.error();
+            totalDeleted += batchRes.value();
+            if (batchRes.value() < kBatchSize)
+                break;
+        }
+        spdlog::debug("deleteOrphanedDocEntities: deleted {} rows", totalDeleted);
+        return totalDeleted;
     }
 
     Result<std::vector<KGNode>> findIsolatedNodes(std::string_view nodeType,

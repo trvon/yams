@@ -2,6 +2,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <array>
 #include <map>
 #include <sstream>
 #include <yams/api/content_store_builder.h>
@@ -455,6 +456,17 @@ int YamsCLI::run(int argc, char* argv[]) {
             }
         }
 
+        static const std::array<std::string_view, 15> kRepairAliases = {
+            "orphans",  "mime",      "chunks",    "embeddings", "fts5",
+            "optimize", "downloads", "path-tree", "refs",       "ref",
+            "stuck",    "graph",     "topology",  "dedupe",     "all"};
+        auto isRepairAlias = [](std::string_view tok) {
+            for (auto alias : kRepairAliases)
+                if (tok == alias)
+                    return true;
+            return false;
+        };
+
         if (argc > 1 && std::string(argv[1]) == "repair-mime") {
             // Rewrite "repair-mime" to "repair --mime"
             needsAliasRewrite = true;
@@ -463,6 +475,19 @@ int YamsCLI::run(int argc, char* argv[]) {
             argvVec.push_back(const_cast<char*>(repairStr.c_str()));
             argvVec.push_back(const_cast<char*>(mimeFlag.c_str()));
             for (int i = 2; i < argc; ++i)
+                argvVec.push_back(argv[i]);
+            argvVec.push_back(nullptr);
+        } else if (argc > 2 && argv[1] && argv[2] && std::string_view(argv[1]) == "repair" &&
+                   !isFlag(argv[2]) && isRepairAlias(argv[2])) {
+            // Rewrite "repair <alias>" to "repair --<alias>"
+            static std::vector<std::string> repairAliasFlagStorage;
+            repairAliasFlagStorage.emplace_back(std::string("--") + argv[2]);
+            needsAliasRewrite = true;
+            argvVec.reserve(argc + 1);
+            argvVec.push_back(argv[0]);
+            argvVec.push_back(const_cast<char*>(repairStr.c_str()));
+            argvVec.push_back(const_cast<char*>(repairAliasFlagStorage.back().c_str()));
+            for (int i = 3; i < argc; ++i)
                 argvVec.push_back(argv[i]);
             argvVec.push_back(nullptr);
         } else if (injectDaemonStatus) {

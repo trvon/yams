@@ -1111,9 +1111,10 @@ private:
                         "MetadataRepository::executeQueryOnPool route='{}' op='{}' error: {}",
                         route, op.empty() ? "(unknown)" : op, result.error().message);
                 }
-                spdlog::error(
-                    "MetadataRepository::executeQueryOnPool route='{}' connection error: {}", route,
-                    result.error().message);
+                spdlog::error("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
+                              "attempts={} connection error: {}",
+                              route, op.empty() ? "(unknown)" : op, attempt + 1,
+                              result.error().message);
                 return Error{result.error()};
             }
 

@@ -601,8 +601,8 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
 
             if (isProxy && !slotAcquired) {
                 noSlotRejectStreak = std::min<uint32_t>(noSlotRejectStreak + 1, 7);
-                // Hard cap reached. Close immediately to apply backpressure without
-                // stalling the acceptor/backlog.
+                boost::system::error_code shutdown_ec;
+                socket.shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
                 boost::system::error_code close_ec;
                 socket.close(close_ec);
                 if (state_) {
@@ -641,6 +641,9 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
                 const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
                 if (active >= hardLimit) {
+                    boost::system::error_code shutdown_ec;
+                    socket.shutdown(boost::asio::local::stream_protocol::socket::shutdown_both,
+                                    shutdown_ec);
                     boost::system::error_code close_ec;
                     socket.close(close_ec);
                     if (state_) {
