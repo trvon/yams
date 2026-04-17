@@ -86,11 +86,12 @@ class Yams < Formula
 
   test do
     # Test that the binary was installed and can show version
+    ENV['HOME'] = testpath.to_s
     assert_match version.to_s, shell_output("#{bin}/yams --version")
 
-    # Test basic functionality - init in a temp directory
-    system "#{bin}/yams", 'init', '--non-interactive', '--storage', testpath / 'yams-test'
-    assert_predicate testpath / 'yams-test/yams.db', :exist?
+    # Test basic functionality with an isolated HOME so YAMS writes into testpath.
+    system "#{bin}/yams", 'init', '--non-interactive'
+    assert_predicate testpath / '.local/share/yams/yams.db', :exist?
     assert_predicate testpath / '.config/yams/config.toml', :exist?
   end
 end

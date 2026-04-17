@@ -105,8 +105,10 @@ class YamsNightly < Formula
   end
 
   test do
+    ENV["HOME"] = testpath
     assert_match(/nightly|dev/, shell_output("#{bin}/yams --version"))
-    system bin/"yams", "init", "--non-interactive", "--storage", testpath/"yams-test"
-    assert_path_exists testpath/"yams-test/yams.db"
+    system bin/"yams", "init", "--non-interactive"
+    assert_path_exists testpath/".local/share/yams/yams.db"
+    assert_path_exists testpath/".config/yams/config.toml"
   end
 end

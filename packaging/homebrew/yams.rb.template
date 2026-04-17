@@ -111,9 +111,10 @@ class Yams < Formula
   end
 
   test do
+    ENV["HOME"] = testpath
     assert_match version.to_s, shell_output("#{bin}/yams --version")
-    system "#{bin}/yams", "init", "--non-interactive", "--storage", testpath/"yams-test"
-    assert_predicate testpath/"yams-test/yams.db", :exist?
+    system "#{bin}/yams", "init", "--non-interactive"
+    assert_predicate testpath/".local/share/yams/yams.db", :exist?
     assert_predicate testpath/".config/yams/config.toml", :exist?
   end
 end
