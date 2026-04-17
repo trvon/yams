@@ -440,13 +440,17 @@ jobs:
           set -euo pipefail
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            python -m venv "$PYTOOLS_DIR"
             VENV_PYTHON="$PYTOOLS_DIR/Scripts/python.exe"
             TOOL_BIN="$PYTOOLS_DIR/Scripts"
+            if [ ! -f "$VENV_PYTHON" ]; then
+              python -m venv "$PYTOOLS_DIR"
+            fi
           else
-            python3 -m venv "$PYTOOLS_DIR"
             VENV_PYTHON="$PYTOOLS_DIR/bin/python"
             TOOL_BIN="$PYTOOLS_DIR/bin"
+            if [ ! -x "$VENV_PYTHON" ]; then
+              python3 -m venv "$PYTOOLS_DIR"
+            fi
           fi
           "$VENV_PYTHON" -m pip install --upgrade pip
           "$VENV_PYTHON" -m pip install --upgrade conan meson 'ninja>=1.10'

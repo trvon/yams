@@ -793,6 +793,56 @@ TEST_CASE("GraphComponent: Repair graph dry-run rolls back", "[daemon][graph][ma
     CHECK_FALSE(blobNode.value().has_value());
 }
 
+TEST_CASE("GraphComponent: Repair graph emits progress during orphan cleanup and batch loop",
+          "[daemon][graph][maintenance][progress]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    auto initResult = component.initialize();
+    REQUIRE(initResult.has_value());
+
+    const auto filePath = (fixture.testDir / "repo" / "emit" / "file.cpp").generic_string();
+    std::filesystem::create_directories(std::filesystem::path(filePath).parent_path());
+    {
+        std::ofstream f(filePath);
+        f << "int y = 2;\n";
+    }
+    DocumentInfo doc;
+    doc.fileName = "file.cpp";
+    doc.filePath = filePath;
+    doc.fileExtension = "cpp";
+    doc.fileSize = 10;
+    doc.sha256Hash = "repair-hash-emit";
+    doc.mimeType = "text/x-c++";
+    doc.setCreatedTime(1);
+    doc.setModifiedTime(1);
+    doc.setIndexedTime(1);
+    auto docIdRes = fixture.metadataRepo->insertDocument(doc);
+    REQUIRE(docIdRes.has_value());
+
+    struct Event {
+        uint64_t processed;
+        uint64_t total;
+    };
+    std::vector<Event> events;
+    std::mutex eventsMu;
+    GraphComponent::RepairProgressFn captureProgress = [&](uint64_t processed, uint64_t total,
+                                                           const GraphComponent::RepairStats&) {
+        std::lock_guard<std::mutex> lk(eventsMu);
+        events.push_back({processed, total});
+    };
+
+    auto result = component.repairGraph(false, captureProgress);
+    REQUIRE(result.has_value());
+
+    REQUIRE_FALSE(events.empty());
+    CHECK(events.front().total >= 1);
+    CHECK(events.front().processed == 0);
+    CHECK(events.back().total >= 1);
+    std::size_t preLoopEmits = static_cast<std::size_t>(std::count_if(
+        events.begin(), events.end(), [](const Event& e) { return e.processed == 0; }));
+    CHECK(preLoopEmits >= 3);
+}
+
 TEST_CASE("GraphComponent: Validate graph (stub)", "[daemon][graph][maintenance]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);

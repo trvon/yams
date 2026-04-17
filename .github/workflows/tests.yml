@@ -338,13 +338,17 @@ jobs:
           set -euo pipefail
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            python -m venv "$PYTOOLS_DIR"
             VENV_PYTHON="$PYTOOLS_DIR/Scripts/python.exe"
             TOOL_BIN="$PYTOOLS_DIR/Scripts"
+            if [ ! -f "$VENV_PYTHON" ]; then
+              python -m venv "$PYTOOLS_DIR"
+            fi
           else
-            python3 -m venv "$PYTOOLS_DIR"
             VENV_PYTHON="$PYTOOLS_DIR/bin/python"
             TOOL_BIN="$PYTOOLS_DIR/bin"
+            if [ ! -x "$VENV_PYTHON" ]; then
+              python3 -m venv "$PYTOOLS_DIR"
+            fi
           fi
 
           "$VENV_PYTHON" -m pip install --upgrade pip
@@ -513,9 +517,25 @@ jobs:
           YAMS_DISABLE_VECTORS: "1"
           YAMS_TESTING: "1"
         run: |
+          set -euo pipefail
           if [ "$RUNNER_OS" = "Linux" ]; then
             mkdir -p "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" || true
             echo "Using XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          fi
+          CONAN_BUILD_ENV=""
+          for candidate in \
+            "${{ env.BUILD_DIR }}/build-debug/conan/conanbuild.sh" \
+            "${{ env.BUILD_DIR }}/conan/conanbuild.sh"
+          do
+            if [ -f "$candidate" ]; then
+              CONAN_BUILD_ENV="$candidate"
+              break
+            fi
+          done
+          if [ -n "$CONAN_BUILD_ENV" ]; then
+            set +u
+            source "$CONAN_BUILD_ENV"
+            set -u
           fi
           # Run unit and integration tests (TSAN disabled in CI)
           meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
@@ -535,10 +555,21 @@ jobs:
           YAMS_DISABLE_VECTORS: "1"
           YAMS_TESTING: "1"
         run: |
-          # Ensure meson/ninja are on PATH
-          $UserBase = python -m site --user-base
-          $UserBin = Join-Path $UserBase 'Scripts'
-          $env:PATH = "$UserBin;$env:PATH"
+          $ErrorActionPreference = "Stop"
+          $conanBuildPs1 = $null
+          $candidates = @(
+            (Join-Path "${{ env.BUILD_DIR }}" "build-debug/conan/conanbuild.ps1"),
+            (Join-Path "${{ env.BUILD_DIR }}" "conan/conanbuild.ps1")
+          )
+          foreach ($candidate in $candidates) {
+            if (Test-Path $candidate) {
+              $conanBuildPs1 = $candidate
+              break
+            }
+          }
+          if ($conanBuildPs1) {
+            . $conanBuildPs1
+          }
           # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
           meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
 
@@ -557,8 +588,24 @@ jobs:
           YAMS_DISABLE_VECTORS: "1"
           YAMS_TESTING: "1"
         run: |
+          set -euo pipefail
           # Ensure Rosetta is present (idempotent)
           softwareupdate --install-rosetta --agree-to-license || true
+          CONAN_BUILD_ENV=""
+          for candidate in \
+            "${{ env.BUILD_DIR }}/build-debug/conan/conanbuild.sh" \
+            "${{ env.BUILD_DIR }}/conan/conanbuild.sh"
+          do
+            if [ -f "$candidate" ]; then
+              CONAN_BUILD_ENV="$candidate"
+              break
+            fi
+          done
+          if [ -n "$CONAN_BUILD_ENV" ]; then
+            set +u
+            source "$CONAN_BUILD_ENV"
+            set -u
+          fi
           # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
           arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
 

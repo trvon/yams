@@ -1,6 +1,7 @@
 // Lightweight RAII harness to start/stop a YamsDaemon for integration tests
 #pragma once
 
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <cstdio>
 #include <cstdlib>
@@ -111,6 +112,7 @@ public:
 
     bool start(std::chrono::milliseconds timeout = std::chrono::seconds(10),
                PreRunLoopCallback preRunLoopCallback = nullptr) {
+        ensureDefaultLogger();
         // Always create new daemon instance on start()
         // (daemon cannot be restarted after stop() - must create new instance)
         spdlog::info("[DaemonHarness] Creating new daemon instance...");
@@ -391,6 +393,24 @@ public:
     yams::daemon::YamsDaemon* daemon() const { return daemon_.get(); }
 
 private:
+    // Install a default spdlog logger once per process if none exists, so plugins
+    // and harness code that call spdlog::info(...) don't dereference a null default
+    // logger. Mirrors daemon_main's init order (set_default_logger before plugin load).
+    static void ensureDefaultLogger() {
+        static const bool once = [] {
+            if (!spdlog::default_logger()) {
+                try {
+                    auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+                    auto logger = std::make_shared<spdlog::logger>("yams-test", sink);
+                    spdlog::set_default_logger(logger);
+                } catch (...) {
+                }
+            }
+            return true;
+        }();
+        (void)once;
+    }
+
     static std::string random_id() {
         static const char* cs = "abcdefghijklmnopqrstuvwxyz0123456789";
         thread_local std::mt19937_64 rng{std::random_device{}()};

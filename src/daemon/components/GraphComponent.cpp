@@ -14,9 +14,13 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -538,8 +542,31 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
     };
     emit(0);
 
+    auto runWithHeartbeat = [&](auto&& fn) {
+        std::mutex hbMu;
+        std::condition_variable hbCv;
+        bool hbDone = false;
+        std::thread hbThread([&]() {
+            std::unique_lock<std::mutex> lk(hbMu);
+            while (!hbDone) {
+                if (hbCv.wait_for(lk, std::chrono::seconds(30), [&] { return hbDone; }))
+                    break;
+                emit(processed);
+            }
+        });
+        auto result = fn();
+        {
+            std::lock_guard<std::mutex> lk(hbMu);
+            hbDone = true;
+        }
+        hbCv.notify_all();
+        hbThread.join();
+        return result;
+    };
+
     if (!dryRun) {
-        auto orphanEdgesRes = kgStore_->deleteOrphanedEdges();
+        emit(processed);
+        auto orphanEdgesRes = runWithHeartbeat([&] { return kgStore_->deleteOrphanedEdges(); });
         if (!orphanEdgesRes) {
             ++stats.errors;
             stats.issues.push_back("deleteOrphanedEdges failed: " + orphanEdgesRes.error().message);
@@ -548,7 +575,9 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
                                    std::to_string(orphanEdgesRes.value()));
         }
 
-        auto orphanEntitiesRes = kgStore_->deleteOrphanedDocEntities();
+        emit(processed);
+        auto orphanEntitiesRes =
+            runWithHeartbeat([&] { return kgStore_->deleteOrphanedDocEntities(); });
         if (!orphanEntitiesRes) {
             ++stats.errors;
             stats.issues.push_back("deleteOrphanedDocEntities failed: " +
@@ -576,6 +605,8 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
         if (docs.empty()) {
             break;
         }
+
+        emit(processed);
 
         std::vector<int64_t> docIds;
         docIds.reserve(docs.size());
@@ -712,6 +743,7 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
         }
         const auto& ids = idsRes.value();
         stats.nodesCreated += static_cast<uint64_t>(ids.size()); // attempted upserts
+        emit(processed);
 
         std::unordered_map<std::string, std::int64_t> idByKey;
         idByKey.reserve(ids.size());
@@ -823,6 +855,7 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
             break;
         }
         stats.edgesCreated += static_cast<uint64_t>(edges.size()); // attempted unique inserts
+        emit(processed);
 
         if (!dryRun) {
             auto commitRes = batch->commit();
