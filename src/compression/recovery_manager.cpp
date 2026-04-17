@@ -172,7 +172,10 @@ public:
             return;
         }
 
-        running_.store(false);
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            running_.store(false);
+        }
         cv_.notify_all();
 
         // Wait for workers to finish

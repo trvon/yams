@@ -31,7 +31,12 @@ public:
     }
 
     void stop() {
-        if (running_.exchange(false)) {
+        bool wasRunning;
+        {
+            std::lock_guard<std::mutex> lock(cvMutex_);
+            wasRunning = running_.exchange(false);
+        }
+        if (wasRunning) {
             cv_.notify_all();
             if (monitorThread_.joinable()) {
                 monitorThread_.join();

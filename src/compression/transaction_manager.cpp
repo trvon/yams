@@ -117,7 +117,10 @@ public:
             return;
         }
 
-        running_.store(false);
+        {
+            std::lock_guard<std::mutex> lock(cleanupMutex_);
+            running_.store(false);
+        }
         cv_.notify_all();
 
         if (cleanupThread_.joinable()) {
