@@ -1764,6 +1764,8 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                 metadata::DocumentQueryOptions opts;
                 // Use LIKE pattern to match filename anywhere in path
                 opts.likePattern = "%" + filename;
+                // Bound the scan itself; FileHistory caps processing at 100 below anyway.
+                opts.limit = 100;
                 auto docsRes = appContext.metadataRepo->queryDocuments(opts);
 
                 if (!docsRes || docsRes.value().empty()) {

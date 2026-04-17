@@ -72,10 +72,13 @@ jobs:
       - name: Install Conan
         shell: bash
         run: |
-          python3 -m pip install --user --upgrade pipx || true
-          python3 -m pipx ensurepath || true
-          pipx install --python python3 conan || pipx install conan
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
+          python3 -m venv "$PYTOOLS_DIR"
+          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade pip
+          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade conan
+          echo "$PYTOOLS_DIR/bin" >> "$GITHUB_PATH"
+          export PATH="$PYTOOLS_DIR/bin:$PATH"
           conan --version
           
           # Detect Conan profile (required for setup.sh)

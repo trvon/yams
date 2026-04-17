@@ -438,32 +438,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            for attempt in 1 2 3; do
-              if brew update; then
-                break
-              fi
-              if [ "$attempt" -eq 3 ]; then
-                echo "brew update failed after ${attempt} attempts" >&2
-                exit 1
-              fi
-              sleep $((attempt * 10))
-            done
-            brew install pipx || true
-            python3 -m pipx ensurepath || true
-          elif [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends pipx || true
-            python3 -m pipx ensurepath || true
+          PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python -m venv "$PYTOOLS_DIR"
+            VENV_PYTHON="$PYTOOLS_DIR/Scripts/python.exe"
+            TOOL_BIN="$PYTOOLS_DIR/Scripts"
+          else
+            python3 -m venv "$PYTOOLS_DIR"
+            VENV_PYTHON="$PYTOOLS_DIR/bin/python"
+            TOOL_BIN="$PYTOOLS_DIR/bin"
           fi
-          PY_USER_BIN="$(python3 -m site --user-base 2>/dev/null)/bin"
-          [ -d "$PY_USER_BIN" ] && echo "$PY_USER_BIN" >> "$GITHUB_PATH" || true
-          [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
-          export PATH="$HOME/.local/bin:$PY_USER_BIN:$PATH"
-          pipx --version || true
-          pipx install --python python3 conan || pipx install conan
-          which conan || { echo 'Conan not found on PATH after installation'; ls -al "$HOME/.local/bin" || true; exit 127; }
+          "$VENV_PYTHON" -m pip install --upgrade pip
+          "$VENV_PYTHON" -m pip install --upgrade conan meson 'ninja>=1.10'
+          echo "$TOOL_BIN" >> "$GITHUB_PATH"
+          export PATH="$TOOL_BIN:$PATH"
           conan --version
+          meson --version
+          ninja --version
           mkdir -p ~/.conan2
           # Best-effort: global.conf may not exist in repo for hosted macOS
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
@@ -662,10 +653,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Install Python dependencies
-          # Pin meson to exact version to avoid version mismatch between build and install steps
-          python -m pip install --upgrade pip
-          python -m pip install conan "meson==1.9.1" ninja
+          $pyToolsScripts = Join-Path $env:RUNNER_TEMP "yams-python-tools\Scripts"
+          "$pyToolsScripts" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:PATH = "$pyToolsScripts;$env:PATH"
 
           # Install WiX for MSI packaging (pin versions to avoid prerelease incompatibility)
           dotnet tool install --global wix --version 6.0.2

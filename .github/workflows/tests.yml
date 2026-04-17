@@ -335,38 +335,25 @@ jobs:
       - name: Install Conan (latest)
         shell: bash
         run: |
-          PYTHON_CMD="python3"
+          set -euo pipefail
+          PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            PYTHON_CMD="python"
-          fi
-
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install pipx || true
-            $PYTHON_CMD -m pipx ensurepath || true
-            pipx install --python $PYTHON_CMD conan || pipx install conan
-          elif [ "$RUNNER_OS" = "Windows" ]; then
-            $PYTHON_CMD -m pip install --user --upgrade pipx || true
-            $PYTHON_CMD -m pipx ensurepath || true
-            pipx install conan
+            python -m venv "$PYTOOLS_DIR"
+            VENV_PYTHON="$PYTOOLS_DIR/Scripts/python.exe"
+            TOOL_BIN="$PYTOOLS_DIR/Scripts"
           else
-            $PYTHON_CMD -m pip install --user --upgrade pipx || true
-            $PYTHON_CMD -m pipx ensurepath || true
-            pipx install --python $PYTHON_CMD conan || pipx install conan || pip3 install --user --upgrade conan
-          fi
-          
-          USER_BASE=$($PYTHON_CMD -m site --user-base 2>/dev/null)
-          if [ -d "$USER_BASE/bin" ]; then
-             echo "$USER_BASE/bin" >> "$GITHUB_PATH"
-             export PATH="$USER_BASE/bin:$PATH"
-          fi
-          if [ -d "$USER_BASE/Scripts" ]; then
-             echo "$USER_BASE/Scripts" >> "$GITHUB_PATH"
-             export PATH="$USER_BASE/Scripts:$PATH"
+            python3 -m venv "$PYTOOLS_DIR"
+            VENV_PYTHON="$PYTOOLS_DIR/bin/python"
+            TOOL_BIN="$PYTOOLS_DIR/bin"
           fi
 
-          [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
-          export PATH="$HOME/.local/bin:$PATH"
+          "$VENV_PYTHON" -m pip install --upgrade pip
+          "$VENV_PYTHON" -m pip install --upgrade conan meson 'ninja>=1.10'
+          echo "$TOOL_BIN" >> "$GITHUB_PATH"
+          export PATH="$TOOL_BIN:$PATH"
           conan --version
+          meson --version
+          ninja --version
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 

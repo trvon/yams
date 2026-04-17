@@ -3,6 +3,8 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <boost/asio/post.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -180,7 +182,12 @@ RequestDispatcher::handleRestoreCollectionRequest(const RestoreCollectionRequest
     };
 
     // Process each document
+    size_t processedIdx = 0;
     for (const auto& doc : documents) {
+        if (processedIdx > 0 && processedIdx % 50 == 0) {
+            co_await boost::asio::post(boost::asio::use_awaitable);
+        }
+        ++processedIdx;
         if (!shouldInclude(doc)) {
             continue;
         }
@@ -406,7 +413,12 @@ RequestDispatcher::handleRestoreSnapshotRequest(const RestoreSnapshotRequest& re
         return (outputDir / result).string();
     };
 
+    size_t snapshotProcessedIdx = 0;
     for (const auto& doc : documents) {
+        if (snapshotProcessedIdx > 0 && snapshotProcessedIdx % 50 == 0) {
+            co_await boost::asio::post(boost::asio::use_awaitable);
+        }
+        ++snapshotProcessedIdx;
         if (!shouldInclude(doc)) {
             continue;
         }

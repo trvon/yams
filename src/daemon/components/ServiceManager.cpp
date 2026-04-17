@@ -196,20 +196,6 @@ adoptPluginInterface(yams::daemon::AbiPluginHost* host, const std::string& inter
     return adopted;
 }
 
-std::optional<std::string> topologyDocumentHashFromNodeKey(std::string_view nodeKey) {
-    constexpr std::string_view kDocPrefix{"doc:"};
-    if (!nodeKey.starts_with(kDocPrefix) || nodeKey.size() <= kDocPrefix.size()) {
-        return std::nullopt;
-    }
-    return std::string{nodeKey.substr(kDocPrefix.size())};
-}
-
-std::uint64_t nowUnixSeconds() {
-    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
-                                          std::chrono::system_clock::now().time_since_epoch())
-                                          .count());
-}
-
 std::uint64_t nowUnixMillis() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
@@ -1070,10 +1056,10 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 6.1: Ingest service already quiesced");
 
     spdlog::info("[ServiceManager] Phase 6.2: Shutting down graph component");
-    if (graphComponent_) {
+    if (auto gc = loadGraphComponent()) {
         try {
-            graphComponent_->shutdown();
-            graphComponent_.reset();
+            gc->shutdown();
+            storeGraphComponent(std::shared_ptr<GraphComponent>{});
             spdlog::info("[ServiceManager] Phase 6.2: Graph component shut down");
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Phase 6.2: GraphComponent shutdown failed: {}",
@@ -2693,7 +2679,7 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
 
     auto reranker = embeddingLifecycle_.reranker();
     if (reranker && reranker->isReady()) {
-        engine->setReranker(reranker);
+        engine->setReranker(std::move(reranker));
         spdlog::debug("[{}] Cross-encoder reranker wired to search engine", contextLabel);
     }
 

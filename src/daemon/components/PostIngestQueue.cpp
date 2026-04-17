@@ -455,20 +455,15 @@ void PostIngestQueue::setSymbolExtensionMap(std::unordered_map<std::string, std:
 void PostIngestQueue::setEntityProviders(
     std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> providers) {
     bool hadProviders = false;
+    bool hasProviders = false;
     {
         std::lock_guard<std::mutex> lock(entityMutex_);
         hadProviders = !entityProviders_.empty();
         entityProviders_ = std::move(providers);
+        hasProviders = !entityProviders_.empty();
     }
     refreshStageAvailability();
 
-    // If providers were just added for the first time, re-queue already-processed
-    // documents that missed entity extraction during initial ingest.
-    bool hasProviders = false;
-    {
-        std::lock_guard<std::mutex> lock(entityMutex_);
-        hasProviders = !entityProviders_.empty();
-    }
     if (!hadProviders && hasProviders && processed_.load(std::memory_order_relaxed) > 0) {
         requeueMissedEntityExtractions();
     }
@@ -2445,6 +2440,7 @@ void PostIngestQueue::initializeGradientLimiters() {
         std::lock_guard<std::mutex> lock(limiterMutex_);
         for (std::size_t i = 0; i < kLimiterCount; ++i) {
             limiters_[i] = std::move(newLimiters[i]);
+            limiterPtrs_[i].store(limiters_[i].get(), std::memory_order_release);
         }
     }
 
@@ -2452,33 +2448,27 @@ void PostIngestQueue::initializeGradientLimiters() {
 }
 
 GradientLimiter* PostIngestQueue::extractionLimiter() const {
-    std::lock_guard<std::mutex> lock(limiterMutex_);
-    return limiters_[0].get();
+    return limiterPtrs_[0].load(std::memory_order_acquire);
 }
 
 GradientLimiter* PostIngestQueue::kgLimiter() const {
-    std::lock_guard<std::mutex> lock(limiterMutex_);
-    return limiters_[1].get();
+    return limiterPtrs_[1].load(std::memory_order_acquire);
 }
 
 GradientLimiter* PostIngestQueue::symbolLimiter() const {
-    std::lock_guard<std::mutex> lock(limiterMutex_);
-    return limiters_[2].get();
+    return limiterPtrs_[2].load(std::memory_order_acquire);
 }
 
 GradientLimiter* PostIngestQueue::entityLimiter() const {
-    std::lock_guard<std::mutex> lock(limiterMutex_);
-    return limiters_[3].get();
+    return limiterPtrs_[3].load(std::memory_order_acquire);
 }
 
 GradientLimiter* PostIngestQueue::titleLimiter() const {
-    std::lock_guard<std::mutex> lock(limiterMutex_);
-    return limiters_[4].get();
+    return limiterPtrs_[4].load(std::memory_order_acquire);
 }
 
 GradientLimiter* PostIngestQueue::embedLimiter() const {
-    std::lock_guard<std::mutex> lock(limiterMutex_);
-    return limiters_[5].get();
+    return limiterPtrs_[5].load(std::memory_order_acquire);
 }
 
 bool PostIngestQueue::tryAcquireLimiterSlot(GradientLimiter* limiter, const std::string& jobId,

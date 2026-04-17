@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -77,7 +78,9 @@ public:
         uint64_t errors{0};
         std::vector<std::string> issues;
     };
-    Result<RepairStats> repairGraph(bool dryRun = false);
+    using RepairProgressFn =
+        std::function<void(uint64_t processed, uint64_t total, const RepairStats& statsSnapshot)>;
+    Result<RepairStats> repairGraph(bool dryRun = false, RepairProgressFn progress = {});
 
     struct GraphHealthReport {
         uint64_t totalNodes{0};

@@ -519,13 +519,24 @@ std::string GraphComponent::resolveSymbolExtractorIdForLanguage(const std::strin
     return {};
 }
 
-Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun) {
+Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
+                                                                RepairProgressFn progress) {
     if (!initialized_ || !metadataRepo_ || !kgStore_) {
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
     }
 
     RepairStats stats;
     constexpr int kBatchSize = 500;
+    constexpr uint64_t kProgressStride = 100;
+    uint64_t processed = 0;
+    uint64_t nextProgressAt = kProgressStride;
+    const auto totalDocsRes = metadataRepo_->getDocumentCount();
+    const uint64_t totalDocs = totalDocsRes ? static_cast<uint64_t>(totalDocsRes.value()) : 0ULL;
+    const auto emit = [&](uint64_t done) {
+        if (progress)
+            progress(done, totalDocs, stats);
+    };
+    emit(0);
 
     if (!dryRun) {
         auto orphanEdgesRes = kgStore_->deleteOrphanedEdges();
@@ -823,9 +834,17 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun) {
         }
 
         offset += docs.size();
+        processed += docs.size();
+        if (processed >= nextProgressAt) {
+            emit(processed);
+            while (nextProgressAt <= processed)
+                nextProgressAt += kProgressStride;
+        }
         if (static_cast<int>(docs.size()) < kBatchSize)
             break;
     }
+
+    emit(processed);
 
     auto maintenanceResult = maintainSemanticTopology(dryRun);
     if (!maintenanceResult) {

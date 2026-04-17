@@ -487,7 +487,6 @@ private:
     // Drain detection: signals corpus stats stale once per drain cycle
     std::atomic<bool> wasActive_{false}; // True if we had work since last drain
 
-    std::chrono::steady_clock::time_point lastCompleteTs_{};
     static constexpr double kAlpha_ = 0.2;
 
     mutable std::mutex extMapMutex_;
@@ -518,7 +517,11 @@ private:
 
     // Gradient-based adaptive concurrency limiters (Netflix Gradient2 algorithm)
     // Index 0-4 = stages (Extraction..Title), index 5 = Embed
+    // limiters_ owns the instances. limiterPtrs_ mirrors the raw pointers for
+    // lock-free hot-path reads. Writes to both happen only in
+    // initializeGradientLimiters() (guarded by limiterMutex_).
     std::array<std::unique_ptr<GradientLimiter>, kLimiterCount> limiters_;
+    std::array<std::atomic<GradientLimiter*>, kLimiterCount> limiterPtrs_{};
     mutable std::mutex limiterMutex_;
 
     // Job tracking for latency measurement

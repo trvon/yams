@@ -136,33 +136,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            for attempt in 1 2 3; do
-              if brew update; then
-                break
-              fi
-              if [ "$attempt" -eq 3 ]; then
-                echo "brew update failed after ${attempt} attempts" >&2
-                exit 1
-              fi
-              sleep $((attempt * 10))
-            done
-            brew install pipx || true
-            python3 -m pipx ensurepath || true
-            pipx install --python python3 conan || pipx install conan
-          elif [ "$RUNNER_OS" = "Windows" ]; then
-            python -m pip install --user --upgrade pipx || true
-            python -m pipx ensurepath || true
-            pipx install conan
-            # Install Meson/Ninja to ensure version consistency with tests job
-            python -m pip install --user --upgrade meson ninja
+          PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python -m venv "$PYTOOLS_DIR"
+            VENV_PYTHON="$PYTOOLS_DIR/Scripts/python.exe"
+            TOOL_BIN="$PYTOOLS_DIR/Scripts"
           else
-            python3 -m pip install --user --upgrade pipx || true
-            python3 -m pipx ensurepath || true
-            pipx install --python python3 conan || pipx install conan || pip3 install --user --upgrade conan
+            python3 -m venv "$PYTOOLS_DIR"
+            VENV_PYTHON="$PYTOOLS_DIR/bin/python"
+            TOOL_BIN="$PYTOOLS_DIR/bin"
           fi
+          "$VENV_PYTHON" -m pip install --upgrade pip
+          "$VENV_PYTHON" -m pip install --upgrade conan meson 'ninja>=1.10'
+          echo "$TOOL_BIN" >> "$GITHUB_PATH"
+          export PATH="$TOOL_BIN:$PATH"
           conan --version
-          [ "$RUNNER_OS" = "Windows" ] && meson --version || true
+          meson --version
+          ninja --version
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 

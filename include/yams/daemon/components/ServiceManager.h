@@ -339,7 +339,7 @@ public:
     KGWriteQueue* getKgWriteQueue() const { return kgWriteQueue_.get(); }
 
     // Graph Component (PBI-009)
-    std::shared_ptr<GraphComponent> getGraphComponent() const { return graphComponent_; }
+    std::shared_ptr<GraphComponent> getGraphComponent() const { return loadGraphComponent(); }
 
     // ContentStore diagnostics
     std::string getContentStoreError() const {

@@ -103,8 +103,11 @@ std::string bestEffortMimeForDocument(const metadata::DocumentInfo& doc,
         if (store) {
             auto bytesResult = store->retrieveBytes(doc.sha256Hash);
             if (bytesResult && !bytesResult.value().empty()) {
-                auto detected = detector.detectFromBuffer(std::span<const std::byte>(
-                    bytesResult.value().data(), bytesResult.value().size()));
+                constexpr std::size_t kMimeSniffBytes = 8192;
+                const auto& bytes = bytesResult.value();
+                const std::size_t sniffSize = std::min(bytes.size(), kMimeSniffBytes);
+                auto detected =
+                    detector.detectFromBuffer(std::span<const std::byte>(bytes.data(), sniffSize));
                 if (detected) {
                     std::string mime = detected.value().mimeType;
                     if (!hintedMime.empty() && hintedMime != "application/octet-stream") {
@@ -1824,65 +1827,107 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         return result;
     }
 
-    auto docsResult = metadata::queryDocumentsByPattern(*meta, "%");
-    if (!docsResult) {
-        result.message = "Failed to query: " + docsResult.error().message;
-        return result;
-    }
-
     auto store = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
     (void)detection::FileTypeDetector::initializeWithMagicNumbers();
     auto& detector = detection::FileTypeDetector::instance();
 
-    std::vector<std::pair<int64_t, std::string>> toRepair;
-    for (const auto& doc : docsResult.value()) {
-        if (shouldRedetectMime(doc)) {
-            const auto detectedMime = bestEffortMimeForDocument(doc, store);
-            if (!detectedMime.empty() && detectedMime != doc.mimeType)
-                toRepair.push_back({doc.id, detectedMime});
+    constexpr int kBatchSize = 5000;
+    constexpr uint64_t kProgressStride = 100;
+    const auto emit = [&](std::string phase, uint64_t processed, const std::string& message) {
+        if (!progress)
+            return;
+        RepairEvent ev;
+        ev.phase = std::move(phase);
+        ev.operation = "mime";
+        ev.processed = processed;
+        ev.succeeded = result.succeeded;
+        ev.failed = result.failed;
+        ev.skipped = result.skipped;
+        ev.message = message;
+        progress(ev);
+    };
+
+    uint64_t totalScanned = 0;
+    uint64_t totalCandidates = 0;
+    int offset = 0;
+    while (true) {
+        metadata::DocumentQueryOptions opts;
+        opts.limit = kBatchSize;
+        opts.offset = offset;
+        auto batchResult = meta->queryDocuments(opts);
+        if (!batchResult) {
+            result.message = "Failed to query: " + batchResult.error().message;
+            return result;
         }
-    }
+        const auto& batch = batchResult.value();
+        if (batch.empty())
+            break;
 
-    result.processed = docsResult.value().size();
-
-    if (toRepair.empty()) {
-        result.message = "All documents have valid MIME types";
-        return result;
-    }
-
-    if (dryRun) {
-        result.skipped = toRepair.size();
-        result.message = "Would repair " + std::to_string(toRepair.size()) + " MIME types";
-        return result;
-    }
-
-    for (auto& [id, mimeType] : toRepair) {
-        auto docResult = meta->getDocument(id);
-        if (!(docResult && docResult.value())) {
-            result.failed++;
-            continue;
-        }
-
-        auto doc = *docResult.value();
-        const bool oldWasText = detector.isTextMimeType(doc.mimeType);
-        const bool newIsText = detector.isTextMimeType(mimeType);
-        doc.mimeType = std::move(mimeType);
-
-        if (meta->updateDocument(doc)) {
-            if (oldWasText && !newIsText) {
-                (void)meta->deleteContent(id);
-                (void)meta->removeFromIndex(id);
-                (void)meta->updateDocumentExtractionStatus(
-                    id, false, metadata::ExtractionStatus::Pending,
-                    "MIME repaired; stale text content cleared");
+        std::vector<std::pair<int64_t, std::string>> toRepair;
+        toRepair.reserve(batch.size());
+        for (const auto& doc : batch) {
+            ++totalScanned;
+            if (shouldRedetectMime(doc)) {
+                const auto detectedMime = bestEffortMimeForDocument(doc, store);
+                if (!detectedMime.empty() && detectedMime != doc.mimeType) {
+                    toRepair.push_back({doc.id, detectedMime});
+                    ++totalCandidates;
+                }
             }
-            result.succeeded++;
-        } else {
-            result.failed++;
+            if (totalScanned % kProgressStride == 0) {
+                emit("repairing", totalScanned, "Scanning documents");
+            }
         }
+
+        if (dryRun) {
+            result.skipped += toRepair.size();
+        } else {
+            for (auto& [id, mimeType] : toRepair) {
+                auto docResult = meta->getDocument(id);
+                if (!(docResult && docResult.value())) {
+                    result.failed++;
+                    continue;
+                }
+
+                auto doc = *docResult.value();
+                const bool oldWasText = detector.isTextMimeType(doc.mimeType);
+                const bool newIsText = detector.isTextMimeType(mimeType);
+                doc.mimeType = std::move(mimeType);
+
+                if (meta->updateDocument(doc)) {
+                    if (oldWasText && !newIsText) {
+                        (void)meta->deleteContent(id);
+                        (void)meta->removeFromIndex(id);
+                        (void)meta->updateDocumentExtractionStatus(
+                            id, false, metadata::ExtractionStatus::Pending,
+                            "MIME repaired; stale text content cleared");
+                    }
+                    result.succeeded++;
+                } else {
+                    result.failed++;
+                }
+                if ((result.succeeded + result.failed) % kProgressStride == 0) {
+                    emit("repairing", totalScanned, "Repairing MIME types");
+                }
+            }
+        }
+
+        emit("repairing", totalScanned, "Processed batch");
+
+        if (static_cast<int>(batch.size()) < kBatchSize)
+            break;
+        offset += kBatchSize;
     }
 
-    result.message = "Repaired " + std::to_string(result.succeeded) + " MIME types";
+    result.processed = totalScanned;
+
+    if (totalCandidates == 0) {
+        result.message = "All documents have valid MIME types";
+    } else if (dryRun) {
+        result.message = "Would repair " + std::to_string(result.skipped) + " MIME types";
+    } else {
+        result.message = "Repaired " + std::to_string(result.succeeded) + " MIME types";
+    }
     return result;
 }
 
@@ -2152,7 +2197,21 @@ RepairOperationResult RepairService::repairKnowledgeGraph(const RepairRequest& r
         return result;
     }
 
-    auto repairRes = graphComponent->repairGraph(req.dryRun);
+    auto graphProgress = [&progress](uint64_t processed, uint64_t total,
+                                     const GraphComponent::RepairStats& snap) {
+        if (!progress)
+            return;
+        RepairEvent ev;
+        ev.phase = "repairing";
+        ev.operation = "graph";
+        ev.processed = processed;
+        ev.total = total;
+        ev.succeeded = snap.nodesCreated + snap.nodesUpdated + snap.edgesCreated;
+        ev.failed = snap.errors;
+        ev.message = "graph repair scanning";
+        progress(ev);
+    };
+    auto repairRes = graphComponent->repairGraph(req.dryRun, graphProgress);
     if (!repairRes) {
         result.failed = 1;
         result.message = "Graph repair failed: " + repairRes.error().message;
@@ -3371,7 +3430,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
                                        !req.force,
                                        modelName,
                                        std::vector<InternalEventBus::EmbedPreparedDoc>{},
-                                       monitor};
+                                       std::move(monitor)};
         job.updateSemanticGraph = req.repairTopology;
 
         int retries = 0;
