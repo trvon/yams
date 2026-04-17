@@ -764,7 +764,7 @@ collectGraphSeedDocs(const std::vector<ComponentResult>& componentResults, size_
             continue;
         }
 
-        float sourceBoost;
+        float sourceBoost = 1.0f;
         switch (comp.source) {
             case ComponentResult::Source::Text:
             case ComponentResult::Source::GraphText:

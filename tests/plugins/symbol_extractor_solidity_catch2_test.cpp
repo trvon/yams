@@ -10,10 +10,8 @@
 #include <yams/plugins/abi.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 
-// Grammar auto-download uses Unix shell commands (which, git clone, gcc) that don't work on Windows
 #ifdef _WIN32
-#define SKIP_ON_WINDOWS_NO_GRAMMAR()                                                               \
-    SKIP("Solidity grammar auto-download not supported on Windows"
+#define SKIP_ON_WINDOWS_NO_GRAMMAR() SKIP("Solidity grammar auto-download not supported on Windows")
 #else
 #define SKIP_ON_WINDOWS_NO_GRAMMAR() (void)0
 #endif
@@ -124,7 +122,8 @@ bool has_symbol_any_kind(yams_symbol_extraction_result_v1* result, const char* n
 
 TEST_CASE("SymbolExtractorSolidity.SupportsLanguage", "[plugin][symbolextractorsolidity]") {
     auto plugin = loadPlugin();
-    INFO("Failed to load symbol extractor plugin"); REQUIRE(plugin.has_value());
+    INFO("Failed to load symbol extractor plugin");
+    REQUIRE(plugin.has_value());
 
     CHECK(plugin->api->supports_language(plugin->api->self, "sol"));
     CHECK(plugin->api->supports_language(plugin->api->self, "solidity"));
@@ -134,7 +133,8 @@ TEST_CASE("SymbolExtractorSolidity.SupportsLanguage", "[plugin][symbolextractors
 TEST_CASE("SymbolExtractorSolidity.ERC20TokenContract", "[plugin][symbolextractorsolidity]") {
     SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
-    INFO("Failed to load symbol extractor plugin"); REQUIRE(plugin.has_value());
+    INFO("Failed to load symbol extractor plugin");
+    REQUIRE(plugin.has_value());
 
     std::string solidityCode = R"(
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -183,7 +183,8 @@ contract MyToken {
     }
 
     // Verify contract extracted
-    INFO("MyToken contract should be extracted"); CHECK((has_symbol(result, "MyToken", "contract") || has_symbol(result, "MyToken", "class")));
+    INFO("MyToken contract should be extracted");
+    CHECK((has_symbol(result, "MyToken", "contract") || has_symbol(result, "MyToken", "class")));
 
     // Verify functions (at least some should be extracted)
     bool hasBalanceOf = has_symbol_any_kind(result, "balanceOf");
@@ -194,7 +195,8 @@ contract MyToken {
             hasBalanceOf, hasTransfer, hasPrivateTransfer);
 
     // At least the contract should be there
-    INFO("Should extract at least the contract"); CHECK(result->symbol_count > 0UL);
+    INFO("Should extract at least the contract");
+    CHECK(result->symbol_count > 0UL);
 
     plugin->api->free_result(plugin->api->self, result);
 }
@@ -202,7 +204,8 @@ contract MyToken {
 TEST_CASE("SymbolExtractorSolidity.ContractInheritance", "[plugin][symbolextractorsolidity]") {
     SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
-    INFO("Failed to load symbol extractor plugin"); REQUIRE(plugin.has_value());
+    INFO("Failed to load symbol extractor plugin");
+    REQUIRE(plugin.has_value());
 
     std::string code = R"(
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -245,7 +248,8 @@ contract Token is IERC20 {
     bool hasContract =
         has_symbol(result, "Token", "contract") || has_symbol(result, "Token", "class");
 
-    INFO("Should extract interface or contract"); CHECK((hasInterface || hasContract));
+    INFO("Should extract interface or contract");
+    CHECK((hasInterface || hasContract));
 
     plugin->api->free_result(plugin->api->self, result);
 }
@@ -253,7 +257,8 @@ contract Token is IERC20 {
 TEST_CASE("SymbolExtractorSolidity.StructsAndEnums", "[plugin][symbolextractorsolidity]") {
     SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
-    INFO("Failed to load symbol extractor plugin"); REQUIRE(plugin.has_value());
+    INFO("Failed to load symbol extractor plugin");
+    REQUIRE(plugin.has_value());
 
     std::string code = R"(
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -290,7 +295,8 @@ contract DataTypes {
     }
 
     // At least the contract should be extracted
-    INFO("Should extract at least the contract"); CHECK(result->symbol_count > 0UL);
+    INFO("Should extract at least the contract");
+    CHECK(result->symbol_count > 0UL);
 
     plugin->api->free_result(plugin->api->self, result);
 }
@@ -298,7 +304,8 @@ contract DataTypes {
 TEST_CASE("SymbolExtractorSolidity.LibraryDeclaration", "[plugin][symbolextractorsolidity]") {
     SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
-    INFO("Failed to load symbol extractor plugin"); REQUIRE(plugin.has_value());
+    INFO("Failed to load symbol extractor plugin");
+    REQUIRE(plugin.has_value());
 
     std::string code = R"(
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -332,7 +339,8 @@ library SafeMath {
     // Library should be extracted (kind depends on grammar)
     bool hasLibrary =
         has_symbol(result, "SafeMath", "library") || has_symbol(result, "SafeMath", "class");
-    INFO("SafeMath library should be extracted"); CHECK(hasLibrary);
+    INFO("SafeMath library should be extracted");
+    CHECK(hasLibrary);
 
     plugin->api->free_result(plugin->api->self, result);
 }
@@ -340,7 +348,8 @@ library SafeMath {
 TEST_CASE("SymbolExtractorSolidity.EmptySolidityFile", "[plugin][symbolextractorsolidity]") {
     SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
-    INFO("Failed to load symbol extractor plugin"); REQUIRE(plugin.has_value());
+    INFO("Failed to load symbol extractor plugin");
+    REQUIRE(plugin.has_value());
 
     std::string code = R"(
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -363,7 +372,8 @@ pragma solidity ^0.8.0;
 TEST_CASE("SymbolExtractorSolidity.InvalidSolidityCode", "[plugin][symbolextractorsolidity]") {
     SKIP_ON_WINDOWS_NO_GRAMMAR();
     auto plugin = loadPlugin();
-    INFO("Failed to load symbol extractor plugin"); REQUIRE(plugin.has_value());
+    INFO("Failed to load symbol extractor plugin");
+    REQUIRE(plugin.has_value());
 
     std::string code = "this is not valid solidity code {{{";
 
@@ -372,7 +382,8 @@ TEST_CASE("SymbolExtractorSolidity.InvalidSolidityCode", "[plugin][symbolextract
                                           "solidity", &result);
 
     // Should either succeed with no symbols or fail gracefully (not crash)
-    INFO("Should handle invalid code gracefully"); CHECK((rc == YAMS_PLUGIN_OK || rc == YAMS_PLUGIN_ERR_INVALID));
+    INFO("Should handle invalid code gracefully");
+    CHECK((rc == YAMS_PLUGIN_OK || rc == YAMS_PLUGIN_ERR_INVALID));
 
     if (result) {
         fprintf(stderr, "[Solidity Invalid] Extracted %zu symbols (from invalid code)\n",
