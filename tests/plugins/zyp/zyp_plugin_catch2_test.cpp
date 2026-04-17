@@ -7,6 +7,7 @@
 #include <yams/compat/dlfcn.h>
 
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -227,7 +228,8 @@ TEST_CASE_METHOD(ZypPluginTest, "InterfaceRetrieval", "[plugin][zyp]") {
         SKIP("zyp plugin not available");
     }
     CHECK(extractor_ != nullptr);
-    CHECK(extractor_->abi_version == static_cast<uint32_t>(YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION));
+    CHECK(extractor_->abi_version ==
+          static_cast<uint32_t>(YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION));
 }
 
 // ============================================================================
