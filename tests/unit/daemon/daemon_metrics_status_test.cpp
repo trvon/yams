@@ -994,7 +994,7 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     REQUIRE(std::holds_alternative<StatusResponse>(resp));
     const auto& status = std::get<StatusResponse>(resp);
 
-    const std::array<std::string_view, 20> requiredCoreReadinessKeys = {
+    const std::array<std::string_view, 23> requiredCoreReadinessKeys = {
         readiness::kIpcServer,
         readiness::kContentStore,
         readiness::kDatabase,
@@ -1014,7 +1014,10 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
         readiness::kRepairService,
         readiness::kSearchEngineBuildReasonInitial,
         readiness::kSearchEngineBuildReasonRebuild,
-        readiness::kSearchEngineBuildReasonDegraded};
+        readiness::kSearchEngineBuildReasonDegraded,
+        readiness::kSearchEngineLexicalReady,
+        readiness::kSearchEngineVectorUsable,
+        readiness::kSearchEngineHybridUsable};
 
     for (const auto key : requiredCoreReadinessKeys) {
         INFO("missing readiness key: " << key);

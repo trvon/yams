@@ -271,4 +271,8 @@ constexpr std::string_view kSearchEngineBuildReasonInitial = "search_engine_buil
 constexpr std::string_view kSearchEngineBuildReasonRebuild = "search_engine_build_reason_rebuild";
 constexpr std::string_view kSearchEngineBuildReasonDegraded = "search_engine_build_reason_degraded";
 
+constexpr std::string_view kSearchEngineLexicalReady = "search_engine_lexical";
+constexpr std::string_view kSearchEngineVectorUsable = "search_engine_vector_usable";
+constexpr std::string_view kSearchEngineHybridUsable = "search_engine_hybrid_usable";
+
 } // namespace yams::daemon::readiness

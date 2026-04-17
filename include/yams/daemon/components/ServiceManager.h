@@ -7,9 +7,7 @@
 #include <future>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -683,8 +681,7 @@ private:
     // Cached GLiNER query concept extraction function.
     mutable search::EntityExtractionFunc cachedQueryConceptExtractor_;
 
-    mutable std::shared_mutex pluginStatusMutex_;
-    PluginStatusSnapshot pluginStatusSnapshot_{};
+    std::shared_ptr<PluginStatusSnapshot> pluginStatusSnapshot_{};
 };
 
 } // namespace yams::daemon

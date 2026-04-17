@@ -17,6 +17,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/metric_keys.h>
 #include <yams/version.hpp>
 
 #include <spdlog/spdlog.h>
@@ -1997,36 +1998,36 @@ private:
 
             // Collect issues for quick summary (skip informational flags)
             std::vector<std::string> issues;
-            auto suppressDerivedIssue = [&](const std::string& lowerKey) {
-                if (lowerKey == "topology_artifacts_fresh" ||
-                    lowerKey == "topology artifacts fresh" ||
-                    lowerKey == "topology_rebuild_running" ||
-                    lowerKey == "topology rebuild running" || lowerKey == "vector_index" ||
-                    lowerKey == "vector index") {
+            namespace readiness = yams::daemon::readiness;
+            auto suppressDerivedIssue = [&](std::string_view key) {
+                if (key == readiness::kTopologyArtifactsFresh ||
+                    key == readiness::kTopologyRebuildRunning || key == readiness::kVectorIndex) {
+                    return true;
+                }
+                const bool emptyCorpusReady =
+                    s.vectorDbInitAttempted && !s.vectorDbReady && s.embeddingAvailable;
+                if (emptyCorpusReady && (key == readiness::kSearchEngineVectorUsable ||
+                                         key == readiness::kSearchEngineHybridUsable)) {
                     return true;
                 }
                 return false;
             };
             for (const auto& [key, ready] : s.readinessStates) {
                 if (!ready) {
-                    std::string lowerKey = key;
-                    std::transform(lowerKey.begin(), lowerKey.end(), lowerKey.begin(), ::tolower);
-                    // Skip informational keys: build_reason, *_degraded flags
-                    if (lowerKey.find("build_reason") != std::string::npos ||
-                        lowerKey.find("build reason") != std::string::npos ||
-                        lowerKey.ends_with("_degraded")) {
+                    const std::string_view k{key};
+                    if (k == readiness::kSearchEngineBuildReasonInitial ||
+                        k == readiness::kSearchEngineBuildReasonRebuild ||
+                        k == readiness::kSearchEngineBuildReasonDegraded ||
+                        k.ends_with("_degraded")) {
                         continue;
                     }
-                    if ((lowerKey == "vector_db" || lowerKey == "vector db") &&
-                        s.vectorDbInitAttempted) {
+                    if (k == readiness::kVectorDb && s.vectorDbInitAttempted) {
                         continue;
                     }
-                    if (lowerKey == "vector_db_ready" || lowerKey == "vector db ready" ||
-                        lowerKey == "vector_db_init_attempted" ||
-                        lowerKey == "vector db init attempted") {
+                    if (k == readiness::kVectorDbReady || k == readiness::kVectorDbInitAttempted) {
                         continue;
                     }
-                    if (suppressDerivedIssue(lowerKey)) {
+                    if (suppressDerivedIssue(k)) {
                         continue;
                     }
                     auto rd = classifyReadiness(key, ready);
@@ -2197,40 +2198,33 @@ private:
 
                 std::vector<std::string> waiting;
                 waiting.reserve(readinessList.size());
-                auto suppressDerivedWaiting = [&](const std::string& lowerKey) {
-                    if ((lowerKey == "embedding ready" || lowerKey == "embedding_ready") &&
-                        (status.embeddingAvailable ||
-                         (status.readinessStates.contains("model_provider") &&
-                          status.readinessStates.at("model_provider")))) {
+                namespace readiness = yams::daemon::readiness;
+                auto suppressDerivedWaiting = [&](std::string_view key) {
+                    if (key == readiness::kTopologyArtifactsFresh ||
+                        key == readiness::kTopologyRebuildRunning ||
+                        key == readiness::kVectorIndex) {
                         return true;
                     }
-                    if ((lowerKey == "plugins ready" || lowerKey == "plugins_ready") &&
-                        (status.readinessStates.contains("plugins") &&
-                         status.readinessStates.at("plugins"))) {
-                        return true;
-                    }
-                    if (lowerKey == "topology artifacts fresh" ||
-                        lowerKey == "topology_artifacts_fresh" ||
-                        lowerKey == "topology rebuild running" ||
-                        lowerKey == "topology_rebuild_running" || lowerKey == "vector index" ||
-                        lowerKey == "vector_index") {
+                    const bool emptyCorpusReady = status.vectorDbInitAttempted &&
+                                                  !status.vectorDbReady &&
+                                                  status.embeddingAvailable;
+                    if (emptyCorpusReady && (key == readiness::kSearchEngineVectorUsable ||
+                                             key == readiness::kSearchEngineHybridUsable)) {
                         return true;
                     }
                     return false;
                 };
                 for (const auto& rd : readinessList) {
                     if (rd.issue) {
-                        // Skip "build reason" keys - they're informational, not readiness
-                        // indicators
-                        std::string lowerLabel = rd.label;
-                        std::transform(lowerLabel.begin(), lowerLabel.end(), lowerLabel.begin(),
-                                       ::tolower);
+                        const std::string_view k{rd.key};
                         const bool skipReadinessLabel =
-                            lowerLabel.find("build reason") != std::string::npos ||
-                            lowerLabel == "vector db ready" ||
-                            lowerLabel == "vector db init attempted" ||
-                            (rd.key == "vector_db" && status.vectorDbInitAttempted) ||
-                            suppressDerivedWaiting(lowerLabel);
+                            k == readiness::kSearchEngineBuildReasonInitial ||
+                            k == readiness::kSearchEngineBuildReasonRebuild ||
+                            k == readiness::kSearchEngineBuildReasonDegraded ||
+                            k == readiness::kVectorDbReady ||
+                            k == readiness::kVectorDbInitAttempted ||
+                            (k == readiness::kVectorDb && status.vectorDbInitAttempted) ||
+                            suppressDerivedWaiting(k);
                         if (!skipReadinessLabel)
                             waiting.push_back(rd.label);
                     }

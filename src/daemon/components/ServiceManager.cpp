@@ -11,7 +11,6 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
-#include <mutex>
 #include <optional>
 #include <queue>
 #include <sstream>
@@ -233,14 +232,8 @@ using yams::Result;
 namespace search = yams::search;
 
 ServiceManager::PluginStatusSnapshot ServiceManager::getPluginStatusSnapshot() const {
-    // Use try_lock to avoid blocking indefinitely during plugin refresh operations
-    std::shared_lock lk(pluginStatusMutex_, std::try_to_lock);
-    if (!lk.owns_lock()) {
-        spdlog::debug(
-            "getPluginStatusSnapshot: mutex busy (refresh in progress?), returning empty");
-        return PluginStatusSnapshot{};
-    }
-    return pluginStatusSnapshot_;
+    auto snap = std::atomic_load_explicit(&pluginStatusSnapshot_, std::memory_order_acquire);
+    return snap ? *snap : PluginStatusSnapshot{};
 }
 
 void ServiceManager::refreshPluginStatusSnapshot() {
@@ -307,10 +300,9 @@ void ServiceManager::refreshPluginStatusSnapshot() {
     } catch (...) {
         // leave snapshot empty on failure
     }
-    {
-        std::unique_lock lk(pluginStatusMutex_);
-        pluginStatusSnapshot_ = std::move(snapshot);
-    }
+    auto shared = std::make_shared<PluginStatusSnapshot>(std::move(snapshot));
+    std::atomic_store_explicit(&pluginStatusSnapshot_, std::move(shared),
+                               std::memory_order_release);
 }
 
 ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state,

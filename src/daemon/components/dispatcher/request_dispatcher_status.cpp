@@ -23,12 +23,6 @@
 
 namespace yams::daemon {
 
-namespace {
-constexpr std::string_view kSearchEngineLexicalReady = "search_engine_lexical";
-constexpr std::string_view kSearchEngineHybridUsable = "search_engine_hybrid_usable";
-constexpr std::string_view kSearchEngineVectorUsable = "search_engine_vector_usable";
-} // namespace
-
 boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const StatusRequest& req) {
     // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
@@ -640,9 +634,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 const bool lexicalReady =
                     res.readinessStates[std::string(readiness::kSearchEngine)];
                 const bool hybridUsable = lexicalReady && res.vectorDbReady;
-                res.readinessStates[std::string(kSearchEngineLexicalReady)] = lexicalReady;
-                res.readinessStates[std::string(kSearchEngineVectorUsable)] = res.vectorDbReady;
-                res.readinessStates[std::string(kSearchEngineHybridUsable)] = hybridUsable;
+                res.readinessStates[std::string(readiness::kSearchEngineLexicalReady)] =
+                    lexicalReady;
+                res.readinessStates[std::string(readiness::kSearchEngineVectorUsable)] =
+                    res.vectorDbReady;
+                res.readinessStates[std::string(readiness::kSearchEngineHybridUsable)] =
+                    hybridUsable;
             } catch (...) {
             }
         }
@@ -844,13 +841,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.readinessStates.emplace(std::string(key), value);
             }
         }
-        if (auto it = res.readinessStates.find(std::string(kSearchEngineLexicalReady));
+        if (auto it = res.readinessStates.find(std::string(readiness::kSearchEngineLexicalReady));
             it == res.readinessStates.end()) {
             const bool lexicalReady = res.readinessStates[std::string(readiness::kSearchEngine)];
             const bool vectorReady = res.readinessStates[std::string(readiness::kVectorDbReady)];
-            res.readinessStates.emplace(std::string(kSearchEngineLexicalReady), lexicalReady);
-            res.readinessStates.emplace(std::string(kSearchEngineVectorUsable), vectorReady);
-            res.readinessStates.emplace(std::string(kSearchEngineHybridUsable),
+            res.readinessStates.emplace(std::string(readiness::kSearchEngineLexicalReady),
+                                        lexicalReady);
+            res.readinessStates.emplace(std::string(readiness::kSearchEngineVectorUsable),
+                                        vectorReady);
+            res.readinessStates.emplace(std::string(readiness::kSearchEngineHybridUsable),
                                         lexicalReady && vectorReady);
         }
 
