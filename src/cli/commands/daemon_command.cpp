@@ -2039,6 +2039,10 @@ private:
                         continue;
                     }
                     auto rd = classifyReadiness(key, ready);
+                    auto pit = s.initProgress.find(key);
+                    if (pit != s.initProgress.end() && pit->second < 100) {
+                        rd.label += " (" + std::to_string(static_cast<int>(pit->second)) + "%)";
+                    }
                     issues.push_back(rd.label);
                 }
             }

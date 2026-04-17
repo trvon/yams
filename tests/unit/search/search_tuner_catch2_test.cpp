@@ -1106,9 +1106,9 @@ TEST_CASE("SearchTuner: adaptive runtime tuning stays steady on overlay-backed s
     telemetry.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;
     telemetry.topWindow = 20;
     telemetry.stages["kg"] = {
-        .enabled = true, .durationMs = 60.0, .skipped = false, .contributed = true};
+        .enabled = true, .contributed = true, .skipped = false, .durationMs = 60.0};
     telemetry.stages["graph_rerank"] = {
-        .enabled = true, .durationMs = 20.0, .skipped = false, .contributed = true};
+        .enabled = true, .contributed = true, .skipped = false, .durationMs = 20.0};
     telemetry.fusionSources["kg"] = {
         .enabled = true, .contributedToFinal = true, .finalScoreMass = 0.4, .finalTopDocCount = 5};
 

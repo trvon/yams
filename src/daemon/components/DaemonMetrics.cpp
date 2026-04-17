@@ -734,7 +734,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         const bool searchReady = state_->readiness.searchEngineReady.load();
         const int searchPct = std::clamp<int>(state_->readiness.searchProgress.load(), 0, 100);
         if (!searchReady || searchPct < 100) {
-            out.initProgress["search"] = static_cast<uint8_t>(searchPct);
+            out.initProgress[std::string(readiness::kSearchEngine)] =
+                static_cast<uint8_t>(searchPct);
         }
     } catch (...) {
     }
