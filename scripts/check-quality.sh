@@ -18,6 +18,7 @@ PROFILE="normal"
 OUTPUT_FORMAT="human"
 OUTPUT_DIR=""
 GIT_ONLY=false
+DIFF_BASE=""
 PARALLEL=true
 VERBOSE=false
 FIX_FORMAT=false
@@ -85,6 +86,8 @@ OPTIONS:
         
     Source Selection:
         -g, --git                Only analyze files changed in git (staged and unstaged)
+        --diff-base REV          Only analyze C/C++ files changed since REV and only fail on
+                                 findings that land on changed lines
         -d, --build-dir DIR      Build directory for compile_commands.json
         
     Analysis Options:
@@ -126,6 +129,9 @@ EXAMPLES:
     
     # Quick check on git changes only
     $(basename "$0") --profile quick --git
+
+    # CI regression check against a base commit
+    $(basename "$0") --profile ci --diff-base origin/main
     
     # CI mode with baseline comparison
     $(basename "$0") --profile ci --format json --baseline quality-baseline.json
@@ -161,6 +167,10 @@ while [[ $# -gt 0 ]]; do
         -g|--git)
             GIT_ONLY=true
             shift
+            ;;
+        --diff-base)
+            DIFF_BASE="$2"
+            shift 2
             ;;
         -d|--build-dir)
             BUILD_DIR="$2"
@@ -235,6 +245,18 @@ case $OUTPUT_FORMAT in
         exit 1
         ;;
 esac
+
+if [[ "$GIT_ONLY" == true && -n "$DIFF_BASE" ]]; then
+    print_error "--git and --diff-base are mutually exclusive"
+    exit 1
+fi
+
+if [[ -n "$DIFF_BASE" ]]; then
+    if ! git rev-parse --verify "${DIFF_BASE}^{commit}" >/dev/null 2>&1; then
+        print_error "Invalid --diff-base revision: $DIFF_BASE"
+        exit 1
+    fi
+fi
 
 # Check for required tools
 check_tool() {
@@ -339,6 +361,7 @@ print_progress "Output format: $OUTPUT_FORMAT"
 [[ -f "$SUPPRESSIONS_FILE" ]] && print_progress "Suppressions file: $SUPPRESSIONS_FILE"
 [[ -n "$CPPCHECK_BUILD_DIR" ]] && print_progress "Cppcheck build dir: $CPPCHECK_BUILD_DIR"
 print_progress "Git only: $GIT_ONLY"
+[[ -n "$DIFF_BASE" ]] && print_progress "Diff base: $DIFF_BASE"
 print_progress "Parallel: $PARALLEL"
 print_progress "Fix format: $FIX_FORMAT"
 
@@ -442,7 +465,23 @@ report_sanitizer_build "UBSAN" "undefined" "builddir-ubsan" "build/ubsan" "build
 # Get list of files to analyze
 print_section "Collecting Source Files"
 
-if [[ "$GIT_ONLY" == true ]]; then
+if [[ -n "$DIFF_BASE" ]]; then
+    print_progress "Getting list of files changed since $DIFF_BASE..."
+
+    FILES=$(git diff --name-only --diff-filter=ACMR "$DIFF_BASE"...HEAD 2>/dev/null || true)
+
+    FILES=$(echo "$FILES" | grep -E '\.(cpp|h|hpp|cc|cxx|c)$' | sort -u || true)
+
+    if [[ -z "$FILES" ]]; then
+        print_success "No changed C++ files found since $DIFF_BASE"
+        exit 0
+    fi
+
+    FILE_ARRAY=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && FILE_ARRAY+=("$line")
+    done <<< "$FILES"
+elif [[ "$GIT_ONLY" == true ]]; then
     print_progress "Getting list of git-modified files..."
     
     # Get both staged and unstaged files
@@ -561,9 +600,9 @@ if [[ -n "$INCLUDE_DIRS" ]]; then
     done
 fi
 
-# Add compile commands if available (but only if not using git-only mode)
+# Add compile commands if available (but only if not using git-scoped modes)
 USE_COMPILE_COMMANDS=false
-if [[ -f "$COMPILE_COMMANDS" && "$GIT_ONLY" == false ]]; then
+if [[ -f "$COMPILE_COMMANDS" && "$GIT_ONLY" == false && -z "$DIFF_BASE" ]]; then
     CPPCHECK_ARGS+=("--project=$COMPILE_COMMANDS")
     USE_COMPILE_COMMANDS=true
 fi
@@ -632,6 +671,66 @@ fi
 
 print_success "cppcheck configured with ${#CPPCHECK_ARGS[@]} arguments"
 
+filter_cppcheck_to_changed_lines() {
+    local diff_base=$1
+    local input_file=$2
+    local output_file=$3
+
+    python3 - "$diff_base" "$input_file" "$output_file" <<'PY'
+import os
+import re
+import subprocess
+import sys
+
+diff_base, input_path, output_path = sys.argv[1:]
+
+diff = subprocess.run(
+    ["git", "diff", "--unified=0", f"{diff_base}...HEAD", "--"],
+    check=False,
+    capture_output=True,
+    text=True,
+).stdout.splitlines()
+
+current = None
+ranges = {}
+path_re = re.compile(r"^\+\+\+ b/(.+)$")
+hunk_re = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+for line in diff:
+    path_match = path_re.match(line)
+    if path_match:
+        current = os.path.normpath(path_match.group(1))
+        continue
+
+    hunk_match = hunk_re.match(line)
+    if hunk_match and current:
+        start = int(hunk_match.group(1))
+        count = int(hunk_match.group(2) or "1")
+        if count == 0:
+            continue
+        ranges.setdefault(current, []).append((start, start + count - 1))
+
+finding_re = re.compile(r"^(?P<file>.+?):(?P<line>\d+):(?P<column>\d+):\s+(?P<severity>[^:]+):")
+
+matches = []
+with open(input_path, "r", encoding="utf-8", errors="replace") as fh:
+    for raw in fh:
+        line = raw.rstrip("\n")
+        match = finding_re.match(line)
+        if not match:
+            continue
+        path = os.path.normpath(match.group("file").lstrip("./"))
+        line_no = int(match.group("line"))
+        if any(lo <= line_no <= hi for lo, hi in ranges.get(path, [])):
+            matches.append(raw)
+
+with open(output_path, "w", encoding="utf-8") as out:
+    out.writelines(matches)
+
+print(len(matches))
+PY
+}
+
 # Run static analysis
 print_section "Running Static Analysis"
 
@@ -656,7 +755,14 @@ fi
 
 # Create file list for cppcheck
 TEMP_FILE_LIST=$(mktemp)
-trap "rm -f $TEMP_FILE_LIST" EXIT
+TEMP_CPPCHECK_OUTPUT=""
+TEMP_FILTERED_OUTPUT=""
+trap 'rm -f "$TEMP_FILE_LIST" "$TEMP_CPPCHECK_OUTPUT" "$TEMP_FILTERED_OUTPUT"' EXIT
+
+if [[ -n "$DIFF_BASE" && "$OUTPUT_FORMAT" == "human" ]]; then
+    TEMP_CPPCHECK_OUTPUT=$(mktemp)
+    TEMP_FILTERED_OUTPUT=$(mktemp)
+fi
 
 printf '%s\n' "${FILE_ARRAY[@]}" > "$TEMP_FILE_LIST"
 
@@ -671,7 +777,11 @@ if [[ "$USE_COMPILE_COMMANDS" == true ]]; then
     fi
     
     CPPCHECK_EXIT_CODE=0
-    if [[ -n "$OUTPUT_FILE" ]]; then
+    if [[ -n "$TEMP_CPPCHECK_OUTPUT" ]]; then
+        if ! cppcheck "${CPPCHECK_ARGS[@]}" > "$TEMP_CPPCHECK_OUTPUT" 2>&1; then
+            CPPCHECK_EXIT_CODE=$?
+        fi
+    elif [[ -n "$OUTPUT_FILE" ]]; then
         # Output to file
         if [[ "$OUTPUT_FORMAT" == "xml" || "$OUTPUT_FORMAT" == "json" || "$OUTPUT_FORMAT" == "sarif" ]]; then
             # XML output goes to stderr
@@ -698,7 +808,11 @@ else
     fi
     
     CPPCHECK_EXIT_CODE=0
-    if [[ -n "$OUTPUT_FILE" ]]; then
+    if [[ -n "$TEMP_CPPCHECK_OUTPUT" ]]; then
+        if ! cppcheck "${CPPCHECK_ARGS[@]}" --file-list="$TEMP_FILE_LIST" > "$TEMP_CPPCHECK_OUTPUT" 2>&1; then
+            CPPCHECK_EXIT_CODE=$?
+        fi
+    elif [[ -n "$OUTPUT_FILE" ]]; then
         # Output to file
         if [[ "$OUTPUT_FORMAT" == "xml" || "$OUTPUT_FORMAT" == "json" || "$OUTPUT_FORMAT" == "sarif" ]]; then
             # XML output goes to stderr
@@ -716,6 +830,26 @@ else
         # Output to stdout/stderr
         if ! cppcheck "${CPPCHECK_ARGS[@]}" --file-list="$TEMP_FILE_LIST"; then
             CPPCHECK_EXIT_CODE=$?
+        fi
+    fi
+fi
+
+if [[ -n "$TEMP_CPPCHECK_OUTPUT" ]]; then
+    FILTERED_COUNT=$(filter_cppcheck_to_changed_lines "$DIFF_BASE" "$TEMP_CPPCHECK_OUTPUT" "$TEMP_FILTERED_OUTPUT")
+    RAW_FINDING_COUNT=$(rg -c '^[^:]+:[0-9]+:[0-9]+:\s+[^:]+:' "$TEMP_CPPCHECK_OUTPUT" || true)
+
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        cp "$TEMP_FILTERED_OUTPUT" "$OUTPUT_FILE"
+    else
+        cat "$TEMP_FILTERED_OUTPUT"
+    fi
+
+    if [[ "$FILTERED_COUNT" == "0" ]]; then
+        if [[ "${RAW_FINDING_COUNT:-0}" -gt 0 ]]; then
+            print_success "No cppcheck findings on changed lines since $DIFF_BASE"
+            CPPCHECK_EXIT_CODE=0
+        elif [[ $CPPCHECK_EXIT_CODE -ne 0 ]]; then
+            cat "$TEMP_CPPCHECK_OUTPUT"
         fi
     fi
 fi

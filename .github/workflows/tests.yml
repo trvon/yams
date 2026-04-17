@@ -46,9 +46,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cppcheck clang-tidy
 
-      - name: Run cppcheck (CI profile, all source)
+      - name: Run cppcheck (CI profile, changed lines)
         shell: bash
-        run: scripts/check-quality.sh --profile ci --format human --parallel
+        run: |
+          set -euo pipefail
+          BASE=""
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          elif [[ -n "${{ github.event.before }}" && "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            BASE="${{ github.event.before }}"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            BASE="HEAD^"
+          fi
+
+          if [[ -n "$BASE" ]]; then
+            scripts/check-quality.sh --profile ci --format human --parallel --diff-base "$BASE"
+          else
+            scripts/check-quality.sh --profile ci --format human --parallel
+          fi
 
       - name: Run clang-tidy on changed files (PR only)
         if: github.event_name == 'pull_request'
@@ -199,7 +214,13 @@ jobs:
           # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
           # is not detected by CMake (module mode will pick this up).
           # Install libbenchmark-dev for Google Benchmark support
-          sudo apt-get install -y --no-install-recommends libboost-all-dev meson pkg-config libbenchmark-dev xz-utils
+          sudo apt-get install -y --no-install-recommends libboost-all-dev pkg-config libbenchmark-dev xz-utils
+          python3 -m pip install --user --upgrade meson 'ninja>=1.10'
+          USER_BASE=$(python3 -m site --user-base)
+          echo "$USER_BASE/bin" >> "$GITHUB_PATH"
+          export PATH="$USER_BASE/bin:$PATH"
+          echo "meson version: $(meson --version || echo 'missing')"
+          echo "ninja version: $(ninja --version || echo 'missing')"
           echo "Installed system Boost headers/libs for module-mode fallback"
 
       - name: Install Zig (Linux)
@@ -237,10 +258,11 @@ jobs:
           done
           # Align with release workflow to ensure Meson builds have required toolchain bits.
           # Install google-benchmark for benchmark tests, zig for zyp PDF plugin
-          brew install pkg-config cmake ninja meson ccache boost google-benchmark zig || true
-          # Guard against Homebrew reporting success without linking binaries (nondefault prefixes).
-          command -v meson >/dev/null 2>&1 || python3 -m pip install --user --upgrade meson
-          command -v ninja >/dev/null 2>&1 || python3 -m pip install --user --upgrade 'ninja>=1.10'
+          brew install pkg-config cmake ccache boost google-benchmark zig || true
+          python3 -m pip install --user --upgrade meson 'ninja>=1.10'
+          USER_BASE=$(python3 -m site --user-base)
+          echo "$USER_BASE/bin" >> "$GITHUB_PATH"
+          export PATH="$USER_BASE/bin:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
           echo "ninja version: $(ninja --version || echo 'missing')"
           echo "zig version: $(zig version || echo 'missing')"
@@ -249,7 +271,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade meson ninja
+          python -m pip install --upgrade meson 'ninja>=1.10'
           USER_BASE=$(python -m site --user-base)
           export PATH="$USER_BASE/Scripts:$USER_BASE/bin:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
