@@ -1022,6 +1022,43 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     }
 }
 
+TEST_CASE("RequestDispatcher: compact and detailed status agree on FSM readiness",
+          "[daemon][status][readiness]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_fsm_readiness_parity_");
+
+    YamsDaemon daemon(cfg);
+    DaemonLifecycleAdapter lifecycleAdapter(&daemon);
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
+
+    auto fetch = [&](bool detailed) {
+        StatusRequest req;
+        req.detailed = detailed;
+        Request r = req;
+        boost::asio::io_context ioc;
+        auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(r), boost::asio::use_future);
+        ioc.run();
+        auto resp = fut.get();
+        REQUIRE(std::holds_alternative<StatusResponse>(resp));
+        return std::get<StatusResponse>(resp);
+    };
+
+    const auto compact = fetch(false);
+    const auto detailed = fetch(true);
+
+    for (const auto key : {readiness::kEmbeddingReady, readiness::kEmbeddingDegraded,
+                           readiness::kPluginsReady, readiness::kPluginsDegraded}) {
+        const std::string k(key);
+        INFO("readiness key must agree between compact and detailed: " << k);
+        REQUIRE(compact.readinessStates.count(k) > 0);
+        REQUIRE(detailed.readinessStates.count(k) > 0);
+        REQUIRE(compact.readinessStates.at(k) == detailed.readinessStates.at(k));
+    }
+}
+
 TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
           "[daemon][status][repair]") {
     DaemonConfig cfg;

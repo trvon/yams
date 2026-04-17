@@ -1998,15 +1998,6 @@ private:
             // Collect issues for quick summary (skip informational flags)
             std::vector<std::string> issues;
             auto suppressDerivedIssue = [&](const std::string& lowerKey) {
-                if ((lowerKey == "embedding_ready" || lowerKey == "embedding ready") &&
-                    (s.embeddingAvailable || (s.readinessStates.contains("model_provider") &&
-                                              s.readinessStates.at("model_provider")))) {
-                    return true;
-                }
-                if ((lowerKey == "plugins_ready" || lowerKey == "plugins ready") &&
-                    (s.readinessStates.contains("plugins") && s.readinessStates.at("plugins"))) {
-                    return true;
-                }
                 if (lowerKey == "topology_artifacts_fresh" ||
                     lowerKey == "topology artifacts fresh" ||
                     lowerKey == "topology_rebuild_running" ||

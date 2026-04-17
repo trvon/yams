@@ -167,37 +167,55 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             setVal(metrics::kPostIngestRpcCapacity, snap->postIngestRpcCapacity);
             setVal(metrics::kPostIngestRpcMaxPerBatch, snap->postIngestRpcMaxPerBatch);
 
+            // FSM-derived readiness and state codes are authoritative for every client —
+            // hoist them above the extended-status gate so compact responses carry the
+            // correct embedding_ready / plugins_ready values instead of defaulting to false.
+            try {
+                if (serviceManager_) {
+                    try {
+                        auto ss = serviceManager_->getServiceManagerFsmSnapshot();
+                        setVal(metrics::kServiceFsmState, static_cast<size_t>(ss.state));
+                    } catch (...) {
+                    }
+                    try {
+                        auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
+                        const bool providerReady =
+                            state_ &&
+                            state_->readiness.modelProviderReady.load(std::memory_order_relaxed);
+                        const bool embeddingOperational =
+                            (es.state == EmbeddingProviderState::ModelReady) ||
+                            ((snap->embeddingAvailable || providerReady) &&
+                             es.state != EmbeddingProviderState::Failed);
+                        setVal(metrics::kEmbeddingState, static_cast<size_t>(es.state));
+                        setReady(readiness::kEmbeddingReady, embeddingOperational);
+                        setReady(readiness::kEmbeddingDegraded,
+                                 es.state == EmbeddingProviderState::Degraded ||
+                                     es.state == EmbeddingProviderState::Failed);
+                    } catch (...) {
+                    }
+                    try {
+                        auto ps = serviceManager_->getPluginHostFsmSnapshot();
+                        const bool pluginsOperational =
+                            (ps.state == PluginHostState::Ready) ||
+                            (((ps.loadedCount > 0) ||
+                              (state_ &&
+                               state_->readiness.pluginsReady.load(std::memory_order_relaxed))) &&
+                             ps.state != PluginHostState::Failed);
+                        setVal(metrics::kPluginHostState, static_cast<size_t>(ps.state));
+                        setReady(readiness::kPluginsReady, pluginsOperational);
+                        setReady(readiness::kPluginsDegraded, ps.state == PluginHostState::Failed);
+                    } catch (...) {
+                    }
+                }
+            } catch (...) {
+            }
+
             // Export selected tuning/config diagnostics only for detailed status to keep the
             // default UX path lean. Benchmarks and clients still get the core cached metrics
             // above without paying for extra live queries and payload bloat.
             if (includeExtendedStatus) {
                 try {
                     if (serviceManager_) {
-                        // Surface FSM states as numeric codes in requestCounts, and booleans in
-                        // readinessStates
-                        try {
-                            auto ss = serviceManager_->getServiceManagerFsmSnapshot();
-                            setVal(metrics::kServiceFsmState, static_cast<size_t>(ss.state));
-                        } catch (...) {
-                        }
-                        try {
-                            auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
-                            const bool providerReady =
-                                state_ && state_->readiness.modelProviderReady.load(
-                                              std::memory_order_relaxed);
-                            const bool embeddingOperational =
-                                (es.state == EmbeddingProviderState::ModelReady) ||
-                                ((snap->embeddingAvailable || providerReady) &&
-                                 es.state != EmbeddingProviderState::Failed);
-                            setVal(metrics::kEmbeddingState, static_cast<size_t>(es.state));
-                            setReady(readiness::kEmbeddingReady, embeddingOperational);
-                            // Provide an explicit degraded flag for clients/tools that
-                            // distinguish readiness from degraded modes.
-                            setReady(readiness::kEmbeddingDegraded,
-                                     es.state == EmbeddingProviderState::Degraded ||
-                                         es.state == EmbeddingProviderState::Failed);
-                        } catch (...) {
-                        }
                         // EmbeddingService metrics (jobs currently being processed)
                         try {
                             setVal(metrics::kEmbedInflight,
@@ -218,20 +236,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                                    serviceManager_->getEmbeddingInferMaxMs());
                             setVal(metrics::kEmbedInferWarnCount,
                                    serviceManager_->getEmbeddingInferWarnCount());
-                        } catch (...) {
-                        }
-                        try {
-                            auto ps = serviceManager_->getPluginHostFsmSnapshot();
-                            const bool pluginsOperational =
-                                (ps.state == PluginHostState::Ready) ||
-                                (((ps.loadedCount > 0) ||
-                                  (state_ && state_->readiness.pluginsReady.load(
-                                                 std::memory_order_relaxed))) &&
-                                 ps.state != PluginHostState::Failed);
-                            setVal(metrics::kPluginHostState, static_cast<size_t>(ps.state));
-                            setReady(readiness::kPluginsReady, pluginsOperational);
-                            setReady(readiness::kPluginsDegraded,
-                                     ps.state == PluginHostState::Failed);
                         } catch (...) {
                         }
                         const auto& tc = serviceManager_->getConfig().tuning;
