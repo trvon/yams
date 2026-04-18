@@ -1,10 +1,12 @@
 name: Publish Package Repositories
 
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: ["completed"]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Release run ID to publish (leave empty for latest successful stable)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -12,9 +14,6 @@ permissions:
 
 jobs:
   publish:
-    if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -24,18 +23,18 @@ jobs:
           fetch-depth: 1
           submodules: false # Publishing does not require submodule contents
 
-      - name: Download artifacts from triggering Release run
-        if: github.event_name == 'workflow_run'
+      - name: Download artifacts from specified Release run
+        if: inputs.run_id != ''
         uses: dawidd6/action-download-artifact@v6
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
-          run_id: ${{ github.event.workflow_run.id }}
+          run_id: ${{ inputs.run_id }}
           path: repo-artifacts
           if_no_artifact_found: warn
 
-      - name: Download artifacts from latest successful Release run (manual)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Download artifacts from latest successful Release run
+        if: inputs.run_id == ''
         uses: dawidd6/action-download-artifact@v6
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
