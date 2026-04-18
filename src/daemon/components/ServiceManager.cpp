@@ -2360,6 +2360,15 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
         } catch (...) {
         }
 
+        try {
+            if (retrievalSessions_) {
+                retrievalSessions_->cleanupExpired(std::chrono::seconds(60));
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("[ServiceManager] retrieval-session cleanup failed: {}", e.what());
+        } catch (...) {
+        }
+
         boost::system::error_code ec;
         timer.expires_after(wait_duration);
         co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
@@ -3298,6 +3307,7 @@ void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
     rcfg.dataDir = resolvedDataDir_;
     rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
     rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
+    rcfg.maxPendingRepairs = config_.maxPendingRepairs;
     repairServiceHost_.start(std::move(rcfg), &state_, std::move(activeConnFn),
                              makeRepairServiceContext(this));
 }

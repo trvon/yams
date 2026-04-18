@@ -17,6 +17,18 @@ constexpr size_t kMaxIndexedDownloadTextBytes = 16 * 1024 * 1024;
 
 class DownloadServiceImpl : public IDownloadService {
 public:
+    DownloadServiceImpl(const AppContext& ctx, const DownloadServiceOptions& opts)
+        : DownloadServiceImpl(ctx) {
+        if (opts.maxFileBytes > 0 && manager_) {
+            dlCfg_.maxFileBytes = opts.maxFileBytes;
+            manager_ = downloader::makeDownloadManager(storageCfg_, dlCfg_);
+            if (!manager_) {
+                spdlog::error("DownloadService: Failed to rebuild download manager with cap");
+                throw std::runtime_error("Failed to initialize download manager with cap");
+            }
+        }
+    }
+
     explicit DownloadServiceImpl(const AppContext& ctx) : ctx_(ctx) {
         // Initialize download manager once with proper config
         // Get storage path from content store or environment
@@ -356,6 +368,11 @@ private:
 
 std::shared_ptr<IDownloadService> makeDownloadService(const AppContext& ctx) {
     return std::make_shared<DownloadServiceImpl>(ctx);
+}
+
+std::shared_ptr<IDownloadService> makeDownloadService(const AppContext& ctx,
+                                                      const DownloadServiceOptions& opts) {
+    return std::make_shared<DownloadServiceImpl>(ctx, opts);
 }
 
 } // namespace yams::app::services

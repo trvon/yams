@@ -423,6 +423,15 @@ void RepairService::onDocumentAdded(const DocumentAddedEvent& event) {
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         if (pendingSet_.find(event.hash) == pendingSet_.end()) {
+            if (cfg_.maxPendingRepairs > 0 && pendingDocuments_.size() >= cfg_.maxPendingRepairs) {
+                if (state_) {
+                    state_->stats.repairQueueDepth.store(
+                        static_cast<uint64_t>(pendingDocuments_.size()));
+                }
+                spdlog::warn("RepairService: dropping DocumentAdded {} -- pending queue at cap {}",
+                             event.hash, cfg_.maxPendingRepairs);
+                return;
+            }
             pendingSet_.insert(event.hash);
             pendingDocuments_.push(event.hash);
         }
@@ -492,10 +501,16 @@ void RepairService::enqueueEmbeddingRepair(const std::vector<std::string>& hashe
     if (!cfg_.enable || !running_ || hashes.empty())
         return;
     size_t enqueuedCount = 0;
+    size_t droppedAtCap = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         for (const auto& hash : hashes) {
             if (pendingSet_.find(hash) == pendingSet_.end()) {
+                if (cfg_.maxPendingRepairs > 0 &&
+                    pendingDocuments_.size() >= cfg_.maxPendingRepairs) {
+                    ++droppedAtCap;
+                    continue;
+                }
                 pendingSet_.insert(hash);
                 pendingDocuments_.push(hash);
                 ++enqueuedCount;
@@ -506,6 +521,10 @@ void RepairService::enqueueEmbeddingRepair(const std::vector<std::string>& hashe
     }
     queueCv_.notify_one();
     spdlog::debug("RepairService: queued {} docs for embedding repair", enqueuedCount);
+    if (droppedAtCap > 0) {
+        spdlog::warn("RepairService: dropped {} embedding-repair hashes -- pending queue at cap {}",
+                     droppedAtCap, cfg_.maxPendingRepairs);
+    }
 }
 
 // ============================================================================

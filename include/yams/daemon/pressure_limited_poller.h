@@ -260,12 +260,23 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                                                      hashes = std::move(hashes),
                                                      batchLimiterId = std::move(batchLimiterId),
                                                      batchLimiterAcquired]() mutable {
-                        cfg.batchProcessFn(std::move(batch));
+                        bool success = false;
+                        try {
+                            cfg.batchProcessFn(std::move(batch));
+                            success = true;
+                        } catch (const std::exception& e) {
+                            spdlog::error("[PostIngestQueue] {} batchProcessFn threw: {}",
+                                          cfg.stageName, e.what());
+                        } catch (...) {
+                            spdlog::error(
+                                "[PostIngestQueue] {} batchProcessFn threw non-std exception",
+                                cfg.stageName);
+                        }
                         if (batchLimiterAcquired) {
-                            cfg.completeJobFn(batchLimiterId, true);
+                            cfg.completeJobFn(batchLimiterId, success);
                         }
                         for (const auto& h : hashes) {
-                            cfg.completeJobFn(h, true);
+                            cfg.completeJobFn(h, success);
                         }
                         cfg.inFlightCounter->fetch_sub(batchCount);
                         if (cfg.notifyLifecycleFn) {
@@ -296,8 +307,18 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                     cfg.inFlightCounter->fetch_add(1);
                     boost::asio::post(cfg.executor, [cfg, job = std::move(job),
                                                      hash = std::move(hash)]() mutable {
-                        cfg.processFn(job);
-                        cfg.completeJobFn(hash, true);
+                        bool success = false;
+                        try {
+                            cfg.processFn(job);
+                            success = true;
+                        } catch (const std::exception& e) {
+                            spdlog::error("[PostIngestQueue] {} processFn threw: {}", cfg.stageName,
+                                          e.what());
+                        } catch (...) {
+                            spdlog::error("[PostIngestQueue] {} processFn threw non-std exception",
+                                          cfg.stageName);
+                        }
+                        cfg.completeJobFn(hash, success);
                         cfg.inFlightCounter->fetch_sub(1);
                         if (cfg.notifyLifecycleFn) {
                             cfg.notifyLifecycleFn();

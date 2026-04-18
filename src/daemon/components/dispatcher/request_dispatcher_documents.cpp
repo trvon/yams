@@ -1591,7 +1591,9 @@ RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
             }
             auto job = downloadJobRegistry().begin(dataDir, req);
             auto appContext = serviceManager_->getAppContext();
-            auto downloadService = app::services::makeDownloadService(appContext);
+            app::services::DownloadServiceOptions dlOpts;
+            dlOpts.maxFileBytes = policy.maxFileBytes;
+            auto downloadService = app::services::makeDownloadService(appContext, dlOpts);
             if (g_forceDownloadServiceUnavailableOnce.exchange(false, std::memory_order_acq_rel)) {
                 downloadService.reset();
             }

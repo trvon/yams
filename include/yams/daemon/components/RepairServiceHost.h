@@ -35,6 +35,7 @@ public:
         std::filesystem::path dataDir;
         std::uint32_t maxBatch{0};
         bool autoRebuildOnDimMismatch{false};
+        std::size_t maxPendingRepairs{1000};
     };
 
     RepairServiceHost();

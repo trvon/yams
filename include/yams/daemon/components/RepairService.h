@@ -109,6 +109,7 @@ public:
         bool autoRebuildOnDimMismatch{true};
         std::int32_t maxRetries{3};
         std::chrono::seconds stalledThreshold{3600}; // 1 hour
+        std::size_t maxPendingRepairs{1000};
     };
 
     // Event types for document operations (same as old RepairCoordinator)

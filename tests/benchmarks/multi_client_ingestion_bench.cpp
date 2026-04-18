@@ -2117,6 +2117,7 @@ DaemonHarnessOptions benchHarnessOptions() {
         .useMockModelProvider = true,
         .autoLoadPlugins = false,
         .enableAutoRepair = true,
+        .isolateState = true,
     };
 }
 
@@ -2126,6 +2127,7 @@ DaemonHarnessOptions benchHarnessOptions(const BenchConfig& cfg) {
         .useMockModelProvider = !cfg.useRealModelProvider,
         .autoLoadPlugins = cfg.enablePlugins,
         .enableAutoRepair = true,
+        .isolateState = true,
         .pluginDir = cfg.pluginDir,
         .dataDir = cfg.dataDir,
         .configPath = cfg.configPath,

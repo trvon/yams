@@ -892,6 +892,10 @@ public:
     virtual Result<DownloadServiceResponse> download(const DownloadServiceRequest& req) = 0;
 };
 
+struct DownloadServiceOptions {
+    std::uint64_t maxFileBytes{0}; // 0 = unlimited
+};
+
 // ===========================
 // Indexing Service
 // ===========================
@@ -1013,6 +1017,8 @@ std::shared_ptr<IEmbeddingService> makeEmbeddingService(const AppContext& ctx);
 std::shared_ptr<IGrepService> makeGrepService(const AppContext& ctx);
 std::shared_ptr<IDocumentService> makeDocumentService(const AppContext& ctx);
 std::shared_ptr<IDownloadService> makeDownloadService(const AppContext& ctx);
+std::shared_ptr<IDownloadService> makeDownloadService(const AppContext& ctx,
+                                                      const DownloadServiceOptions& opts);
 std::shared_ptr<IIndexingService> makeIndexingService(const AppContext& ctx);
 std::shared_ptr<IStatsService> makeStatsService(const AppContext& ctx);
 
