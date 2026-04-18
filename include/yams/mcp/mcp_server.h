@@ -21,6 +21,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #endif
 #include <yams/mcp/error_handling.h>
+#include <yams/mcp/mode_router.h>
 #include <yams/mcp/tool_registry.h>
 #if !defined(YAMS_WASI)
 #include <yams/metadata/metadata_repository.h>
@@ -500,6 +501,11 @@ private:
     boost::asio::awaitable<json> handleBatchExecute(const json& args);
     // Session action: dispatch to session_start/stop/pin/unpin/watch
     boost::asio::awaitable<json> handleSessionAction(const json& args);
+
+    boost::asio::awaitable<ModeRouterStepResult>
+    dispatchPipelineStep(std::string op, json params, std::size_t stepIndex,
+                         std::shared_ptr<json> prevResultPtr);
+    static void appendExecuteAddHint(json& result, const json& args);
 
     // Code-mode helpers
     static json resolvePrevRefs(const json& params, const json& prev);

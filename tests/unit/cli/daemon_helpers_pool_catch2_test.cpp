@@ -35,3 +35,22 @@ TEST_CASE("DaemonClientPool pruning thread exits promptly on shutdown", "[cli][d
 
     CHECK(worst < 1100ms);
 }
+
+TEST_CASE("is_transport_failure classifies 'Daemon not ready yet' as transport",
+          "[cli][daemon][transport]") {
+    using yams::Error;
+    using yams::ErrorCode;
+
+    yams::Error notReady{ErrorCode::InvalidState,
+                         "Daemon not ready yet for list (status=initializing)"};
+    CHECK(yams::cli::is_transport_failure(notReady));
+
+    yams::Error timeout{ErrorCode::Timeout, "deadline exceeded"};
+    CHECK(yams::cli::is_transport_failure(timeout));
+
+    yams::Error otherInvalid{ErrorCode::InvalidState, "unrelated invalid state"};
+    CHECK_FALSE(yams::cli::is_transport_failure(otherInvalid));
+
+    yams::Error notFound{ErrorCode::NotFound, "missing key"};
+    CHECK_FALSE(yams::cli::is_transport_failure(notFound));
+}

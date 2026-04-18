@@ -432,6 +432,14 @@ Result<void> Database::open(const std::string& path, ConnectionMode mode) {
     sqlite3_busy_timeout(db_, 5000); // 5 second timeout
 
     path_ = path;
+
+    if (mode == ConnectionMode::ReadWrite || mode == ConnectionMode::Create) {
+        if (auto wal = enableWAL(); !wal) {
+            spdlog::warn("Database::open: WAL not enabled for '{}': {}", path_,
+                         wal.error().message);
+        }
+    }
+
     trace_db_lifetime("open", this, path_, db_, statementCache_.size(), SQLITE_OK,
                       count_live_statements(db_));
     return {};

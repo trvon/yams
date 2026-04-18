@@ -1082,6 +1082,10 @@ inline bool is_transport_failure(const yams::Error& err) {
     if (err.code == ErrorCode::Timeout) {
         return true;
     }
+    if (err.code == ErrorCode::InvalidState &&
+        err.message.find("Daemon not ready yet") != std::string::npos) {
+        return true;
+    }
     return yams::daemon::parseIpcFailureKind(err.message).has_value();
 }
 

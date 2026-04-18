@@ -639,10 +639,9 @@ json MCPServer::describeAllOps() const {
                 {"session_ops", json::array({"start", "stop", "pin", "unpin", "watch"})}};
 }
 
-boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
-    auto prevResultPtr = std::make_shared<json>(json::object());
-
-    static const std::unordered_map<std::string, std::string> queryOpTable = {
+namespace {
+const std::unordered_map<std::string, std::string>& queryOpTable() {
+    static const std::unordered_map<std::string, std::string> table = {
         {"search", "search"},
         {"grep", "grep"},
         {"list", "list"},
@@ -655,13 +654,130 @@ boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
         {"status", "status"},
         {"describe", "describe"},
     };
+    return table;
+}
+} // namespace
+
+boost::asio::awaitable<ModeRouterStepResult>
+MCPServer::dispatchPipelineStep(std::string op, json params, std::size_t stepIndex,
+                                std::shared_ptr<json> prevResultPtr) {
+    ModeRouterStepResult step;
+    step.stepIndex = stepIndex;
+    step.op = op;
+
+    auto fail = [&step](std::string message) {
+        step.isError = true;
+        step.primaryError = message;
+        step.data = json{{"error", std::move(message)}};
+    };
+
+    if (op == "describe") {
+        const auto target = params.value("target", std::string{});
+        step.data = target.empty() ? describeAllOps() : describeOp(target);
+    } else if (op == "search") {
+        auto req = MCPSearchRequest::fromJson(params);
+        auto result = co_await handleSearchDocuments(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else if (op == "grep") {
+        auto req = MCPGrepRequest::fromJson(params);
+        auto result = co_await handleGrepDocuments(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else if (op == "list") {
+        auto req = MCPListDocumentsRequest::fromJson(params);
+        auto result = co_await handleListDocuments(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else if (op == "list_collections") {
+        auto req = MCPListCollectionsRequest::fromJson(params);
+        auto result = co_await handleListCollections(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else if (op == "list_snapshots") {
+        auto req = MCPListSnapshotsRequest::fromJson(params);
+        auto result = co_await handleListSnapshots(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else if (op == "suggest_context") {
+        auto req = MCPSuggestContextRequest::fromJson(params);
+        auto result = co_await handleSuggestContext(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else if (op == "semantic_dedupe") {
+        auto req = MCPSemanticDedupeRequest::fromJson(params);
+        auto result = co_await handleSemanticDedupe(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else if (op == "graph") {
+        auto req = MCPGraphRequest::fromJson(params);
+        auto result = co_await handleGraphQuery(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else if (op == "get") {
+        auto req = MCPRetrieveDocumentRequest::fromJson(params);
+        auto result = co_await handleRetrieveDocument(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else if (op == "status") {
+        auto req = MCPStatusRequest::fromJson(params);
+        auto result = co_await handleGetStatus(req);
+        if (!result) {
+            fail(result.error().message);
+        } else {
+            step.data = result.value().toJson();
+        }
+    } else {
+        auto toolResult = co_await internalRegistry_->callTool(op, params);
+        step.isError = toolResult.value("isError", false);
+        if (step.isError) {
+            step.primaryError = extractToolPrimaryError(toolResult);
+        }
+        step.data = extractToolResultData(std::move(toolResult));
+    }
+
+    *prevResultPtr = step.data;
+    co_return step;
+}
+
+boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
+    auto prevResultPtr = std::make_shared<json>(json::object());
+    const auto& opTable = queryOpTable();
 
     if (args.contains("steps") && args["steps"].is_array()) {
         for (const auto& step : args["steps"]) {
-            if (!step.is_object() || !step.contains("op"))
+            if (!step.is_object() || !step.contains("op")) {
                 continue;
+            }
             const auto op = step["op"].get<std::string>();
-            if (queryOpTable.find(op) == queryOpTable.end()) {
+            if (!opTable.contains(op)) {
                 co_return wrapToolResultStructured(
                     json::array({content::text(
                         "Error: '" + op +
@@ -678,13 +794,13 @@ boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
     cfg.summaryPrefix = "Pipeline";
     cfg.invalidOpHint =
         "Use the 'execute' tool for write operations (add, update, delete, restore, download).";
-    cfg.opTable = queryOpTable;
+    cfg.opTable = opTable;
     cfg.stepProjector = projections::queryStepProjection;
     cfg.finalResultBuilder = projections::queryFinalResult;
     cfg.singleStepUnwrap = true;
 
     cfg.normalize = [prevResultPtr](const std::string& op,
-                                    json params) -> ModeRouterNormalizeResult {
+                                    const json& params) -> ModeRouterNormalizeResult {
         json resolved = resolvePrevRefs(params, *prevResultPtr);
         if (op == "describe") {
             return ModeRouterNormalizeResult{std::move(resolved), std::nullopt};
@@ -696,110 +812,8 @@ boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
     cfg.dispatch = [this, prevResultPtr](
                        std::string op, std::string /*target*/, json params,
                        std::size_t stepIndex) -> boost::asio::awaitable<ModeRouterStepResult> {
-        ModeRouterStepResult step;
-        step.stepIndex = stepIndex;
-        step.op = op;
-
-        auto fail = [&step](std::string message) {
-            step.isError = true;
-            step.primaryError = message;
-            step.data = json{{"error", std::move(message)}};
-        };
-
-        if (op == "describe") {
-            const auto target = params.value("target", std::string{});
-            step.data = target.empty() ? describeAllOps() : describeOp(target);
-        } else if (op == "search") {
-            auto req = MCPSearchRequest::fromJson(params);
-            auto result = co_await handleSearchDocuments(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else if (op == "grep") {
-            auto req = MCPGrepRequest::fromJson(params);
-            auto result = co_await handleGrepDocuments(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else if (op == "list") {
-            auto req = MCPListDocumentsRequest::fromJson(params);
-            auto result = co_await handleListDocuments(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else if (op == "list_collections") {
-            auto req = MCPListCollectionsRequest::fromJson(params);
-            auto result = co_await handleListCollections(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else if (op == "list_snapshots") {
-            auto req = MCPListSnapshotsRequest::fromJson(params);
-            auto result = co_await handleListSnapshots(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else if (op == "suggest_context") {
-            auto req = MCPSuggestContextRequest::fromJson(params);
-            auto result = co_await handleSuggestContext(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else if (op == "semantic_dedupe") {
-            auto req = MCPSemanticDedupeRequest::fromJson(params);
-            auto result = co_await handleSemanticDedupe(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else if (op == "graph") {
-            auto req = MCPGraphRequest::fromJson(params);
-            auto result = co_await handleGraphQuery(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else if (op == "get") {
-            auto req = MCPRetrieveDocumentRequest::fromJson(params);
-            auto result = co_await handleRetrieveDocument(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else if (op == "status") {
-            auto req = MCPStatusRequest::fromJson(params);
-            auto result = co_await handleGetStatus(req);
-            if (!result) {
-                fail(result.error().message);
-            } else {
-                step.data = result.value().toJson();
-            }
-        } else {
-            auto toolResult = co_await internalRegistry_->callTool(op, params);
-            step.isError = toolResult.value("isError", false);
-            if (step.isError) {
-                step.primaryError = extractToolPrimaryError(toolResult);
-            }
-            step.data = extractToolResultData(std::move(toolResult));
-        }
-
-        *prevResultPtr = step.data;
-        co_return step;
+        co_return co_await dispatchPipelineStep(std::move(op), std::move(params), stepIndex,
+                                                prevResultPtr);
     };
 
     ModeRouter router(std::move(cfg));
@@ -844,34 +858,42 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
 
     ModeRouter router(std::move(cfg));
     json result = co_await router.handle(args, negotiatedProtocolVersion_, limitToolResultDup_);
+    appendExecuteAddHint(result, args);
+    co_return result;
+}
 
-    if (result.value("isError", false) && args.contains("operations") &&
-        args["operations"].is_array()) {
-        bool sawAddWithUrl = false;
-        bool sawAddWithTitleOrDesc = false;
-        for (const auto& op : args["operations"]) {
-            if (!op.is_object())
-                continue;
-            if (op.value("op", std::string{}) != "add")
-                continue;
-            const auto params = extractCompositeStepParams(op);
-            if (!params.is_object())
-                continue;
-            if (params.contains("url"))
-                sawAddWithUrl = true;
-            if (params.contains("title") || params.contains("description"))
-                sawAddWithTitleOrDesc = true;
+void MCPServer::appendExecuteAddHint(json& result, const json& args) {
+    if (!result.value("isError", false) || !args.contains("operations") ||
+        !args["operations"].is_array()) {
+        return;
+    }
+    bool sawAddWithUrl = false;
+    bool sawAddWithTitleOrDesc = false;
+    for (const auto& op : args["operations"]) {
+        if (!op.is_object()) {
+            continue;
         }
-        if ((sawAddWithUrl || sawAddWithTitleOrDesc) && result.contains("content") &&
-            result["content"].is_array()) {
-            result["content"].push_back(content::text(
-                "Hint: execute op 'add' expects {path} or {content}+{name} (optional: "
-                "mime_type, tags, metadata, collection, snapshot_id). If you're trying to "
-                "fetch a URL, use op 'download' with {url} and optional {post_index:true}."));
+        if (op.value("op", std::string{}) != "add") {
+            continue;
+        }
+        const auto params = extractCompositeStepParams(op);
+        if (!params.is_object()) {
+            continue;
+        }
+        if (params.contains("url")) {
+            sawAddWithUrl = true;
+        }
+        if (params.contains("title") || params.contains("description")) {
+            sawAddWithTitleOrDesc = true;
         }
     }
-
-    co_return result;
+    if ((sawAddWithUrl || sawAddWithTitleOrDesc) && result.contains("content") &&
+        result["content"].is_array()) {
+        result["content"].push_back(content::text(
+            "Hint: execute op 'add' expects {path} or {content}+{name} (optional: "
+            "mime_type, tags, metadata, collection, snapshot_id). If you're trying to "
+            "fetch a URL, use op 'download' with {url} and optional {post_index:true}."));
+    }
 }
 
 boost::asio::awaitable<json> MCPServer::handleSessionAction(const json& args) {

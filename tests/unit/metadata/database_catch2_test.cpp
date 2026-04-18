@@ -171,6 +171,22 @@ TEST_CASE("Database: transactions", "[unit][metadata][database]") {
     }
 }
 
+TEST_CASE("Database: open enables WAL automatically for writable modes",
+          "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    auto stmtResult = db.prepare("PRAGMA journal_mode");
+    REQUIRE(stmtResult.has_value());
+    Statement stmt = std::move(stmtResult).value();
+    auto stepResult = stmt.step();
+    REQUIRE(stepResult.has_value());
+    REQUIRE(stepResult.value());
+    CHECK(stmt.getString(0) == "wal");
+}
+
 TEST_CASE("Database: WAL mode", "[unit][metadata][database]") {
     DatabaseFixture fix;
     Database db;
