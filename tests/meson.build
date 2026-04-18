@@ -1208,6 +1208,7 @@ if catch2_dep.found()
       'unit/mcp/mcp_socket_resolution_catch2_test.cpp',
       'unit/mcp/mcp_code_mode_catch2_test.cpp',
       'unit/mcp/mcp_composite_dispatch_catch2_test.cpp',
+      'unit/mcp/mcp_mode_router_catch2_test.cpp',
       'unit/mcp/mcp_tool_registry_wrappers_catch2_test.cpp',
       'unit/mcp/mcp_tools_schema_and_smoke_catch2_test.cpp',
       'unit/mcp/stdio_transport_catch2_test.cpp',

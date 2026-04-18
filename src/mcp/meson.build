@@ -10,6 +10,7 @@ yams_mcp_sources = [
   'mcp_cancellation.cpp',
   'mcp_resources.cpp',
   'mcp_tool_calls.cpp',
+  'mode_router.cpp',
   'stdio_transport.cpp',
   'tool_registry.cpp',
 ]

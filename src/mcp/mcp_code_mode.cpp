@@ -1,9 +1,11 @@
 #include <yams/mcp/mcp_server.h>
+#include <yams/mcp/mode_router.h>
 
 #include <boost/asio/awaitable.hpp>
 
 #include <nlohmann/json.hpp>
 
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -161,27 +163,6 @@ std::optional<std::string> normalizeQueryParamsForOp(const std::string& op, json
     }
 
     return std::nullopt;
-}
-
-std::string normalizeCompositePrimaryError(std::string error) {
-    constexpr std::string_view kPrefix = "Error: ";
-    while (error.starts_with(kPrefix)) {
-        error.erase(0, kPrefix.size());
-    }
-    return error;
-}
-
-std::string buildCompositeFirstLine(std::string summary,
-                                    const std::optional<std::string>& primaryError) {
-    if (!primaryError.has_value() || primaryError->empty()) {
-        return summary;
-    }
-
-    std::string normalized = normalizeCompositePrimaryError(*primaryError);
-    if (normalized.empty()) {
-        return summary;
-    }
-    return normalized + "\n" + summary;
 }
 
 } // namespace
@@ -659,461 +640,238 @@ json MCPServer::describeAllOps() const {
 }
 
 boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
-    try {
-        if (!args.contains("steps") || !args["steps"].is_array()) {
-            co_return wrapToolResultStructured(
-                json::array({content::text("Error: 'steps' array is required")}), std::nullopt,
-                true);
-        }
+    auto prevResultPtr = std::make_shared<json>(json::object());
 
-        const auto& steps = args["steps"];
-        if (steps.empty()) {
-            co_return wrapToolResultStructured(
-                json::array({content::text("Error: 'steps' array must not be empty")}),
-                std::nullopt, true);
-        }
+    static const std::unordered_map<std::string, std::string> queryOpTable = {
+        {"search", "search"},
+        {"grep", "grep"},
+        {"list", "list"},
+        {"list_collections", "list_collections"},
+        {"list_snapshots", "list_snapshots"},
+        {"suggest_context", "suggest_context"},
+        {"semantic_dedupe", "semantic_dedupe"},
+        {"graph", "graph"},
+        {"get", "get"},
+        {"status", "status"},
+        {"describe", "describe"},
+    };
 
-        // Allowed read-only ops for the query tool
-        static const std::unordered_set<std::string> allowedOps = {
-            "search",           "grep",           "list",
-            "list_collections", "list_snapshots", "suggest_context",
-            "semantic_dedupe",  "graph",          "get",
-            "status",           "describe"};
-
-        struct QueryDispatchResult {
-            json result = json::object();
-            bool isError = false;
-            std::optional<std::string> primaryError;
-        };
-
-        auto dispatchQueryOp = [this](const std::string& op,
-                                      json params) -> boost::asio::awaitable<QueryDispatchResult> {
-            if (op == "describe") {
-                const auto target = params.value("target", std::string{});
-                co_return QueryDispatchResult{.result = target.empty() ? describeAllOps()
-                                                                       : describeOp(target)};
-            }
-
-            if (auto routingError = normalizeQueryParamsForOp(op, params)) {
-                co_return QueryDispatchResult{.result = json{{"error", *routingError}},
-                                              .isError = true,
-                                              .primaryError = *routingError};
-            }
-
-            auto fail = [](std::string message) {
-                return QueryDispatchResult{.result = json{{"error", message}},
-                                           .isError = true,
-                                           .primaryError = std::move(message)};
-            };
-
-            if (op == "search") {
-                auto req = MCPSearchRequest::fromJson(params);
-                auto result = co_await handleSearchDocuments(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-            if (op == "grep") {
-                auto req = MCPGrepRequest::fromJson(params);
-                auto result = co_await handleGrepDocuments(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-            if (op == "list") {
-                auto req = MCPListDocumentsRequest::fromJson(params);
-                auto result = co_await handleListDocuments(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-            if (op == "list_collections") {
-                auto req = MCPListCollectionsRequest::fromJson(params);
-                auto result = co_await handleListCollections(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-            if (op == "list_snapshots") {
-                auto req = MCPListSnapshotsRequest::fromJson(params);
-                auto result = co_await handleListSnapshots(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-            if (op == "suggest_context") {
-                auto req = MCPSuggestContextRequest::fromJson(params);
-                auto result = co_await handleSuggestContext(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-            if (op == "semantic_dedupe") {
-                auto req = MCPSemanticDedupeRequest::fromJson(params);
-                auto result = co_await handleSemanticDedupe(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-            if (op == "graph") {
-                auto req = MCPGraphRequest::fromJson(params);
-                auto result = co_await handleGraphQuery(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-            if (op == "get") {
-                auto req = MCPRetrieveDocumentRequest::fromJson(params);
-                auto result = co_await handleRetrieveDocument(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-            if (op == "status") {
-                auto req = MCPStatusRequest::fromJson(params);
-                auto result = co_await handleGetStatus(req);
-                if (!result) {
-                    co_return fail(result.error().message);
-                }
-                co_return QueryDispatchResult{.result = result.value().toJson()};
-            }
-
-            auto toolResult = co_await internalRegistry_->callTool(op, params);
-            const bool isError = toolResult.value("isError", false);
-            auto primaryError = extractToolPrimaryError(toolResult);
-            auto resultData = extractToolResultData(std::move(toolResult));
-            co_return QueryDispatchResult{.result = std::move(resultData),
-                                          .isError = isError,
-                                          .primaryError = std::move(primaryError)};
-        };
-
-        if (steps.size() == 1) {
-            const auto& step = steps[0];
-            if (!step.is_object() || !step.contains("op")) {
-                co_return wrapToolResultStructured(
-                    json::array({content::text("Error: step 0 missing 'op' field")}), std::nullopt,
-                    true);
-            }
-
+    if (args.contains("steps") && args["steps"].is_array()) {
+        for (const auto& step : args["steps"]) {
+            if (!step.is_object() || !step.contains("op"))
+                continue;
             const auto op = step["op"].get<std::string>();
-            if (allowedOps.find(op) == allowedOps.end()) {
+            if (queryOpTable.find(op) == queryOpTable.end()) {
                 co_return wrapToolResultStructured(
-                    json::array({content::text("Error: '" + op +
-                                               "' is not a read operation. Use the 'execute' "
-                                               "tool for write operations "
-                                               "(add, update, delete, restore, download).")}),
+                    json::array({content::text(
+                        "Error: '" + op +
+                        "' is not a read operation. Use the 'execute' tool for write operations "
+                        "(add, update, delete, restore, download).")}),
                     std::nullopt, true);
             }
-
-            auto params = resolvePrevRefs(extractCompositeStepParams(step), json::object());
-            auto dispatch = co_await dispatchQueryOp(op, std::move(params));
-            std::string firstLine =
-                buildCompositeFirstLine("Pipeline: 1/1 steps", dispatch.primaryError);
-
-            json contentItems = json::array({content::text(firstLine)});
-            if (!limitToolResultDup_) {
-                contentItems.push_back(content::json(dispatch.result, 2));
-            }
-
-            std::optional<json> structured;
-            if (negotiatedProtocolVersion_ >= "2024-11-05") {
-                structured = json{{"type", "tool_result"}, {"data", dispatch.result}};
-            }
-
-            co_return wrapToolResultStructured(contentItems, structured, dispatch.isError);
         }
-
-        json prevResult = json::object();
-        json allResults = json::array();
-        bool hasError = false;
-
-        for (size_t i = 0; i < steps.size(); ++i) {
-            const auto& step = steps[i];
-            if (!step.is_object() || !step.contains("op")) {
-                co_return wrapToolResultStructured(
-                    json::array({content::text("Error: step " + std::to_string(i) +
-                                               " missing 'op' field")}),
-                    std::nullopt, true);
-            }
-
-            auto op = step["op"].get<std::string>();
-
-            if (allowedOps.find(op) == allowedOps.end()) {
-                co_return wrapToolResultStructured(
-                    json::array({content::text("Error: '" + op +
-                                               "' is not a read operation. Use the 'execute' tool "
-                                               "for write operations "
-                                               "(add, update, delete, restore, download).")}),
-                    std::nullopt, true);
-            }
-
-            auto resolvedParams = resolvePrevRefs(extractCompositeStepParams(step), prevResult);
-            auto dispatch = co_await dispatchQueryOp(op, std::move(resolvedParams));
-            const bool isError = dispatch.isError;
-            prevResult = dispatch.result;
-
-            if (isError)
-                hasError = true;
-
-            allResults.push_back(
-                json{{"stepIndex", i}, {"op", op}, {"result", prevResult}, {"isError", isError}});
-
-            if (isError)
-                break; // Stop pipeline on error
-        }
-
-        // For single-step pipelines, return the direct result
-        json finalResult;
-        if (steps.size() == 1) {
-            finalResult = allResults[0]["result"];
-        } else {
-            finalResult = json{{"steps", allResults},
-                               {"totalSteps", steps.size()},
-                               {"completedSteps", allResults.size()}};
-        }
-
-        // Build summary text
-        std::ostringstream summary;
-        summary << "Pipeline: " << allResults.size() << "/" << steps.size() << " steps";
-        if (hasError)
-            summary << " (stopped on error)";
-
-        // Prefer an actionable first-line error for clients that only surface error.message.
-        std::optional<std::string> primaryError;
-        if (hasError) {
-            for (const auto& step : allResults) {
-                if (!step.is_object() || !step.value("isError", false))
-                    continue;
-                if (!step.contains("result"))
-                    continue;
-                const auto& r = step["result"];
-                if (r.is_string()) {
-                    primaryError = r.get<std::string>();
-                    break;
-                }
-                if (r.is_object()) {
-                    if (r.contains("error") && r["error"].is_string()) {
-                        primaryError = r["error"].get<std::string>();
-                        break;
-                    }
-                    if (r.contains("text") && r["text"].is_string()) {
-                        primaryError = r["text"].get<std::string>();
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Some clients/tools ignore structuredContent. Provide a JSON text payload too.
-        // Keep this bounded via limitToolResultDup_ to avoid duplicating large results.
-        std::string firstLine = buildCompositeFirstLine(summary.str(), primaryError);
-        json contentItems = json::array({content::text(firstLine)});
-        if (!limitToolResultDup_) {
-            contentItems.push_back(content::json(finalResult, 2));
-        }
-
-        std::optional<json> structured;
-        if (negotiatedProtocolVersion_ >= "2024-11-05") {
-            structured = json{{"type", "tool_result"}, {"data", finalResult}};
-        }
-
-        co_return wrapToolResultStructured(contentItems, structured, hasError);
-    } catch (const json::exception& e) {
-        co_return wrapToolResultStructured(
-            json::array({content::text(std::string("JSON error: ") + e.what())}), std::nullopt,
-            true);
-    } catch (const std::exception& e) {
-        co_return wrapToolResultStructured(
-            json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt, true);
     }
+
+    ModeRouterConfig cfg;
+    cfg.kind = "read";
+    cfg.stepsKey = "steps";
+    cfg.summaryPrefix = "Pipeline";
+    cfg.invalidOpHint =
+        "Use the 'execute' tool for write operations (add, update, delete, restore, download).";
+    cfg.opTable = queryOpTable;
+    cfg.stepProjector = projections::queryStepProjection;
+    cfg.finalResultBuilder = projections::queryFinalResult;
+    cfg.singleStepUnwrap = true;
+
+    cfg.normalize = [prevResultPtr](const std::string& op,
+                                    json params) -> ModeRouterNormalizeResult {
+        json resolved = resolvePrevRefs(params, *prevResultPtr);
+        if (op == "describe") {
+            return ModeRouterNormalizeResult{std::move(resolved), std::nullopt};
+        }
+        auto err = normalizeQueryParamsForOp(op, resolved);
+        return ModeRouterNormalizeResult{std::move(resolved), std::move(err)};
+    };
+
+    cfg.dispatch = [this, prevResultPtr](
+                       std::string op, std::string /*target*/, json params,
+                       std::size_t stepIndex) -> boost::asio::awaitable<ModeRouterStepResult> {
+        ModeRouterStepResult step;
+        step.stepIndex = stepIndex;
+        step.op = op;
+
+        auto fail = [&step](std::string message) {
+            step.isError = true;
+            step.primaryError = message;
+            step.data = json{{"error", std::move(message)}};
+        };
+
+        if (op == "describe") {
+            const auto target = params.value("target", std::string{});
+            step.data = target.empty() ? describeAllOps() : describeOp(target);
+        } else if (op == "search") {
+            auto req = MCPSearchRequest::fromJson(params);
+            auto result = co_await handleSearchDocuments(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else if (op == "grep") {
+            auto req = MCPGrepRequest::fromJson(params);
+            auto result = co_await handleGrepDocuments(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else if (op == "list") {
+            auto req = MCPListDocumentsRequest::fromJson(params);
+            auto result = co_await handleListDocuments(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else if (op == "list_collections") {
+            auto req = MCPListCollectionsRequest::fromJson(params);
+            auto result = co_await handleListCollections(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else if (op == "list_snapshots") {
+            auto req = MCPListSnapshotsRequest::fromJson(params);
+            auto result = co_await handleListSnapshots(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else if (op == "suggest_context") {
+            auto req = MCPSuggestContextRequest::fromJson(params);
+            auto result = co_await handleSuggestContext(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else if (op == "semantic_dedupe") {
+            auto req = MCPSemanticDedupeRequest::fromJson(params);
+            auto result = co_await handleSemanticDedupe(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else if (op == "graph") {
+            auto req = MCPGraphRequest::fromJson(params);
+            auto result = co_await handleGraphQuery(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else if (op == "get") {
+            auto req = MCPRetrieveDocumentRequest::fromJson(params);
+            auto result = co_await handleRetrieveDocument(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else if (op == "status") {
+            auto req = MCPStatusRequest::fromJson(params);
+            auto result = co_await handleGetStatus(req);
+            if (!result) {
+                fail(result.error().message);
+            } else {
+                step.data = result.value().toJson();
+            }
+        } else {
+            auto toolResult = co_await internalRegistry_->callTool(op, params);
+            step.isError = toolResult.value("isError", false);
+            if (step.isError) {
+                step.primaryError = extractToolPrimaryError(toolResult);
+            }
+            step.data = extractToolResultData(std::move(toolResult));
+        }
+
+        *prevResultPtr = step.data;
+        co_return step;
+    };
+
+    ModeRouter router(std::move(cfg));
+    co_return co_await router.handle(args, negotiatedProtocolVersion_, limitToolResultDup_);
 }
 
 boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
-    try {
-        if (!args.contains("operations") || !args["operations"].is_array()) {
-            co_return wrapToolResultStructured(
-                json::array({content::text("Error: 'operations' array is required")}), std::nullopt,
-                true);
+    ModeRouterConfig cfg;
+    cfg.kind = "write";
+    cfg.stepsKey = "operations";
+    cfg.summaryPrefix = "Execute";
+    cfg.invalidOpHint = "Use the 'query' tool for read operations (search, grep, list, etc).";
+    cfg.opTable = {
+        {"add", "add"},         {"update", "update"},     {"delete", "delete_by_name"},
+        {"restore", "restore"}, {"download", "download"}, {"download_cancel", "download_cancel"},
+    };
+    cfg.stepProjector = projections::executeStepProjection;
+    cfg.finalResultBuilder = projections::executeFinalResult;
+
+    cfg.normalize = [](const std::string& op, json params) -> ModeRouterNormalizeResult {
+        if (op == "add") {
+            auto normalized = detail::normalizeAddParams(params);
+            return ModeRouterNormalizeResult{std::move(normalized.params),
+                                             std::move(normalized.error)};
         }
+        return ModeRouterNormalizeResult{std::move(params), std::nullopt};
+    };
 
-        const auto& operations = args["operations"];
-        if (operations.empty()) {
-            co_return wrapToolResultStructured(
-                json::array({content::text("Error: 'operations' array must not be empty")}),
-                std::nullopt, true);
+    cfg.dispatch = [this](std::string op, std::string target, json params,
+                          std::size_t stepIndex) -> boost::asio::awaitable<ModeRouterStepResult> {
+        auto toolResult = co_await internalRegistry_->callTool(target, params);
+        ModeRouterStepResult step;
+        step.stepIndex = stepIndex;
+        step.op = std::move(op);
+        step.isError = toolResult.value("isError", false);
+        if (step.isError) {
+            step.primaryError = extractToolPrimaryError(toolResult);
         }
+        step.data = extractToolResultData(std::move(toolResult));
+        co_return step;
+    };
 
-        bool continueOnError = args.value("continueOnError", false);
+    ModeRouter router(std::move(cfg));
+    json result = co_await router.handle(args, negotiatedProtocolVersion_, limitToolResultDup_);
 
-        // Allowed write ops
-        // "delete" maps to the "delete_by_name" tool internally
-        static const std::unordered_map<std::string, std::string> opToTool = {
-            {"add", "add"},
-            {"update", "update"},
-            {"delete", "delete_by_name"},
-            {"restore", "restore"},
-            {"download", "download"},
-            {"download_cancel", "download_cancel"},
-        };
-
-        json results = json::array();
-        size_t succeeded = 0;
-        size_t failed = 0;
-
-        for (size_t i = 0; i < operations.size(); ++i) {
-            const auto& operation = operations[i];
-            if (!operation.is_object() || !operation.contains("op")) {
-                auto errResult = json{{"stepIndex", i},
-                                      {"op", "unknown"},
-                                      {"success", false},
-                                      {"error", "Missing 'op' field"}};
-                results.push_back(errResult);
-                ++failed;
-                if (!continueOnError)
-                    break;
+    if (result.value("isError", false) && args.contains("operations") &&
+        args["operations"].is_array()) {
+        bool sawAddWithUrl = false;
+        bool sawAddWithTitleOrDesc = false;
+        for (const auto& op : args["operations"]) {
+            if (!op.is_object())
                 continue;
-            }
-
-            auto op = operation["op"].get<std::string>();
-            auto toolIt = opToTool.find(op);
-            if (toolIt == opToTool.end()) {
-                auto errResult =
-                    json{{"stepIndex", i},
-                         {"op", op},
-                         {"success", false},
-                         {"error", "'" + op +
-                                       "' is not a write operation. Use the 'query' tool for "
-                                       "read operations (search, grep, list, etc)."}};
-                results.push_back(errResult);
-                ++failed;
-                if (!continueOnError)
-                    break;
+            if (op.value("op", std::string{}) != "add")
                 continue;
-            }
-
-            auto params = extractCompositeStepParams(operation);
-            if (op == "add") {
-                auto normalized = detail::normalizeAddParams(params);
-                params = std::move(normalized.params);
-                if (normalized.error) {
-                    auto errResult = json{{"stepIndex", i},
-                                          {"op", op},
-                                          {"success", false},
-                                          {"error", *normalized.error}};
-                    results.push_back(std::move(errResult));
-                    ++failed;
-                    if (!continueOnError) {
-                        break;
-                    }
-                    continue;
-                }
-            }
-
-            // Dispatch via the internal registry
-            auto toolResult = co_await internalRegistry_->callTool(toolIt->second, params);
-
-            bool isError = toolResult.value("isError", false);
-            json stepResult = json{{"stepIndex", i}, {"op", op}, {"success", !isError}};
-
-            // Extract data from tool result
-            auto primaryToolError = extractToolPrimaryError(toolResult);
-            stepResult["data"] = extractToolResultData(std::move(toolResult));
-
-            if (isError) {
-                ++failed;
-                if (primaryToolError.has_value()) {
-                    stepResult["error"] = *primaryToolError;
-                }
-            } else {
-                ++succeeded;
-            }
-
-            results.push_back(stepResult);
-
-            if (isError && !continueOnError)
-                break;
+            const auto params = extractCompositeStepParams(op);
+            if (!params.is_object())
+                continue;
+            if (params.contains("url"))
+                sawAddWithUrl = true;
+            if (params.contains("title") || params.contains("description"))
+                sawAddWithTitleOrDesc = true;
         }
-
-        json finalResult = json{{"results", results},
-                                {"totalOps", operations.size()},
-                                {"succeeded", succeeded},
-                                {"failed", failed}};
-
-        std::ostringstream summary;
-        summary << "Execute: " << succeeded << " succeeded, " << failed << " failed out of "
-                << operations.size() << " operations";
-
-        // Prefer an actionable first-line error for clients that only surface error.message.
-        std::optional<std::string> primaryError;
-        if (failed > 0) {
-            for (const auto& step : results) {
-                if (!step.is_object())
-                    continue;
-                if (step.value("success", true))
-                    continue;
-                if (step.contains("error") && step["error"].is_string()) {
-                    primaryError = step["error"].get<std::string>();
-                    break;
-                }
-            }
+        if ((sawAddWithUrl || sawAddWithTitleOrDesc) && result.contains("content") &&
+            result["content"].is_array()) {
+            result["content"].push_back(content::text(
+                "Hint: execute op 'add' expects {path} or {content}+{name} (optional: "
+                "mime_type, tags, metadata, collection, snapshot_id). If you're trying to "
+                "fetch a URL, use op 'download' with {url} and optional {post_index:true}."));
         }
-
-        // Some clients/tools ignore structuredContent. Provide a JSON text payload too.
-        std::string firstLine = buildCompositeFirstLine(summary.str(), primaryError);
-        json contentItems = json::array({content::text(firstLine)});
-        if (!limitToolResultDup_) {
-            contentItems.push_back(content::json(finalResult, 2));
-        }
-
-        // Heuristic hints: common confusion between add/download schemas.
-        if (failed > 0) {
-            bool sawAddWithUrl = false;
-            bool sawAddWithTitleOrDesc = false;
-            for (const auto& op : operations) {
-                if (!op.is_object())
-                    continue;
-                const auto opName = op.value("op", std::string{});
-                if (opName != "add")
-                    continue;
-                const auto params = extractCompositeStepParams(op);
-                if (!params.is_object())
-                    continue;
-                if (params.contains("url"))
-                    sawAddWithUrl = true;
-                if (params.contains("title") || params.contains("description"))
-                    sawAddWithTitleOrDesc = true;
-            }
-            if (sawAddWithUrl || sawAddWithTitleOrDesc) {
-                contentItems.push_back(content::text(
-                    "Hint: execute op 'add' expects {path} or {content}+{name} (optional: "
-                    "mime_type, tags, metadata, collection, snapshot_id). If you're trying to "
-                    "fetch a URL, use op 'download' with {url} and optional {post_index:true}."));
-            }
-        }
-
-        std::optional<json> structured;
-        if (negotiatedProtocolVersion_ >= "2024-11-05") {
-            structured = json{{"type", "tool_result"}, {"data", finalResult}};
-        }
-
-        co_return wrapToolResultStructured(contentItems, structured, failed > 0);
-    } catch (const json::exception& e) {
-        co_return wrapToolResultStructured(
-            json::array({content::text(std::string("JSON error: ") + e.what())}), std::nullopt,
-            true);
-    } catch (const std::exception& e) {
-        co_return wrapToolResultStructured(
-            json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt, true);
     }
+
+    co_return result;
 }
 
 boost::asio::awaitable<json> MCPServer::handleSessionAction(const json& args) {
