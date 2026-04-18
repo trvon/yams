@@ -1,9 +1,46 @@
+import re
+import shutil
+import subprocess
+
 from conan import ConanFile
 from conan.tools.build import check_min_cppstd, cross_building
 from conan.tools.layout import basic_layout
 
 
 # type: ignore[assignment,attr-defined,import-error]
+
+
+def _parse_version_tuple(text: str):
+    match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text)
+    if not match:
+        return None
+    major = int(match.group(1))
+    minor = int(match.group(2))
+    patch = int(match.group(3) or "0")
+    return (major, minor, patch)
+
+
+def _tool_on_path_satisfies(name: str, minimum: tuple[int, int, int]) -> bool:
+    tool_path = shutil.which(name)
+    if not tool_path:
+        return False
+
+    try:
+        result = subprocess.run(
+            [tool_path, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    version_text = (result.stdout or result.stderr or "").strip()
+    version = _parse_version_tuple(version_text)
+    if version is None:
+        return False
+
+    return minimum <= version < (2, 0, 0)
 
 
 class YamsConan(ConanFile):
@@ -101,8 +138,16 @@ class YamsConan(ConanFile):
 
     def build_requirements(self):
         self.tool_requires("pkgconf/2.1.0")
-        self.tool_requires("meson/[>=1.2.2 <2]")
-        self.tool_requires("ninja/[>=1.10.2 <2]")
+        if _tool_on_path_satisfies("meson", (1, 2, 2)):
+            self.output.info("Using Meson from PATH; skipping Conan Meson tool_requires")
+        else:
+            self.tool_requires("meson/[>=1.2.2 <2]")
+
+        if _tool_on_path_satisfies("ninja", (1, 10, 2)):
+            self.output.info("Using Ninja from PATH; skipping Conan Ninja tool_requires")
+        else:
+            self.tool_requires("ninja/[>=1.10.2 <2]")
+
         if cross_building(self):
             # Cross-builds still need a build-machine protoc for Meson codegen.
             self.tool_requires("protobuf/3.21.12")

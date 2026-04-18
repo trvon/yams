@@ -1,59 +1,47 @@
-# YAMS Documentation Index
+# YAMS Documentation
 
 Content-addressed storage with deduplication and semantic search.
 
-## Quick Links
+Site landing: [index.md](index.md) • Project README: [../README.md](../README.md)
 
-- [Installation](user_guide/installation.md)
-- [CLI Reference](user_guide/cli.md)
-- [MCP Server](user_guide/mcp.md)
-- [Admin: Operations](admin/operations.md)
-- [Benchmarks](benchmarks/README.md)
+## User guide
 
-## Documentation Structure
+| Topic             | Link                                             |
+|-------------------|--------------------------------------------------|
+| Install           | [user_guide/installation.md](user_guide/installation.md) |
+| CLI reference     | [user_guide/cli.md](user_guide/cli.md)           |
+| MCP server        | [user_guide/mcp.md](user_guide/mcp.md)           |
+| Embeddings        | [user_guide/embeddings.md](user_guide/embeddings.md) |
+| Tutorials         | [user_guide/tutorials/](user_guide/tutorials/)   |
+| Interactive tuning| [guides/interactive-tuning.md](guides/interactive-tuning.md) |
+| Plugins           | [PLUGINS.md](PLUGINS.md)                         |
+| Build from source | [BUILD.md](BUILD.md)                             |
+| Admin / ops       | [admin/operations.md](admin/operations.md)       |
+| Hosting           | [hosting/](hosting/)                             |
+| Changelog         | [changelogs/](changelogs/)                       |
+| Roadmap           | [roadmap.md](roadmap.md)                         |
+| Release policy    | [release-policy.md](release-policy.md)           |
 
-- **Get Started:** Installation, CLI, MCP integration
-- **User Guides:** Tutorials, embeddings, search
-- **Admin:** Operations, configuration, tuning
-- **Developer:** Contributing, build system, architecture
-- **API:** MCP tools, plugin specs
-- **Hosting:** Managed hosting, self-hosting
+## Developer / reference
 
-## Plugin System
+| Topic               | Link                                           |
+|---------------------|------------------------------------------------|
+| Architecture        | [architecture/](architecture/)                 |
+| API (MCP, plugins)  | [api/](api/)                                   |
+| Plugin spec (WIT, schemas) | [spec/](spec/)                          |
+| Contributing        | [developer/contributing.md](developer/contributing.md) |
+| Build system internals | [developer/build_system.md](developer/build_system.md) |
+| Profiling           | [developer/profiling.md](developer/profiling.md) |
+| Benchmarks          | [benchmarks/README.md](benchmarks/README.md)   |
+| Design docs         | [design/](design/)                             |
+| ADRs                | [adrs/](adrs/)                                 |
+| RFCs                | [rfcs/](rfcs/)                                 |
+| Testing             | [testing/](testing/)                           |
+| CI                  | [ci/local-act.md](ci/local-act.md)             |
 
-YAMS supports C-ABI plugins loaded from trusted directories.
+## External
 
-**Trust file:** `<data_dir>/plugins.trust` (default: `~/.local/share/yams/plugins.trust`)
-
-**Discovery paths:**
-- `YAMS_PLUGIN_DIR` (exclusive if set)
-- `$HOME/.local/lib/yams/plugins`
-- `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`
-
-**CLI:**
-```bash
-yams plugin scan
-yams plugin trust add /usr/local/lib/yams/plugins
-yams plugin load /path/to/plugin.so
-```
-
-See [PLUGINS.md](PLUGINS.md) for details.
-
-## Build Options (Meson)
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `build-cli` | `true` | Build CLI binary |
-| `build-mcp-server` | `true` | Build MCP server |
-| `build-tests` | `false` | Build test suite |
-| `enable-onnx` | `enabled` | ONNX embedding models |
-| `plugin-symbols` | `true` | Tree-sitter symbol extraction |
-
-See [BUILD.md](BUILD.md) for full build instructions.
-
-## Links
-
-- [SourceHut](https://sr.ht/~trvon/yams/)
-- [GitHub](https://github.com/trvon/yams)
-- [Releases](https://github.com/trvon/yams/releases)
-- [Issues](https://github.com/trvon/yams/issues)
+- SourceHut: https://sr.ht/~trvon/yams/
+- GitHub: https://github.com/trvon/yams
+- Releases: https://github.com/trvon/yams/releases
+- Issues: https://github.com/trvon/yams/issues

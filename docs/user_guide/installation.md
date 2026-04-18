@@ -1,308 +1,170 @@
-# YAMS Installation Guide
+# Installation
 
-YAMS provides multiple installation methods to suit different users and environments.
+Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64.
 
-**Supported platforms:** Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64
+## Homebrew (macOS, Linux)
 
-## Package Manager Installation
+```bash
+brew install trvon/yams/yams           # stable
+brew install trvon/yams/yams-nightly   # nightly
+brew services start yams               # optional: run as a service
+brew upgrade yams                      # update
+brew link --overwrite yams             # if linking conflicts
+```
 
-### APT (Debian / Ubuntu)
+## APT (Debian, Ubuntu) {#apt}
 
 ```bash
 curl -fsSL https://repo.yamsmemory.ai/gpg.key \
   | sudo gpg --dearmor -o /usr/share/keyrings/yams.gpg
 
-echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" \
+echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] \
+https://repo.yamsmemory.ai/aptrepo stable main" \
   | sudo tee /etc/apt/sources.list.d/yams.list
 
-sudo apt-get update
-sudo apt-get install yams
-
-# Optional: start the packaged daemon service
-sudo systemctl enable --now yams-daemon
+sudo apt-get update && sudo apt-get install yams
+sudo systemctl enable --now yams-daemon   # optional
 yams daemon status
 ```
 
-Current tested Linux package path:
-- x86_64 `.deb` install in a clean Debian trixie systemd container
-- x86_64 `.rpm` install in a clean Fedora 42 systemd container
-- packaged `yams-daemon.service` enabled and started successfully in both lanes
-- non-root CLI validation with `yams daemon status`, `yams add`, and `yams search`
-
-### Homebrew (macOS/Linux)
+## DNF / YUM (Fedora, RHEL) {#dnf}
 
 ```bash
-# Stable release (recommended)
-brew install trvon/yams/yams
-
-# Or get nightly builds for latest features
-brew install trvon/yams/yams-nightly
-
-# If linking fails due to conflicts, force link
-brew link --overwrite yams
-
-# Verify installation
-yams --version
-
-# Run as a service (optional)
-brew services start yams
+sudo tee /etc/yum.repos.d/yams.repo <<'REPO'
+[yams]
+name=YAMS Repository
+baseurl=https://repo.yamsmemory.ai/yumrepo/
+enabled=1
+gpgcheck=0
+REPO
+sudo dnf makecache && sudo dnf install yams
 ```
 
-### Update
+!!! note
+    Current CI installs the published `.rpm` artifact directly rather than pulling through repo metadata. The hosted `yumrepo/` path is documented but not covered by automated validation.
 
-```bash
-brew upgrade yams
-```
-
-## Manual Installation from GitHub Releases
-
-1. Visit the [releases page](https://github.com/trvon/yams/releases)
-2. Download the appropriate binary for your platform:
-   - `yams-VERSION-linux-x86_64.tar.gz` for Linux x86_64
-   - `yams-VERSION-linux-arm64.tar.gz` for Linux ARM64
-   - `yams-VERSION-macos-x86_64.zip` for macOS Intel
-   - `yams-VERSION-macos-arm64.zip` for macOS Apple Silicon
-   - `yams-VERSION-windows-x86_64.zip` for Windows
-3. Extract the archive
-4. Move the `yams` binary to a directory in your PATH
+Tested lanes: x86_64 `.deb` on Debian trixie and x86_64 `.rpm` on Fedora 42, both in clean systemd containers with `yams-daemon.service` enabled.
 
 ## Docker
 
 ```bash
-# Pull the latest image
 docker pull ghcr.io/trvon/yams:latest
-
-# Run YAMS
 docker run --rm -v yams-data:/home/yams/.local/share/yams ghcr.io/trvon/yams:latest --version
-
-# Run MCP server
-docker run -it --rm -v yams-data:/home/yams/.local/share/yams ghcr.io/trvon/yams:latest serve
+docker run -i --rm -v yams-data:/home/yams/.local/share/yams ghcr.io/trvon/yams:latest serve
 ```
 
-## Build from Source
+## GitHub releases
 
-### Requirements
-- **Compiler:** GCC 13+, Clang 16+, or MSVC 2022+ (C++20 minimum)
-- **Build tools:** meson, ninja-build, cmake, pkg-config
-- **Optional dependency manager:** conan (default bootstrap path)
-- **System libs:** libssl-dev, libsqlite3-dev, protobuf-compiler (Linux/macOS)
+Grab a prebuilt archive from [github.com/trvon/yams/releases](https://github.com/trvon/yams/releases):
 
-### Quick Setup
+- `yams-VERSION-linux-x86_64.tar.gz` / `-arm64`
+- `yams-VERSION-macos-x86_64.zip` / `-arm64`
+- `yams-VERSION-windows-x86_64.zip`
 
-#### macOS
-```bash
-brew install meson conan ninja cmake pkg-config openssl@3 protobuf
-```
+Extract and place the `yams` binary on your `PATH`.
 
-#### Ubuntu/Debian
-```bash
-sudo apt update
-sudo apt install -y build-essential git python3-pip python3-venv \
-    libssl-dev libsqlite3-dev protobuf-compiler cmake ninja-build pkg-config
-pip3 install --user meson conan
-```
-
-### Get the Source
-```bash
-git clone https://github.com/trvon/yams.git
-cd yams
-```
-
-### Build
-
-**Linux/macOS:**
-```bash
-# Quick build (portable optimized build: `-O2 -g`, `NDEBUG`)
-./setup.sh Release
-
-# Build
-meson compile -C build/release
-
-# Optional: Install system-wide
-meson install -C build/release
-```
-
-**Windows:**
-```pwsh
-# Quick build (portable optimized build: `-O2 -g`, `NDEBUG`)
-./setup.ps1 Release
-
-# Build
-meson compile -C build/release
-```
-
-**Advanced options (Linux/macOS):**
-```bash
-# Debug build with tests
-./setup.sh Debug
-meson compile -C builddir
-
-# Coverage (Debug only)
-./setup.sh Debug --coverage
-
-# Cross-compilation
-YAMS_CONAN_HOST_PROFILE=path/to/profile ./setup.sh Release
-
-# Offline from Conan cache only
-./setup.sh Release --offline
-
-# System dependencies only (no Conan, no network)
-YAMS_USE_SYSTEM_DEPS=true \
-YAMS_OFFLINE=true \
-YAMS_PKG_CONFIG_PATH=/opt/yams-deps/lib/pkgconfig \
-YAMS_CMAKE_PREFIX_PATH=/opt/yams-deps \
-./setup.sh Release --system-deps --offline
-
-# Custom C++ standard
-YAMS_CPPSTD=20 ./setup.sh Release
-
-# Custom install prefix
-YAMS_INSTALL_PREFIX=/opt/yams ./setup.sh Release
-```
-
-See [BUILD.md](../BUILD.md) for detailed build instructions, compiler configuration, Conan profiles, and troubleshooting.
-
-## Initialize Storage
-
-### Quick Start
-```bash
-# Initialize YAMS storage in current directory
-yams init
-
-# Or specify custom location
-export YAMS_STORAGE="$HOME/.local/share/yams"
-yams init
-
-# Non-interactive init (uses defaults)
-yams init --non-interactive
-```
-
-### Symbol Extraction (Tree-sitter Grammars)
-
-YAMS can extract symbols (functions, classes, etc.) from source code using tree-sitter grammars. During `yams init`, you'll be prompted to download grammars:
+## Build from source
 
 ```bash
-# Interactive: choose recommended, all, or specific languages
-yams init
+# Linux / macOS
+./setup.sh Release && meson compile -C build/release
 
-# Auto mode: downloads recommended grammars (C, C++, Python, JS, TS, Rust, Go)
-yams init --auto
+# Windows
+./setup.ps1 Release ; meson compile -C build/release
 ```
 
-**Supported languages:** C, C++, Python, JavaScript, TypeScript, Rust, Go, Java, C#, PHP, Kotlin, Dart, SQL, Solidity
+Prerequisites, compiler matrix, offline/system-deps builds, and troubleshooting: [docs/BUILD.md](../BUILD.md).
 
-**Requirements:** git + compiler (MSVC/MinGW on Windows, gcc/clang on Unix)
+## Initialize
 
-**Manual grammar paths:** Set environment variables like `YAMS_TS_CPP_LIB=/path/to/libtree-sitter-cpp.so`
+```bash
+yams init                        # interactive
+yams init --auto                 # containers / headless
+yams init --non-interactive      # defaults, no prompts
+yams init --force                # overwrite config/keys
+```
 
-### XDG Paths (Defaults)
-- **Data:** `$XDG_DATA_HOME/yams` or `~/.local/share/yams`
-- **Config:** `$XDG_CONFIG_HOME/yams` or `~/.config/yams`
-- **Keys:** `~/.config/yams/keys`
+`yams init` creates:
 
-### What init creates
 - Data dir with `yams.db` and `storage/`
-- Config at `~/.config/yams/config.toml`
-- Ed25519 keys at `~/.config/yams/keys` (private key 0600)
-- An initial API key stored in config
+- `~/.config/yams/config.toml`
+- Ed25519 keys in `~/.config/yams/keys` (private key 0600)
+- An initial API key in config
 
-### Override paths
-- **Data:** `--storage` flag or `YAMS_STORAGE` env var
-- **Config:** `XDG_CONFIG_HOME` env var
-- **Data default root:** `XDG_DATA_HOME` env var
+### Paths (XDG)
 
-### Security notes
-- `yams init --print` shows config with secrets masked. Do not rely on stdout for secret recovery.
-- Re-running init without `--force` leaves existing setup intact and exits successfully.
-- Use `--force` to overwrite config/keys.
+| Purpose | Default                                            | Override                   |
+|---------|----------------------------------------------------|----------------------------|
+| Data    | `$XDG_DATA_HOME/yams` (`~/.local/share/yams`)      | `--storage` or `YAMS_STORAGE` |
+| Config  | `$XDG_CONFIG_HOME/yams` (`~/.config/yams`)         | `XDG_CONFIG_HOME`          |
+| Keys    | `~/.config/yams/keys`                              | —                          |
 
-## Verify Installation
+### Tree-sitter grammars
+
+`yams init` can download grammars for 18 languages ([list](cli.md#symbol-extraction)). Requirements: `git` + a C compiler (gcc/clang on Unix, MSVC/MinGW on Windows). Pin an existing grammar with `YAMS_TS_<LANG>_LIB=/path/to/libtree-sitter-<lang>.so`.
+
+## Shell completion
+
+```bash
+# Bash
+source <(yams completion bash)
+
+# Zsh (persistent)
+mkdir -p ~/.local/share/zsh/site-functions
+yams completion zsh > ~/.local/share/zsh/site-functions/_yams
+# Ensure ~/.local/share/zsh/site-functions is on fpath before compinit
+
+# Fish
+mkdir -p ~/.config/fish/completions
+yams completion fish > ~/.config/fish/completions/yams.fish
+
+# PowerShell (current session)
+pwsh -NoLogo -NoProfile -Command 'Invoke-Expression (yams completion powershell | Out-String)'
+```
+
+Homebrew already installs bash/zsh/fish completions; only shell activation is your side.
+
+## Verify
+
 ```bash
 yams --version
 yams stats
 yams search "test" --limit 1
-```
 
-For ONNX-enabled builds and packages, a deeper plugin check is also useful:
-
-```bash
+# ONNX-enabled builds: confirm the model provider is loadable
 YAMS_SKIP_MODEL_LOADING=1 yams doctor plugin onnx --no-daemon
+# Expect: "Interface: model_provider_v1 v1 -> AVAILABLE"
 ```
 
-Expected output includes `Interface: model_provider_v1 v1 -> AVAILABLE`.
+## Uninstall
 
-## Uninstallation
-
-### Homebrew
 ```bash
-brew uninstall yams
-brew untap trvon/yams
-```
+# Homebrew
+brew uninstall yams && brew untap trvon/yams
 
-### Manual Installation
-```bash
+# Manual
 rm ~/.local/bin/yams
-rm -rf ~/.local/share/bash-completion/completions/yams
-rm -rf ~/.local/share/zsh/site-functions/_yams
-rm -rf ~/.config/fish/completions/yams.fish
-```
+rm -rf ~/.local/share/bash-completion/completions/yams \
+       ~/.local/share/zsh/site-functions/_yams \
+       ~/.config/fish/completions/yams.fish
 
-### Data Cleanup (optional)
-```bash
-rm -rf ~/.local/share/yams
-rm -rf ~/.config/yams
+# Data (optional, destructive)
+rm -rf ~/.local/share/yams ~/.config/yams
 ```
 
 ## Troubleshooting
 
-### Build Issues
+| Symptom                                   | Fix                                                            |
+|-------------------------------------------|----------------------------------------------------------------|
+| OpenSSL not found (macOS source build)    | `export OPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"`         |
+| Permission issues on storage path         | `chown`/`chmod` the dir; avoid `sudo` for runtime              |
+| Build cache stale                         | `rm -rf build && ./setup.sh Release`                           |
+| `yams plugin list` empty                  | `yams plugin trust add ~/.local/lib/yams/plugins` and re-check |
+| `yams` not on PATH                        | Add install dir: `export PATH="$HOME/.local/bin:$PATH"`        |
 
-**OpenSSL not found (macOS):**
-```bash
-export OPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
-```
+Further diagnostics: `yams doctor`, `yams stats --verbose`. Build issues: [docs/BUILD.md](../BUILD.md).
 
-**Permission issues:**
-```bash
-# chown/chmod your storage path; avoid sudo for runtime
-```
+## Next
 
-**Reconfigure build:**
-```bash
-rm -rf build && ./setup.sh Release
-```
-
-### Plugin Issues
-
-**Plugin discovery:** Verify with `yams plugin list`. If empty:
-- Check trusted directories: `yams plugin trust list`
-- Add plugin path: `yams plugin trust add ~/.local/lib/yams/plugins`
-- Verify shared libs: `ldd libyams_onnx_plugin.so`
-
-### Runtime Issues
-
-**Binary not found after installation:**
-```bash
-# Add installation directory to PATH
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-**Monitor and diagnose:**
-```bash
-yams stats --verbose
-yams doctor
-```
-
-### Getting Help
-
-- [GitHub Issues](https://github.com/trvon/yams/issues)
-- [Documentation](https://yamsmemory.ai)
-- [Discord](https://discord.gg/rTBmRHdTEc)
-
-## Next Steps
-
-- **CLI usage:** `yams add`, `yams search`, `yams get`, `yams list`, `yams stats`
-- **MCP server:** `yams serve` (stdio transport)
-- **Configuration:** Edit `~/.config/yams/config.toml`
-- **Full docs:** [yamsmemory.ai](https://yamsmemory.ai)
+- [CLI reference](cli.md) · [MCP server](mcp.md) · [Embeddings](embeddings.md) · [Plugins](../PLUGINS.md)
+- Issues: https://github.com/trvon/yams/issues · Discord: https://discord.gg/rTBmRHdTEc

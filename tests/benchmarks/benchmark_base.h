@@ -106,8 +106,8 @@ public:
             size_t ops = runIteration();
             auto end = std::chrono::high_resolution_clock::now();
 
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            durations.push_back(duration.count() / 1000.0); // Convert to ms
+            auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+            durations.push_back(static_cast<double>(duration.count()) / 1'000'000.0);
             totalOperations += ops;
         }
 
@@ -194,8 +194,8 @@ protected:
         auto start = std::chrono::high_resolution_clock::now();
         func();
         auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-        return duration.count() / 1000.0; // Return in ms
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        return static_cast<double>(duration.count()) / 1'000'000.0;
     }
 
     size_t getCurrentMemoryUsage() {

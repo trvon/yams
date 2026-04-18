@@ -13,6 +13,8 @@ Param(
 
 $ErrorActionPreference = 'Stop'
 $forceVs2022Toolset = $false
+$initialMeson = Get-Command meson -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+$initialNinja = Get-Command ninja -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
 
 if (-not $Offline -and $env:YAMS_OFFLINE -match '^(1|true|yes|on)$') {
     $Offline = $true
@@ -628,6 +630,29 @@ if ((-not $SystemDeps) -and (Test-Path $conanBuildPs1)) {
     . $conanBuildPs1
 }
 
+$activeMeson = Get-Command meson -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+$activeNinja = Get-Command ninja -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+$conanToolsOverride = ($activeMeson -ne $initialMeson) -or ($activeNinja -ne $initialNinja)
+$mesonWrapperPs1 = $null
+if ((-not $SystemDeps) -and (Test-Path $conanBuildPs1)) {
+    $mesonWrapperPs1 = Join-Path $buildDir 'mesonw.ps1'
+    $wrapperContent = @"
+Param(
+    [Parameter(ValueFromRemainingArguments = `$true)]
+    [string[]]`$MesonArgs
+)
+
+`$ErrorActionPreference = 'Stop'
+`$conanBuildPs1 = '$($conanBuildPs1 -replace "'", "''")'
+if (Test-Path `$conanBuildPs1) {
+    . `$conanBuildPs1
+}
+& meson @MesonArgs
+exit `$LASTEXITCODE
+"@
+    Set-Content -Path $mesonWrapperPs1 -Value $wrapperContent -Encoding ASCII
+}
+
 # Detect install prefix
 if ($env:YAMS_INSTALL_PREFIX) {
     $InstallPrefix = $env:YAMS_INSTALL_PREFIX
@@ -955,7 +980,15 @@ if ($Package) {
         Write-Host "  $($_.Name)" -ForegroundColor Green
     }
 } else {
-    Write-Host "To install, run: meson install -C $buildDir"
+    if ($conanToolsOverride -and $mesonWrapperPs1) {
+        Write-Host "Conan provided Meson/Ninja for this build directory."
+        Write-Host "To install, run: $mesonWrapperPs1 install -C $buildDir"
+    } else {
+        Write-Host "To install, run: meson install -C $buildDir"
+        if ($mesonWrapperPs1) {
+            Write-Host "Fallback wrapper (replays Conan build env if needed): $mesonWrapperPs1"
+        }
+    }
     Write-Host "To build MSI:    .\setup.ps1 -BuildType $BuildType -Package"
     Write-Host "Note: You may need to add '$InstallPrefix\bin' to your PATH."
 }

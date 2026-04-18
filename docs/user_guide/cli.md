@@ -1481,6 +1481,24 @@ yams config search path-tree enable --mode
 ```
 
 
+## Symbol Extraction {#symbol-extraction}
+
+YAMS extracts functions, classes, imports, and calls from source files via tree-sitter grammars managed under `yams config grammar`.
+
+```bash
+yams config grammar list                        # available + installed
+yams config grammar download cpp python rust    # fetch specific grammars
+yams add src/ --recursive --include="*.cpp,*.py,*.rs"   # symbols extracted on add
+```
+
+**Supported languages (18):** C, C++, C#, Dart, Go, Java, JavaScript, Kotlin, P4, Perl, PHP, Python, R, Rust, Solidity, SQL, TypeScript, Zig.
+
+Source of truth: [`plugins/symbol_extractor_treesitter/symbol_extractor.cpp`](../../plugins/symbol_extractor_treesitter/symbol_extractor.cpp) (`language_configs`).
+
+Pin an existing grammar manually with `YAMS_TS_<LANG>_LIB=/path/to/libtree-sitter-<lang>.so` (e.g. `YAMS_TS_CPP_LIB`). Requires `git` + a C compiler when grammars are built locally.
+
+---
+
 ## Exit Codes
 
 - 0  Success.
@@ -1893,3 +1911,4 @@ YAMS-first workflow
 - **Docs:** [yamsmemory.ai](https://yamsmemory.ai)
 - **GitHub:** [github.com/trvon/yams](https://github.com/trvon/yams)
 - **Discord:** [discord.gg/rTBmRHdTEc](https://discord.gg/rTBmRHdTEc)
+docs/user_guide/cli.md 

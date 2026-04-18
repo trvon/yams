@@ -111,6 +111,53 @@ meson compile -C build/debug yams_search_benchmarks
 ./build/debug/tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
 ```
 
+**Topology-aware ingestion hotspot smoke**
+
+Use the no-embedding lane first to isolate non-ML ingestion cost and queue/drain behavior:
+
+```bash
+ninja -C build/debug tests/benchmarks/ingestion_throughput_bench \
+  tests/benchmarks/yams_large_scale_ingestion_bench
+
+build/debug/tests/benchmarks/ingestion_throughput_bench \
+  --config tests/benchmarks/configs/topology_ingestion_smoke.json
+
+YAMS_BENCH_DOC_COUNT=10 \
+YAMS_BENCH_ENABLE_EMBEDDINGS=0 \
+YAMS_BENCH_SKIP_DEFAULT_SETUP=1 \
+YAMS_BENCH_OUT_DIR=/tmp/yams-topology-bench \
+YAMS_BENCH_RUN_ID=no-embed-smoke \
+build/debug/tests/benchmarks/yams_large_scale_ingestion_bench \
+  --benchmark_filter='BM_LargeScaleIngestion/200/0/2/iterations:1' \
+  --benchmark_min_time=0.01s
+```
+
+When isolating topology cost with mock embeddings, set:
+
+```bash
+YAMS_BENCH_FORCE_MOCK_EMBEDDINGS=1
+```
+
+Current status:
+
+- no-embedding ingestion hotspot lane is working and produces stable queue/drain metrics
+- topology counters are now exposed in both throughput JSONL and large-scale CSV/counters
+- embedding-enabled topology throughput smoke now completes and reaches
+  `topology_artifacts_fresh=true`
+- embedding-enabled large-scale ingestion smoke now completes as well; benchmark gating trusts
+  persisted vector/topology artifacts when daemon status counters lag
+
+Latest smoke checkpoint:
+
+- throughput harness embedding smoke: `documents_total=3`, `files_indexed=3`,
+  `topology_artifacts_fresh=true`
+- preserved benchmark DB shows stored topology artifacts:
+  - `metadata` rows with `topology.%`: `27`
+  - `kg_nodes` with `node_key like 'topology:%'`: `2`
+- large-scale embedding smoke: `10/10` docs completed in about `10.154s`
+- large-scale embedding benchmark numbers are now usable for smoke validation and hotspot
+  inspection; treat larger corpus runs as exploratory until repeated under load
+
 ## Performance Benchmarks
 
 ### Latest Debug Runs (M4, 2026-04-08)

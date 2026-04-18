@@ -12,18 +12,14 @@ Store once, find anything, never lose context.
 
 ## Why YAMS
 
-- **Store anything, find it later.** Content-addressed storage with automatic deduplication and compression. Files, notes, code, PDFs — YAMS keeps one copy and retrieves it instantly.
-
-- **Search by meaning, not just keywords.** Hybrid search combines full-text indexing with vector embeddings so you can search by concept, not just exact text.
-
-- **Works with your tools.** CLI for scripts and automation. MCP server for AI assistants like Claude Desktop. Plugin architecture for custom integrations.
-
----
+- **Store anything, find it later.** Content-addressed storage with automatic deduplication and compression.
+- **Search by meaning, not just keywords.** Hybrid full-text + vector embeddings.
+- **Works with your tools.** CLI, MCP server for AI assistants, C-ABI plugin architecture.
 
 ## Quick Start
 
 ```bash
-brew install trvon/yams/yams   # or see Install below for apt/dnf/docker
+brew install trvon/yams/yams       # or see Install below
 yams init
 echo "hello world" | yams add - --tags demo
 yams search hello
@@ -31,13 +27,11 @@ yams search hello
 
 ## Use with AI Assistants
 
-YAMS runs as an MCP server, giving AI assistants persistent memory with 3 composite tools (query, execute, session).
+YAMS runs as an MCP server over stdio (JSON-RPC).
 
 ```bash
-yams serve  # stdio transport
+yams serve
 ```
-
-Add to your Claude Desktop config:
 
 ```json
 {
@@ -47,64 +41,28 @@ Add to your Claude Desktop config:
 }
 ```
 
-See the [MCP guide](user_guide/mcp.md) for full setup and usage.
+Full MCP setup: [user_guide/mcp.md](user_guide/mcp.md).
 
 ## Install
 
-### Debian / Ubuntu (APT)
+| Platform            | Command                                                              |
+|---------------------|----------------------------------------------------------------------|
+| macOS (Homebrew)    | `brew install trvon/yams/yams`                                       |
+| Debian / Ubuntu     | APT repo — see [installation.md#apt](user_guide/installation.md#apt) |
+| Fedora / RHEL       | DNF repo — see [installation.md#dnf](user_guide/installation.md#dnf) |
+| Docker              | `docker pull ghcr.io/trvon/yams:latest`                              |
+| From source         | See [BUILD.md](BUILD.md)                                             |
 
-```bash
-curl -fsSL https://repo.yamsmemory.ai/gpg.key \
-  | sudo gpg --dearmor -o /usr/share/keyrings/yams.gpg
-
-echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" \
-  | sudo tee /etc/apt/sources.list.d/yams.list
-sudo apt-get update && sudo apt-get install yams
-
-# Optional: start the packaged daemon service
-sudo systemctl enable --now yams-daemon
-yams daemon status
-```
-
-### Fedora / RHEL (YUM / DNF)
-
-!!! note "Repo path caveat"
-    The hosted YUM repository is documented here, but the current automated validation installs the published `.rpm` artifact directly rather than pulling it through the repo metadata.
-
-```bash
-sudo tee /etc/yum.repos.d/yams.repo <<'REPO'
-[yams]
-name=YAMS Repository
-baseurl=https://repo.yamsmemory.ai/yumrepo/
-enabled=1
-gpgcheck=0
-REPO
-sudo dnf makecache && sudo dnf install yams
-```
-
-### macOS (Homebrew)
-
-```bash
-brew install trvon/yams/yams
-```
-
-### Other methods
-
-| Method | Details |
-|--------|---------|
-| Docker | `docker run --rm -it ghcr.io/trvon/yams:latest --version` |
-| Direct download | `curl -fsSL https://repo.yamsmemory.ai/latest.json | jq .` |
-| Build from source | See [Installation](user_guide/installation.md) |
-
-**Platforms**: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64
+Supported: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64.
 
 ## Links
 
-| Resource | URL |
-|----------|-----|
-| Benchmarks | [Benchmark docs](benchmarks/README.md) |
-| Roadmap | [What's planned](roadmap.md) |
-| SourceHut | https://sr.ht/~trvon/yams/ |
-| GitHub | https://github.com/trvon/yams |
-| Discord | https://discord.gg/rTBmRHdTEc |
-| License | GPL-3.0-or-later |
+| Resource   | URL                                               |
+|------------|---------------------------------------------------|
+| Full docs  | [README.md](README.md)                            |
+| Benchmarks | [benchmarks/README.md](benchmarks/README.md)      |
+| Roadmap    | [roadmap.md](roadmap.md)                          |
+| SourceHut  | https://sr.ht/~trvon/yams/                        |
+| GitHub     | https://github.com/trvon/yams                     |
+| Discord    | https://discord.gg/rTBmRHdTEc                     |
+| License    | GPL-3.0-or-later                                  |

@@ -1,350 +1,162 @@
 # YAMS Plugin System
 
-YAMS plugins extend the system with new capabilities. Choose your plugin type:
+YAMS loads plugins to extend extraction, embeddings, storage, search, and graph backends.
 
-| Type | Use Case | Language | Deployment |
-|------|----------|----------|------------|
-| **External** | Prototyping, integration, scripting | Python, Node.js, any | Process-based |
-| **Native** | Production, performance-critical | C/C++ | Shared library |
+| Type         | Use case                              | Language    | Deployment       |
+|--------------|---------------------------------------|-------------|------------------|
+| **External** | Prototyping, integration, scripting   | Python, JS, any | Subprocess (JSON-RPC over stdio) |
+| **Native**   | Performance-critical, in-process      | C/C++       | Shared library (C ABI) |
+
+## Trust and discovery
+
+**Default deny.** Only paths in the trust file load.
+
+```bash
+yams plugin trust add ~/.local/lib/yams/plugins   # trust a directory
+yams plugin trust list
+yams plugin trust remove <path>
+
+yams plugin scan                                  # discover
+yams plugin list                                  # loaded
+yams plugin load <path|name>
+yams plugin unload <name>
+yams plugin info <name>
+yams plugin health
+yams doctor plugin <name>                         # diagnose one
+```
+
+Trust file: `<data_dir>/plugins.trust` (default `~/.local/share/yams/plugins.trust`). Legacy `~/.config/yams/plugins_trust.txt` is imported.
+
+**Search order:**
+
+1. Persisted trusted roots from `plugins.trust`
+2. `[daemon].plugin_dir` and `[daemon|plugins].trusted_paths` in config
+3. Built-in defaults: `~/.local/lib/yams/plugins`, `/opt/homebrew/lib/yams/plugins` (macOS), `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins` — unless strict mode is on
+
+Strict mode: `[daemon].plugin_dir_strict = true` or `YAMS_PLUGIN_DIR_STRICT=1`. Dev override: `YAMS_PLUGIN_TRUST_ALL=1`.
+
+## Bundled plugins
+
+| Plugin                         | Purpose                                      | Details |
+|--------------------------------|----------------------------------------------|---------|
+| `onnx`                         | ONNX Runtime embeddings (CPU + GPU)          | [plugins/onnx/README.md](../plugins/onnx/README.md) |
+| `object_storage_s3`            | S3 / R2-compatible object storage backend    | [plugins/object_storage_s3/README.md](../plugins/object_storage_s3/README.md) |
+| `zyp`                          | PDF text + metadata extraction               | `plugins/zyp/` |
+| `symbol_extractor_treesitter`  | Tree-sitter symbols for 18 languages         | `plugins/symbol_extractor_treesitter/` |
+| `glint`                        | GLiNER natural-language entity extraction    | [plugins/glint/README.md](../plugins/glint/README.md) |
+| `hound`                        | Graph adapter mapping Hound → YAMS KG        | `plugins/hound/` |
+| `yams-ghidra-plugin`           | Ghidra binary analysis (external, PyGhidra)  | `plugins/yams-ghidra-plugin/` |
+
+## Standard interfaces
+
+| Interface              | Header                                              | Purpose                      |
+|------------------------|-----------------------------------------------------|------------------------------|
+| `content_extractor_v1` | `include/yams/plugins/content_extractor_v1.h`       | Document text extraction     |
+| `symbol_extractor_v1`  | `include/yams/plugins/symbol_extractor_v1.h`        | Source / binary symbols      |
+| `entity_extractor_v2`  | `include/yams/plugins/entity_extractor_v2.h`        | Named entity extraction      |
+| `search_provider_v1`   | `include/yams/plugins/search_provider_v1.h`         | Search backend               |
+| `graph_adapter_v1`     | See [docs/api/graph_adapter_v1.md](api/graph_adapter_v1.md) | KG adapter           |
+| `model_provider_v1`    | `include/yams/ml/`                                  | Embedding model provider     |
+| `object_storage_v1`    | See [docs/api/storage_plugin_v1.md](api/storage_plugin_v1.md) | Object storage       |
+
+Interface versions are tracked in [docs/spec/interface_versions.json](spec/interface_versions.json).
 
 ---
 
-## External Plugins (Recommended for New Development)
+## External plugins (JSON-RPC)
 
-External plugins run as separate processes communicating via JSON-RPC 2.0 over stdio.
+External plugins run as subprocesses communicating JSON-RPC 2.0 over stdio. Every external plugin must implement:
 
-### Minimal Python Plugin
+| Method               | Purpose                | Response                                              |
+|----------------------|------------------------|-------------------------------------------------------|
+| `handshake.manifest` | Plugin metadata        | `{name, version, interfaces, capabilities}`           |
+| `plugin.init`        | Initialize with config | `{status: "ok"}`                                      |
+| `plugin.health`      | Health status          | `{status: "ok"\|"degraded"\|"error"}`                 |
+| `plugin.shutdown`    | Graceful cleanup       | `{status: "ok"}`                                      |
+
+Per-interface methods are defined in [docs/spec/external_plugin_jsonrpc_protocol.md](spec/external_plugin_jsonrpc_protocol.md).
+
+### Minimal Python example
 
 ```python
 #!/usr/bin/env python3
-"""Minimal YAMS external plugin."""
-import json
-import sys
+import json, sys
 
 def handle(req):
-    method = req.get("method", "")
-
-    if method == "handshake.manifest":
+    m = req.get("method", "")
+    if m == "handshake.manifest":
         return {"name": "my_plugin", "version": "1.0.0", "interfaces": []}
-    elif method == "plugin.init":
+    if m in ("plugin.init", "plugin.health", "plugin.shutdown"):
         return {"status": "ok"}
-    elif method == "plugin.health":
-        return {"status": "ok"}
-    elif method == "plugin.shutdown":
-        return {"status": "ok"}
-    else:
-        raise ValueError(f"Unknown method: {method}")
+    raise ValueError(f"Unknown method: {m}")
 
-if __name__ == "__main__":
-    for line in sys.stdin:
-        req = json.loads(line.strip())
-        try:
-            result = handle(req)
-            resp = {"jsonrpc": "2.0", "id": req.get("id"), "result": result}
-        except Exception as e:
-            resp = {"jsonrpc": "2.0", "id": req.get("id"), "error": {"code": -32603, "message": str(e)}}
-        print(json.dumps(resp), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    try:
+        resp = {"jsonrpc": "2.0", "id": req.get("id"), "result": handle(req)}
+    except Exception as e:
+        resp = {"jsonrpc": "2.0", "id": req.get("id"),
+                "error": {"code": -32603, "message": str(e)}}
+    print(json.dumps(resp), flush=True)
 ```
 
-### Using the Python SDK
+The higher-level `yams_sdk.BasePlugin` is in [external/yams-sdk/](../external/yams-sdk/).
 
-```python
-#!/usr/bin/env python3
-from yams_sdk import BasePlugin, rpc
-
-class MyPlugin(BasePlugin):
-    def manifest(self):
-        return {
-            "name": "my_plugin",
-            "version": "1.0.0",
-            "interfaces": ["content_extractor_v1"],
-            "capabilities": {
-                "content_extraction": {"formats": ["text/plain"]}
-            }
-        }
-
-    def init(self, config):
-        self.config = config
-
-    def health(self):
-        return {"status": "ok"}
-
-    @rpc("extractor.supports")
-    def supports(self, mime_type=None, extension=None):
-        return {"supported": extension == ".txt" or mime_type == "text/plain"}
-
-    @rpc("extractor.extract")
-    def extract(self, source, options=None):
-        with open(source["path"]) as f:
-            text = f.read()
-        return {"success": True, "content": text, "metadata": {}}
-
-if __name__ == "__main__":
-    MyPlugin().run()
-```
-
-### Required RPC Methods
-
-Every external plugin MUST implement these JSON-RPC methods:
-
-| Method | Purpose | Response |
-|--------|---------|----------|
-| `handshake.manifest` | Return plugin metadata | `{name, version, interfaces, capabilities}` |
-| `plugin.init` | Initialize with config | `{status: "ok"}` |
-| `plugin.health` | Report health status | `{status: "ok"\|"degraded"\|"error"}` |
-| `plugin.shutdown` | Graceful cleanup | `null` or `{status: "ok"}` |
-
-### Content Extractor Interface
-
-Plugins implementing `content_extractor_v1` must also provide:
-
-| Method | Purpose | Response |
-|--------|---------|----------|
-| `extractor.supports` | Check file type support | `{supported: bool}` |
-| `extractor.extract` | Extract text content | `{success: bool, content: str, metadata: {}}` |
-
-### Plugin Directory Structure
-
-For production deployment, organize plugins as directories:
+### Plugin directory layout
 
 ```
 my_plugin/
-├── yams-plugin.json    # Manifest (required)
-├── plugin              # Compiled binary (Linux/macOS)
-├── plugin.exe          # Compiled binary (Windows)
-└── plugin.py           # Python fallback
+├── yams-plugin.json    # manifest (required)
+├── plugin              # compiled binary (Linux/macOS)
+├── plugin.exe          # compiled binary (Windows)
+└── plugin.py           # interpreter fallback
 ```
 
-### Plugin Manifest (`yams-plugin.json`)
+Manifest fields and `${plugin_dir}` substitution: see [docs/spec/plugin_spec.md](spec/plugin_spec.md).
 
-```json
-{
-  "name": "my_plugin",
-  "version": "1.0.0",
-  "entry": {
-    "binary": {
-      "linux": "${plugin_dir}/plugin",
-      "darwin": "${plugin_dir}/plugin",
-      "windows": "${plugin_dir}/plugin.exe"
-    },
-    "fallback_cmd": ["python3", "-u", "${plugin_dir}/plugin.py"],
-    "env": {"LOG_LEVEL": "INFO"}
-  },
-  "capabilities": {
-    "content_extraction": {"formats": ["application/pdf"]}
-  }
-}
-```
-
-**Variable substitution:** `${plugin_dir}` expands to the plugin directory path.
-
-### Entry Point Resolution
-
-The host loads plugins in this priority order:
-
-1. `entry.binary.<platform>` - Platform-specific compiled binary (most secure)
-2. `plugin` or `plugin.exe` - Default compiled binary in plugin directory
-3. `entry.fallback_cmd` or `entry.cmd` - Interpreter command
-4. Direct execution based on file extension (`.py` → Python, `.js` → Node.js)
-
----
-
-## Native Plugins (C ABI)
-
-Native plugins are shared libraries loaded directly into the daemon process.
-
-### Required Entry Points
-
-```c
-#include "yams/plugins/abi.h"
-
-int yams_plugin_get_abi_version(void)          { return 1; }
-const char* yams_plugin_get_name(void)         { return "my_plugin"; }
-const char* yams_plugin_get_version(void)      { return "1.0.0"; }
-const char* yams_plugin_get_manifest_json(void);
-int yams_plugin_get_interface(const char* iface_id, uint32_t version, void** out);
-int yams_plugin_init(const char* config_json, const void* host_context);
-void yams_plugin_shutdown(void);
-int yams_plugin_get_health_json(char** out_json);  // Optional
-```
-
-### Interface Pattern
-
-Plugins expose vtables for specific capabilities:
-
-```c
-typedef struct content_extractor_v1 {
-    void* handle;
-    int (*extract_content)(void* handle, const char* path, char** out_text, char** out_metadata);
-    void (*free_extracted_content)(void* handle, char* text, char* metadata);
-    int (*get_supported_extensions)(void* handle, char*** out_exts, uint32_t* out_count);
-    void (*free_extension_list)(void* handle, char** exts, uint32_t count);
-} content_extractor_v1_t;
-```
-
-### Standard Interfaces
-
-| Interface | Purpose |
-|-----------|---------|
-| `content_extractor_v1` | Document text extraction |
-| `symbol_extractor_v1` | Binary symbol extraction |
-| `model_provider_v1` | Embedding generation |
-| `graph_adapter_v1` | Graph storage backend |
-| `search_provider_v1` | Search backend |
-
-## Object Storage Provider Compatibility
-
-YAMS object storage uses an S3-compatible path. Current provider status:
-
-- Cloudflare R2: tested in this repository.
-- AWS S3: supported by the same interface/path, but not currently validated by
-  automated tests in this repository.
-
-See:
-
-- `plugins/object_storage_s3/README.md` for practical setup examples.
-- `docs/api/storage_plugin_v1.md` for capability-level API expectations.
-
-### Error Codes
-
-```c
-#define YAMS_PLUGIN_OK            0
-#define YAMS_PLUGIN_ERR_INVALID   1
-#define YAMS_PLUGIN_ERR_NOT_FOUND 3
-#define YAMS_PLUGIN_ERR_IO        4
-```
-
-### Memory Management
-
-- Plugin allocates with `malloc()`, host frees with `free()`
-- Vtables have static lifetime (valid until plugin unload)
-- Thread-safe unless documented otherwise
-
----
-
-## Plugin Loading & Trust
-
-### Trust Policy
-
-**Default deny:** Only explicitly trusted paths are loaded.
-
-```bash
-# Manage trust
-yams plugin trust add /path/to/plugin
-yams plugin trust list
-yams plugin trust remove /path/to/plugin
-
-# Development override
-export YAMS_PLUGIN_TRUST_ALL=1
-```
-
-Canonical trust file: `<data_dir>/plugins.trust` (default `~/.local/share/yams/plugins.trust`).
-Legacy path `~/.config/yams/plugins_trust.txt` is imported for compatibility.
-
-### Search Paths
-
-1. Persisted trusted roots from `<data_dir>/plugins.trust`
-2. Optional `[daemon].plugin_dir` and `[daemon|plugins].trusted_paths`
-3. Built-in defaults (`~/.local/lib/yams/plugins`, `/opt/homebrew/lib/yams/plugins` on macOS,
-   `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`) unless strict mode is enabled
-
-Strict mode controls:
-- Config: `[daemon].plugin_dir_strict = true`
-- Env override: `YAMS_PLUGIN_DIR_STRICT=1`
-
-### CLI Commands
-
-```bash
-yams plugin scan                  # Discover plugins
-yams plugin list                  # Show loaded plugins
-yams plugin load <path|name>      # Load a plugin
-yams plugin unload <name>         # Unload a plugin
-yams plugin info <name>           # Show plugin details
-```
-
----
-
-## Process Lifecycle (External Plugins)
-
-### States
+### Process lifecycle
 
 ```
 Unstarted → Starting → Ready ⇄ Busy → ShuttingDown → Terminated
-                ↓                           ↓
-             Failed ←───────────────────────┘
+                ↓                         ↓
+             Failed ←───────────────────── ┘
 ```
 
-### Platform Implementation
-
-| Platform | Spawn | Cleanup | Termination |
-|----------|-------|---------|-------------|
-| Windows | `CreateProcess` | Job Objects | `TerminateProcess` |
-| Unix | `fork`/`exec` | Process groups | `SIGTERM` → `SIGKILL` |
-
-### Automatic Recovery
-
-Crashed plugins are restarted with exponential backoff (up to 3 retries by default).
+Crashed plugins are restarted with exponential backoff (up to 3 retries). Unix uses `SIGTERM → SIGKILL` with process groups; Windows uses Job Objects and `TerminateProcess`.
 
 ---
 
-## JSON-RPC Protocol Reference
+## Native plugins (C ABI)
 
-### Request Format
+Required entry points — full signatures in [include/yams/plugins/abi.h](../include/yams/plugins/abi.h):
 
-```json
-{"jsonrpc": "2.0", "id": 1, "method": "method_name", "params": {...}}
+```c
+int         yams_plugin_get_abi_version(void);
+const char* yams_plugin_get_name(void);
+const char* yams_plugin_get_version(void);
+const char* yams_plugin_get_manifest_json(void);
+int         yams_plugin_get_interface(const char* iface_id, uint32_t version, void** out);
+int         yams_plugin_init(const char* config_json, const void* host_context);
+void        yams_plugin_shutdown(void);
+int         yams_plugin_get_health_json(char** out_json);  // optional
 ```
 
-### Success Response
+Interfaces are exposed as vtables (see `include/yams/plugins/*.h`). Memory: plugin allocates with `malloc`, host frees with `free`. Vtables have static lifetime. Thread-safe unless documented otherwise.
 
-```json
-{"jsonrpc": "2.0", "id": 1, "result": {...}}
-```
+## Object storage provider compatibility
 
-### Error Response
+- **Cloudflare R2** — tested in-repo.
+- **AWS S3** — same interface, not validated by automated tests here.
 
-```json
-{"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "...", "data": {...}}}
-```
+See [plugins/object_storage_s3/README.md](../plugins/object_storage_s3/README.md) for setup and [docs/api/storage_plugin_v1.md](api/storage_plugin_v1.md) for capability expectations.
 
-### Standard Error Codes
+## References
 
-| Code | Name | Meaning |
-|------|------|---------|
-| -32700 | Parse error | Invalid JSON |
-| -32600 | Invalid Request | Missing required fields |
-| -32601 | Method not found | Unknown method |
-| -32602 | Invalid params | Bad parameters |
-| -32603 | Internal error | Plugin error |
-| -32000 | Extraction failed | Content extraction failed |
-| -32001 | Unsupported format | Cannot handle file type |
-
----
-
-## Examples
-
-### Complete External Plugin Example
-
-See: `tests/fixtures/mock_plugin.py`
-
-### Native Plugin Examples
-
-- `plugins/onnx/` - Model provider (ONNX Runtime)
-- `plugins/pdf_extractor/` - Content extractor (MuPDF)
-- `plugins/symbol_extractor_treesitter/` - Symbol extractor
-
-### External Plugin Examples
-
-- `plugins/yams-ghidra-plugin/` - Binary analysis (PyGhidra)
-
----
-
-## Reference
-
-| Resource | Path |
-|----------|------|
-| C ABI Specification | `docs/spec/plugin_spec.md` |
-| JSON-RPC Protocol | `docs/spec/external_plugin_jsonrpc_protocol.md` |
-| Interface Headers | `include/yams/plugins/*.h` |
-| Python SDK | `external/yams-sdk/` |
-| Interface Registry | `docs/spec/interface_versions.json` |
+| Resource             | Path                                                          |
+|----------------------|---------------------------------------------------------------|
+| C ABI spec           | [docs/spec/plugin_spec.md](spec/plugin_spec.md)               |
+| JSON-RPC spec        | [docs/spec/external_plugin_jsonrpc_protocol.md](spec/external_plugin_jsonrpc_protocol.md) |
+| Interface versions   | [docs/spec/interface_versions.json](spec/interface_versions.json) |
+| Interface headers    | `include/yams/plugins/*.h`                                    |
+| Python SDK           | `external/yams-sdk/`                                          |
+| Mock plugin          | `tests/fixtures/mock_plugin.py`                               |

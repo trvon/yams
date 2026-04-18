@@ -141,7 +141,7 @@ yams config grammar download cpp python rust
 yams add src/ --recursive --include="*.cpp,*.py,*.rs"
 ```
 
-**Supported:** C, C++, Python, JavaScript, TypeScript, Rust, Go, Java, C#, PHP, Kotlin, Dart, SQL, Solidity
+**Supported languages (18):** C, C++, C#, Dart, Go, Java, JavaScript, Kotlin, P4, Perl, PHP, Python, R, Rust, Solidity, SQL, TypeScript, Zig. Full list: [cli.md#symbol-extraction](./cli.md#symbol-extraction).
 
 ## Plugins
 
@@ -167,3 +167,4 @@ yams repair --embeddings # Generate missing embeddings
 - **Docs:** [yamsmemory.ai](https://yamsmemory.ai)
 - **GitHub:** [github.com/trvon/yams](https://github.com/trvon/yams)
 - **Discord:** [discord.gg/rTBmRHdTEc](https://discord.gg/rTBmRHdTEc)
+docs/index.md 

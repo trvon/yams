@@ -75,6 +75,10 @@ is_true() {
   esac
 }
 
+command_path_or_empty() {
+  command -v "$1" 2>/dev/null || true
+}
+
 ENABLE_OFFLINE=false
 USE_SYSTEM_DEPS=false
 ENABLE_COVERAGE=false
@@ -92,6 +96,9 @@ fi
 if is_true "${YAMS_USE_SYSTEM_DEPS:-false}"; then
   USE_SYSTEM_DEPS=true
 fi
+
+INITIAL_MESON_BIN="$(command_path_or_empty meson)"
+INITIAL_NINJA_BIN="$(command_path_or_empty ninja)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -807,6 +814,38 @@ else
 fi
 YAMS_PROTOC_PATH="${YAMS_PROTOC_PATH:-}"
 
+MESON_WRAPPER_PATH=""
+ACTIVE_MESON_BIN="$(command_path_or_empty meson)"
+ACTIVE_NINJA_BIN="$(command_path_or_empty ninja)"
+CONAN_TOOLS_OVERRIDE=false
+if [[ -f "${CONAN_BUILD_ENV:-}" ]]; then
+  MESON_WRAPPER_PATH="${BUILD_DIR}/mesonw"
+  CONAN_BUILD_ENV_ESCAPED=$(printf '%q' "${CONAN_BUILD_ENV}")
+  cat >"${MESON_WRAPPER_PATH}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+CONAN_BUILD_ENV=${CONAN_BUILD_ENV_ESCAPED}
+for maybe_unset_var in ACLOCAL_PATH PKG_CONFIG_PATH LD_LIBRARY_PATH DYLD_LIBRARY_PATH \
+    DYLD_FALLBACK_LIBRARY_PATH LIBRARY_PATH CMAKE_PREFIX_PATH MANPATH; do
+  if [[ -z "\${!maybe_unset_var+x}" ]]; then
+    export "\${maybe_unset_var}="
+  fi
+done
+if [[ -f "\${CONAN_BUILD_ENV}" ]]; then
+  set +u
+  # shellcheck disable=SC1090
+  source "\${CONAN_BUILD_ENV}"
+  set -u
+fi
+exec meson "\$@"
+EOF
+  chmod +x "${MESON_WRAPPER_PATH}"
+
+  if [[ "${ACTIVE_MESON_BIN}" != "${INITIAL_MESON_BIN}" || "${ACTIVE_NINJA_BIN}" != "${INITIAL_NINJA_BIN}" ]]; then
+    CONAN_TOOLS_OVERRIDE=true
+  fi
+fi
+
 MESON_ARGS=(
   "${BUILD_DIR}"
   "--prefix" "${INSTALL_PREFIX}"
@@ -1093,4 +1132,15 @@ fi
 
 echo
 echo "--- Setup complete! ---"
-echo "To compile, run: meson compile -C ${BUILD_DIR}"
+if [[ "${CONAN_TOOLS_OVERRIDE}" == "true" ]]; then
+  echo "Conan provided Meson/Ninja for this build directory."
+  echo "To compile, run: ${MESON_WRAPPER_PATH} compile -C ${BUILD_DIR}"
+  echo "To install, run: ${MESON_WRAPPER_PATH} install -C ${BUILD_DIR}"
+elif [[ -n "${MESON_WRAPPER_PATH}" ]]; then
+  echo "To compile, run: meson compile -C ${BUILD_DIR}"
+  echo "To install, run: meson install -C ${BUILD_DIR}"
+  echo "Fallback wrapper (replays Conan build env if needed): ${MESON_WRAPPER_PATH}"
+else
+  echo "To compile, run: meson compile -C ${BUILD_DIR}"
+  echo "To install, run: meson install -C ${BUILD_DIR}"
+fi

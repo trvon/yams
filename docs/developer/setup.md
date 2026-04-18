@@ -38,6 +38,9 @@ meson compile -C build/release
 meson compile -C builddir
 ```
 
+If setup reports that Conan supplied Meson/Ninja, prefer the generated local wrapper
+(`build/.../mesonw` or `mesonw.ps1`) for follow-up Meson commands.
+
 ### Windows
 
 ```pwsh

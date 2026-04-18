@@ -1,41 +1,24 @@
-# YAMS MCP Server Guide
+# MCP Server
 
-A comprehensive guide for using YAMS as a Model Context Protocol (MCP) server with AI assistants.
+YAMS runs as a Model Context Protocol server over stdio (NDJSON, JSON-RPC 2.0), giving AI assistants read + write access to your content-addressed store.
 
-## Overview
-
-The YAMS MCP server exposes content-addressable storage and search capabilities through the Model Context Protocol, enabling AI assistants to:
-- Search and retrieve documents from your knowledge base
-- Store and manage content with rich metadata
-- Perform regex searches across indexed content
-- Access file type analytics and statistics
-
-The server uses **stdio transport exclusively**, implementing the MCP specification's newline-delimited JSON (NDJSON) protocol for maximum compatibility with MCP clients.
-
-## Quick Start
-
-### Running the MCP Server
+## Run
 
 ```bash
-# Stdio transport (standard MCP protocol)
-yams serve
-
-# With verbose logging (logs go to stderr)
-yams serve --verbose
-
-# Docker (stdio transport)
+yams serve                              # stdio transport
+yams serve --verbose                    # logs on stderr
 docker run -i ghcr.io/trvon/yams:latest serve
 ```
 
-After updating the configuration, restart Claude Desktop to load the MCP server.
+## Client configuration
 
-### Configuration for Claude Desktop
+| Client           | Config file                                                   |
+|------------------|---------------------------------------------------------------|
+| Claude Desktop   | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) · `%APPDATA%\Claude\claude_desktop_config.json` (Windows) · `~/.config/Claude/claude_desktop_config.json` (Linux) |
+| Continue.dev     | IDE config — `contextProviders` entry                         |
+| Cursor / Zed / custom | Any MCP-compliant stdio client                           |
 
-Add to your Claude Desktop configuration file:
-
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-**Linux:** `~/.config/Claude/claude_desktop_config.json`
+### Claude Desktop
 
 ```json
 {
@@ -43,489 +26,171 @@ Add to your Claude Desktop configuration file:
     "yams": {
       "command": "yams",
       "args": ["serve"],
-      "env": {
-        "YAMS_STORAGE": "/path/to/your/data"
-      }
+      "env": { "YAMS_STORAGE": "/path/to/your/data" }
     }
   }
 }
 ```
 
-### Configuration for Continue.dev
+### Continue.dev
 
 ```json
 {
-  "models": [...],
   "contextProviders": [
     {
       "name": "mcp",
-      "params": {
-        "serverCommand": "yams",
-        "serverArgs": ["serve"]
-      }
+      "params": { "serverCommand": "yams", "serverArgs": ["serve"] }
     }
   ]
 }
 ```
 
-## Prompt Templates
+Restart the client after editing its config.
 
-YAMS exposes basic prompt templates via `prompts/list` and `prompts/get`. In addition to built-ins (e.g., `search_codebase`, `summarize_document`, `rag/*`), you can add file-backed templates:
-
-- Create a directory for prompts (Markdown files):
-  - Default search path order:
-    1) `YAMS_MCP_PROMPTS_DIR` (env override)
-    2) `[mcp_server].prompts_dir` in `config.toml`
-    3) `$XDG_DATA_HOME/yams/prompts` or `~/.local/share/yams/prompts`
-    4) `./docs/prompts` (when running from repo)
-- File naming: `PROMPT-*.md` → name exposed as `*` with dashes converted to underscores.
-  - Example: `PROMPT-research-mcp.md` → name `research_mcp`
-- prompts/list merges built-ins with any file-backed templates.
-- prompts/get returns the template content as a single assistant text message.
-
-Tips:
-- To seed prompts, copy examples from the repo's `docs/prompts` into your prompts dir or provide a gist/raw URL for users to download.
-- Future: `yams init prompts` can be wired to fetch/populate a starter set.
-
-## Readiness and Initialization
-
-During startup, the daemon may report an initializing state. The CLI (yams status) and the MCP server will indicate not-ready services and progress. If models are configured to preload and you see prolonged initialization, consider lazy loading and verify model/provider readiness. Refer to yams stats -v for recommendations and detailed service status.
-
-## Docker Usage
-
-### Basic Docker Commands
+### Docker
 
 ```bash
-# Run with local storage mounted
 docker run -i --rm \
-  -v ~/.local/share/yams:/data \
-  -e YAMS_STORAGE=/data \
-  ghcr.io/trvon/yams:latest serve
-
-
-
-# With custom configuration
-docker run -i --rm \
-  -v ~/.config/yams:/config \
-  -v ~/.local/share/yams:/data \
-  -e YAMS_CONFIG=/config/config.toml \
-  -e YAMS_STORAGE=/data \
+  -v ~/.local/share/yams:/data -e YAMS_STORAGE=/data \
   ghcr.io/trvon/yams:latest serve
 ```
 
-## Available Tools
+`-i` is required — stdio transport needs an attached stdin.
 
-The MCP server exposes **3 composite tools** to AI assistants. All operations are accessed through these tools, dramatically reducing context window usage (~800 tokens vs ~4,000 for individual tools).
+## Tools
 
-| Tool | Purpose | Operations |
-|------|---------|------------|
-| `query` | Read-only pipeline | `search`, `grep`, `list`, `list_collections`, `list_snapshots`, `suggest_context`, `semantic_dedupe`, `graph`, `get`, `status`, `describe` |
-| `execute` | Write batch | `add`, `update`, `delete`, `restore`, `download` |
-| `session` | Session lifecycle | `start`, `stop`, `pin`, `unpin`, `watch` |
+The server exposes **3 composite tools**. All operations are reached through these; this keeps AI context windows tight (~800 tokens vs. ~4,000 for one-tool-per-op designs).
 
-Use `describe` to discover the full parameter schema for any operation at runtime:
+| Tool      | Purpose             | Operations |
+|-----------|---------------------|------------|
+| `query`   | Read pipeline       | `search`, `grep`, `list`, `list_collections`, `list_snapshots`, `suggest_context`, `semantic_dedupe`, `graph`, `get`, `status`, `describe` |
+| `execute` | Write batch         | `add`, `update`, `delete`, `restore`, `download` |
+| `session` | Session lifecycle   | `start`, `stop`, `pin`, `unpin`, `watch` |
+
+Discover operation parameter schemas at runtime with `describe`:
 
 ```json
 {"name": "query", "arguments": {"steps": [{"op": "describe", "params": {"target": "search"}}]}}
 ```
 
-### query — Read Pipeline
+Full operation schemas: [docs/api/mcp_tools.md](../api/mcp_tools.md). Protocol implementation: [`include/yams/mcp/mcp_server.h`](../../include/yams/mcp/mcp_server.h).
 
-Supports multi-step pipelines where each step can reference the previous result via `$prev`.
+### `query` examples
 
-**Search example:**
 ```json
-{
-  "name": "query",
-  "arguments": {
-    "steps": [{"op": "search", "params": {"query": "configuration management", "limit": 5}}]
-  }
-}
+// search
+{"name": "query", "arguments": {
+  "steps": [{"op": "search", "params": {"query": "configuration management", "limit": 5}}]}}
+
+// grep with regex + context
+{"name": "query", "arguments": {
+  "steps": [{"op": "grep", "params": {"pattern": "class\\s+\\w+Handler", "line_numbers": true, "context": 2}}]}}
+
+// pipeline: search → fetch top hit (uses $prev)
+{"name": "query", "arguments": {
+  "steps": [
+    {"op": "search", "params": {"query": "auth middleware", "limit": 1}},
+    {"op": "get", "params": {"hash": "$prev.results[0].hash", "include_content": true}}
+  ]}}
+
+// advisory retrieval — ranked snapshot suggestions + supporting hits
+{"name": "query", "arguments": {
+  "steps": [{"op": "suggest_context", "params": {"query": "auth token refresh flow", "limit": 3}}]}}
+
+// persisted semantic duplicate groups
+{"name": "query", "arguments": {
+  "steps": [{"op": "semantic_dedupe", "params": {"limit": 10}}]}}
 ```
 
-**Grep example:**
+`suggest_context` inside a `session` suppresses already-served snapshot sets for the same normalized query, so long-running sessions don't re-suggest the same context each turn.
+
+### `execute` example
+
 ```json
-{
-  "name": "query",
-  "arguments": {
-    "steps": [{"op": "grep", "params": {"pattern": "class\\s+\\w+Handler", "line_numbers": true, "context": 2}}]
-  }
-}
+{"name": "execute", "arguments": {
+  "operations": [{"op": "add", "params": {"path": "/tmp/notes.md", "tags": ["meeting"]}}]}}
 ```
 
-**Pipeline example (search → get top result):**
-```json
-{
-  "name": "query",
-  "arguments": {
-    "steps": [
-      {"op": "search", "params": {"query": "auth middleware", "limit": 1}},
-      {"op": "get", "params": {"hash": "$prev.results[0].hash", "include_content": true}}
-    ]
-  }
-}
-```
+Stops on first error unless `continueOnError: true`.
 
-**Context suggestion example:**
-```json
-{
-  "name": "query",
-  "arguments": {
-    "steps": [
-      {"op": "suggest_context", "params": {"query": "auth token refresh flow", "limit": 3}}
-    ]
-  }
-}
-```
-
-This returns ranked snapshot suggestions plus a few supporting search hits for each snapshot. Hosts can call it before a model turn to implement advisory proactive retrieval without leaving MCP's normal `tools/call` flow.
-
-When `session` scoping is used, `suggest_context` also suppresses the most recently served snapshot set for the same normalized query so long-running sessions do not keep re-suggesting the same context on every turn.
-
-**Semantic dedupe inspection example:**
-```json
-{
-  "name": "query",
-  "arguments": {
-    "steps": [
-      {"op": "semantic_dedupe", "params": {"limit": 10}}
-    ]
-  }
-}
-```
-
-This returns persisted semantic duplicate groups and their member documents so hosts can review duplicate suggestions without adding more CLI-only surfaces.
-
-### execute — Write Batch
-
-Executes write operations sequentially. Stops on first error unless `continueOnError: true`.
-
-**Add example:**
-```json
-{
-  "name": "execute",
-  "arguments": {
-    "operations": [
-      {"op": "add", "params": {"path": "/tmp/notes.md", "tags": ["meeting"]}}
-    ]
-  }
-}
-```
-
-### session — Session Lifecycle
-
-Manage sessions for scoped work.
+### `session` example
 
 ```json
 {"name": "session", "arguments": {"action": "start", "params": {"label": "review"}}}
 ```
 
-For full parameter schemas and pipeline examples, see the [API Reference](../api/mcp_tools.md).
+## Prompt templates
 
-## Hot/Cold Modes
+`prompts/list` and `prompts/get` expose built-in templates (`search_codebase`, `summarize_document`, `rag/*`) plus any file-backed templates you drop in:
 
-You can control hot/cold behavior via startup flags (passed to the MCP server):
-- --list-mode hot_only|cold_only|auto
-- --grep-mode hot_only|cold_only|auto
-- --retrieval-mode hot_only|cold_only|auto
+1. `YAMS_MCP_PROMPTS_DIR` (env override)
+2. `[mcp_server].prompts_dir` in `config.toml`
+3. `$XDG_DATA_HOME/yams/prompts` (`~/.local/share/yams/prompts`)
+4. `./docs/prompts` when running from the repo
 
-Environment alternatives:
-- YAMS_LIST_MODE, YAMS_GREP_MODE, YAMS_RETRIEVAL_MODE
+Filename `PROMPT-<name>.md` is exposed as `<name>` with dashes → underscores (e.g. `PROMPT-research-mcp.md` → `research_mcp`).
 
-Note: paths_only typically engages hot paths where supported, and reduces response size for large result sets.
+## Hot / cold modes
 
-## Additional Tools
+Control daemon path selection on server startup:
 
-All operations are accessed through the 3 composite tools above. Use `describe` to discover available operations and their schemas. See the [API Reference](../api/mcp_tools.md) for full documentation.
+| Flag                  | Env                     | Values                              |
+|-----------------------|-------------------------|-------------------------------------|
+| `--list-mode`         | `YAMS_LIST_MODE`        | `hot_only` · `cold_only` · `auto`   |
+| `--grep-mode`         | `YAMS_GREP_MODE`        | `hot_only` · `cold_only` · `auto`   |
+| `--retrieval-mode`    | `YAMS_RETRIEVAL_MODE`   | `hot_only` · `cold_only` · `auto`   |
 
-## Testing the MCP Server
+`paths_only: true` on list/search operations engages hot paths where supported and shrinks responses.
 
-### Manual Testing with JSON-RPC
-
-Test the MCP server directly with JSON-RPC messages:
+## Testing
 
 ```bash
-# Initialize the connection
-echo '{"jsonrpc":"2.0","method":"initialize","params":{"clientInfo":{"name":"test","version":"1.0"}},"id":1}' | yams serve
+# initialize
+echo '{"jsonrpc":"2.0","method":"initialize","params":{"clientInfo":{"name":"test","version":"1.0"}},"id":1}' \
+  | yams serve
 
-# List available tools (should return query, execute, session)
+# list tools — expect query, execute, session
 echo '{"jsonrpc":"2.0","method":"tools/list","id":2}' | yams serve
 
-# Search using the query tool
-echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"query","arguments":{"steps":[{"op":"search","params":{"query":"test"}}]}},"id":3}' | yams serve
+# one-shot search via query
+echo '{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"query","arguments":{"steps":[{"op":"search","params":{"query":"test"}}]}}}' \
+  | yams serve
 ```
 
-## Integration Examples
+Verbose trace:
 
-### Python Client
-
-This example shows how to communicate with the `yams serve` process over stdio using the **MCP specification standard: newline-delimited JSON (NDJSON)**.
-
-```python
-import json
-import subprocess
-
-class YamsMCP:
-    def __init__(self):
-        self.proc = subprocess.Popen(
-            ['yams', 'serve'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,  # Text mode for line-based I/O
-            bufsize=1   # Line buffered
-        )
-        self.request_id = 0
-
-    def send_request(self, request_data):
-        """Sends a JSON-RPC request using NDJSON (MCP stdio standard)."""
-        message = json.dumps(request_data)
-        # MCP stdio spec: messages are newline-delimited
-        self.proc.stdin.write(f"{message}\n")
-        self.proc.stdin.flush()
-
-    def read_response(self):
-        """Reads a JSON-RPC response using NDJSON (MCP stdio standard)."""
-        line = self.proc.stdout.readline()
-        if not line:
-            stderr = self.proc.stderr.read()
-            raise ConnectionError(f"Failed to read response. Server stderr:\n{stderr}")
-        
-        # Parse the newline-delimited JSON
-        return json.loads(line)
-
-    def call(self, method, params):
-        """Makes a generic JSON-RPC call."""
-        self.request_id += 1
-        request = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-            "id": self.request_id
-        }
-        self.send_request(request)
-        return self.read_response()
-
-# --- Usage Example ---
-if __name__ == "__main__":
-    mcp = YamsMCP()
-    
-    print("--> Initializing connection...")
-    init_response = mcp.call("initialize", {
-        "clientInfo": {
-            "name": "python-example-client",
-            "version": "1.0"
-        }
-    })
-    print("<-- Server initialized:", json.dumps(init_response, indent=2))
-
-    print("\n--> Listing tools...")
-    tools = mcp.call("tools/list", {})
-    print("<-- Tools available:", json.dumps(tools, indent=2))
-
-    print("\n--> Calling 'query' tool (search op)...")
-    search_result = mcp.call("tools/call", {
-        "name": "query",
-        "arguments": {"steps": [{"op": "search", "params": {"query": "test", "limit": 5}}]}
-    })
-    print("<-- Search result:", json.dumps(search_result, indent=2))
-    
-    # Cleanly shutdown the process
-    mcp.proc.terminate()
-```
-
-### Node.js Client
-
-This example shows how to communicate with the `yams serve` process over stdio using the **MCP specification standard: newline-delimited JSON (NDJSON)**.
-
-```javascript
-const { spawn } = require('child_process');
-const { createInterface } = require('readline');
-
-class YamsMCP {
-  constructor() {
-    this.proc = spawn('yams', ['serve']);
-    this.requestId = 0;
-    this.responseCallbacks = new Map();
-
-    // MCP stdio spec: newline-delimited JSON
-    // Use readline to process line-by-line
-    const rl = createInterface({
-      input: this.proc.stdout,
-      crlfDelay: Infinity
-    });
-
-    rl.on('line', (line) => {
-      if (!line.trim()) return; // Skip empty lines
-      
-      try {
-        const response = JSON.parse(line);
-        if (this.responseCallbacks.has(response.id)) {
-          this.responseCallbacks.get(response.id)(response);
-          this.responseCallbacks.delete(response.id);
-        }
-      } catch (err) {
-        console.error('Failed to parse response:', line, err);
-      }
-    });
-    
-    this.proc.stderr.on('data', (data) => {
-      console.error(`Server STDERR: ${data}`);
-    });
-  }
-
-  _send(request) {
-    const message = JSON.stringify(request);
-    // MCP stdio spec: messages are newline-delimited
-    this.proc.stdin.write(message + '\n');
-  }
-
-  call(method, params) {
-    this.requestId++;
-    const id = this.requestId;
-    const request = {
-      jsonrpc: "2.0",
-      method: method,
-      params: params,
-      id: id
-    };
-
-    return new Promise((resolve, reject) => {
-      this.responseCallbacks.set(id, resolve);
-      this._send(request);
-      // Optional: Add a timeout
-      setTimeout(() => {
-        if (this.responseCallbacks.has(id)) {
-          this.responseCallbacks.delete(id);
-          reject(new Error(`Request ${id} timed out`));
-        }
-      }, 5000); // 5 second timeout
-    });
-  }
-  
-  shutdown() {
-      this.proc.kill();
-  }
-}
-
-// --- Usage Example ---
-async function main() {
-    const mcp = new YamsMCP();
-
-    console.log("--> Initializing connection...");
-    const initResponse = await mcp.call("initialize", {
-        "clientInfo": {"name": "js-example-client", "version": "1.0"}
-    });
-    console.log("<-- Server initialized:", JSON.stringify(initResponse, null, 2));
-
-    console.log("\n--> Listing tools...");
-    const tools = await mcp.call("tools/list", {});
-    console.log("<-- Tools available:", JSON.stringify(tools, null, 2));
-
-    console.log("\n--> Calling 'query' tool (search op)...");
-    const searchResult = await mcp.call("tools/call", {
-        "name": "query",
-        "arguments": {"steps": [{"op": "search", "params": {"query": "test", "limit": 5}}]}
-    });
-    console.log("<-- Search result:", JSON.stringify(searchResult, null, 2));
-
-    mcp.shutdown();
-}
-
-main().catch(console.error);
-```
-
-## Troubleshooting
-
-### Connection Issues
-
-If clients can't connect, enable debug logging:
 ```bash
 export SPLOG_LEVEL=debug
 yams serve --verbose 2>debug.log
 ```
 
-**Common issues:**
-1. Client doesn't send `notifications/initialized` after `initialize` response
-2. Protocol version mismatch (supported: 2024-11-05 through 2025-06-18)
-3. Daemon connection timeout - pre-start with `yams status`
+Minimal Python and Node.js clients: drive the `yams serve` subprocess with newline-delimited JSON on stdin and read responses line-by-line from stdout. See [docs/api/mcp_tools.md](../api/mcp_tools.md) for end-to-end examples.
 
-**Test manually:**
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | yams serve --verbose
-```
+## Troubleshooting
 
-See the repo `include/yams/mcp/mcp_server.h` for protocol implementation details.
+| Symptom                              | Fix                                                          |
+|--------------------------------------|--------------------------------------------------------------|
+| Client times out on connect          | Pre-warm daemon: `yams status`; check protocol version (supported 2024-11-05 … 2025-06-18) |
+| No `tools/list` response             | Client isn't sending `notifications/initialized` after `initialize` |
+| Claude Desktop doesn't list YAMS     | Check config path/JSON; use absolute `yams` path; restart Claude Desktop |
+| Docker container exits immediately   | Missing `-i` — stdio needs an attached stdin                 |
+| `Ctrl+C` doesn't stop server         | Update to latest; else `kill -TERM <pid>`                    |
 
-### Server doesn't respond to Ctrl+C
+Readiness: during startup the daemon may report initializing. `yams status` and server responses indicate not-ready services and progress. If model preloading prolongs init, switch to lazy loading and re-check with `yams stats -v`.
 
-The server should respond immediately to Ctrl+C. If it doesn't:
-1. Check you're running the latest version
-2. Try `kill -TERM <pid>` instead
-3. Report an issue if the problem persists
+## Security
 
-### "No startup message" when running serve
+- Stdio runs with the calling process's permissions — no network surface.
+- Docker: pin a version tag (not `latest`), run non-root, use read-only mounts, and cap resources.
+- Set `YAMS_STORAGE` explicitly to avoid surprises from per-user defaults.
 
-By default, the server runs quietly. Use `--verbose` to see startup messages on stderr:
-```
-=== YAMS MCP Server (stdio) ===
-Transport: stdio (JSON-RPC over stdin/stdout)
-Status: Waiting for client connection...
-Press Ctrl+C to stop the server
-```
+## Performance
 
-### Claude Desktop doesn't show YAMS tools
+- Pre-index with `yams add` before exposing to an assistant.
+- Use `paths_only: true` and tight `limit` values for large corpora.
+- Pick the search type that fits: `keyword` for exact, `fuzzy` for approximate, `hybrid` for default.
 
-1. Verify configuration file location and JSON syntax
-2. Check YAMS is in PATH or use absolute path
-3. Restart Claude Desktop after configuration changes
-4. Check Claude Desktop logs for errors
+## References
 
-### Docker container exits immediately
-
-For stdio transport, the container needs `-i` (interactive) flag:
-```bash
-docker run -i ghcr.io/trvon/yams:latest serve  # Correct
-docker run ghcr.io/trvon/yams:latest serve     # Wrong - will exit
-```
-
-
-
-## Security Considerations
-
-### Stdio Transport
-- Runs with the permissions of the calling process
-- No network exposure - communication only via stdin/stdout
-- Ideal for local AI assistants
-
-### Docker Deployment
-- Use read-only mounts where possible
-- Run as non-root user
-- Limit container resources
-- Use specific version tags, not `latest`
-
-## Performance Tips
-
-1. **Index your content first**: Use `yams add` to pre-index files
-2. **Use paths_only**: Reduces response size for large result sets
-3. **Limit results**: Use reasonable limits to avoid overwhelming the AI
-4. **Cache common queries**: YAMS caches search results automatically
-5. **Use appropriate search type**:
-   - `keyword` for exact matches
-   - `fuzzy` for approximate matches
-   - `hybrid` for best overall results
-
-## Best Practices
-
-1. **Initialize storage before starting MCP**: Run `yams init` first
-2. **Set YAMS_STORAGE environment variable**: Ensures consistent storage location
-3. **Use descriptive metadata**: Tag and name documents for better search
-4. **Regular maintenance**: Run `yams stats` to monitor storage health
-5. **Test configuration**: Verify MCP tools are accessible before production use
-
----
-
-For more information:
-- [CLI Reference](cli.md) - Complete command-line documentation
-- [API Documentation](../api/mcp_tools.md) - Detailed tool schemas
-- [GitHub Issues](https://github.com/trvon/yams/issues) - Report problems or request features
+- [CLI reference](cli.md) · [Tool schemas](../api/mcp_tools.md) · [Protocol header](../../include/yams/mcp/mcp_server.h)
+- Issues: https://github.com/trvon/yams/issues

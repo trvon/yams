@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -6,7 +7,6 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
 #include <yams/plugins/abi.h>
 #include <yams/plugins/entity_extractor_v2.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
@@ -68,12 +68,13 @@ bool ensure_session() {
 
     if (!get_ctx().session->initialize()) {
         get_ctx().last_error = std::string(get_ctx().session->last_error());
-        spdlog::error("[Glint] Failed to initialize session: {}", get_ctx().last_error);
+        std::fprintf(stderr, "[Glint] Failed to initialize session: %s\n",
+                     get_ctx().last_error.c_str());
         return false;
     }
 
     get_ctx().initialized = true;
-    spdlog::info("[Glint] Session initialized successfully");
+    std::fprintf(stderr, "[Glint] Session initialized successfully\n");
     return true;
 }
 
@@ -282,11 +283,11 @@ YAMS_PLUGIN_API int yams_plugin_init(const char* config_json, const void* host_c
                 }
             }
         } catch (const std::exception& e) {
-            spdlog::warn("[Glint] Failed to parse config: {}", e.what());
+            std::fprintf(stderr, "[Glint] Failed to parse config: %s\n", e.what());
         }
     }
 
-    spdlog::info("[Glint] Plugin initialized");
+    std::fprintf(stderr, "[Glint] Plugin initialized\n");
     return YAMS_PLUGIN_OK;
 }
 
@@ -294,7 +295,7 @@ YAMS_PLUGIN_API void yams_plugin_shutdown(void) {
     std::lock_guard<std::mutex> lock(get_ctx().mutex);
     get_ctx().session.reset();
     get_ctx().initialized = false;
-    spdlog::info("[Glint] Plugin shutdown");
+    std::fprintf(stderr, "[Glint] Plugin shutdown\n");
 }
 
 YAMS_PLUGIN_API int yams_plugin_get_interface(const char* iface_id, uint32_t version,

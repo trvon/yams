@@ -10,195 +10,141 @@
 </p>
 
 > [!WARNING]
-> **Experimental Software - Not Production Ready**
-> 
-> YAMS is under active development and should be considered **experimental**. The software may contain bugs, incomplete features, and breaking changes between versions. Use at your own risk.
-
-> For production workloads, please wait for a stable 1.0 release.
-
+> **Experimental — not production ready.** Expect bugs and breaking changes until 1.0.
 
 ## Features
+
 - SHA-256 content-addressed storage with block-level dedupe (Rabin chunking)
 - Full-text search (SQLite FTS5) + semantic vector search (embeddings)
-- Symbol extraction from source code (tree-sitter: C, C++, Python, JS, TS, Rust, Go, Java, C#, PHP, Kotlin, Dart, SQL, Solidity)
+- Tree-sitter symbol extraction for 18 languages ([list](docs/user_guide/cli.md#symbol-extraction))
 - Snapshot management with Merkle tree diffs and rename detection
 - WAL-backed durability, high-throughput I/O, thread-safe
-- Portable CLI, MCP server, and plugin architecture (ONNX, S3, PDF extraction)
-- Interactive relevance tuning: `yams tune` labels top-K results from your own corpus to shape retrieval ([guide](docs/guides/interactive-tuning.md))
+- CLI, MCP server, and C-ABI plugins (ONNX embeddings, S3 storage, PDF via ZYP)
+- Interactive relevance tuning: [`yams tune`](docs/guides/interactive-tuning.md)
+
+## Documentation
+
+| Topic                | Link                                                                |
+|----------------------|---------------------------------------------------------------------|
+| Install              | [docs/user_guide/installation.md](docs/user_guide/installation.md)  |
+| CLI reference        | [docs/user_guide/cli.md](docs/user_guide/cli.md)                    |
+| MCP server           | [docs/user_guide/mcp.md](docs/user_guide/mcp.md)                    |
+| Embeddings           | [docs/user_guide/embeddings.md](docs/user_guide/embeddings.md)      |
+| Plugins              | [docs/PLUGINS.md](docs/PLUGINS.md)                                  |
+| Build from source    | [docs/BUILD.md](docs/BUILD.md)                                      |
+| Architecture         | [docs/architecture/](docs/architecture/)                            |
+| Benchmarks           | [docs/benchmarks/README.md](docs/benchmarks/README.md)              |
+| Changelog            | [docs/changelogs/](docs/changelogs/)                                |
+| Roadmap              | [docs/roadmap.md](docs/roadmap.md)                                  |
 
 ## Links
+
 - SourceHut: https://sr.ht/~trvon/yams/
 - GitHub mirror: https://github.com/trvon/yams
-- Docs: https://yamsmemory.ai
-- Benchmark docs: [docs/benchmarks/README.md](docs/benchmarks/README.md)
+- Docs site: https://yamsmemory.ai
 - Discord: https://discord.gg/rTBmRHdTEc
 - License: GPL-3.0-or-later
 
 ## Install
-Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64
 
-### macOS (Homebrew)
+Supported: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64.
+
 ```bash
-# Stable release (recommended)
+# macOS
 brew install trvon/yams/yams
 
-# Homebrew installs completion files for bash/zsh/fish.
-# Shell activation still depends on your shell startup config.
-
-# Verify installation
-yams --version
-```
-
-Generated completions include nested subcommands and leaf value hints such as:
-- `yams config embeddings ...`
-- `yams plugin trust ...`
-- `yams plugins trust ...` (alias of `plugin`)
-- `yams daemon start --log-level <Tab>`
-- `yams config search path-tree enable --mode <Tab>`
-
-Manual completion setup if needed:
-
-```bash
-# Bash
-source <(yams completion bash)
-
-# Zsh: quick use in the current shell
-autoload -U compinit && compinit
-source <(yams completion zsh)
-
-# Zsh: persistent install
-mkdir -p ~/.local/share/zsh/site-functions
-yams completion zsh > ~/.local/share/zsh/site-functions/_yams
-# Ensure ~/.local/share/zsh/site-functions is on fpath before compinit in ~/.zshrc
-
-# Fish
-mkdir -p ~/.config/fish/completions
-yams completion fish > ~/.config/fish/completions/yams.fish
-
-# PowerShell: quick use for the current session
-pwsh -NoLogo -NoProfile -Command 'Invoke-Expression (yams completion powershell | Out-String)'
-```
-
-### Docker
-```bash
-# Pull and run
+# Docker
 docker pull ghcr.io/trvon/yams:latest
-docker run --rm -v yams-data:/home/yams/.local/share/yams ghcr.io/trvon/yams:latest --version
 
-# MCP server
-docker run -i --rm -v yams-data:/home/yams/.local/share/yams ghcr.io/trvon/yams:latest serve
+# Debian/Ubuntu, Fedora/RHEL, Windows: see installation guide
 ```
 
-### Build from Source
+Full install matrix and package repos: [docs/user_guide/installation.md](docs/user_guide/installation.md).
 
-**Linux/macOS:**
+### Build from source
+
 ```bash
-# Quick build (auto-detects Clang/GCC, configures Conan + Meson)
-./setup.sh Release
-
-# Build
+./setup.sh Release          # Linux/macOS (auto-detects toolchain, runs Conan + Meson)
 meson compile -C build/release
-
-# Optional: Install system-wide
-meson install -C build/release
 ```
 
-**Windows:**
 ```pwsh
-./setup.ps1 Release
+./setup.ps1 Release         # Windows
 meson compile -C build/release
 ```
 
-**Prerequisites:** GCC 13+, Clang 16+, or MSVC 2022+ (C++20); meson, ninja-build, cmake, pkg-config, conan
-
-See [docs/BUILD.md](docs/BUILD.md) for detailed instructions.
+Requires a C++20 toolchain (GCC 13+, Clang 16+, or MSVC 2022+ recommended), Meson, Ninja, CMake, pkg-config, and Conan. See [docs/BUILD.md](docs/BUILD.md).
 
 ## Quick Start
+
 ```bash
-# Initialize (interactive - prompts for grammar downloads)
-yams init .
-
-# Auto mode for containers/headless
-yams init --auto
-
-# Add content
+yams init                                # interactive; use --auto for headless
 yams add ./README.md --tags docs
 yams add src/ --recursive --include="*.cpp,*.h" --tags code
 
-# Search
 yams search "config file" --limit 5
 yams grep "TODO" --include="*.cpp"
 
-# List and retrieve
 yams list --limit 20
 yams get <hash> -o ./output.bin
 ```
 
+Shell completions: `yams completion bash|zsh|fish|powershell`. Install instructions: [docs/user_guide/cli.md#cmd-completion](docs/user_guide/cli.md#cmd-completion).
+
 ## MCP Server
+
+YAMS ships an MCP server over stdio (JSON-RPC) for AI assistants.
+
 ```bash
-yams serve  # stdio transport (JSON-RPC)
+yams serve
 ```
 
 ```json
 {
   "mcpServers": {
-    "yams": {
-      "command": "yams",
-      "args": ["serve"]
-    }
+    "yams": { "command": "yams", "args": ["serve"] }
   }
 }
 ```
 
+Tool reference and Claude Desktop setup: [docs/user_guide/mcp.md](docs/user_guide/mcp.md).
+
 ## Plugins
 
-YAMS supports plugins for embeddings (ONNX), storage (S3), and content extraction (PDF):
-
 ```bash
-yams plugin list                    # List loaded plugins
-yams plugin trust add ~/.local/lib/yams/plugins
-yams plugin health                  # Check plugin status
-yams doctor plugin onnx             # Diagnose specific plugin
+yams plugin list                                  # loaded plugins
+yams plugin trust add ~/.local/lib/yams/plugins   # trust a directory
+yams plugin health                                # status
+yams doctor plugin onnx                           # diagnose
 ```
 
-**Recommended model:** `all-MiniLM-L6-v2` (384-dim) — best speed/quality tradeoff.
+Plugin architecture, trust model, and bundled plugins (ONNX, S3, ZYP, GLiNER, symbol extractor): [docs/PLUGINS.md](docs/PLUGINS.md).
 
-### GPU Acceleration
+### GPU acceleration (ONNX)
 
-The ONNX plugin supports GPU acceleration for faster embedding generation:
+| Platform | Provider   | Hardware                                    |
+|----------|------------|---------------------------------------------|
+| macOS    | CoreML     | Apple Silicon Neural Engine + GPU           |
+| Linux    | CUDA       | NVIDIA GPUs                                 |
+| Linux    | MIGraphX   | AMD GPUs (ROCm)                             |
+| Windows  | DirectML   | Any DirectX 12 GPU (NVIDIA, AMD, Intel)     |
 
-| Platform | Provider | Hardware |
-|----------|----------|----------|
-| macOS | CoreML | Apple Silicon Neural Engine + GPU |
-| Linux | CUDA | NVIDIA GPUs |
-| Windows | DirectML | Any DirectX 12 GPU (NVIDIA, AMD, Intel) |
+Auto-detected at build. Override with `YAMS_ONNX_GPU=auto|cuda|coreml|directml|migraphx|none`. Details: [plugins/onnx/README.md](plugins/onnx/README.md).
 
-GPU support is **auto-detected** during build. To manually control:
-```bash
-# Disable GPU
-YAMS_ONNX_GPU=none ./setup.sh Release
-
-# Force specific provider
-YAMS_ONNX_GPU=cuda ./setup.sh Release    # Linux
-YAMS_ONNX_GPU=coreml ./setup.sh Release  # macOS
-YAMS_ONNX_GPU=directml ./setup.ps1       # Windows
-```
-
-See [plugins/onnx/README.md](plugins/onnx/README.md) for detailed configuration.
+Recommended model: `all-MiniLM-L6-v2` (384-dim).
 
 ## Troubleshooting
 
 ```bash
-yams doctor              # Full diagnostics
-yams stats --verbose     # Storage statistics
-yams repair --all        # Repair common issues
+yams doctor              # full diagnostics
+yams stats --verbose     # storage statistics
+yams repair --all        # repair common issues
 ```
 
-**Build issues:** See [docs/BUILD.md](docs/BUILD.md)
+Build issues: [docs/BUILD.md](docs/BUILD.md). Empty `yams plugin list`? Add a trust path: `yams plugin trust add ~/.local/lib/yams/plugins`.
 
-**Plugin discovery:** `yams plugin list` empty? Add trust path: `yams plugin trust add ~/.local/lib/yams/plugins`
+## Cite
 
-### Cite
 ```bibtex
 @misc{yams,
   author = {Trevon Williams},
