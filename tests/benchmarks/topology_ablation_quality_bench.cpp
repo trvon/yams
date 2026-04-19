@@ -1,0 +1,1102 @@
+#define CATCH_CONFIG_MAIN
+#include <catch2/catch_session.hpp>
+#include <catch2/catch_test_macros.hpp>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <random>
+#include <set>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
+
+#include "../integration/daemon/test_async_helpers.h"
+#include "../integration/daemon/test_daemon_harness.h"
+#include "beir_loader.h"
+#include "topology_topic_vocab.h"
+
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/daemon.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/metric_keys.h>
+#include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/topology/topology_artifacts.h>
+#include <yams/topology/topology_metadata_store.h>
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+using namespace std::chrono_literals;
+using yams::daemon::AddDocumentRequest;
+using yams::daemon::ClientConfig;
+using yams::daemon::DaemonClient;
+using yams::daemon::SearchRequest;
+using yams::test::DaemonHarness;
+using yams::test::DaemonHarnessOptions;
+namespace irm = yams::daemon::ir_metrics;
+
+namespace {
+
+constexpr auto kStartTimeout = std::chrono::seconds(60);
+constexpr int kTopK = 10;
+constexpr int kTopK100 = 100;
+
+struct LabeledQuery {
+    std::string query;
+    std::set<std::string> relevantFiles;
+    std::map<std::string, int> relevanceGrades;
+};
+
+struct DocSpec {
+    std::string filename;
+    std::string content;
+    std::string topic;
+    int grade = 0;
+};
+
+struct Fixture {
+    fs::path corpusDir;
+    std::vector<DocSpec> docs;
+    std::vector<LabeledQuery> queries;
+    std::vector<std::string> topics;
+    std::unordered_map<std::string, std::vector<std::string>> topicToCoreFiles;
+    std::unordered_map<std::string, std::vector<std::string>> topicToBridgeFiles;
+    std::unordered_map<std::string, std::vector<std::string>> topicToThinAnchorFiles;
+};
+
+fs::path resolveOutputPath() {
+    if (const char* override = std::getenv("YAMS_BENCH_OUTPUT"); override && *override) {
+        return fs::path(override);
+    }
+    return fs::path("bench_results/topology_ablation_quality.jsonl");
+}
+
+void emitRecord(const fs::path& outputPath, const json& record) {
+    json enriched = record;
+    enriched["schema_version"] = std::string(irm::kIRSchemaVersion);
+    if (const char* v = std::getenv("YAMS_BENCH_RUN_ID"); v && *v) {
+        enriched["run_id"] = v;
+    }
+    if (const char* v = std::getenv("YAMS_BENCH_PHASE"); v && *v) {
+        enriched["run_phase"] = v;
+    }
+    fs::create_directories(outputPath.parent_path());
+    std::ofstream ofs(outputPath, std::ios::app);
+    ofs << enriched.dump() << '\n';
+}
+
+struct TopicSpec {
+    std::string name;
+    std::vector<std::string> primaryTerms;
+    std::string queryPhrase;
+};
+
+const std::vector<TopicSpec>& topicCatalog() {
+    static const std::vector<TopicSpec> kTopics = {
+        {"authentication",
+         {"user", "password", "session", "token", "login", "credential"},
+         "user login session credential"},
+        {"database",
+         {"table", "row", "schema", "transaction", "index", "query"},
+         "transaction schema row index"},
+        {"network",
+         {"socket", "packet", "tcp", "latency", "bandwidth", "endpoint"},
+         "socket packet endpoint latency"},
+        {"encryption",
+         {"cipher", "key", "salt", "hash", "aes", "decrypt"},
+         "cipher key salt decrypt"},
+        {"logging",
+         {"trace", "span", "metric", "verbose", "rotation", "appender"},
+         "trace span verbose appender"},
+        {"storage",
+         {"chunk", "block", "object", "manifest", "blob", "shard"},
+         "chunk block manifest shard"},
+    };
+    return kTopics;
+}
+
+std::vector<TopicSpec> resolveTopicCatalog(int desiredCount) {
+    std::vector<TopicSpec> out;
+    const auto& curated = topicCatalog();
+    out.reserve(static_cast<std::size_t>(desiredCount));
+    for (const auto& t : curated) {
+        if (static_cast<int>(out.size()) >= desiredCount) {
+            return out;
+        }
+        out.push_back(t);
+    }
+    const auto& vocab = yams::bench::extendedTopicVocab();
+    for (const auto& v : vocab) {
+        if (static_cast<int>(out.size()) >= desiredCount) {
+            break;
+        }
+        TopicSpec spec;
+        spec.name = v.name;
+        spec.queryPhrase = v.queryPhrase;
+        spec.primaryTerms.assign(v.primaryTerms.begin(), v.primaryTerms.end());
+        out.push_back(std::move(spec));
+    }
+    return out;
+}
+
+enum class FixtureMode { Synthetic, Beir };
+
+struct FixtureConfig {
+    FixtureMode mode = FixtureMode::Synthetic;
+    int topicCount = 6;
+    int corePerTopic = 6;
+    int bridgePerTopic = 3;
+    int tangentialPerTopic = 3;
+    int noiseDocs = 12;
+    std::string beirDataset = "nfcorpus";
+    fs::path beirCacheDir;
+    int beirMaxQueries = 0;
+    bool useSimeonEmbeddings = false;
+};
+
+inline bool configUsesRealEmbeddings(const FixtureConfig& cfg) {
+    return cfg.useSimeonEmbeddings || cfg.mode == FixtureMode::Beir;
+}
+
+int readEnvInt(const char* key, int fallback) {
+    if (const char* raw = std::getenv(key); raw && *raw) {
+        try {
+            return std::max(0, std::stoi(raw));
+        } catch (const std::exception& e) {
+            spdlog::warn("Bench: bad {}='{}': {}", key, raw, e.what());
+        }
+    }
+    return fallback;
+}
+
+FixtureConfig fixtureConfigFromEnv() {
+    FixtureConfig cfg;
+    if (const char* raw = std::getenv("YAMS_BENCH_FIXTURE"); raw && *raw) {
+        std::string s(raw);
+        if (s == "beir") {
+            cfg.mode = FixtureMode::Beir;
+        }
+    }
+    cfg.topicCount = readEnvInt("YAMS_BENCH_TOPICS", cfg.topicCount);
+    if (const char* raw = std::getenv("YAMS_BENCH_DOCS_PER_TOPIC"); raw && *raw) {
+        try {
+            const int base = std::max(2, std::stoi(raw));
+            cfg.corePerTopic = std::max(1, base / 2);
+            cfg.bridgePerTopic = std::max(1, base / 4);
+            cfg.tangentialPerTopic = std::max(1, base / 4);
+        } catch (const std::exception& e) {
+            spdlog::warn("Bench: bad YAMS_BENCH_DOCS_PER_TOPIC='{}': {}", raw, e.what());
+        }
+    }
+    cfg.noiseDocs = readEnvInt("YAMS_BENCH_NOISE_DOCS", cfg.noiseDocs);
+    if (const char* raw = std::getenv("YAMS_BENCH_BEIR_DATASET"); raw && *raw) {
+        cfg.beirDataset = raw;
+    }
+    if (const char* raw = std::getenv("YAMS_BENCH_BEIR_CACHE_DIR"); raw && *raw) {
+        cfg.beirCacheDir = raw;
+    } else if (const char* home = std::getenv("HOME"); home && *home) {
+        cfg.beirCacheDir = fs::path(home) / ".cache" / "yams" / "benchmarks" / cfg.beirDataset;
+    }
+    cfg.beirMaxQueries = readEnvInt("YAMS_BENCH_BEIR_MAX_QUERIES", cfg.beirMaxQueries);
+    const auto& vocab = yams::bench::extendedTopicVocab();
+    const int maxTopics = static_cast<int>(topicCatalog().size() + vocab.size());
+    if (cfg.topicCount > maxTopics) {
+        spdlog::warn("Bench: requested {} topics but only {} available; clamping", cfg.topicCount,
+                     maxTopics);
+        cfg.topicCount = maxTopics;
+    }
+    if (cfg.topicCount < 1) {
+        cfg.topicCount = 1;
+    }
+    return cfg;
+}
+
+std::string makeContent(const TopicSpec& primary, std::mt19937& rng,
+                        const TopicSpec* neighbor = nullptr, double neighborMixRatio = 0.0) {
+    std::ostringstream oss;
+    std::uniform_int_distribution<int> primDist(0,
+                                                static_cast<int>(primary.primaryTerms.size()) - 1);
+    const int primaryWords = 60;
+    const int neighborWords = static_cast<int>(primaryWords * neighborMixRatio);
+    oss << "Document body. ";
+    for (int i = 0; i < primaryWords; ++i) {
+        oss << primary.primaryTerms[primDist(rng)] << ' ';
+    }
+    if (neighbor) {
+        std::uniform_int_distribution<int> nDist(
+            0, static_cast<int>(neighbor->primaryTerms.size()) - 1);
+        for (int i = 0; i < neighborWords; ++i) {
+            oss << neighbor->primaryTerms[nDist(rng)] << ' ';
+        }
+    }
+    oss << "\nMore filler content goes here to add length and natural variation.\n";
+    return oss.str();
+}
+
+std::string makeThinAnchorContent(const TopicSpec& primary, std::mt19937& rng) {
+    static const std::array<const char*, 24> noiseWords = {
+        "alpha", "beta",  "gamma",  "delta",   "epsilon", "zeta", "eta",     "theta",
+        "iota",  "kappa", "lambda", "mu",      "nu",      "xi",   "omicron", "pi",
+        "rho",   "sigma", "tau",    "upsilon", "phi",     "chi",  "psi",     "omega",
+    };
+    std::ostringstream oss;
+    std::uniform_int_distribution<int> noiseDist(0, static_cast<int>(noiseWords.size()) - 1);
+    std::uniform_int_distribution<int> termDist(0,
+                                                static_cast<int>(primary.primaryTerms.size()) - 1);
+    oss << "Filler content with sparse anchor. ";
+    for (int i = 0; i < 80; ++i) {
+        oss << noiseWords[noiseDist(rng)] << ' ';
+    }
+    oss << primary.primaryTerms[termDist(rng)] << ' ';
+    for (int i = 0; i < 80; ++i) {
+        oss << noiseWords[noiseDist(rng)] << ' ';
+    }
+    return oss.str();
+}
+
+std::string makeNoiseContent(std::mt19937& rng) {
+    static const std::array<const char*, 24> noiseWords = {
+        "alpha", "beta",  "gamma",  "delta",   "epsilon", "zeta", "eta",     "theta",
+        "iota",  "kappa", "lambda", "mu",      "nu",      "xi",   "omicron", "pi",
+        "rho",   "sigma", "tau",    "upsilon", "phi",     "chi",  "psi",     "omega",
+    };
+    std::ostringstream oss;
+    std::uniform_int_distribution<int> dist(0, static_cast<int>(noiseWords.size()) - 1);
+    oss << "Generic content with no domain anchor. ";
+    for (int i = 0; i < 80; ++i) {
+        oss << noiseWords[dist(rng)] << ' ';
+    }
+    return oss.str();
+}
+
+Fixture buildFixture(const fs::path& root, const FixtureConfig& cfg) {
+    Fixture fx;
+    fx.corpusDir = root / "corpus";
+    fs::create_directories(fx.corpusDir);
+
+    const auto catalog = resolveTopicCatalog(cfg.topicCount);
+    for (const auto& t : catalog) {
+        fx.topics.push_back(t.name);
+    }
+
+    std::mt19937 rng(0xC01DA11A);
+
+    auto addDoc = [&](const std::string& filename, const std::string& topic, int grade,
+                      const std::string& content) {
+        std::ofstream(fx.corpusDir / filename) << content;
+        fx.docs.push_back({filename, content, topic, grade});
+    };
+
+    for (std::size_t ti = 0; ti < catalog.size(); ++ti) {
+        const auto& topic = catalog[ti];
+        const auto& neighbor = catalog[(ti + 1) % catalog.size()];
+        const auto& farNeighbor = catalog[(ti + 2) % catalog.size()];
+
+        for (int i = 0; i < cfg.corePerTopic; ++i) {
+            std::string fn = "core_" + topic.name + "_" + std::to_string(i) + ".txt";
+            addDoc(fn, topic.name, 3, makeContent(topic, rng));
+            fx.topicToCoreFiles[topic.name].push_back(fn);
+        }
+        for (int i = 0; i < cfg.bridgePerTopic; ++i) {
+            std::string fn = "bridge_" + topic.name + "_" + std::to_string(i) + ".txt";
+            addDoc(fn, topic.name, 2, makeContent(topic, rng, &neighbor, 0.45));
+            fx.topicToBridgeFiles[topic.name].push_back(fn);
+        }
+        for (int i = 0; i < cfg.tangentialPerTopic; ++i) {
+            std::string fn = "tangent_" + topic.name + "_" + std::to_string(i) + ".txt";
+            addDoc(fn, topic.name, 1, makeContent(farNeighbor, rng, &topic, 0.20));
+        }
+        std::string thinFn = "thin_" + topic.name + ".txt";
+        addDoc(thinFn, topic.name, 1, makeThinAnchorContent(topic, rng));
+        fx.topicToThinAnchorFiles[topic.name].push_back(thinFn);
+    }
+    for (int i = 0; i < cfg.noiseDocs; ++i) {
+        std::string fn = "noise_" + std::to_string(i) + ".txt";
+        addDoc(fn, "", 0, makeNoiseContent(rng));
+    }
+
+    for (const auto& t : catalog) {
+        LabeledQuery q;
+        q.query = t.queryPhrase;
+        for (const auto& d : fx.docs) {
+            if (d.topic == t.name && d.grade > 0) {
+                q.relevantFiles.insert(d.filename);
+                q.relevanceGrades[d.filename] = d.grade;
+            }
+        }
+        fx.queries.push_back(std::move(q));
+    }
+    return fx;
+}
+
+std::string sanitizeBeirId(const std::string& id) {
+    std::string out;
+    out.reserve(id.size());
+    for (char c : id) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') {
+            out.push_back(c);
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.empty()) {
+        out = "doc";
+    }
+    return out;
+}
+
+yams::Result<Fixture> buildBeirFixture(const fs::path& root, const FixtureConfig& cfg) {
+    Fixture fx;
+    fx.corpusDir = root / "corpus";
+    fs::create_directories(fx.corpusDir);
+
+    auto loaded = yams::bench::loadBEIRDataset(cfg.beirDataset, cfg.beirCacheDir);
+    if (!loaded) {
+        return loaded.error();
+    }
+    const auto& ds = loaded.value();
+
+    std::unordered_map<std::string, std::string> docIdToFilename;
+    docIdToFilename.reserve(ds.documents.size());
+    for (const auto& [docId, doc] : ds.documents) {
+        std::string base = sanitizeBeirId(docId);
+        std::string fn = base + ".txt";
+        int suffix = 1;
+        while (docIdToFilename.count(docId) == 0 && fs::exists(fx.corpusDir / fn)) {
+            fn = base + "_" + std::to_string(suffix++) + ".txt";
+        }
+        std::string content;
+        if (!doc.title.empty()) {
+            content = doc.title;
+            content.append("\n\n");
+        }
+        content.append(doc.text);
+        std::ofstream(fx.corpusDir / fn) << content;
+        fx.docs.push_back({fn, std::move(content), std::string{}, 0});
+        docIdToFilename.emplace(docId, std::move(fn));
+    }
+
+    std::vector<std::string> queryIds;
+    queryIds.reserve(ds.queries.size());
+    for (const auto& [qid, _] : ds.queries) {
+        if (ds.qrels.find(qid) != ds.qrels.end()) {
+            queryIds.push_back(qid);
+        }
+    }
+    if (cfg.beirMaxQueries > 0 && static_cast<int>(queryIds.size()) > cfg.beirMaxQueries) {
+        queryIds.resize(static_cast<std::size_t>(cfg.beirMaxQueries));
+    }
+
+    for (const auto& qid : queryIds) {
+        const auto qIt = ds.queries.find(qid);
+        if (qIt == ds.queries.end()) {
+            continue;
+        }
+        LabeledQuery q;
+        q.query = qIt->second.text;
+        auto range = ds.qrels.equal_range(qid);
+        bool hasRelevant = false;
+        for (auto it = range.first; it != range.second; ++it) {
+            const auto& [docId, grade] = it->second;
+            if (grade <= 0) {
+                continue;
+            }
+            auto fnIt = docIdToFilename.find(docId);
+            if (fnIt == docIdToFilename.end()) {
+                continue;
+            }
+            q.relevantFiles.insert(fnIt->second);
+            q.relevanceGrades[fnIt->second] = grade;
+            hasRelevant = true;
+        }
+        if (hasRelevant) {
+            fx.queries.push_back(std::move(q));
+        }
+    }
+
+    spdlog::info("BEIR fixture: {} -> {} docs written, {} queries with qrels", cfg.beirDataset,
+                 fx.docs.size(), fx.queries.size());
+    return fx;
+}
+
+bool waitForTopologyArtifacts(yams::daemon::ServiceManager* sm, std::chrono::milliseconds timeout) {
+    if (!sm) {
+        return false;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto& tm = sm->getTopologyManager();
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto snap = tm.getTelemetrySnapshot();
+        if (snap.artifactsFresh && snap.lastRunSucceeded) {
+            return true;
+        }
+        std::this_thread::sleep_for(250ms);
+    }
+    auto snap = tm.getTelemetrySnapshot();
+    spdlog::warn("waitForTopologyArtifacts: timed out (fresh={}, succeeded={}, running={}, "
+                 "failures={}, reason={})",
+                 snap.artifactsFresh, snap.lastRunSucceeded, snap.rebuildRunning,
+                 snap.rebuildFailuresTotal, snap.lastReason);
+    return false;
+}
+
+double computeDCG(const std::vector<int>& grades, int k) {
+    double dcg = 0.0;
+    const int bound = std::min(k, static_cast<int>(grades.size()));
+    for (int i = 0; i < bound; ++i) {
+        dcg += (std::pow(2.0, grades[i]) - 1.0) / std::log2(i + 2.0);
+    }
+    return dcg;
+}
+
+double computeIDCG(std::vector<int> grades, int k) {
+    std::sort(grades.begin(), grades.end(), std::greater<int>());
+    return computeDCG(grades, k);
+}
+
+struct QualityMetrics {
+    double ndcgAtK = 0.0;
+    double mrrAtK = 0.0;
+    double map = 0.0;
+    double recallAtK = 0.0;
+    double recallAt100 = 0.0;
+    int numQueries = 0;
+};
+
+bool ingestFixtureMode(DaemonClient& client, const Fixture& fx, bool withEmbeddings) {
+    for (const auto& d : fx.docs) {
+        AddDocumentRequest req;
+        req.name = d.filename;
+        req.content = d.content;
+        req.tags = {"topology-ablation-quality"};
+        req.noEmbeddings = !withEmbeddings;
+
+        auto res = yams::cli::run_sync(client.streamingAddDocument(req), 60s);
+        if (!res) {
+            spdlog::warn("Ingest failed for {}: {}", d.filename, res.error().message);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool seedTopologyArtifacts(DaemonHarness& harness, const Fixture& fx) {
+    auto* daemon = harness.daemon();
+    auto* sm = daemon ? daemon->getServiceManager() : nullptr;
+    auto repo = sm ? sm->getMetadataRepo() : nullptr;
+    auto kg = repo ? repo->getKnowledgeGraphStore() : nullptr;
+    if (!repo || !kg) {
+        spdlog::warn("Topology seeding skipped: metadata or KG store unavailable");
+        return false;
+    }
+
+    auto allTaggedRes = repo->findDocumentsByTags({"topology-ablation-quality"}, false);
+    if (!allTaggedRes) {
+        spdlog::warn("Topology seeding: findDocumentsByTags failed: {}",
+                     allTaggedRes.error().message);
+        return false;
+    }
+    std::unordered_map<std::string, yams::metadata::DocumentInfo> byFilename;
+    for (const auto& info : allTaggedRes.value()) {
+        byFilename.emplace(info.fileName, info);
+    }
+
+    std::unordered_map<std::string, std::string> filenameToHash;
+    std::unordered_map<std::string, std::int64_t> filenameToNodeId;
+    for (const auto& d : fx.docs) {
+        auto it = byFilename.find(d.filename);
+        if (it == byFilename.end()) {
+            spdlog::warn("Topology seeding: no metadata row for {}", d.filename);
+            continue;
+        }
+        const auto& info = it->second;
+        filenameToHash[d.filename] = info.sha256Hash;
+        auto nodeRes = kg->ensureDocumentNode(info.sha256Hash, info.fileName);
+        if (!nodeRes) {
+            spdlog::warn("Topology seeding: ensureDocumentNode failed for {}: {}", d.filename,
+                         nodeRes.error().message);
+            continue;
+        }
+        filenameToNodeId[d.filename] = nodeRes.value();
+    }
+
+    std::vector<yams::metadata::KGEdge> edges;
+    auto addPair = [&](std::int64_t a, std::int64_t b, const std::string& rel, float weight) {
+        yams::metadata::KGEdge fwd;
+        fwd.srcNodeId = a;
+        fwd.dstNodeId = b;
+        fwd.relation = rel;
+        fwd.weight = weight;
+        edges.push_back(fwd);
+        yams::metadata::KGEdge rev = fwd;
+        rev.srcNodeId = b;
+        rev.dstNodeId = a;
+        edges.push_back(rev);
+    };
+
+    for (const auto& topic : fx.topics) {
+        const auto& cores = fx.topicToCoreFiles.at(topic);
+        if (cores.size() < 2) {
+            continue;
+        }
+        const auto medoidIt = filenameToNodeId.find(cores.front());
+        if (medoidIt == filenameToNodeId.end()) {
+            continue;
+        }
+        for (std::size_t i = 1; i < cores.size(); ++i) {
+            auto it = filenameToNodeId.find(cores[i]);
+            if (it == filenameToNodeId.end())
+                continue;
+            addPair(medoidIt->second, it->second, "semantic_neighbor", 0.85f);
+        }
+        const auto& bridges = fx.topicToBridgeFiles.at(topic);
+        for (const auto& b : bridges) {
+            auto it = filenameToNodeId.find(b);
+            if (it == filenameToNodeId.end())
+                continue;
+            addPair(medoidIt->second, it->second, "semantic_neighbor", 0.55f);
+        }
+    }
+
+    if (!edges.empty()) {
+        auto er = kg->addEdgesUnique(edges);
+        if (!er) {
+            spdlog::warn("Topology seeding: addEdgesUnique failed: {}", er.error().message);
+        }
+    }
+
+    yams::topology::TopologyArtifactBatch batch;
+    batch.snapshotId = "ablation_quality_synth";
+    batch.algorithm = "synthetic_quality_v1";
+    batch.generatedAtUnixSeconds =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count());
+    batch.topologyEpoch = 1;
+
+    for (std::size_t ti = 0; ti < fx.topics.size(); ++ti) {
+        const auto& topic = fx.topics[ti];
+        const auto& cores = fx.topicToCoreFiles.at(topic);
+        const auto& bridges = fx.topicToBridgeFiles.at(topic);
+        if (cores.empty())
+            continue;
+        const auto medoidHashIt = filenameToHash.find(cores.front());
+        if (medoidHashIt == filenameToHash.end())
+            continue;
+
+        yams::topology::ClusterArtifact cluster;
+        cluster.clusterId = "cluster_" + topic;
+        cluster.level = 0;
+        cluster.persistenceScore = 0.85;
+        cluster.cohesionScore = 0.70;
+        cluster.bridgeMass = static_cast<double>(bridges.size()) /
+                             static_cast<double>(cores.size() + bridges.size());
+
+        cluster.medoid = yams::topology::ClusterRepresentative{
+            cluster.clusterId, medoidHashIt->second, cores.front(), 1.0};
+
+        for (std::size_t i = 0; i < cores.size(); ++i) {
+            auto hashIt = filenameToHash.find(cores[i]);
+            if (hashIt == filenameToHash.end())
+                continue;
+            cluster.memberDocumentHashes.push_back(hashIt->second);
+            yams::topology::DocumentClusterMembership m;
+            m.documentHash = hashIt->second;
+            m.clusterId = cluster.clusterId;
+            m.clusterLevel = 0;
+            m.persistenceScore = cluster.persistenceScore;
+            m.cohesionScore = cluster.cohesionScore;
+            m.bridgeScore = 0.05;
+            m.role = (i == 0) ? yams::topology::DocumentTopologyRole::Medoid
+                              : yams::topology::DocumentTopologyRole::Core;
+            batch.memberships.push_back(std::move(m));
+        }
+        for (const auto& b : bridges) {
+            auto hashIt = filenameToHash.find(b);
+            if (hashIt == filenameToHash.end())
+                continue;
+            cluster.memberDocumentHashes.push_back(hashIt->second);
+            yams::topology::DocumentClusterMembership m;
+            m.documentHash = hashIt->second;
+            m.clusterId = cluster.clusterId;
+            m.clusterLevel = 0;
+            m.persistenceScore = cluster.persistenceScore;
+            m.cohesionScore = cluster.cohesionScore;
+            m.bridgeScore = 0.80;
+            m.role = yams::topology::DocumentTopologyRole::Bridge;
+            batch.memberships.push_back(std::move(m));
+        }
+        auto thinIt = fx.topicToThinAnchorFiles.find(topic);
+        if (thinIt != fx.topicToThinAnchorFiles.end()) {
+            const auto medoidNodeIt = filenameToNodeId.find(cores.front());
+            for (const auto& tf : thinIt->second) {
+                auto hashIt = filenameToHash.find(tf);
+                if (hashIt == filenameToHash.end())
+                    continue;
+                cluster.memberDocumentHashes.push_back(hashIt->second);
+                yams::topology::DocumentClusterMembership mm;
+                mm.documentHash = hashIt->second;
+                mm.clusterId = cluster.clusterId;
+                mm.clusterLevel = 0;
+                mm.persistenceScore = cluster.persistenceScore;
+                mm.cohesionScore = cluster.cohesionScore;
+                mm.bridgeScore = 0.10;
+                mm.role = yams::topology::DocumentTopologyRole::Outlier;
+                batch.memberships.push_back(std::move(mm));
+                auto nodeIt = filenameToNodeId.find(tf);
+                if (nodeIt != filenameToNodeId.end() && medoidNodeIt != filenameToNodeId.end()) {
+                    yams::metadata::KGEdge fwd;
+                    fwd.srcNodeId = medoidNodeIt->second;
+                    fwd.dstNodeId = nodeIt->second;
+                    fwd.relation = "semantic_neighbor";
+                    fwd.weight = 0.40f;
+                    auto er = kg->addEdgesUnique({fwd});
+                    if (!er) {
+                        spdlog::warn("Topology seeding (thin anchor): addEdgesUnique failed: {}",
+                                     er.error().message);
+                    }
+                }
+            }
+        }
+        cluster.memberCount = cluster.memberDocumentHashes.size();
+        batch.clusters.push_back(std::move(cluster));
+    }
+
+    auto metadataIface = std::static_pointer_cast<yams::metadata::IMetadataRepository>(repo);
+    yams::topology::MetadataKgTopologyArtifactStore store(metadataIface, kg);
+    auto sr = store.storeBatch(batch);
+    if (!sr) {
+        spdlog::warn("Topology seeding: storeBatch failed: {}", sr.error().message);
+        return false;
+    }
+
+    std::vector<std::string> overlayHashes;
+    overlayHashes.reserve(filenameToHash.size());
+    for (const auto& [fname, hash] : filenameToHash) {
+        overlayHashes.push_back(hash);
+    }
+    sm->getTopologyManager().markDirtyBatch(overlayHashes);
+    sm->getTopologyManager().setPublishedEpoch(batch.topologyEpoch);
+    return true;
+}
+
+double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
+                   const std::string& searchType, QualityMetrics& acc, bool accumulateTopK) {
+    SearchRequest req;
+    req.query = q.query;
+    req.searchType = searchType;
+    req.limit = static_cast<std::size_t>(k);
+    req.timeout = 30s;
+
+    auto res = yams::cli::run_sync(client.search(req), 45s);
+    if (!res) {
+        return 0.0;
+    }
+    const auto& results = res.value().results;
+
+    int firstRelevantRank = -1;
+    int numRelevantInTopK = 0;
+    int numRelevantSeen = 0;
+    double avgPrecision = 0.0;
+    std::vector<int> retrievedGrades;
+    std::unordered_set<std::string> seenTopKFilenames;
+
+    const std::size_t bound = std::min(static_cast<std::size_t>(k), results.size());
+    for (std::size_t i = 0; i < bound; ++i) {
+        std::string filename = fs::path(results[i].path).filename().string();
+        const bool isDuplicate = !seenTopKFilenames.insert(filename).second;
+        const bool isRelevant = q.relevantFiles.count(filename) > 0 && !isDuplicate;
+
+        auto gradeIt = q.relevanceGrades.find(filename);
+        int grade = (!isDuplicate && gradeIt != q.relevanceGrades.end()) ? gradeIt->second : 0;
+        retrievedGrades.push_back(grade);
+
+        if (isRelevant) {
+            ++numRelevantInTopK;
+            if (firstRelevantRank < 0) {
+                firstRelevantRank = static_cast<int>(i) + 1;
+            }
+            ++numRelevantSeen;
+            avgPrecision += static_cast<double>(numRelevantSeen) / static_cast<double>(i + 1);
+        }
+    }
+
+    double recallHere = 0.0;
+    if (!q.relevantFiles.empty()) {
+        recallHere =
+            static_cast<double>(numRelevantInTopK) / static_cast<double>(q.relevantFiles.size());
+    }
+
+    if (accumulateTopK) {
+        if (firstRelevantRank > 0) {
+            acc.mrrAtK += 1.0 / firstRelevantRank;
+        }
+        acc.recallAtK += recallHere;
+        if (numRelevantSeen > 0) {
+            acc.map += avgPrecision / numRelevantSeen;
+        }
+        std::vector<int> allGrades;
+        for (const auto& [_, g] : q.relevanceGrades) {
+            allGrades.push_back(g);
+        }
+        double dcg = computeDCG(retrievedGrades, k);
+        double idcg = computeIDCG(allGrades, k);
+        acc.ndcgAtK += (idcg > 0.0) ? dcg / idcg : 0.0;
+    }
+    return recallHere;
+}
+
+QualityMetrics evaluate(DaemonClient& client, const Fixture& fx, const std::string& searchType) {
+    QualityMetrics m;
+    m.numQueries = static_cast<int>(fx.queries.size());
+    if (m.numQueries == 0) {
+        return m;
+    }
+    for (const auto& q : fx.queries) {
+        (void)evaluateAtK(client, q, kTopK, searchType, m, true);
+    }
+    for (const auto& q : fx.queries) {
+        QualityMetrics scratch;
+        const double recall100 = evaluateAtK(client, q, kTopK100, searchType, scratch, false);
+        m.recallAt100 += recall100;
+    }
+    m.ndcgAtK /= m.numQueries;
+    m.mrrAtK /= m.numQueries;
+    m.map /= m.numQueries;
+    m.recallAtK /= m.numQueries;
+    m.recallAt100 /= m.numQueries;
+    return m;
+}
+
+void setAxisEnv(std::size_t maxClusters, std::size_t maxDocs, float medoidBoost, float bridgeBoost,
+                const char* variant = nullptr) {
+    setenv("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING", "1", 1);
+    setenv("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", std::to_string(maxClusters).c_str(), 1);
+    setenv("YAMS_SEARCH_TOPOLOGY_MAX_DOCS", std::to_string(maxDocs).c_str(), 1);
+    std::ostringstream mb, bb;
+    mb << medoidBoost;
+    bb << bridgeBoost;
+    setenv("YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST", mb.str().c_str(), 1);
+    setenv("YAMS_SEARCH_TOPOLOGY_BRIDGE_BOOST", bb.str().c_str(), 1);
+    setenv("YAMS_SEARCH_ADAPTIVE_MIN_TEXT_HITS", "999", 1);
+    setenv("YAMS_SEARCH_ADAPTIVE_MIN_TOP_TEXT_SCORE", "0.99", 1);
+    setenv("YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "1", 1);
+    setenv("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE", "1", 1);
+    setenv("YAMS_ENABLE_ENV_OVERRIDES", "1", 1);
+    if (variant) {
+        setenv("YAMS_SEARCH_TOPOLOGY_ROUTING_VARIANT", variant, 1);
+    } else {
+        unsetenv("YAMS_SEARCH_TOPOLOGY_ROUTING_VARIANT");
+    }
+}
+
+DaemonHarnessOptions quietHarnessOptions() {
+    DaemonHarnessOptions opts;
+    opts.enableModelProvider = false;
+    opts.useMockModelProvider = true;
+    opts.autoLoadPlugins = false;
+    opts.enableAutoRepair = true;
+    opts.isolateState = true;
+    return opts;
+}
+
+DaemonHarnessOptions harnessOptionsFor(const FixtureConfig& cfg) {
+    DaemonHarnessOptions opts = quietHarnessOptions();
+    if (configUsesRealEmbeddings(cfg)) {
+        opts.enableModelProvider = true;
+        opts.useMockModelProvider = false;
+        opts.autoLoadPlugins = false;
+    }
+    return opts;
+}
+
+struct CellOutcome {
+    bool ok = false;
+    QualityMetrics metrics{};
+    double hybridEvalMs = -1.0;
+    std::string fixtureStatus = "ok";
+    bool topologySeeded = false;
+};
+
+CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBoost,
+                    float bridgeBoost, const char* variant = nullptr,
+                    const FixtureConfig& cfg = FixtureConfig{}) {
+    setAxisEnv(maxClusters, maxDocs, medoidBoost, bridgeBoost, variant);
+    if (configUsesRealEmbeddings(cfg)) {
+        setenv("YAMS_BENCH_INGEST_NO_EMBEDDINGS", "0", 1);
+        setenv("YAMS_EMBED_BACKEND", "simeon", 1);
+    } else {
+        unsetenv("YAMS_EMBED_BACKEND");
+    }
+    if (const char* lv = std::getenv("YAMS_BENCH_DAEMON_DEBUG"); lv && std::string(lv) == "1") {
+        spdlog::set_level(spdlog::level::debug);
+    }
+
+    CellOutcome outcome;
+    try {
+        DaemonHarness harness(harnessOptionsFor(cfg));
+        if (!harness.start(kStartTimeout)) {
+            outcome.fixtureStatus = "missing";
+            return outcome;
+        }
+
+        Fixture fx;
+        if (cfg.mode == FixtureMode::Beir) {
+            auto fxRes = buildBeirFixture(harness.rootDir(), cfg);
+            if (!fxRes) {
+                spdlog::warn("BEIR fixture build failed: {}", fxRes.error().message);
+                outcome.fixtureStatus = "missing";
+                return outcome;
+            }
+            fx = std::move(fxRes.value());
+        } else {
+            fx = buildFixture(harness.rootDir(), cfg);
+        }
+
+        ClientConfig ccfg;
+        ccfg.socketPath = harness.socketPath();
+        ccfg.autoStart = false;
+        ccfg.requestTimeout = 30s;
+        DaemonClient client(ccfg);
+
+        const bool ingestWithEmbeddings = configUsesRealEmbeddings(cfg);
+        if (!ingestFixtureMode(client, fx, ingestWithEmbeddings)) {
+            outcome.fixtureStatus = "missing";
+            return outcome;
+        }
+
+        if (cfg.mode == FixtureMode::Beir) {
+            auto* daemon = harness.daemon();
+            auto* sm = daemon ? daemon->getServiceManager() : nullptr;
+            const auto timeout = std::chrono::milliseconds(
+                static_cast<long long>(readEnvInt("YAMS_BENCH_TOPOLOGY_WAIT_MS", 300000)));
+            outcome.topologySeeded = waitForTopologyArtifacts(sm, timeout);
+        } else {
+            outcome.topologySeeded = seedTopologyArtifacts(harness, fx);
+            if (cfg.useSimeonEmbeddings) {
+                auto* daemon = harness.daemon();
+                auto* sm = daemon ? daemon->getServiceManager() : nullptr;
+                const auto timeout = std::chrono::milliseconds(
+                    static_cast<long long>(readEnvInt("YAMS_BENCH_TOPOLOGY_WAIT_MS", 300000)));
+                (void)waitForTopologyArtifacts(sm, timeout);
+            }
+        }
+
+        const std::string searchType = std::getenv("YAMS_BENCH_SEARCH_TYPE")
+                                           ? std::getenv("YAMS_BENCH_SEARCH_TYPE")
+                                           : "hybrid";
+
+        const auto start = std::chrono::steady_clock::now();
+        outcome.metrics = evaluate(client, fx, searchType);
+        const auto end = std::chrono::steady_clock::now();
+        outcome.hybridEvalMs = std::chrono::duration<double, std::milli>(end - start).count();
+        outcome.ok = outcome.metrics.numQueries > 0;
+    } catch (const std::exception& e) {
+        spdlog::warn("Cell threw: {}", e.what());
+        outcome.fixtureStatus = "missing";
+    } catch (...) {
+        outcome.fixtureStatus = "missing";
+    }
+    return outcome;
+}
+
+json toCellJson(const CellOutcome& outcome) {
+    json j;
+    j[std::string(irm::kIRFixtureStatus)] = outcome.fixtureStatus;
+    j["topology_seeded"] = outcome.topologySeeded;
+    if (outcome.ok) {
+        j[std::string(irm::kIRNdcgAtK)] = outcome.metrics.ndcgAtK;
+        j[std::string(irm::kIRMrrAtK)] = outcome.metrics.mrrAtK;
+        j[std::string(irm::kIRMap)] = outcome.metrics.map;
+        j[std::string(irm::kIRRecallAtK)] = outcome.metrics.recallAtK;
+        j[std::string(irm::kIRRecallAt100)] = outcome.metrics.recallAt100;
+        j["num_queries"] = outcome.metrics.numQueries;
+        j["hybrid_eval_ms"] = outcome.hybridEvalMs;
+    } else {
+        j[std::string(irm::kIRNdcgAtK)] = -1.0;
+        j[std::string(irm::kIRMrrAtK)] = -1.0;
+        j[std::string(irm::kIRMap)] = -1.0;
+        j[std::string(irm::kIRRecallAtK)] = -1.0;
+        j[std::string(irm::kIRRecallAt100)] = -1.0;
+        j["num_queries"] = 0;
+        j["hybrid_eval_ms"] = -1.0;
+    }
+    return j;
+}
+
+} // namespace
+
+TEST_CASE("[!benchmark][topology-ablation-quality] axis-1 routing depth",
+          "[topology-ablation-quality]") {
+    const auto outputPath = resolveOutputPath();
+    struct Point {
+        std::size_t maxClusters;
+        std::size_t maxDocs;
+    };
+    const std::vector<Point> grid = {
+        {1, 32}, {1, 64}, {1, 128}, {2, 32}, {2, 64}, {2, 128}, {4, 32}, {4, 64}, {4, 128},
+    };
+    constexpr float kMidMedoidBoost = 0.05f;
+    constexpr float kMidBridgeBoost = 0.03f;
+
+    for (const auto& p : grid) {
+        auto outcome = runCell(p.maxClusters, p.maxDocs, kMidMedoidBoost, kMidBridgeBoost);
+        json record = {
+            {std::string(irm::kIRTestKey), std::string(irm::kIRTestName)},
+            {std::string(irm::kIRAxisKey), "routing_depth"},
+            {std::string(irm::kIRAxisIdKey), 1},
+            {"max_clusters", p.maxClusters},
+            {"max_docs_cap", p.maxDocs},
+            {"medoid_boost", kMidMedoidBoost},
+            {"bridge_boost", kMidBridgeBoost},
+        };
+        record.update(toCellJson(outcome));
+        emitRecord(outputPath, record);
+    }
+}
+
+TEST_CASE("[!benchmark][topology-ablation-quality] axis-2 role-score weights",
+          "[topology-ablation-quality]") {
+    const auto outputPath = resolveOutputPath();
+    const std::vector<float> medoidGrid = {0.0f, 0.025f, 0.05f, 0.075f, 0.10f};
+    const std::vector<float> bridgeGrid = {0.0f, 0.015f, 0.03f, 0.045f, 0.06f};
+    constexpr std::size_t kMidClusters = 2;
+    constexpr std::size_t kMidDocs = 64;
+
+    for (const auto m : medoidGrid) {
+        for (const auto b : bridgeGrid) {
+            auto outcome = runCell(kMidClusters, kMidDocs, m, b);
+            json record = {
+                {std::string(irm::kIRTestKey), std::string(irm::kIRTestName)},
+                {std::string(irm::kIRAxisKey), "role_score_weights"},
+                {std::string(irm::kIRAxisIdKey), 2},
+                {"max_clusters", kMidClusters},
+                {"max_docs_cap", kMidDocs},
+                {"medoid_boost", m},
+                {"bridge_boost", b},
+            };
+            record.update(toCellJson(outcome));
+            emitRecord(outputPath, record);
+        }
+    }
+}
+
+TEST_CASE("[!benchmark][topology-ablation-quality] axis-3 routing variants",
+          "[topology-ablation-quality]") {
+    const auto outputPath = resolveOutputPath();
+    constexpr std::size_t kMidClusters = 2;
+    constexpr std::size_t kMidDocs = 64;
+    constexpr float kMidMedoidBoost = 0.05f;
+    constexpr float kMidBridgeBoost = 0.03f;
+    const std::array<const char*, 5> variants = {
+        "baseline", "vector_seed", "kg_walk", "score_replace", "medoid_promote",
+    };
+
+    for (const char* v : variants) {
+        auto outcome = runCell(kMidClusters, kMidDocs, kMidMedoidBoost, kMidBridgeBoost, v);
+        json record = {
+            {std::string(irm::kIRTestKey), std::string(irm::kIRTestName)},
+            {std::string(irm::kIRAxisKey), "routing_variants"},
+            {std::string(irm::kIRAxisIdKey), 3},
+            {"max_clusters", kMidClusters},
+            {"max_docs_cap", kMidDocs},
+            {"medoid_boost", kMidMedoidBoost},
+            {"bridge_boost", kMidBridgeBoost},
+            {"variant", std::string(v)},
+        };
+        record.update(toCellJson(outcome));
+        emitRecord(outputPath, record);
+    }
+}
+
+TEST_CASE("[!benchmark][topology-ablation-quality] axis-3 routing variants on corpus ladder",
+          "[topology-ablation-quality]") {
+    const auto outputPath = resolveOutputPath();
+    constexpr std::size_t kMidClusters = 2;
+    constexpr std::size_t kMidDocs = 64;
+    constexpr float kMidMedoidBoost = 0.05f;
+    constexpr float kMidBridgeBoost = 0.03f;
+    const std::array<const char*, 5> variants = {
+        "baseline", "vector_seed", "kg_walk", "score_replace", "medoid_promote",
+    };
+
+    const std::string tier = std::getenv("YAMS_BENCH_TIER") ? std::getenv("YAMS_BENCH_TIER") : "S";
+
+    FixtureConfig cfg = fixtureConfigFromEnv();
+    if (tier == "XL" || tier == "XXL") {
+        cfg.mode = FixtureMode::Beir;
+        cfg.useSimeonEmbeddings = true;
+        if (const char* raw = std::getenv("YAMS_BENCH_BEIR_DATASET"); !(raw && *raw)) {
+            cfg.beirDataset = (tier == "XL") ? "nfcorpus" : "scifact";
+        }
+        if (cfg.beirCacheDir.empty() || cfg.beirCacheDir.filename().string() != cfg.beirDataset) {
+            if (const char* home = std::getenv("HOME"); home && *home) {
+                cfg.beirCacheDir =
+                    fs::path(home) / ".cache" / "yams" / "benchmarks" / cfg.beirDataset;
+            }
+        }
+    } else if (tier == "L+") {
+        cfg.useSimeonEmbeddings = true;
+    }
+
+    const std::size_t expectedCorpusSize = [&]() -> std::size_t {
+        if (cfg.mode == FixtureMode::Beir) {
+            return 0;
+        }
+        const int perTopic = cfg.corePerTopic + cfg.bridgePerTopic + cfg.tangentialPerTopic + 1;
+        return static_cast<std::size_t>(cfg.topicCount) * static_cast<std::size_t>(perTopic) +
+               static_cast<std::size_t>(cfg.noiseDocs);
+    }();
+
+    const std::string variantFilter =
+        std::getenv("YAMS_BENCH_VARIANT_FILTER") ? std::getenv("YAMS_BENCH_VARIANT_FILTER") : "";
+    const int variantCooldownMs = readEnvInt("YAMS_BENCH_VARIANT_COOLDOWN_MS", 0);
+    bool firstEmitted = false;
+    for (const char* v : variants) {
+        if (!variantFilter.empty() && variantFilter.find(v) == std::string::npos) {
+            continue;
+        }
+        if (firstEmitted && variantCooldownMs > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(variantCooldownMs));
+        }
+        firstEmitted = true;
+        auto outcome = runCell(kMidClusters, kMidDocs, kMidMedoidBoost, kMidBridgeBoost, v, cfg);
+        json record = {
+            {std::string(irm::kIRTestKey), std::string(irm::kIRTestName)},
+            {std::string(irm::kIRAxisKey), "routing_variants_ladder"},
+            {std::string(irm::kIRAxisIdKey), 3},
+            {"tier", tier},
+            {"fixture_mode", (cfg.mode == FixtureMode::Beir) ? "beir" : "synthetic"},
+            {"embedding_backend", configUsesRealEmbeddings(cfg) ? "simeon" : "mock"},
+            {"topic_count", cfg.topicCount},
+            {"docs_per_topic_core", cfg.corePerTopic},
+            {"docs_per_topic_bridge", cfg.bridgePerTopic},
+            {"docs_per_topic_tangent", cfg.tangentialPerTopic},
+            {"noise_docs", cfg.noiseDocs},
+            {"corpus_size_expected", expectedCorpusSize},
+            {"beir_dataset", (cfg.mode == FixtureMode::Beir) ? cfg.beirDataset : ""},
+            {"max_clusters", kMidClusters},
+            {"max_docs_cap", kMidDocs},
+            {"medoid_boost", kMidMedoidBoost},
+            {"bridge_boost", kMidBridgeBoost},
+            {"variant", std::string(v)},
+        };
+        record.update(toCellJson(outcome));
+        emitRecord(outputPath, record);
+    }
+}

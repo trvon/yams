@@ -1,0 +1,76 @@
+{
+  "record_count": 2,
+  "schema_version": "topology_ablation_v1",
+  "notes": "Defaults-row baseline only. Axes 1 and 2 are swept; axis 5 (KG rerank) is deferred. See docs/benchmarks/topology_ablation_matrix.md and tests/benchmarks/topology_ablation_bench.cpp. Numbers from 3 consecutive runs on darwin-arm64; regression thresholds wait for a second independent host run.",
+  "axis_1_routing_depth": {
+    "defaults_c2_d64": {
+      "route_latency_us_mean": {
+        "count": 3,
+        "unit": "us",
+        "mean": 2.490688333333335,
+        "p95": 2.5076949999999987,
+        "min": 2.4588950000000067,
+        "max": 2.5076949999999987,
+        "stddev": 0.02249954271139896
+      },
+      "route_latency_us_p95": {
+        "count": 3,
+        "unit": "us",
+        "mean": 2.5833333333333335,
+        "p95": 2.584,
+        "min": 2.583,
+        "max": 2.584,
+        "stddev": 0.00047140452079097976
+      },
+      "route_latency_us_p99": {
+        "count": 3,
+        "unit": "us",
+        "mean": 2.9303333333333335,
+        "p95": 3.125,
+        "min": 2.583,
+        "max": 3.125,
+        "stddev": 0.24619955772141874
+      },
+      "avg_routed_docs_per_call": {
+        "count": 3,
+        "unit": "docs",
+        "mean": 32.0,
+        "p95": 32.0,
+        "min": 32.0,
+        "max": 32.0,
+        "stddev": 0.0
+      }
+    }
+  },
+  "axis_2_role_score_weights": {
+    "defaults_m050_b030": {
+      "score_spread_medoid_minus_core": {
+        "count": 3,
+        "unit": "score_delta",
+        "mean": 0.050000011920928955,
+        "p95": 0.050000011920928955,
+        "min": 0.050000011920928955,
+        "max": 0.050000011920928955,
+        "stddev": 0.0
+      },
+      "score_spread_bridge_minus_core": {
+        "count": 3,
+        "unit": "score_delta",
+        "mean": 0.029999971389770508,
+        "p95": 0.029999971389770508,
+        "min": 0.029999971389770508,
+        "max": 0.029999971389770508,
+        "stddev": 0.0
+      },
+      "score_spread_max": {
+        "count": 3,
+        "unit": "score",
+        "mean": 0.550000011920929,
+        "p95": 0.550000011920929,
+        "min": 0.550000011920929,
+        "max": 0.550000011920929,
+        "stddev": 0.0
+      }
+    }
+  }
+}

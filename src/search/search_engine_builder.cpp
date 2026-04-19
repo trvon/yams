@@ -736,6 +736,36 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine topologyWeakQueryMaxDocs overridden to {} via env",
                          cfg.topologyWeakQueryMaxDocs);
         }
+        if (auto medoidBoost = getEnvFloat("YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST")) {
+            cfg.topologyMedoidBoost = std::max(0.0f, *medoidBoost);
+            spdlog::info("SearchEngine topologyMedoidBoost overridden to {:.3f} via env",
+                         cfg.topologyMedoidBoost);
+        }
+        if (auto bridgeBoost = getEnvFloat("YAMS_SEARCH_TOPOLOGY_BRIDGE_BOOST")) {
+            cfg.topologyBridgeBoost = std::max(0.0f, *bridgeBoost);
+            spdlog::info("SearchEngine topologyBridgeBoost overridden to {:.3f} via env",
+                         cfg.topologyBridgeBoost);
+        }
+        if (auto bypassWarming = getEnvBool("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE")) {
+            cfg.bypassCorpusWarmingGate = *bypassWarming;
+            spdlog::info("SearchEngine bypassCorpusWarmingGate overridden to {} via env",
+                         cfg.bypassCorpusWarmingGate);
+        }
+        if (auto routingVariant = getEnvString("YAMS_SEARCH_TOPOLOGY_ROUTING_VARIANT")) {
+            using V = SearchEngineConfig::TopologyRoutingVariant;
+            const auto& raw = *routingVariant;
+            if (raw == "vector_seed")
+                cfg.topologyRoutingVariant = V::VectorSeed;
+            else if (raw == "kg_walk")
+                cfg.topologyRoutingVariant = V::KgWalk;
+            else if (raw == "score_replace")
+                cfg.topologyRoutingVariant = V::ScoreReplace;
+            else if (raw == "medoid_promote")
+                cfg.topologyRoutingVariant = V::MedoidPromote;
+            else
+                cfg.topologyRoutingVariant = V::Baseline;
+            spdlog::info("SearchEngine topologyRoutingVariant set to '{}' via env", raw);
+        }
         if (auto evidenceRescueSlots = getEnvInt("YAMS_SEARCH_FUSION_EVIDENCE_RESCUE_SLOTS")) {
             cfg.fusionEvidenceRescueSlots = static_cast<size_t>(std::max(0, *evidenceRescueSlots));
             spdlog::info("SearchEngine fusionEvidenceRescueSlots overridden to {} via env",

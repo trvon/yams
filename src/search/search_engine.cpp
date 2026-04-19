@@ -181,6 +181,80 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
     return routed;
 }
 
+std::string_view topologyRoutingVariantToString(SearchEngineConfig::TopologyRoutingVariant v) {
+    using V = SearchEngineConfig::TopologyRoutingVariant;
+    switch (v) {
+        case V::VectorSeed:
+            return "vector_seed";
+        case V::KgWalk:
+            return "kg_walk";
+        case V::ScoreReplace:
+            return "score_replace";
+        case V::MedoidPromote:
+            return "medoid_promote";
+        case V::Baseline:
+        default:
+            return "baseline";
+    }
+}
+
+std::unordered_set<std::string>
+kgWalkExpandSeeds(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+                  const std::unordered_set<std::string>& seedDocumentHashes,
+                  std::size_t maxNeighborsPerSeed, std::size_t maxAdded) {
+    std::unordered_set<std::string> added;
+    if (!kgStore || seedDocumentHashes.empty() || maxAdded == 0) {
+        return added;
+    }
+    std::vector<std::int64_t> seedNodeIds;
+    seedNodeIds.reserve(seedDocumentHashes.size());
+    for (const auto& hash : seedDocumentHashes) {
+        std::string nodeKey = "doc:" + hash;
+        auto nodeRes = kgStore->getNodeByKey(nodeKey);
+        if (!nodeRes || !nodeRes.value().has_value()) {
+            continue;
+        }
+        seedNodeIds.push_back(nodeRes.value()->id);
+    }
+    std::unordered_set<std::int64_t> neighborIdSet;
+    for (auto seedId : seedNodeIds) {
+        if (added.size() >= maxAdded) {
+            break;
+        }
+        auto neighborsRes = kgStore->neighbors(seedId, maxNeighborsPerSeed);
+        if (!neighborsRes) {
+            continue;
+        }
+        for (auto nid : neighborsRes.value()) {
+            neighborIdSet.insert(nid);
+        }
+    }
+    if (neighborIdSet.empty()) {
+        return added;
+    }
+    std::vector<std::int64_t> neighborIds(neighborIdSet.begin(), neighborIdSet.end());
+    auto nodesRes = kgStore->getNodesByIds(neighborIds);
+    if (!nodesRes) {
+        return added;
+    }
+    constexpr std::string_view kDocPrefix = "doc:";
+    for (const auto& node : nodesRes.value()) {
+        if (added.size() >= maxAdded) {
+            break;
+        }
+        if (node.nodeKey.size() <= kDocPrefix.size() ||
+            node.nodeKey.compare(0, kDocPrefix.size(), kDocPrefix) != 0) {
+            continue;
+        }
+        std::string hash = node.nodeKey.substr(kDocPrefix.size());
+        if (seedDocumentHashes.contains(hash)) {
+            continue;
+        }
+        added.insert(std::move(hash));
+    }
+    return added;
+}
+
 std::vector<ComponentResult> buildTopologyWeakQueryComponentResults(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
     const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
@@ -225,7 +299,8 @@ std::vector<ComponentResult> buildTopologyWeakQueryComponentResults(
         ComponentResult cr;
         cr.documentHash = doc.sha256Hash;
         cr.filePath = doc.filePath;
-        cr.score = std::clamp(config.graphExpansionFtsPenalty * 0.85f, 0.0f, 1.0f);
+        cr.score = std::clamp(config.graphExpansionFtsPenalty * config.topologyRoutedBaseMultiplier,
+                              0.0f, 1.0f);
         cr.source = ComponentResult::Source::GraphText;
         cr.rank = rank++;
         cr.snippet = std::optional<std::string>(doc.filePath);
@@ -237,11 +312,11 @@ std::vector<ComponentResult> buildTopologyWeakQueryComponentResults(
             switch (membership.role) {
                 case yams::topology::DocumentTopologyRole::Medoid:
                     cr.debugInfo["topology_role"] = "medoid";
-                    cr.score = std::clamp(cr.score + 0.05f, 0.0f, 1.0f);
+                    cr.score = std::clamp(cr.score + config.topologyMedoidBoost, 0.0f, 1.0f);
                     break;
                 case yams::topology::DocumentTopologyRole::Bridge:
                     cr.debugInfo["topology_role"] = "bridge";
-                    cr.score = std::clamp(cr.score + 0.03f, 0.0f, 1.0f);
+                    cr.score = std::clamp(cr.score + config.topologyBridgeBoost, 0.0f, 1.0f);
                     break;
                 case yams::topology::DocumentTopologyRole::Outlier:
                     cr.debugInfo["topology_role"] = "outlier";
@@ -1887,8 +1962,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["semantic_budget_mode"] =
             shortQueryBudgeted ? "short_query+pressure" : "pressure";
     }
-    if (corpusWarming) {
-        if (topologyOverlayHashes.empty()) {
+    if (corpusWarming && !workingConfig.bypassCorpusWarmingGate) {
+        if (topologyOverlayHashes.empty() && freshness.topologyEpoch == 0) {
             workingConfig.enableTopologyWeakQueryRouting = false;
         }
         workingConfig.enableGraphRerank = false;
@@ -2301,6 +2376,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                   workingConfig.vectorMaxResults);
 
     std::vector<ComponentResult> allComponentResults;
+    std::unordered_set<std::string> topologyMedoidHashes;
     size_t estimatedResults = 0;
     if (workingConfig.textWeight > 0.0f)
         estimatedResults += workingConfig.textMaxResults;
@@ -2494,6 +2570,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::unordered_set<std::string> tier2Candidates = tier1Candidates;
             std::size_t topologyWeakQuerySeedCount = 0;
             std::size_t topologyWeakQueryAddedDocs = 0;
+            std::size_t topologyRoutingVariantSeedExtension = 0;
             bool topologyWeakQueryRoutingApplied = false;
 
             // --- TIER 2: Vector search NARROWED to Tier 1 candidates ---
@@ -2544,9 +2621,41 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (weakTier1Query && !tier1Candidates.empty() &&
                 workingConfig.enableTopologyWeakQueryRouting) {
                 bool topologyEpochMismatch = false;
+                std::unordered_set<std::string> wideSeeds = tier1Candidates;
+                using V = SearchEngineConfig::TopologyRoutingVariant;
+                const auto variant = workingConfig.topologyRoutingVariant;
+                if (variant == V::KgWalk) {
+                    auto kgAdded = kgWalkExpandSeeds(
+                        kgStore_, tier1Candidates,
+                        std::max<std::size_t>(8, workingConfig.topologyWeakQueryMaxDocs / 4),
+                        workingConfig.topologyWeakQueryMaxDocs);
+                    for (auto& h : kgAdded) {
+                        if (wideSeeds.insert(h).second) {
+                            ++topologyRoutingVariantSeedExtension;
+                        }
+                    }
+                } else if (variant == V::VectorSeed) {
+                    awaitEmbedding();
+                    if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
+                        const std::size_t seedLimit =
+                            std::max<std::size_t>(8, workingConfig.vectorMaxResults);
+                        auto vecRes =
+                            queryVectorWithRelaxedRetry(queryEmbedding.value(), seedLimit);
+                        if (vecRes) {
+                            for (const auto& cr : vecRes.value()) {
+                                if (cr.documentHash.empty()) {
+                                    continue;
+                                }
+                                if (wideSeeds.insert(cr.documentHash).second) {
+                                    ++topologyRoutingVariantSeedExtension;
+                                }
+                            }
+                        }
+                    }
+                }
                 const auto topologyCandidates = buildTopologyWeakQueryCandidates(
-                    metadataRepo_, kgStore_, query, tier1Candidates, topologyOverlayHashes,
-                    workingConfig, freshness.topologyEpoch, &topologyEpochMismatch);
+                    metadataRepo_, kgStore_, query, wideSeeds, topologyOverlayHashes, workingConfig,
+                    freshness.topologyEpoch, &topologyEpochMismatch);
                 if (topologyEpochMismatch) {
                     response.debugStats["topology_epoch_mismatch"] = "1";
                 }
@@ -2580,6 +2689,33 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
                 auto topologyDocResults = buildTopologyWeakQueryComponentResults(
                     metadataRepo_, kgStore_, topologyCandidates, workingConfig);
+                if (variant == V::ScoreReplace && !topologyDocResults.empty()) {
+                    std::unordered_map<std::string, float> tier1MaxScore;
+                    tier1MaxScore.reserve(allComponentResults.size());
+                    for (const auto& cr : allComponentResults) {
+                        if (cr.documentHash.empty()) {
+                            continue;
+                        }
+                        auto& slot = tier1MaxScore[cr.documentHash];
+                        slot = std::max(slot, cr.score);
+                    }
+                    for (auto& cr : topologyDocResults) {
+                        auto it = tier1MaxScore.find(cr.documentHash);
+                        if (it != tier1MaxScore.end()) {
+                            cr.score =
+                                std::clamp(std::max(cr.score, it->second) * 1.5f, 0.0f, 1.0f);
+                            cr.debugInfo["topology_score_replace"] = "1";
+                        }
+                    }
+                }
+                if (variant == V::MedoidPromote) {
+                    for (const auto& cr : topologyDocResults) {
+                        auto roleIt = cr.debugInfo.find("topology_role");
+                        if (roleIt != cr.debugInfo.end() && roleIt->second == "medoid") {
+                            topologyMedoidHashes.insert(cr.documentHash);
+                        }
+                    }
+                }
                 if (!topologyDocResults.empty()) {
                     allComponentResults.insert(allComponentResults.end(),
                                                topologyDocResults.begin(),
@@ -2647,6 +2783,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 std::to_string(topologyWeakQueryAddedDocs);
             response.debugStats["topology_weak_query_total_candidates"] =
                 std::to_string(tier2Candidates.size());
+            response.debugStats["topology_routing_variant"] =
+                std::string(topologyRoutingVariantToString(workingConfig.topologyRoutingVariant));
+            response.debugStats["topology_routing_variant_seed_extension"] =
+                std::to_string(topologyRoutingVariantSeedExtension);
 
             if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_ &&
                 !hasVectorTierDimMismatch()) {
@@ -3451,6 +3591,23 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     {
         YAMS_ZONE_SCOPED_N("fusion::results");
         response.results = fusion.fuse(allComponentResults);
+    }
+    if (workingConfig.topologyRoutingVariant ==
+            SearchEngineConfig::TopologyRoutingVariant::MedoidPromote &&
+        !topologyMedoidHashes.empty() && !response.results.empty()) {
+        double topScore = response.results.front().score;
+        std::size_t promoted = 0;
+        for (auto& r : response.results) {
+            if (topologyMedoidHashes.contains(r.document.sha256Hash)) {
+                r.score = topScore + 1.0 + static_cast<double>(promoted) * 1e-3;
+                ++promoted;
+            }
+        }
+        if (promoted > 0) {
+            std::stable_sort(response.results.begin(), response.results.end(),
+                             [](const auto& a, const auto& b) { return a.score > b.score; });
+            response.debugStats["topology_medoid_promoted_count"] = std::to_string(promoted);
+        }
     }
 
     // TurboQuant packed-code reranking: operates on fused results using compressed codes

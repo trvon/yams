@@ -206,6 +206,19 @@ struct SearchEngineConfig {
         false; // Expand weak-query vector candidates via topology clusters seeded by Tier 1 docs
     size_t topologyWeakQueryMaxClusters = 2; // Maximum topology clusters to route through
     size_t topologyWeakQueryMaxDocs = 64;    // Maximum routed document hashes added to Tier 2
+    float topologyRoutedBaseMultiplier = 0.85f;
+    float topologyMedoidBoost = 0.05f;
+    float topologyBridgeBoost = 0.03f;
+    enum class TopologyRoutingVariant {
+        Baseline,
+        VectorSeed,
+        KgWalk,
+        ScoreReplace,
+        MedoidPromote,
+    };
+    TopologyRoutingVariant topologyRoutingVariant = TopologyRoutingVariant::Baseline;
+
+    bool bypassCorpusWarmingGate = false;
 
     // RRF (Reciprocal Rank Fusion) parameter
     // Lower k = more weight on top-ranked items (better precision/MRR)

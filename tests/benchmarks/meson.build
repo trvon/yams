@@ -394,6 +394,66 @@ if catch2_with_main_dep.found()
        env: multi_client_bench_env)
 
   alias_target('bench_multi_client', multi_client_ingestion_bench)
+
+  # Topology ablation bench (Catch2-based, component-level)
+  # Sweeps router limit and role-score boosts on a synthetic topology batch.
+  # See docs/benchmarks/topology_ablation_matrix.md.
+  topology_ablation_bench = executable('topology_ablation_bench',
+    files('topology_ablation_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_with_main_dep,
+      dependency('yams_topology'),
+      dependency('nlohmann_json'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  test('topology_ablation_bench', topology_ablation_bench,
+       args: ['--allow-running-no-tests'],
+       suite: ['bench', 'topology-ablation'],
+       is_parallel: false,
+       timeout: 300,
+       env: {
+         'YAMS_TESTING': '1',
+         'LD_LIBRARY_PATH': _test_env_ld_library_path,
+       })
+
+  alias_target('bench_topology_ablation', topology_ablation_bench)
+
+  # Topology ablation quality bench (Catch2-based, daemon-driven)
+  # Same grid as topology_ablation_bench but measures IR quality (nDCG@10,
+  # MRR@10, MAP, recall@10, recall@100) via a daemon harness + small labeled
+  # synthetic corpus. See docs/benchmarks/topology_ablation_matrix.md.
+  topology_ablation_quality_bench = executable('topology_ablation_quality_bench',
+    files('topology_ablation_quality_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_with_main_dep,
+      test_deps,
+      dependency('nlohmann_json'),
+      dependency('spdlog'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  test('topology_ablation_quality_bench', topology_ablation_quality_bench,
+       args: ['--allow-running-no-tests'],
+       suite: ['bench', 'topology-ablation-quality'],
+       is_parallel: false,
+       timeout: 1800,
+       env: {
+         'YAMS_TESTING': '1',
+         'YAMS_DISABLE_VECTORS': '1',
+         'YAMS_SKIP_MODEL_LOADING': '1',
+         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+         'YAMS_BENCH_FORCE_MOCK_EMBEDDINGS': '1',
+         'LD_LIBRARY_PATH': _test_env_ld_library_path,
+       })
+
+  alias_target('bench_topology_ablation_quality', topology_ablation_quality_bench)
 else
   message('Catch2 not found, skipping symbol_extraction_bench, hnsw_entity_search_bench, and multi_client_ingestion_bench')
 endif

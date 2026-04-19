@@ -51,6 +51,7 @@
 #include <spdlog/spdlog.h>
 #include <benchmark/benchmark.h>
 
+#include "tests/benchmarks/beir_loader.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/search_runner.h>
@@ -321,24 +322,9 @@ static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, b
     }
 }
 
-struct BEIRDocument {
-    std::string id;
-    std::string title;
-    std::string text;
-};
-
-struct BEIRQuery {
-    std::string id;
-    std::string text;
-};
-
-struct BEIRDataset {
-    std::string name;
-    std::map<std::string, BEIRDocument> documents;
-    std::map<std::string, BEIRQuery> queries;
-    std::multimap<std::string, std::pair<std::string, int>> qrels;
-    fs::path basePath;
-};
+using yams::bench::BEIRDataset;
+using yams::bench::BEIRDocument;
+using yams::bench::BEIRQuery;
 
 static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
     const char* home = std::getenv("HOME");
@@ -437,131 +423,10 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
     return dataset;
 }
 
-// Generic BEIR dataset loader - works with any dataset from:
-// https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/
-// Supported datasets: cqadupstack, nfcorpus, arguana, scidocs, fiqa, quora, hotpotqa,
-//                     fever, climate-fever, dbpedia-entity, trec-covid, touche-2020
+// Generic BEIR dataset loader — delegates to yams::bench::loadBEIRDataset.
 static Result<BEIRDataset> loadBEIRDataset(const std::string& datasetName,
                                            const fs::path& cacheDir) {
-    const char* home = std::getenv("HOME");
-    if (!home) {
-        return Error{ErrorCode::InvalidArgument, "HOME environment variable not set"};
-    }
-
-    // Map dataset names to their zip file names (some differ)
-    static const std::map<std::string, std::string> DATASET_ZIP_NAMES = {
-        {"touche-2020", "webis-touche2020"},
-        {"dbpedia-entity", "dbpedia-entity"},
-    };
-
-    std::string zipName = datasetName;
-    auto zipIt = DATASET_ZIP_NAMES.find(datasetName);
-    if (zipIt != DATASET_ZIP_NAMES.end()) {
-        zipName = zipIt->second;
-    }
-
-    fs::path datasetDir = cacheDir.empty()
-                              ? fs::path(home) / ".cache" / "yams" / "benchmarks" / datasetName
-                              : cacheDir;
-
-    BEIRDataset dataset;
-    dataset.name = datasetName;
-    dataset.basePath = datasetDir;
-
-    fs::path corpusFile = datasetDir / "corpus.jsonl";
-    fs::path queriesFile = datasetDir / "queries.jsonl";
-    fs::path qrelsFile = datasetDir / "qrels" / "test.tsv";
-
-    if (!fs::exists(corpusFile) || !fs::exists(queriesFile) || !fs::exists(qrelsFile)) {
-        if (datasetName == "longmemeval_s") {
-            return Error{ErrorCode::NotFound,
-                         "LongMemEval_S dataset not found. Convert from HuggingFace:\n"
-                         "  uv pip install datasets\n"
-                         "  python scripts/prepare_longmemeval_s.py\n"
-                         "Expected location: ~/.cache/yams/benchmarks/longmemeval_s/"};
-        }
-        std::ostringstream oss;
-        oss << datasetName << " dataset not found. Please download manually:\n"
-            << "  mkdir -p ~/.cache/yams/benchmarks && cd ~/.cache/yams/benchmarks\n"
-            << "  curl -L -o " << zipName << ".zip "
-            << "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/" << zipName
-            << ".zip\n"
-            << "  unzip " << zipName << ".zip";
-        if (datasetName != zipName) {
-            oss << " && mv " << zipName << " " << datasetName;
-        }
-        return Error{ErrorCode::NotFound, oss.str()};
-    }
-
-    // Load corpus
-    std::ifstream corpusIn(corpusFile);
-    std::string line;
-    while (std::getline(corpusIn, line)) {
-        if (line.empty())
-            continue;
-        try {
-            auto j = json::parse(line);
-            BEIRDocument doc;
-            doc.id = j.value("_id", "");
-            if (doc.id.empty())
-                doc.id = j.value("id", "");
-            doc.title = j.value("title", "");
-            doc.text = j.value("text", "");
-            if (!doc.id.empty() && !doc.text.empty()) {
-                dataset.documents[doc.id] = doc;
-            }
-        } catch (const json::exception& e) {
-            spdlog::warn("Failed to parse corpus line: {}", e.what());
-        }
-    }
-    corpusIn.close();
-
-    // Load queries
-    std::ifstream queriesIn(queriesFile);
-    while (std::getline(queriesIn, line)) {
-        if (line.empty())
-            continue;
-        try {
-            auto j = json::parse(line);
-            BEIRQuery q;
-            q.id = j.value("_id", "");
-            if (q.id.empty())
-                q.id = j.value("id", "");
-            q.text = j.value("text", "");
-            if (!q.id.empty() && !q.text.empty()) {
-                dataset.queries[q.id] = q;
-            }
-        } catch (const json::exception& e) {
-            spdlog::warn("Failed to parse query line: {}", e.what());
-        }
-    }
-    queriesIn.close();
-
-    // Load qrels
-    std::ifstream qrelsIn(qrelsFile);
-    bool firstLine = true;
-    while (std::getline(qrelsIn, line)) {
-        if (line.empty() || line[0] == '#')
-            continue;
-        if (firstLine) {
-            firstLine = false;
-            if (line.find("query-id") != std::string::npos)
-                continue;
-        }
-        std::istringstream iss(line);
-        std::string queryId, docId, scoreStr;
-        if (std::getline(iss, queryId, '\t') && std::getline(iss, docId, '\t') &&
-            std::getline(iss, scoreStr, '\t')) {
-            int score = std::stoi(scoreStr);
-            dataset.qrels.emplace(queryId, std::make_pair(docId, score));
-        }
-    }
-    qrelsIn.close();
-
-    spdlog::info("Loaded BEIR {} dataset: {} documents, {} queries, {} qrels", datasetName,
-                 dataset.documents.size(), dataset.queries.size(), dataset.qrels.size());
-
-    return dataset;
+    return yams::bench::loadBEIRDataset(datasetName, cacheDir);
 }
 
 static Result<BEIRDataset> selectBenchmarkBEIRDataset(const std::string& datasetName,
@@ -1912,6 +1777,12 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
     j["used_literal_retry"] = e.usedLiteralTextRetry;
     j["search_stats"] = e.searchStats;
     j["diag"] = e.diagnostics;
+
+    if (const char* embBackend = std::getenv("YAMS_EMBED_BACKEND"); embBackend && *embBackend) {
+        j["embedding_backend"] = embBackend;
+    } else {
+        j["embedding_backend"] = "daemon";
+    }
 
     if (g_debugRunContext.has_value()) {
         j["run_id"] = g_debugRunContext->runId;
@@ -4132,6 +4003,11 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     j["hybrid_eval_ms"] = result.hybridEvalMs;
     j["keyword_eval_ms"] = result.keywordEvalMs;
     j["search_engine"] = result.searchEngine;
+    if (const char* embBackend = std::getenv("YAMS_EMBED_BACKEND"); embBackend && *embBackend) {
+        j["embedding_backend"] = embBackend;
+    } else {
+        j["embedding_backend"] = "daemon";
+    }
     j["quantized_hnsw_mode"] = result.quantizedHnswMode;
     j["quantized_hnsw_rerank_factor"] = result.quantizedHnswRerankFactor;
     j["vectors_db_bytes"] = result.vectorsDbBytes;
@@ -5264,13 +5140,21 @@ struct BenchFixture {
             std::getenv("YAMS_POST_KG_CONCURRENT") ? std::getenv("YAMS_POST_KG_CONCURRENT")
                                                    : "<unset>");
 
+        const bool embedBackendSimeon = [] {
+            const char* v = std::getenv("YAMS_EMBED_BACKEND");
+            return v && std::string{v} == "simeon";
+        }();
+
         DaemonHarness::Options harnessOptions;
         harnessOptions.isolateState = true;
         harnessOptions.useMockModelProvider = vectorsDisabled || forceMockEmbeddings;
-        harnessOptions.autoLoadPlugins = !vectorsDisabled && !forceMockEmbeddings;
-        harnessOptions.configureModelPool = !vectorsDisabled && !forceMockEmbeddings;
+        harnessOptions.autoLoadPlugins =
+            !vectorsDisabled && !forceMockEmbeddings && !embedBackendSimeon;
+        harnessOptions.configureModelPool =
+            !vectorsDisabled && !forceMockEmbeddings && !embedBackendSimeon;
         harnessOptions.modelPoolLazyLoading = false;
-        harnessOptions.pluginDirStrict = !vectorsDisabled && !forceMockEmbeddings;
+        harnessOptions.pluginDirStrict =
+            !vectorsDisabled && !forceMockEmbeddings && !embedBackendSimeon;
 
         // YAMS_BENCH_DATA_DIR: reuse a pre-ingested data directory to skip
         // corpus ingestion + embedding wait on repeated benchmark runs.
