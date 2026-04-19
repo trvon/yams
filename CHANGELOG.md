@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [0.13.1](https://github.com/trvon/yams/compare/v0.13.0...v0.13.1) (2026-04-18)
+
+
+### Fixed
+
+* clang warning fixes and daemon startup wal guard and fallback regression fix ([c2a9d32](https://github.com/trvon/yams/commit/c2a9d322adfb26f0cdea2c41bc9c75afca4e12fb))
+* enforce resource caps ([d86eb06](https://github.com/trvon/yams/commit/d86eb06c3c9d7f24392833d62596ee45414b00eb))
+* fixing ci push to repo ([8b9a443](https://github.com/trvon/yams/commit/8b9a443280b68afd65fc8636992e60d81be1dba6))
+* fixing mcp code routing and paramater normalization with a light refactor ([ce56050](https://github.com/trvon/yams/commit/ce560509bfa432c3c7fbc02014bf8557219a62f6))
+* small fixes for benchmarks and documentation update ([d7ab484](https://github.com/trvon/yams/commit/d7ab4844a1c4b67cbe6957932d9f0b6a68185884))
+
 ## [0.13.0](https://github.com/trvon/yams/compare/v0.12.1...v0.13.0) (2026-04-17)
 
 
