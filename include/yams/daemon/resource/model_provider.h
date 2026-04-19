@@ -191,6 +191,16 @@ public:
      */
     virtual bool isAvailable() const = 0;
 
+    /**
+     * Whether this provider is training-free / model-less.
+     *
+     * Training-free providers (e.g. simeon SIMD embedder) have no model file
+     * to load; loadModel() is a no-op and dimension is fixed at construction.
+     * Callers can use this to skip model-centric logic like preload/warmup
+     * and model-name-based dimension resolution.
+     */
+    virtual bool isTrainingFree() const { return false; }
+
     // ========================================================================
     // Resource Management
     // ========================================================================
@@ -274,5 +284,16 @@ void registerModelProvider(const std::string& name, ModelProviderFactory factory
  * @return Vector of provider names
  */
 std::vector<std::string> getRegisteredProviders();
+
+/**
+ * RAII helper that registers a factory at static-init time.
+ *
+ * Usage:
+ *   static ModelProviderFactoryRegistration s_simeon_reg{
+ *       "simeon", [] { return makeSimeonModelProvider(); }};
+ */
+struct ModelProviderFactoryRegistration {
+    ModelProviderFactoryRegistration(std::string name, ModelProviderFactory factory);
+};
 
 } // namespace yams::daemon

@@ -115,6 +115,20 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 
     // 3. Ask provider directly (if weak_ptr is set)
     auto modelProvider = deps_.modelProvider.lock();
+    // Training-free providers (e.g. simeon) don't use named models; ask for the
+    // fixed output dimension directly before falling through to the name-based
+    // resolution paths below.
+    if (!dim && modelProvider && modelProvider->isAvailable() && modelProvider->isTrainingFree()) {
+        try {
+            size_t prov = modelProvider->getEmbeddingDim("");
+            if (prov > 0) {
+                dim = prov;
+                spdlog::info("[VectorInit] using training-free provider dim={} ({})", *dim,
+                             modelProvider->getProviderName());
+            }
+        } catch (...) {
+        }
+    }
     if (!dim && deps_.resolvePreferredModel) {
         try {
             std::string preferred = deps_.resolvePreferredModel();

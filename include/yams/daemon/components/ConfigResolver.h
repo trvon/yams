@@ -107,6 +107,23 @@ public:
     static std::optional<size_t> readVectorSentinelDim(const std::filesystem::path& dataDir);
 
     /**
+     * @brief Resolve embedding backend selection.
+     *
+     * Priority:
+     *   1. YAMS_EMBED_BACKEND environment variable (highest)
+     *   2. `embeddings.backend` key in TOML config
+     *   3. defaultValue fallback
+     *
+     * Recognized values: "auto", "daemon", "simeon", "mock".
+     * "auto" means: let PluginManager pick ABI plugin first, fall back to any
+     * registered in-process provider.
+     *
+     * @param defaultValue Value returned when neither env nor TOML is set.
+     * @return Lower-cased backend name.
+     */
+    static std::string resolveEmbeddingBackend(const std::string& defaultValue = "auto");
+
+    /**
      * @brief Write vector sentinel file with dimension and schema info.
      *
      * Creates dataDir/vectors_sentinel.json with embedding metadata.

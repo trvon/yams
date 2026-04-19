@@ -276,3 +276,17 @@ constexpr std::string_view kSearchEngineVectorUsable = "search_engine_vector_usa
 constexpr std::string_view kSearchEngineHybridUsable = "search_engine_hybrid_usable";
 
 } // namespace yams::daemon::readiness
+
+namespace yams::daemon::ir_metrics {
+constexpr std::string_view kIRSchemaVersion = "topology_ablation_quality_v1";
+constexpr std::string_view kIRTestKey = "test";
+constexpr std::string_view kIRTestName = "topology_ablation_quality";
+constexpr std::string_view kIRAxisKey = "axis";
+constexpr std::string_view kIRAxisIdKey = "axis_id";
+constexpr std::string_view kIRNdcgAtK = "ndcg_at_k";
+constexpr std::string_view kIRMrrAtK = "mrr_at_k";
+constexpr std::string_view kIRMap = "map";
+constexpr std::string_view kIRRecallAtK = "recall_at_k";
+constexpr std::string_view kIRRecallAt100 = "recall_at_100";
+constexpr std::string_view kIRFixtureStatus = "fixture_status";
+} // namespace yams::daemon::ir_metrics

@@ -105,6 +105,10 @@ public:
         return publishedEpoch_.load(std::memory_order_acquire);
     }
 
+    void setPublishedEpoch(std::uint64_t epoch) {
+        publishedEpoch_.store(epoch, std::memory_order_release);
+    }
+
     [[nodiscard]] bool tryScheduleRebuild();
     void clearScheduled();
 

@@ -1,7 +1,11 @@
 #include <spdlog/spdlog.h>
+#include <cctype>
 #include <mutex>
+#include <string>
 #include <unordered_map>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/simeon_model_provider.h>
 
 // Forward declaration to avoid include issues
 namespace yams::daemon {
@@ -357,6 +361,23 @@ std::vector<std::string> getRegisteredProviders() {
     return providers;
 }
 
+ModelProviderFactoryRegistration::ModelProviderFactoryRegistration(std::string name,
+                                                                   ModelProviderFactory factory) {
+    registerModelProvider(std::move(name), std::move(factory));
+}
+
+namespace {
+// Force-link anchor: referencing forceLinkSimeonProvider() from this TU
+// (which is always pulled into the daemon archive via createModelProvider
+// / registerModelProvider) creates an undefined symbol that the archive
+// linker resolves by pulling in simeon_model_provider.o, allowing its
+// static ModelProviderFactoryRegistration to run during program init.
+[[maybe_unused]] const int kSimeonLinkSentinel = [] {
+    forceLinkSimeonProvider();
+    return 0;
+}();
+} // namespace
+
 std::unique_ptr<IModelProvider> createModelProvider(const std::string& preferredProvider,
                                                     bool forceMockProvider) {
     // Default configuration
@@ -368,6 +389,22 @@ std::unique_ptr<IModelProvider> createModelProvider([[maybe_unused]] const Model
                                                     const std::string& preferredProvider,
                                                     bool forceMockProvider) {
     auto& registry = getProviderRegistry();
+
+    // Resolve embedding backend selection: env > TOML > "auto".
+    // Non-"auto" / non-"daemon" names dispatch to the in-process registry.
+    const auto backendSelection = ConfigResolver::resolveEmbeddingBackend("auto");
+    if (backendSelection != "auto" && backendSelection != "daemon") {
+        auto it = registry.find(backendSelection);
+        if (it != registry.end() && it->second) {
+            if (auto provider = it->second()) {
+                spdlog::info("Using {} model provider (backend={})", provider->getProviderName(),
+                             backendSelection);
+                return provider;
+            }
+        }
+        spdlog::warn("Requested embedding backend '{}' not found in registry; falling back",
+                     backendSelection);
+    }
 
     // Check for test/mock mode
     if (forceMockProvider) {

@@ -661,18 +661,21 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         size_t provDim = modelDim(selectedModel);
         embConfig.embedding_dim = provDim > 0 ? provDim : targetDbDim;
 
-        // Backend selection override via environment or special model name
         embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
         if (const char* be = std::getenv("YAMS_EMBED_BACKEND")) {
             std::string s(be);
             for (auto& c : s)
                 c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-            if (s != "daemon" && s != "hybrid" && s != "local") {
-                spdlog::warn("EmbeddingService: unsupported YAMS_EMBED_BACKEND='{}'; using daemon",
-                             s);
+            if (s == "simeon") {
+                embConfig.backend = vector::EmbeddingConfig::Backend::Simeon;
+            } else if (s == "daemon" || s == "hybrid") {
+                embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
             } else if (s == "local") {
                 spdlog::warn("EmbeddingService: YAMS_EMBED_BACKEND=local is deprecated; using "
                              "daemon backend");
+            } else {
+                spdlog::warn("EmbeddingService: unsupported YAMS_EMBED_BACKEND='{}'; using daemon",
+                             s);
             }
         }
 
@@ -694,8 +697,10 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             modelMaxSeq = 512;
         vdbConfig.embedding_dim =
             yams::vector::dimres::resolve_dim(dataPath_, actualDim, actualDim);
-        spdlog::info("EmbeddingService: model={} dim={} max_seq={} backend=Daemon", selectedModel,
-                     actualDim, modelMaxSeq);
+        const char* backendName =
+            (embConfig.backend == vector::EmbeddingConfig::Backend::Simeon) ? "Simeon" : "Daemon";
+        spdlog::info("EmbeddingService: model={} dim={} max_seq={} backend={}", selectedModel,
+                     actualDim, modelMaxSeq, backendName);
 
         auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
         if (!vectorDb->initialize()) {

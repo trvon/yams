@@ -28,3 +28,6 @@
 [submodule "external/agent"]
   path = external/agent
   url = https://github.com/trvon/agents-dcs.git
+[submodule "third_party/simeon"]
+	path = third_party/simeon
+	url = git@github.com:trvon/simeon.git

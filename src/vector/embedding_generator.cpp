@@ -34,6 +34,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/ml/provider.h>
+#include <yams/vector/simeon_embedding_backend.h>
 
 namespace yams::vector {
 
@@ -1758,11 +1759,27 @@ private:
 class EmbeddingGenerator::Impl {
 public:
     explicit Impl(const EmbeddingConfig& config) : config_(config) {
-        switch (config.backend) {
+        auto effective = config.backend;
+        if (const char* env = std::getenv("YAMS_EMBED_BACKEND"); env && *env) {
+            std::string s(env);
+            for (auto& c : s)
+                c = static_cast<char>(std::tolower(c));
+            if (s == "simeon") {
+                effective = EmbeddingConfig::Backend::Simeon;
+                config_.backend = effective;
+            } else if (s == "daemon") {
+                effective = EmbeddingConfig::Backend::Daemon;
+                config_.backend = effective;
+            }
+        }
+        switch (effective) {
+            case EmbeddingConfig::Backend::Simeon:
+                backend_ = makeSimeonBackend(config_);
+                break;
             case EmbeddingConfig::Backend::Daemon:
             case EmbeddingConfig::Backend::Hybrid:
             default:
-                backend_ = std::make_unique<DaemonBackend>(config);
+                backend_ = std::make_unique<DaemonBackend>(config_);
                 break;
         }
     }

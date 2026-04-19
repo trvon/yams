@@ -21,7 +21,8 @@ struct EmbeddingConfig {
     // Backend selection
     enum class Backend {
         Daemon, // Use daemon service
-        Hybrid  // Legacy alias; treated as daemon-only
+        Hybrid, // Legacy alias; treated as daemon-only
+        Simeon  // In-process SIMD model-free (third_party/simeon)
     };
     Backend backend = Backend::Daemon; // Daemon-only embedding path
 

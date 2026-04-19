@@ -644,6 +644,37 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
     return preferred;
 }
 
+std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultValue) {
+    auto normalize = [](std::string s) {
+        for (auto& c : s)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+
+    if (const char* envp = std::getenv("YAMS_EMBED_BACKEND")) {
+        std::string v(envp);
+        if (!v.empty()) {
+            return normalize(std::move(v));
+        }
+    }
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto it = kv.find("embeddings.backend");
+            if (it != kv.end() && !it->second.empty()) {
+                return normalize(it->second);
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for embedding backend: {}", e.what());
+    }
+
+    return normalize(defaultValue);
+}
+
 std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
     std::string preferred;
 

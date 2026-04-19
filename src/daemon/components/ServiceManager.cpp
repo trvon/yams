@@ -1987,11 +1987,16 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 spdlog::info("ServiceManager: Adopted {} entity extractors.", entityRes.value());
             }
         }
-        // If autoload is disabled but model provider is enabled, defer initialization
-        // until after daemon reaches Ready state (see daemon.cpp main loop)
+        // If autoload is disabled but model provider is enabled, try the in-process
+        // registry before deferring. This covers training-free backends like simeon
+        // that don't need ABI plugin infrastructure.
         if (!enableAutoload && config_.enableModelProvider) {
-            spdlog::info("Model provider enabled with autoload disabled; deferring initialization "
-                         "until Ready");
+            auto adoptResult = init::step<bool>("adopt_in_process_model_provider",
+                                                [&]() { return adoptModelProviderFromHosts(); });
+            if (!adoptResult || !adoptResult.value()) {
+                spdlog::info("Model provider enabled with autoload disabled; deferring "
+                             "initialization until Ready");
+            }
         }
     } catch (const std::exception& e) {
         spdlog::warn("Plugin autoload failed: {}", e.what());
@@ -2076,20 +2081,28 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
     }
 
-    // Only schedule warmup if vector DB is present with non-zero dim
+    // Only schedule warmup if vector DB is present with non-zero dim.
+    // Training-free providers have nothing to warm; skip entirely.
     if (embeddingLifecycle_.preloadOnStartup()) {
-        size_t vdim = 0;
-        try {
-            if (auto vectorDatabase = getVectorDatabase())
-                vdim = vectorDatabase->getConfig().embedding_dim;
-        } catch (...) {
-        }
-        if (vdim == 0) {
-            spdlog::info("[Warmup] deferred: vector DB not ready or dim=0");
+        auto provider = loadModelProvider();
+        if (provider && provider->isTrainingFree()) {
+            spdlog::info("[Warmup] skipped: provider '{}' is training-free",
+                         provider->getProviderName());
             embeddingLifecycle_.setPreloadOnStartup(false);
         } else {
-            spdlog::info("[Warmup] embeddings.preload_on_startup detected -> background warmup "
-                         "will run after Ready");
+            size_t vdim = 0;
+            try {
+                if (auto vectorDatabase = getVectorDatabase())
+                    vdim = vectorDatabase->getConfig().embedding_dim;
+            } catch (...) {
+            }
+            if (vdim == 0) {
+                spdlog::info("[Warmup] deferred: vector DB not ready or dim=0");
+                embeddingLifecycle_.setPreloadOnStartup(false);
+            } else {
+                spdlog::info("[Warmup] embeddings.preload_on_startup detected -> background warmup "
+                             "will run after Ready");
+            }
         }
     }
 

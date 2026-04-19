@@ -200,8 +200,11 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
         telemetry_.lastFallbackFullRebuilds = stats.fallbackFullRebuilds;
     }
     if (stats.skipped) {
-        spdlog::info("[TopologyManager] rebuild skipped (reason={}, docs={}, issues={})", reason,
-                     stats.documentsProcessed, stats.issues.empty() ? 0 : stats.issues.size());
+        spdlog::info(
+            "[TopologyManager] rebuild skipped (reason={}, docs={}, missing_embeddings={}, "
+            "missing_graph_nodes={}, issues={})",
+            reason, stats.documentsProcessed, stats.documentsMissingEmbeddings,
+            stats.documentsMissingGraphNodes, stats.issues.empty() ? 0 : stats.issues.size());
     } else {
         spdlog::info("[TopologyManager] rebuild complete (reason={}, docs={}, clusters={}, "
                      "memberships={}, stored={}, snapshot={})",

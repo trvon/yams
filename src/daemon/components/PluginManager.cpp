@@ -770,6 +770,48 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
             }
         }
 
+        // No ABI plugin adopted; try in-process registry if a specific backend is selected.
+        const auto backend = ConfigResolver::resolveEmbeddingBackend("auto");
+        if (backend != "auto" && backend != "daemon") {
+            const auto known = getRegisteredProviders();
+            if (std::find(known.begin(), known.end(), backend) != known.end()) {
+                auto provider = createModelProvider(ModelPoolConfig{}, backend);
+                if (provider && provider->isAvailable()) {
+                    modelProvider_ = std::move(provider);
+                    adoptedProviderPluginName_ = backend;
+                    if (deps_.state) {
+                        deps_.state->readiness.modelProviderReady = true;
+                    }
+                    const auto providerName = modelProvider_->getProviderName();
+                    const auto trainingFree = modelProvider_->isTrainingFree();
+                    embeddingModelName_ = trainingFree ? providerName : (backend + "-default");
+                    const size_t dim = modelProvider_->getEmbeddingDim(embeddingModelName_);
+                    spdlog::info("[PluginManager] Adopted in-process model provider: {} "
+                                 "(training_free={}, dim={})",
+                                 providerName, trainingFree, dim);
+                    embeddingFsm_.dispatch(ProviderAdoptedEvent{backend});
+                    if (dim > 0) {
+                        embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, dim});
+                    }
+                    if (deps_.lifecycleFsm) {
+                        deps_.lifecycleFsm->setSubsystemDegraded("embeddings", false);
+                    }
+                    try {
+                        auto count =
+                            static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
+                        cachedModelCount_.store(count, std::memory_order_relaxed);
+                    } catch (...) {
+                        cachedModelCount_.store(0, std::memory_order_relaxed);
+                    }
+                    refreshStatusSnapshot();
+                    return Result<bool>(true);
+                }
+                spdlog::warn("[PluginManager] In-process provider '{}' registered but factory "
+                             "returned unavailable instance",
+                             backend);
+            }
+        }
+
         // No provider found
         spdlog::warn("[PluginManager] No model provider adopted from any plugin");
         embeddingFsm_.dispatch(ProviderDegradedEvent{"no provider adopted"});
