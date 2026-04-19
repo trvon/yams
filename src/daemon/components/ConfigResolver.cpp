@@ -551,7 +551,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
             auto preload = kv.find("daemon.models.preload_models");
             if (preload != kv.end()) {
                 const auto& v = preload->second;
-                if (v.find("embeddinggemma-300m") != std::string::npos) {
+                if (v.find("simeon-default") != std::string::npos) {
+                    preferred = "simeon-default";
+                } else if (v.find("embeddinggemma-300m") != std::string::npos) {
                     preferred = "embeddinggemma-300m";
                 } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
                     preferred = "all-MiniLM-L6-v2";
@@ -602,7 +604,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                     if (eq != std::string::npos) {
                         std::string v = l.substr(eq + 1);
                         trim(v);
-                        if (v.find("embeddinggemma-300m") != std::string::npos) {
+                        if (v.find("simeon-default") != std::string::npos) {
+                            preferred = "simeon-default";
+                        } else if (v.find("embeddinggemma-300m") != std::string::npos) {
                             preferred = "embeddinggemma-300m";
                         } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
                             preferred = "all-MiniLM-L6-v2";
@@ -619,6 +623,14 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for preferred model: {}", e.what());
+    }
+
+    // If simeon is the selected backend and nothing else named a preferred
+    // model above, return the simeon-default sentinel instead of scanning
+    // the ONNX models directory (which would pick an incompatible model).
+    if (resolveEmbeddingBackend("auto") == "simeon") {
+        spdlog::debug("Preferred model defaulted to simeon-default (backend=simeon)");
+        return "simeon-default";
     }
 
     try {
@@ -673,6 +685,71 @@ std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultVa
     }
 
     return normalize(defaultValue);
+}
+
+ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
+    TopologyRoutingPolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return policy;
+        }
+
+        auto kv = parseSimpleTomlFlat(cfgPath);
+
+        auto parseBool = [](std::string v) -> std::optional<bool> {
+            for (auto& c : v)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (v == "true" || v == "1" || v == "yes" || v == "on")
+                return true;
+            if (v == "false" || v == "0" || v == "no" || v == "off")
+                return false;
+            return std::nullopt;
+        };
+
+        if (auto it = kv.find("search.topology.enable_weak_query_routing"); it != kv.end()) {
+            policy.enableWeakQueryRouting = parseBool(it->second);
+        }
+        auto parseSize = [](const std::string& s) -> std::optional<std::size_t> {
+            try {
+                return static_cast<std::size_t>(std::stoul(s));
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        };
+        auto parseFloat = [](const std::string& s) -> std::optional<float> {
+            try {
+                return std::stof(s);
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        };
+        if (auto it = kv.find("search.topology.max_clusters"); it != kv.end()) {
+            policy.maxClusters = parseSize(it->second);
+        }
+        if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
+            policy.maxDocs = parseSize(it->second);
+        }
+        if (auto it = kv.find("search.topology.medoid_boost"); it != kv.end()) {
+            policy.medoidBoost = parseFloat(it->second);
+        }
+        if (auto it = kv.find("search.topology.bridge_boost"); it != kv.end()) {
+            policy.bridgeBoost = parseFloat(it->second);
+        }
+        if (auto it = kv.find("search.topology.routed_base_multiplier"); it != kv.end()) {
+            policy.routedBaseMultiplier = parseFloat(it->second);
+        }
+        if (auto it = kv.find("search.topology.routing_variant"); it != kv.end()) {
+            if (!it->second.empty())
+                policy.routingVariant = it->second;
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for topology routing policy: {}", e.what());
+    }
+
+    return policy;
 }
 
 std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {

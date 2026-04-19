@@ -356,6 +356,7 @@ ConfigMigrator::getLatestConfigDefaults() {
 
             {"embeddings",
              {{"enable", "true"},
+              {"backend", "auto"},
               {"auto_generate", "false"},
               {"auto_on_add", "false"},
               {"preferred_model", "all-MiniLM-L6-v2"},
@@ -415,6 +416,17 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"reranker_model", ""}}},
 
             {"search.path_tree", {{"enable", "false"}, {"mode", "fallback"}}},
+
+            {"search.topology",
+             {{"enable_weak_query_routing", "false"},
+              {"max_clusters", "2"},
+              {"max_docs", "64"},
+              {"medoid_boost", "0.05"},
+              {"bridge_boost", "0.03"},
+              {"routed_base_multiplier", "0.85"},
+              {"routing_variant", "baseline"}}},
+
+            {"indexing", {{"sync_threshold", "10"}}},
 
             // Daemon service defaults: enable model provider + plugin autoload by default
             {"daemon",
@@ -756,6 +768,8 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "search",
                                              "search.path_tree",
                                              "search.hybrid",
+                                             "search.topology",
+                                             "indexing",
                                              "knowledge_graph",
                                              "file_detection",
                                              "downloader",

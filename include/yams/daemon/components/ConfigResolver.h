@@ -46,6 +46,16 @@ public:
         bool overridden{false};
     };
 
+    struct TopologyRoutingPolicy {
+        std::optional<bool> enableWeakQueryRouting;
+        std::optional<std::size_t> maxClusters;
+        std::optional<std::size_t> maxDocs;
+        std::optional<float> medoidBoost;
+        std::optional<float> bridgeBoost;
+        std::optional<float> routedBaseMultiplier;
+        std::optional<std::string> routingVariant;
+    };
+
     ConfigResolver() = delete; // Static-only class
 
     /**
@@ -228,6 +238,24 @@ public:
      * - YAMS_EMBED_CHUNK_PRESERVE_SENTENCES
      */
     static EmbeddingChunkingPolicy resolveEmbeddingChunkingPolicy();
+
+    /**
+     * @brief Resolve topology-aware routing policy from config file.
+     *
+     * Reads [search.topology] keys. Callers apply these as defaults, then
+     * overlay env vars (YAMS_SEARCH_TOPOLOGY_*) which take final precedence.
+     * All fields are optional; unset keys are left nullopt.
+     *
+     * Config keys:
+     * - search.topology.enable_weak_query_routing = true|false
+     * - search.topology.max_clusters = int
+     * - search.topology.max_docs = int
+     * - search.topology.medoid_boost = float
+     * - search.topology.bridge_boost = float
+     * - search.topology.routed_base_multiplier = float
+     * - search.topology.routing_variant = baseline|vector_seed|kg_walk|score_replace|medoid_promote
+     */
+    static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
 
     /**
      * @brief Read an integer timeout from environment with bounds.

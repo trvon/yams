@@ -69,6 +69,10 @@ access_key = ""
 secret_key = ""
 session_token = ""
 use_path_style = false
+# Behavior when S3 is unreachable: "strict" (error) or "local" (fallback to local engine)
+fallback_policy = "strict"
+# Local data dir to use when falling back; empty = config-level data_dir
+fallback_local_data_dir = ""
 
 [storage.s3.r2]
 # Explicit Cloudflare R2 temporary-credential bootstrap mode.
@@ -145,8 +149,8 @@ enable = true
 database_path = "vectors.db"
 # Table name for embeddings
 table_name = "document_embeddings"
-# Embedding dimension (model-dependent)
-embedding_dim = 768
+# Embedding dimension (must match the embedding model: 384 for all-MiniLM-L6-v2 / simeon-default)
+embedding_dim = 384
 # Index type: "FLAT", "IVF_PQ", "HNSW"
 index_type = "IVF_PQ"
 # Number of partitions for IVF index
@@ -160,7 +164,7 @@ checkpoint_frequency = 1000
 # Maximum batch size for operations
 max_batch_size = 1000
 # Default similarity threshold for search
-default_similarity_threshold = 0.7
+default_similarity_threshold = 0.35
 # Use in-memory database (for testing)
 use_in_memory = false
 # Auto-create database if missing
@@ -174,11 +178,14 @@ max_elements = 100000
 [embeddings]
 # Enable embedding generation
 enable = true
+# Embedding backend: "auto" | "daemon" (ONNX) | "simeon" (in-process, model-free)
+# Env override: YAMS_EMBED_BACKEND
+backend = "auto"
 # Automatically generate for new documents
 auto_generate = false
 # Automatically trigger embeddings after AddDocument
 auto_on_add = false
-# Preferred embedding model
+# Preferred embedding model (set to "simeon-default" when backend = "simeon")
 preferred_model = "all-MiniLM-L6-v2"
 # Path to model files
 model_path = "~/.yams/models"
@@ -186,8 +193,8 @@ model_path = "~/.yams/models"
 tokenizer_path = "models/tokenizer.json"
 # Maximum sequence length
 max_sequence_length = 512
-# Embedding dimension (must match model)
-embedding_dim = 768
+# Embedding dimension (must match model: 384 for all-MiniLM-L6-v2 / simeon-default)
+embedding_dim = 384
 # Batch size for generation
 batch_size = 32
 # Normalize embedding vectors
@@ -231,6 +238,16 @@ intro_boost = 0.75
 [daemon]
 # Enable daemon-managed model provider and plugin auto-loading
 enable = true
+# Auto-start daemon if not running when needed
+auto_start = true
+# Unix domain socket path for IPC
+socket_path = "/tmp/yams-daemon.sock"
+# PID file for daemon process management
+pid_file = "/tmp/yams-daemon.pid"
+# Connection timeout in milliseconds
+connect_timeout_ms = 1000
+# Request timeout in milliseconds
+request_timeout_ms = 5000
 # Auto-load plugins from standard directories (and YAMS_PLUGIN_DIR if set)
 auto_load_plugins = true
 # Optional explicit plugin directory (comment out to use defaults and YAMS_PLUGIN_DIR)
@@ -315,7 +332,7 @@ lru_eviction = true
 # Index type: "FLAT", "HNSW", "IVF_FLAT", "IVF_PQ", "LSH", "ANNOY"
 type = "HNSW"
 # Vector dimension
-dimension = 768
+dimension = 384
 # Distance metric: "COSINE", "L2", "INNER_PRODUCT"
 distance_metric = "COSINE"
 # HNSW: connections per node
@@ -415,6 +432,24 @@ include_debug_scores = false
 # Run searches in parallel
 parallel_search = true
 
+[search.topology]
+# Topology-aware weak-query routing (medoid/bridge cluster boosts).
+# Each key can be overridden at runtime via YAMS_SEARCH_TOPOLOGY_* env vars.
+# Route weak queries through cluster medoids/bridges
+enable_weak_query_routing = false
+# Max number of clusters considered when routing a weak query
+max_clusters = 2
+# Max number of candidate docs pulled from routed clusters
+max_docs = 64
+# Score boost applied to medoid documents in routed clusters
+medoid_boost = 0.05
+# Score boost applied to bridge documents linking routed clusters
+bridge_boost = 0.03
+# Score multiplier applied to baseline (non-routed) candidates when routing fires
+routed_base_multiplier = 0.85
+# Routing variant: "baseline" | "medoid_only" | "bridge_only" | "full"
+routing_variant = "baseline"
+
 [knowledge_graph]
 # Database path for KG (relative to data_dir if not absolute)
 # Defaults to {data_dir}/yams.db
@@ -505,27 +540,6 @@ ping_interval_s = 30
 # and as a last resort uses ./docs/prompts when running from the repo root.
 # prompts_dir = "/home/user/.local/share/yams/prompts"
 
-[daemon]
-# Enable daemon for background embedding generation
-# This eliminates ONNX model loading overhead on every command
-enable = true
-# Auto-start daemon if not running when needed
-auto_start = true
-# Unix domain socket path for IPC
-socket_path = "/tmp/yams-daemon.sock"
-# PID file for daemon process management
-pid_file = "/tmp/yams-daemon.pid"
-# Number of worker threads for request handling
-worker_threads = 4
-# Maximum memory usage in GB
-max_memory_gb = 4
-# Daemon log level: "trace", "debug", "info", "warn", "error"
-log_level = "info"
-# Connection timeout in milliseconds
-connect_timeout_ms = 1000
-# Request timeout in milliseconds
-request_timeout_ms = 5000
-
 [daemon.models]
 # Maximum number of models to keep loaded in memory
 max_loaded_models = 4
@@ -567,21 +581,6 @@ batch_size = 32
 [experimental]
 # Enable experimental features
 enable = false
-
-[experimental.enhanced_search]
-# Alias for PBI-003 bring-up; mirrors [search.enhanced]. Prefer [search.enhanced] for stable use.
-enable = false
-classification_weight = 0.15
-kg_expansion_weight = 0.10
-hotzone_weight = 0.05
-enhanced_search_timeout_ms = 2000
-
-[experimental.hotzones]
-# Alias for PBI-003 bring-up; mirrors [search.hotzones]. Prefer [search.hotzones] for stable use.
-decay_interval_hours = 24
-max_boost_factor = 2.0
-enable_persistence = true
-data_file = "hotzones.db"
 
 [experimental.bert_ner]
 # Enable BERT Named Entity Recognition
@@ -745,16 +744,46 @@ ca_path = ""
 # Proxy URL (e.g., http://user:pass@host:port) or empty
 url = ""
 
-[plugins]
-# Global plugin settings
-# Optional additional trusted plugin roots (array).
-# trusted_paths = ["~/.local/lib/yams/plugins"]
-
 [plugins.symbol_extraction]
 # Enable Tree-sitter based symbol extraction plugins (runtime toggle)
 enable = true
+# Auto-download missing Tree-sitter grammar shared objects on first use
+auto_download_grammars = true
 # Optional: restrict languages processed by the symbol extractor plugin
 # languages = ["cpp", "python", "c", "go", "rust", "js", "ts"]
 # Optional: override grammar .so paths per language
 # grammar_paths.cpp = "/usr/lib/libtree-sitter-cpp.so"
 # grammar_paths.python = "/usr/lib/libtree-sitter-python.so"
+
+[cli.streaming]
+# Enable streaming for large payloads on CLI <-> daemon IPC
+enable = true
+# Switch to streaming when payload exceeds this many bytes
+payload_threshold_bytes = 262144
+# Switch to streaming when first-byte latency exceeds this many ms
+ttfb_threshold_ms = 150
+# Per-chunk size on the streaming transport
+chunk_size_bytes = 65536
+# Maximum number of in-flight chunks
+max_inflight_chunks = 4
+
+[cli.pool]
+# CLI <-> daemon client pool sizing and timeouts
+max_clients = 8
+min_clients = 1
+acquire_timeout_ms = 5000
+# 0 = unbounded waiter queue
+max_waiters = 0
+fair_queue = true
+health_check_interval_ms = 30000
+health_check_timeout_ms = 500
+reconnect_backoff_base_ms = 100
+reconnect_backoff_max_ms = 5000
+reconnect_backoff_jitter_pct = 0.2
+
+[repair]
+# Online repair of missing embeddings / corrupted chunks while serving traffic
+enable_online_repair = false
+max_repair_concurrency = 1
+repair_backoff_ms = 250
+max_retries = 3
