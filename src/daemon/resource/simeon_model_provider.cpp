@@ -118,7 +118,18 @@ public:
 
     std::shared_ptr<vector::EmbeddingGenerator>
     getEmbeddingGenerator(const std::string& /*modelName*/) override {
-        return nullptr;
+        if (!backend_)
+            return nullptr;
+        vector::EmbeddingConfig cfg;
+        cfg.backend = vector::EmbeddingConfig::Backend::Simeon;
+        cfg.embedding_dim = embeddingDim_;
+        auto freshBackend = vector::makeSimeonBackend(cfg);
+        if (!freshBackend || !freshBackend->initialize())
+            return nullptr;
+        auto gen = std::make_shared<vector::EmbeddingGenerator>(std::move(freshBackend), cfg);
+        if (!gen->initialize())
+            return nullptr;
+        return gen;
     }
 
     std::string getProviderName() const override { return "Simeon"; }

@@ -675,6 +675,29 @@ public:
         return records;
     }
 
+    std::unordered_map<std::string, VectorRecord> getDocumentLevelVectorsAll() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        auto result = backend_->getDocumentLevelVectorsAll();
+        if (!result) {
+            return {};
+        }
+
+        auto records = std::move(result.value());
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            TurboQuantMSE* tq = ensureTurboQuant();
+            for (auto& [_hash, rec] : records) {
+                if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
+                    !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
+                    rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
+                                                                         config_.embedding_dim, tq);
+                }
+            }
+        }
+
+        return records;
+    }
+
     bool hasEmbedding(const std::string& document_hash) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
         auto result = backend_->hasEmbedding(document_hash);
@@ -1224,6 +1247,13 @@ VectorDatabase::getVectorsByDocument(const std::string& document_hash) const {
     YAMS_ZONE_SCOPED_N("VectorDB::getVectorsByDocument");
     auto result = pImpl->getVectorsByDocument(document_hash);
     YAMS_PLOT("vector_db::get_vectors_by_document_count", static_cast<int64_t>(result.size()));
+    return result;
+}
+
+std::unordered_map<std::string, VectorRecord> VectorDatabase::getDocumentLevelVectorsAll() const {
+    YAMS_ZONE_SCOPED_N("VectorDB::getDocumentLevelVectorsAll");
+    auto result = pImpl->getDocumentLevelVectorsAll();
+    YAMS_PLOT("vector_db::document_level_vectors_all", static_cast<int64_t>(result.size()));
     return result;
 }
 

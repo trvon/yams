@@ -104,6 +104,7 @@ public:
     getVectorsBatch(const std::vector<std::string>& chunk_ids) override;
     Result<std::vector<VectorRecord>>
     getVectorsByDocument(const std::string& document_hash) override;
+    Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() override;
 
     Result<bool> hasEmbedding(const std::string& document_hash) override;
     Result<std::unordered_set<std::string>> getEmbeddedDocumentHashes() override;

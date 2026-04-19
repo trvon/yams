@@ -123,6 +123,8 @@ simeon_core_srcs = [
   join_paths(simeon_dir, 'src', 'simeon.cpp'),
   join_paths(simeon_dir, 'src', 'tokenizer.cpp'),
   join_paths(simeon_dir, 'src', 'hasher.cpp'),
+  join_paths(simeon_dir, 'src', 'hash_xxh64.cpp'),
+  join_paths(simeon_dir, 'src', 'hash_crc32c.cpp'),
   join_paths(simeon_dir, 'src', 'projection.cpp'),
   join_paths(simeon_dir, 'src', 'arch', 'scalar.cpp'),
 ]

@@ -1989,6 +1989,7 @@ public:
         std::vector<VectorRecord> results;
 
         if (stmt_select_by_doc_) {
+            std::lock_guard stmt_lock(stmt_mutex_);
             sqlite3_reset(stmt_select_by_doc_);
             StmtResetGuard guard(stmt_select_by_doc_);
             sqlite3_bind_text(stmt_select_by_doc_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
@@ -1997,6 +1998,45 @@ public:
                 results.push_back(recordFromStatement(stmt_select_by_doc_));
             }
         }
+
+        return results;
+    }
+
+    Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() {
+        std::shared_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        static constexpr const char* kSelectAllDocLevel = R"sql(
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+       start_offset, end_offset, metadata,
+       model_id, model_version, embedding_version, content_hash,
+       created_at, embedded_at, is_stale, level,
+       source_chunk_ids, parent_document_hash, child_document_hashes,
+       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+FROM vectors WHERE level = ?
+)sql";
+
+        std::unordered_map<std::string, VectorRecord> results;
+
+        std::lock_guard stmt_lock(stmt_mutex_);
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, kSelectAllDocLevel, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"prepare getDocumentLevelVectorsAll: "} + sqlite3_errmsg(db_)};
+        }
+        sqlite3_bind_int(stmt, 1, static_cast<int>(EmbeddingLevel::DOCUMENT));
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto record = recordFromStatement(stmt);
+            auto hash = record.document_hash;
+            if (!hash.empty()) {
+                results.emplace(std::move(hash), std::move(record));
+            }
+        }
+        sqlite3_finalize(stmt);
 
         return results;
     }
@@ -2020,6 +2060,7 @@ public:
         }
 
         if (stmt_has_embedding_) {
+            std::lock_guard stmt_lock(stmt_mutex_);
             sqlite3_reset(stmt_has_embedding_);
             StmtResetGuard guard(stmt_has_embedding_);
             sqlite3_bind_text(stmt_has_embedding_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
@@ -4969,6 +5010,11 @@ SqliteVecBackend::getVectorsBatch(const std::vector<std::string>& chunk_ids) {
 Result<std::vector<VectorRecord>>
 SqliteVecBackend::getVectorsByDocument(const std::string& document_hash) {
     return impl_->getVectorsByDocument(document_hash);
+}
+
+Result<std::unordered_map<std::string, VectorRecord>>
+SqliteVecBackend::getDocumentLevelVectorsAll() {
+    return impl_->getDocumentLevelVectorsAll();
 }
 
 Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {

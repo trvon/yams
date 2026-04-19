@@ -1,4 +1,5 @@
 #include <yams/daemon/components/SearchEngineManager.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
@@ -209,6 +210,58 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     opts.config.enableAdaptiveVectorFallback = true;
     opts.config.enableWeakQueryFanoutBoost = false;
     opts.config.adaptiveVectorSkipMinTier1Hits = 0;
+
+    // Apply topology routing policy from config file. Env vars
+    // (YAMS_SEARCH_TOPOLOGY_*) still override inside SearchEngineBuilder.
+    {
+        auto tp = ConfigResolver::resolveTopologyRoutingPolicy();
+        if (tp.enableWeakQueryRouting) {
+            opts.config.enableTopologyWeakQueryRouting = *tp.enableWeakQueryRouting;
+            spdlog::info("SearchEngine enableTopologyWeakQueryRouting applied via config: {}",
+                         *tp.enableWeakQueryRouting);
+        }
+        if (tp.maxClusters) {
+            opts.config.topologyWeakQueryMaxClusters = *tp.maxClusters;
+            spdlog::info("SearchEngine topologyWeakQueryMaxClusters applied via config: {}",
+                         *tp.maxClusters);
+        }
+        if (tp.maxDocs) {
+            opts.config.topologyWeakQueryMaxDocs = *tp.maxDocs;
+            spdlog::info("SearchEngine topologyWeakQueryMaxDocs applied via config: {}",
+                         *tp.maxDocs);
+        }
+        if (tp.medoidBoost) {
+            opts.config.topologyMedoidBoost = std::max(0.0f, *tp.medoidBoost);
+            spdlog::info("SearchEngine topologyMedoidBoost applied via config: {:.3f}",
+                         opts.config.topologyMedoidBoost);
+        }
+        if (tp.bridgeBoost) {
+            opts.config.topologyBridgeBoost = std::max(0.0f, *tp.bridgeBoost);
+            spdlog::info("SearchEngine topologyBridgeBoost applied via config: {:.3f}",
+                         opts.config.topologyBridgeBoost);
+        }
+        if (tp.routedBaseMultiplier) {
+            opts.config.topologyRoutedBaseMultiplier = std::max(0.0f, *tp.routedBaseMultiplier);
+            spdlog::info("SearchEngine topologyRoutedBaseMultiplier applied via config: {:.3f}",
+                         opts.config.topologyRoutedBaseMultiplier);
+        }
+        if (tp.routingVariant) {
+            using V = yams::search::SearchEngineConfig::TopologyRoutingVariant;
+            const auto& raw = *tp.routingVariant;
+            if (raw == "vector_seed")
+                opts.config.topologyRoutingVariant = V::VectorSeed;
+            else if (raw == "kg_walk")
+                opts.config.topologyRoutingVariant = V::KgWalk;
+            else if (raw == "score_replace")
+                opts.config.topologyRoutingVariant = V::ScoreReplace;
+            else if (raw == "medoid_promote")
+                opts.config.topologyRoutingVariant = V::MedoidPromote;
+            else
+                opts.config.topologyRoutingVariant = V::Baseline;
+            spdlog::info("SearchEngine topologyRoutingVariant applied via config: {}", raw);
+        }
+    }
+
     if (!vectorEnabled) {
         opts.config.vectorWeight = 0.0f;
         opts.config.vectorMaxResults = 0;

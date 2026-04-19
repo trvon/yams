@@ -746,6 +746,11 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine topologyBridgeBoost overridden to {:.3f} via env",
                          cfg.topologyBridgeBoost);
         }
+        if (auto routedBase = getEnvFloat("YAMS_SEARCH_TOPOLOGY_ROUTED_BASE_MULTIPLIER")) {
+            cfg.topologyRoutedBaseMultiplier = std::max(0.0f, *routedBase);
+            spdlog::info("SearchEngine topologyRoutedBaseMultiplier overridden to {:.3f} via env",
+                         cfg.topologyRoutedBaseMultiplier);
+        }
         if (auto bypassWarming = getEnvBool("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE")) {
             cfg.bypassCorpusWarmingGate = *bypassWarming;
             spdlog::info("SearchEngine bypassCorpusWarmingGate overridden to {} via env",

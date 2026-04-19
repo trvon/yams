@@ -314,20 +314,12 @@ void EmbeddingService::updateSemanticNeighborGraph(
         }
     }
 
-    const auto embeddedHashes = vdb->getEmbeddedDocumentHashes();
-    for (const auto& documentHash : embeddedHashes) {
-        if (documentVectorsByHash.contains(documentHash)) {
+    const auto docLevelAll = vdb->getDocumentLevelVectorsAll();
+    for (const auto& [documentHash, record] : docLevelAll) {
+        if (documentVectorsByHash.contains(documentHash) || record.embedding.empty()) {
             continue;
         }
-        const auto vectors = vdb->getVectorsByDocument(documentHash);
-        const auto docLevel = std::find_if(
-            vectors.begin(), vectors.end(), [](const yams::vector::VectorRecord& record) {
-                return record.level == yams::vector::EmbeddingLevel::DOCUMENT &&
-                       !record.embedding.empty();
-            });
-        if (docLevel != vectors.end()) {
-            documentVectorsByHash.emplace(documentHash, docLevel->embedding);
-        }
+        documentVectorsByHash.emplace(documentHash, record.embedding);
     }
     if (documentVectorsByHash.size() < 2) {
         return;

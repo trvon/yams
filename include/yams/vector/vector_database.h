@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -313,6 +314,7 @@ public:
     std::map<std::string, VectorRecord>
     getVectorsBatch(const std::vector<std::string>& chunk_ids) const;
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const;
+    std::unordered_map<std::string, VectorRecord> getDocumentLevelVectorsAll() const;
     bool hasEmbedding(const std::string& document_hash) const;
     std::unordered_set<std::string> getEmbeddedDocumentHashes() const;
 

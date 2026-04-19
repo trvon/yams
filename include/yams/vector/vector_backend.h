@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <yams/core/types.h>
@@ -121,6 +122,16 @@ public:
      */
     virtual Result<std::vector<VectorRecord>>
     getVectorsByDocument(const std::string& document_hash) = 0;
+
+    /**
+     * @brief Fetch every document-level vector in one pass, keyed by document hash.
+     *
+     * Avoids the N-call loop through `getVectorsByDocument` when a caller needs
+     * doc-level embeddings for the whole corpus (topology rebuild, semantic
+     * neighbor graph). One prepared-statement reset cycle instead of N — on
+     * macOS this sidesteps libsqlite3's `purgeableCacheShrink` per-reset cost.
+     */
+    virtual Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() = 0;
 
     /**
      * @brief Check if a document has embeddings

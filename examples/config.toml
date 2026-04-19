@@ -187,7 +187,7 @@ auto_generate = false
 auto_on_add = false
 # Preferred embedding model (set to "simeon-default" when backend = "simeon")
 preferred_model = "all-MiniLM-L6-v2"
-# Path to model files
+# Root directory where name-based models are resolved (read by the ONNX plugin)
 model_path = "~/.yams/models"
 # Path to tokenizer
 tokenizer_path = "models/tokenizer.json"
@@ -211,9 +211,9 @@ track_content_hash = true
 model_version = "1.0.0"
 # Embedding schema version
 embedding_schema_version = 1
-# Keep model loaded in memory (hot) for better performance
+# Keep the embedding model resident in memory (ONNX plugin reads this)
 keep_model_hot = true
-# Model unload timeout in seconds (0 = never unload)
+# Unload an idle embedding model after this many seconds (0 = never unload)
 model_idle_timeout = 300
 # Preload model on startup
 preload_on_startup = false
@@ -266,6 +266,10 @@ max_memory_gb = 0
 log_level = "info"
 # Auto-rebuild vector schema when embedding dimensions change
 auto_rebuild_on_dim_mismatch = true
+# Auto-repair missing/corrupted chunks and embeddings in the background
+auto_repair = true
+# Batch size for auto-repair passes
+auto_repair_batch_size = 16
 # Prefer centralized tuning (TuningManager); set to true only if you need legacy in-loop tuner
 # use_legacy_tuner = false
 
@@ -283,6 +287,16 @@ initial_delay_minutes = 10
 [tuning]
 # Default tuning preset applied by the daemon. Options: "efficient", "balanced", "aggressive".
 profile = "balanced"
+# CLI <-> daemon client-pool worker threads
+cli_pool_threads = 2
+# Max concurrent in-flight list requests admitted to the daemon
+list_inflight_limit = 8
+# How long list requests wait for admission before erroring (ms)
+list_admission_wait_ms = 200
+# Max concurrent in-flight grep requests
+grep_inflight_limit = 1
+# How long grep requests wait for admission before erroring (ms)
+grep_admission_wait_ms = 20000
 # backpressure_read_pause_ms = 5
 # worker_poll_ms = 150
 # idle_cpu_pct = 10.0
@@ -447,7 +461,7 @@ medoid_boost = 0.05
 bridge_boost = 0.03
 # Score multiplier applied to baseline (non-routed) candidates when routing fires
 routed_base_multiplier = 0.85
-# Routing variant: "baseline" | "medoid_only" | "bridge_only" | "full"
+# Routing variant: "baseline" | "vector_seed" | "kg_walk" | "score_replace" | "medoid_promote"
 routing_variant = "baseline"
 
 [knowledge_graph]
@@ -577,56 +591,6 @@ fallback_to_local = true
 max_retries = 3
 # Batch size for embedding requests
 batch_size = 32
-
-[experimental]
-# Enable experimental features
-enable = false
-
-[experimental.bert_ner]
-# Enable BERT Named Entity Recognition
-enable = false
-# Path to BERT model
-model_path = ""
-# Model name
-model_name = "bert-base-NER"
-# Batch size for processing
-batch_size = 16
-# Minimum confidence threshold
-confidence_threshold = 0.8
-# Automatically tag documents
-auto_tag = false
-# Update knowledge graph with entities
-update_knowledge_graph = false
-# Entity types to extract
-entity_types = ["PERSON", "ORG", "LOC", "MISC"]
-
-[experimental.auto_tagging]
-# Enable automatic tagging
-enable = false
-# Use BERT NER for tagging
-use_bert_ner = false
-# Use keyword extraction
-use_keyword_extraction = true
-# Use topic modeling
-use_topic_modeling = false
-# Minimum tag confidence
-min_tag_confidence = 0.7
-# Maximum tags per document
-max_tags_per_document = 10
-# Update frequency (hours)
-tag_update_frequency_hours = 24
-
-[experimental.smart_chunking]
-# Enable smart chunking
-enable = false
-# Use semantic boundaries
-use_semantic_boundaries = false
-# Use sentence detection
-use_sentence_detection = true
-# Preserve code blocks
-preserve_code_blocks = true
-# Preserve markdown sections
-preserve_markdown_sections = true
 
 [classification]
 # Enable BART-based document classification for intelligent tagging

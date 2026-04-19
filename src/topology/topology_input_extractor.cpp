@@ -188,13 +188,23 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
 
     localStats.documentsLoaded = documents.size();
 
+    std::unordered_map<std::string, vector::VectorRecord> docLevelVectors;
+    if (config.includeEmbeddings && vectorDb_) {
+        docLevelVectors = vectorDb_->getDocumentLevelVectorsAll();
+    }
+
     std::vector<TopologyDocumentInput> extracted;
     extracted.reserve(documents.size());
     for (const auto& document : documents) {
         std::vector<float> embedding;
         if (config.includeEmbeddings && vectorDb_) {
-            auto vectors = vectorDb_->getVectorsByDocument(document.sha256Hash);
-            embedding = aggregateEmbedding(vectors);
+            auto it = docLevelVectors.find(document.sha256Hash);
+            if (it != docLevelVectors.end() && !it->second.embedding.empty()) {
+                embedding = it->second.embedding;
+            } else {
+                auto vectors = vectorDb_->getVectorsByDocument(document.sha256Hash);
+                embedding = aggregateEmbedding(vectors);
+            }
             if (embedding.empty()) {
                 ++localStats.documentsMissingEmbeddings;
                 if (config.requireEmbeddings) {

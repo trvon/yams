@@ -295,7 +295,7 @@ static bool forceMockEmbeddingsForBench() {
 }
 
 static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, bool vectorsDisabled,
-                                           bool forceMockEmbeddings) {
+                                           bool forceMockEmbeddings, bool embedBackendSimeon) {
     if (!harness || !harness->daemon() || vectorsDisabled) {
         return;
     }
@@ -312,6 +312,16 @@ static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, b
         }
         auto sharedProvider = std::make_shared<BenchmarkMockModelProvider>(dim);
         serviceManager->__test_setModelProvider(sharedProvider);
+    }
+
+    if (embedBackendSimeon) {
+        auto ready = serviceManager->ensureEmbeddingModelReadySync("simeon-default", {}, 10000,
+                                                                   false, false);
+        if (!ready) {
+            spdlog::warn("[Bench] Simeon provider not ready for retrieval bench: {}",
+                         ready.error().message);
+        }
+        return;
     }
 
     auto ready =
@@ -1545,6 +1555,25 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
                     "ewma_graph_rerank_contribution_rate",
                 };
                 for (const auto& key : kKeys) {
+                    if (auto it = parsed.find(key); it != parsed.end() && it->is_number()) {
+                        summary.tunerSignalSamples[key].push_back(it->get<double>());
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    if (auto runtimeConfig = searchStats.find("tuner_runtime_config_json");
+        runtimeConfig != searchStats.end()) {
+        try {
+            auto parsed = json::parse(runtimeConfig->second);
+            if (parsed.is_object()) {
+                static const std::vector<std::string> kWeightKeys = {
+                    "text_weight", "vector_weight", "entity_vector_weight", "path_tree_weight",
+                    "kg_weight",   "tag_weight",    "metadata_weight",
+                };
+                for (const auto& key : kWeightKeys) {
                     if (auto it = parsed.find(key); it != parsed.end() && it->is_number()) {
                         summary.tunerSignalSamples[key].push_back(it->get<double>());
                     }
@@ -4057,6 +4086,46 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
         {"num_queries", result.keywordMetrics.numQueries},
     };
 
+    {
+        auto sampleMean = [](const std::vector<double>& v) -> double {
+            if (v.empty())
+                return 0.0;
+            double sum = 0.0;
+            for (double x : v)
+                sum += x;
+            return sum / static_cast<double>(v.size());
+        };
+        auto meanSignal = [&](const std::string& key) -> double {
+            auto it = result.hybridDiagnostics.tunerSignalSamples.find(key);
+            return it == result.hybridDiagnostics.tunerSignalSamples.end() ? 0.0
+                                                                           : sampleMean(it->second);
+        };
+        auto meanScoreMass = [&](const std::string& src) -> double {
+            auto it = result.hybridDiagnostics.fusionSourceScoreMassSamples.find(src);
+            return it == result.hybridDiagnostics.fusionSourceScoreMassSamples.end()
+                       ? 0.0
+                       : sampleMean(it->second);
+        };
+        const double denseMass = meanScoreMass("vector") + meanScoreMass("compressed_ann") +
+                                 meanScoreMass("graph_vector") + meanScoreMass("entity_vector");
+        const double lexicalMass =
+            meanScoreMass("text") + meanScoreMass("graph_text") + meanScoreMass("path_tree");
+        const double otherMass = meanScoreMass("kg") + meanScoreMass("tag") +
+                                 meanScoreMass("metadata") + meanScoreMass("symbol");
+        const double totalMass = denseMass + lexicalMass + otherMass;
+        const double denseContrib = totalMass > 0.0 ? denseMass / totalMass : 0.0;
+        const double bm25Contrib = totalMass > 0.0 ? lexicalMass / totalMass : 0.0;
+
+        j["fusion_alpha"] = meanSignal("vector_weight");
+        j["text_weight"] = meanSignal("text_weight");
+        j["dense_contrib"] = denseContrib;
+        j["bm25_contrib"] = bm25Contrib;
+        j["other_contrib"] = totalMass > 0.0 ? otherMass / totalMass : 0.0;
+
+        j["ngram_range_used"] = "3-5";
+        j["idf_weighted"] = false;
+    }
+
     j["hybrid_debug_summary"] = queryDiagnosticsToJson(result.hybridDiagnostics);
     j["keyword_debug_summary"] = queryDiagnosticsToJson(result.keywordDiagnostics);
 
@@ -5150,11 +5219,14 @@ struct BenchFixture {
         harnessOptions.useMockModelProvider = vectorsDisabled || forceMockEmbeddings;
         harnessOptions.autoLoadPlugins =
             !vectorsDisabled && !forceMockEmbeddings && !embedBackendSimeon;
-        harnessOptions.configureModelPool =
-            !vectorsDisabled && !forceMockEmbeddings && !embedBackendSimeon;
+        harnessOptions.configureModelPool = !vectorsDisabled && !forceMockEmbeddings;
         harnessOptions.modelPoolLazyLoading = false;
         harnessOptions.pluginDirStrict =
             !vectorsDisabled && !forceMockEmbeddings && !embedBackendSimeon;
+        if (embedBackendSimeon) {
+            harnessOptions.enableModelProvider = true;
+            harnessOptions.useMockModelProvider = false;
+        }
 
         // YAMS_BENCH_DATA_DIR: reuse a pre-ingested data directory to skip
         // corpus ingestion + embedding wait on repeated benchmark runs.
@@ -5427,10 +5499,17 @@ struct BenchFixture {
                                   << "\"\n\n";
                     }
                     configOut << "[embeddings]\n";
-                    configOut << "preferred_model = \"embeddinggemma-300m\"\n";
-                    configOut << "embedding_dim = 768\n\n";
-                    configOut << "[daemon.models]\n";
-                    configOut << "preload_models = [\"embeddinggemma-300m\"]\n";
+                    if (embedBackendSimeon) {
+                        configOut << "preferred_model = \"simeon-default\"\n";
+                        configOut << "embedding_dim = 384\n\n";
+                        configOut << "[daemon.models]\n";
+                        configOut << "preload_models = []\n";
+                    } else {
+                        configOut << "preferred_model = \"embeddinggemma-300m\"\n";
+                        configOut << "embedding_dim = 768\n\n";
+                        configOut << "[daemon.models]\n";
+                        configOut << "preload_models = [\"embeddinggemma-300m\"]\n";
+                    }
                     configOut.close();
                     harnessOptions.configPath = configPath;
                     spdlog::info("Using isolated benchmark config: {}", configPath.string());
@@ -5449,7 +5528,8 @@ struct BenchFixture {
         if (!harness->start(daemonReadyTimeout))
             throw std::runtime_error("Failed to start daemon");
 
-        ensureBenchmarkEmbeddingsReady(harness.get(), vectorsDisabled, forceMockEmbeddings);
+        ensureBenchmarkEmbeddingsReady(harness.get(), vectorsDisabled, forceMockEmbeddings,
+                                       embedBackendSimeon);
 
         if (useBEIR) {
             const BEIRDataset& dataset = preparedBeirDataset.value();
