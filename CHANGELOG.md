@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [0.13.2](https://github.com/trvon/yams/compare/v0.13.1...v0.13.2) (2026-04-19)
+
+
+### Fixed
+
+* fixing apt update, re-rolling gpg public key ([76f9170](https://github.com/trvon/yams/commit/76f917051f2efd8678e5cbef78db36072299251b))
+
 ## [0.13.1](https://github.com/trvon/yams/compare/v0.13.0...v0.13.1) (2026-04-18)
 
 
@@ -195,4 +202,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **build:** centralize dependency discovery and trim Meson duplication ([0261b90](https://github.com/trvon/yams/commit/0261b90a7bb449dafefec0212532605e54f2517d))
 * **vector:** remove dead thread-local TurboQuant plumbing from vector_index_manager ([4ac90c7](https://github.com/trvon/yams/commit/4ac90c7573fc9da403182abff410d7f4120a7b94))
-
