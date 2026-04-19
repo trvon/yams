@@ -388,6 +388,23 @@ static PendingPostIngestByMime processTask(ServiceManager* sm,
                           "(bytesStored={}, bytesDeduped={})",
                           serviceResp.hash, serviceResp.bytesStored, serviceResp.bytesDeduped);
 
+            if (auto kgStore = sm ? sm->getKgStore() : nullptr;
+                kgStore && !serviceResp.hash.empty()) {
+                auto blobRes = kgStore->ensureBlobNode(serviceResp.hash);
+                if (!blobRes) {
+                    spdlog::debug("[IngestService] ensureBlobNode failed for {}: {}",
+                                  serviceResp.hash.substr(0, 8), blobRes.error().message);
+                }
+                const std::string& docName =
+                    !req.name.empty() ? req.name
+                                      : (!req.path.empty() ? req.path : serviceResp.hash);
+                auto docRes = kgStore->ensureDocumentNode(serviceResp.hash, docName);
+                if (!docRes) {
+                    spdlog::debug("[IngestService] ensureDocumentNode failed for {}: {}",
+                                  serviceResp.hash.substr(0, 8), docRes.error().message);
+                }
+            }
+
             if (sm && sm->getPostIngestQueue() && !serviceResp.hash.empty()) {
                 spdlog::debug("[IngestService] Enqueuing post-ingest for hash={}",
                               serviceResp.hash);
