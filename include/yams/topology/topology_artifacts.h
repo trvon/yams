@@ -72,13 +72,14 @@ struct TopologyBuildConfig {
     DirtyRegionExpansionMode dirtyRegionExpansion{
         DirtyRegionExpansionMode::PriorClusterAndNeighbors};
     Duration budget{Duration{250}};
-    // KMeansEmbedding engine: requested cluster count (0 = auto via sqrt_n heuristic);
-    // ignored by other engines.
-    std::size_t kmeansK{0};
     // HDBSCAN engine: minimum points for core-distance / minimum cluster size
     // (0 = auto from corpus size). Ignored by other engines.
     std::size_t hdbscanMinPoints{0};
     std::size_t hdbscanMinClusterSize{0};
+    // SGC (Wu 2019) feature propagation hops applied to document embeddings
+    // before clustering runs: X' = S_hat^K * X. K = 0 disables smoothing.
+    // Only embedding-consuming engines (HDBSCAN) observe the smoothed features.
+    std::size_t featureSmoothingHops{0};
 };
 
 struct TopologyDirtyRegion {

@@ -1,0 +1,27 @@
+# Infer Static Analysis — Known False Positives
+# Updated: 2026-04-08, Infer v1.2.0
+# See docs/design/infer-findings-matrix.md for full analysis
+#
+# Each entry documents why the finding is a false positive.
+
+# ─── DEADLOCK (3 findings) ─────────────────────────────────────────────────────
+# request_handler.cpp uses scoped lock_guard<mutex> on ctx_mtx_ at multiple
+# sequential (non-nested) call sites within boost::asio coroutines. Every
+# acquisition is released (lock_guard dtor) before any co_await or function call
+# that re-acquires. Infer cannot model lock_guard scope across co_await points.
+#   Line 790  handle_connection
+#   Line 871  handle_request (delegates to handle_streaming_request)
+#   Line 1149 handle_streaming_request
+
+# ─── USE_AFTER_DELETE (3 findings) ─────────────────────────────────────────────
+# downloader_catch2_test.cpp uses raw pointer aliasing with unique_ptr:
+#   auto http = make_unique<T>(); auto* ptr = http.get(); dm = make(..., move(http));
+# The raw pointer is valid because dm owns the object for the entire test scope.
+# Infer models unique_ptr move as deletion of the pointed-to object.
+#   Line 623  CATCH2_INTERNAL_TEST_19 — httpPtr
+#   Line 715  CATCH2_INTERNAL_TEST_22 — diskPtr
+#   Line 754  CATCH2_INTERNAL_TEST_25 — httpPtr
+
+# ─── NULLPTR_DEREFERENCE (1 finding) ───────────────────────────────────────────
+# EntityGraphService.cpp line 111 — Infer mismodels std::atomic<bool> member
+# stop_ as a nullable pointer (known Infer limitation with atomic types).

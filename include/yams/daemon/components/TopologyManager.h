@@ -140,10 +140,6 @@ public:
         return autoRebuildEnabled_.load(std::memory_order_acquire);
     }
 
-    void setKmeansK(std::size_t k) { kmeansK_.store(k, std::memory_order_release); }
-
-    [[nodiscard]] std::size_t kmeansK() const { return kmeansK_.load(std::memory_order_acquire); }
-
     void setHdbscanMinPoints(std::size_t n) {
         hdbscanMinPoints_.store(n, std::memory_order_release);
     }
@@ -158,6 +154,14 @@ public:
 
     [[nodiscard]] std::size_t hdbscanMinClusterSize() const {
         return hdbscanMinClusterSize_.load(std::memory_order_acquire);
+    }
+
+    void setFeatureSmoothingHops(std::size_t n) {
+        featureSmoothingHops_.store(n, std::memory_order_release);
+    }
+
+    [[nodiscard]] std::size_t featureSmoothingHops() const {
+        return featureSmoothingHops_.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] TelemetrySnapshot getTelemetrySnapshot() const;
@@ -186,9 +190,9 @@ private:
     std::atomic<bool> rebuildScheduled_{false};
     std::atomic<bool> autoRebuildEnabled_{true};
     std::atomic<std::uint64_t> publishedEpoch_{0};
-    std::atomic<std::size_t> kmeansK_{0};
     std::atomic<std::size_t> hdbscanMinPoints_{0};
     std::atomic<std::size_t> hdbscanMinClusterSize_{0};
+    std::atomic<std::size_t> featureSmoothingHops_{0};
 };
 
 } // namespace yams::daemon

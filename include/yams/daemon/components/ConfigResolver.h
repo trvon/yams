@@ -62,9 +62,9 @@ public:
 
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
-        std::optional<std::size_t> kmeansK;
         std::optional<std::size_t> hdbscanMinPoints;
         std::optional<std::size_t> hdbscanMinClusterSize;
+        std::optional<std::size_t> featureSmoothingHops;
     };
 
     struct PostIngestCaps {
@@ -286,13 +286,15 @@ public:
      * @brief Resolve topology cluster-engine selection from config file.
      *
      * Reads [topology] keys. Callers apply `engine` to
-     * TuningConfig::topologyAlgorithm (which seeds
-     * topology::makeEngine dispatch) and `kmeans_k` to the
-     * TopologyBuildConfig consumed by the KMeansEmbedding engine.
+     * TuningConfig::topologyAlgorithm (which seeds topology::makeEngine
+     * dispatch) and the hdbscan_* knobs to TopologyBuildConfig.
      *
      * Config keys:
-     * - topology.engine = connected|louvain|label_propagation|kmeans_embedding
-     * - topology.kmeans_k = int (0 = auto: sqrt_n)
+     * - topology.engine = connected|hdbscan
+     * - topology.hdbscan_min_points = int (0 = auto from corpus size)
+     * - topology.hdbscan_min_cluster_size = int (0 = auto from corpus size)
+     * - topology.feature_smoothing_hops = int (0 = off; SGC K for embedding
+     *   propagation over the semantic-neighbor graph before clustering)
      */
     static TopologyEnginePolicy resolveTopologyEnginePolicy();
 

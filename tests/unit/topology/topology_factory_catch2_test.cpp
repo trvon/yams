@@ -2,9 +2,13 @@
 
 #include <yams/topology/topology_artifacts.h>
 #include <yams/topology/topology_factory.h>
+#include <yams/topology/topology_sgc.h>
+
+#include <cmath>
 
 #include <algorithm>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using yams::topology::ITopologyEngine;
@@ -108,12 +112,10 @@ TEST_CASE("topology::makeEngine builds artifacts for the Axis-8 engines",
     yams::topology::TopologyBuildConfig cfg;
     cfg.reciprocalOnly = true;
     cfg.inputKind = yams::topology::TopologyInputKind::Hybrid;
-    cfg.kmeansK = 2;
     cfg.hdbscanMinPoints = 2;
     cfg.hdbscanMinClusterSize = 2;
 
-    for (const char* key :
-         {"connected", "louvain", "label_propagation", "kmeans_embedding", "hdbscan"}) {
+    for (const char* key : {"connected", "hdbscan"}) {
         auto engine = makeEngine(key);
         REQUIRE(engine != nullptr);
         auto result = engine->buildArtifacts(docs, cfg);
@@ -125,84 +127,61 @@ TEST_CASE("topology::makeEngine builds artifacts for the Axis-8 engines",
     }
 }
 
-namespace {
-
-// Two K_4 cliques {a,b,c,d} and {e,f,g,h} joined by a single weak bridge d↔e.
-// Louvain should split the graph into two communities of size 4 because the
-// modularity gain from keeping the bridge edge inside a merged community is
-// dominated by the loss of per-community density. This is the classic
-// "bridged cliques" community-detection benchmark — any modularity-optimizing
-// algorithm must recover it.
-std::vector<yams::topology::TopologyDocumentInput> buildBridgedCliquesFixture() {
-    const auto edge = [](std::string hash, float s) {
-        yams::topology::TopologyNeighbor n;
-        n.documentHash = std::move(hash);
-        n.score = s;
-        n.reciprocal = true;
-        return n;
-    };
-    auto mk = [&](std::string hash, std::vector<std::pair<std::string, float>> nbrs) {
-        yams::topology::TopologyDocumentInput doc;
-        doc.documentHash = std::move(hash);
-        for (auto& [nb, w] : nbrs) {
-            doc.neighbors.push_back(edge(std::move(nb), w));
-        }
-        return doc;
-    };
-    constexpr float W = 1.0f;
-    constexpr float B = 0.05f; // bridge weight << intra-clique weight
-    std::vector<yams::topology::TopologyDocumentInput> docs;
-    docs.push_back(mk("a", {{"b", W}, {"c", W}, {"d", W}}));
-    docs.push_back(mk("b", {{"a", W}, {"c", W}, {"d", W}}));
-    docs.push_back(mk("c", {{"a", W}, {"b", W}, {"d", W}}));
-    docs.push_back(mk("d", {{"a", W}, {"b", W}, {"c", W}, {"e", B}})); // bridge
-    docs.push_back(mk("e", {{"d", B}, {"f", W}, {"g", W}, {"h", W}})); // bridge
-    docs.push_back(mk("f", {{"e", W}, {"g", W}, {"h", W}}));
-    docs.push_back(mk("g", {{"e", W}, {"f", W}, {"h", W}}));
-    docs.push_back(mk("h", {{"e", W}, {"f", W}, {"g", W}}));
-    return docs;
-}
-
-} // namespace
-
-TEST_CASE("topology::louvain splits bridged cliques by modularity",
-          "[topology][factory][axis8][louvain][catch2]") {
-    // Correctness gate: Louvain must recover the known community structure
-    // on the bridged-K_4 benchmark before we trust any L+/XXL bench results.
-    // Expected outcome: two communities, each containing exactly one clique
-    // ({a,b,c,d} and {e,f,g,h}).
-    const auto docs = buildBridgedCliquesFixture();
+TEST_CASE("topology::applySGCSmoothing hops=0 is a no-op", "[topology][sgc][catch2]") {
+    auto docs = buildTwoClusterFixture();
+    const auto before = docs;
     yams::topology::TopologyBuildConfig cfg;
     cfg.reciprocalOnly = true;
-    cfg.inputKind = yams::topology::TopologyInputKind::Hybrid;
-
-    auto engine = makeEngine("louvain");
-    REQUIRE(engine != nullptr);
-    auto result = engine->buildArtifacts(docs, cfg);
-    REQUIRE(result);
-    const auto& batch = result.value();
-    CAPTURE(batch.algorithm);
-
-    REQUIRE(batch.clusters.size() == 2);
-    REQUIRE(batch.memberships.size() == docs.size());
-
-    std::unordered_map<std::string, std::string> clusterOf;
-    for (const auto& m : batch.memberships) {
-        clusterOf.emplace(m.documentHash, m.clusterId);
+    yams::topology::applySGCSmoothing(docs, cfg, 0);
+    REQUIRE(docs.size() == before.size());
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(docs[i].embedding.size() == before[i].embedding.size());
+        for (std::size_t d = 0; d < docs[i].embedding.size(); ++d) {
+            CHECK(docs[i].embedding[d] == before[i].embedding[d]);
+        }
     }
-    REQUIRE(clusterOf.size() == docs.size());
+}
 
-    const std::string clusterA = clusterOf.at("a");
-    const std::string clusterE = clusterOf.at("e");
-    CHECK(clusterA != clusterE);
-    for (const char* h : {"b", "c", "d"}) {
-        CAPTURE(h);
-        CHECK(clusterOf.at(h) == clusterA);
-    }
-    for (const char* h : {"f", "g", "h"}) {
-        CAPTURE(h);
-        CHECK(clusterOf.at(h) == clusterE);
-    }
+TEST_CASE("topology::applySGCSmoothing shrinks intra-cluster variance", "[topology][sgc][catch2]") {
+    auto docs = buildTwoClusterFixture();
+    yams::topology::TopologyBuildConfig cfg;
+    cfg.reciprocalOnly = true;
+
+    const auto variance = [](const std::vector<yams::topology::TopologyDocumentInput>& v,
+                             std::size_t lo, std::size_t hi) {
+        std::vector<double> mean(v[lo].embedding.size(), 0.0);
+        const double n = static_cast<double>(hi - lo);
+        for (std::size_t i = lo; i < hi; ++i) {
+            for (std::size_t d = 0; d < mean.size(); ++d) {
+                mean[d] += static_cast<double>(v[i].embedding[d]);
+            }
+        }
+        for (auto& m : mean) {
+            m /= n;
+        }
+        double acc = 0.0;
+        for (std::size_t i = lo; i < hi; ++i) {
+            for (std::size_t d = 0; d < mean.size(); ++d) {
+                const double diff = static_cast<double>(v[i].embedding[d]) - mean[d];
+                acc += diff * diff;
+            }
+        }
+        return acc / n;
+    };
+
+    const double beforeClusterA = variance(docs, 0, 3);
+    const double beforeClusterB = variance(docs, 3, 6);
+
+    auto smoothed = docs;
+    yams::topology::applySGCSmoothing(smoothed, cfg, 2);
+
+    REQUIRE(smoothed.size() == docs.size());
+    const double afterClusterA = variance(smoothed, 0, 3);
+    const double afterClusterB = variance(smoothed, 3, 6);
+
+    CHECK(afterClusterA < beforeClusterA);
+    CHECK(afterClusterB < beforeClusterB);
 }
 
 TEST_CASE("topology::hdbscan recovers two dense embedding clusters",

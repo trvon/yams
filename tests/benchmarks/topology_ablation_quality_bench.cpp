@@ -989,12 +989,15 @@ struct TopologyConfigOverride {
     std::optional<int> rrfK;
     std::optional<std::string> routeScoring;
     std::optional<std::string> engine;
-    std::optional<int> kmeansK;
+    std::optional<int> hdbscanMinPoints;
+    std::optional<int> hdbscanMinClusterSize;
+    std::optional<int> featureSmoothingHops;
 
     [[nodiscard]] bool empty() const {
         return !integration.has_value() && !recallExpandPerCluster.has_value() &&
                !rrfK.has_value() && !routeScoring.has_value() && !engine.has_value() &&
-               !kmeansK.has_value();
+               !hdbscanMinPoints.has_value() && !hdbscanMinClusterSize.has_value() &&
+               !featureSmoothingHops.has_value();
     }
 };
 
@@ -1019,13 +1022,20 @@ fs::path writeTopologyConfigToml(const TopologyConfigOverride& ovr) {
     if (ovr.routeScoring.has_value()) {
         out << "route_scoring = \"" << *ovr.routeScoring << "\"\n";
     }
-    if (ovr.engine.has_value() || ovr.kmeansK.has_value()) {
+    if (ovr.engine.has_value() || ovr.hdbscanMinPoints.has_value() ||
+        ovr.hdbscanMinClusterSize.has_value() || ovr.featureSmoothingHops.has_value()) {
         out << "\n[topology]\n";
         if (ovr.engine.has_value()) {
             out << "engine = \"" << *ovr.engine << "\"\n";
         }
-        if (ovr.kmeansK.has_value()) {
-            out << "kmeans_k = " << *ovr.kmeansK << "\n";
+        if (ovr.hdbscanMinPoints.has_value()) {
+            out << "hdbscan_min_points = " << *ovr.hdbscanMinPoints << "\n";
+        }
+        if (ovr.hdbscanMinClusterSize.has_value()) {
+            out << "hdbscan_min_cluster_size = " << *ovr.hdbscanMinClusterSize << "\n";
+        }
+        if (ovr.featureSmoothingHops.has_value()) {
+            out << "feature_smoothing_hops = " << *ovr.featureSmoothingHops << "\n";
         }
     }
     return path;
@@ -1657,16 +1667,11 @@ TEST_CASE("[!benchmark][topology-ablation-quality] axis-8 cluster engine sweep",
 
     struct EngineCell {
         std::string engine;
-        std::optional<int> kmeansK; // only meaningful for kmeans_embedding
         std::string label;
     };
     const std::vector<EngineCell> engineGrid = {
-        {"connected", std::nullopt, "connected"},
-        {"louvain", std::nullopt, "louvain"},
-        {"label_propagation", std::nullopt, "label_propagation"},
-        {"kmeans_embedding", 0, "kmeans_embedding_auto"},
-        {"kmeans_embedding", 8, "kmeans_embedding_k8"},
-        {"kmeans_embedding", 32, "kmeans_embedding_k32"},
+        {"connected", "connected"},
+        {"hdbscan", "hdbscan"},
     };
 
     const auto envInt = [](const char* name, int fallback) {
@@ -1687,6 +1692,9 @@ TEST_CASE("[!benchmark][topology-ablation-quality] axis-8 cluster engine sweep",
     const auto routeK = static_cast<std::size_t>(envInt("YAMS_BENCH_AXIS8_ROUTE_K", 4));
     const auto maxDocs = static_cast<std::size_t>(envInt("YAMS_BENCH_AXIS8_MAX_DOCS", 128));
     const std::string routeScoring = envStr("YAMS_BENCH_AXIS8_ROUTE_SCORING", "current");
+    const int hdbscanMinCluster = envInt("YAMS_BENCH_AXIS8_HDBSCAN_MIN_CLUSTER", 0);
+    const int hdbscanMinPoints = envInt("YAMS_BENCH_AXIS8_HDBSCAN_MIN_POINTS", 0);
+    const int featureSmoothingHops = envInt("YAMS_BENCH_TOPOLOGY_SGC_HOPS", 0);
 
     const std::string tier = std::getenv("YAMS_BENCH_TIER") ? std::getenv("YAMS_BENCH_TIER") : "S";
 
@@ -1732,8 +1740,18 @@ TEST_CASE("[!benchmark][topology-ablation-quality] axis-8 cluster engine sweep",
 
         TopologyConfigOverride override;
         override.engine = cell.engine;
-        override.kmeansK = cell.kmeansK;
         override.routeScoring = routeScoring;
+        if (cell.engine == "hdbscan") {
+            if (hdbscanMinCluster > 0) {
+                override.hdbscanMinClusterSize = hdbscanMinCluster;
+            }
+            if (hdbscanMinPoints > 0) {
+                override.hdbscanMinPoints = hdbscanMinPoints;
+            }
+            if (featureSmoothingHops > 0) {
+                override.featureSmoothingHops = featureSmoothingHops;
+            }
+        }
         auto outcome =
             runCell(routeK, maxDocs, kMidMedoidBoost, kMidBridgeBoost, nullptr, cfg, override);
 
@@ -1752,12 +1770,12 @@ TEST_CASE("[!benchmark][topology-ablation-quality] axis-8 cluster engine sweep",
             {"corpus_size_expected", expectedCorpusSize},
             {"beir_dataset", (cfg.mode == FixtureMode::Beir) ? cfg.beirDataset : ""},
             {"topology_engine_requested", cell.engine},
-            {"kmeans_k_requested", cell.kmeansK.value_or(-1)},
             {"route_k", routeK},
             {"max_docs_cap", maxDocs},
             {"route_scoring", routeScoring},
             {"medoid_boost", kMidMedoidBoost},
             {"bridge_boost", kMidBridgeBoost},
+            {"feature_smoothing_hops", (cell.engine == "hdbscan") ? featureSmoothingHops : 0},
         };
         record.update(toCellJson(outcome));
         emitRecord(outputPath, record);

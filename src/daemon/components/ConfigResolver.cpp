@@ -791,13 +791,6 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
                 policy.engine = it->second;
             }
         }
-        if (auto it = kv.find("topology.kmeans_k"); it != kv.end()) {
-            try {
-                policy.kmeansK = static_cast<std::size_t>(std::stoul(it->second));
-            } catch (const std::exception&) {
-                // Ignore invalid value; leave nullopt.
-            }
-        }
         if (auto it = kv.find("topology.hdbscan_min_points"); it != kv.end()) {
             try {
                 policy.hdbscanMinPoints = static_cast<std::size_t>(std::stoul(it->second));
@@ -807,6 +800,12 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         if (auto it = kv.find("topology.hdbscan_min_cluster_size"); it != kv.end()) {
             try {
                 policy.hdbscanMinClusterSize = static_cast<std::size_t>(std::stoul(it->second));
+            } catch (const std::exception&) {
+            }
+        }
+        if (auto it = kv.find("topology.feature_smoothing_hops"); it != kv.end()) {
+            try {
+                policy.featureSmoothingHops = static_cast<std::size_t>(std::stoul(it->second));
             } catch (const std::exception&) {
             }
         }

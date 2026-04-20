@@ -316,10 +316,6 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             spdlog::info("Topology engine applied via config: {} (resolved={})",
                          *enginePolicy.engine, resolved);
         }
-        if (enginePolicy.kmeansK) {
-            topologyManager_.setKmeansK(*enginePolicy.kmeansK);
-            spdlog::info("Topology kmeans_k applied via config: {}", *enginePolicy.kmeansK);
-        }
         if (enginePolicy.hdbscanMinPoints) {
             topologyManager_.setHdbscanMinPoints(*enginePolicy.hdbscanMinPoints);
             spdlog::info("Topology hdbscan_min_points applied via config: {}",
@@ -329,6 +325,11 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             topologyManager_.setHdbscanMinClusterSize(*enginePolicy.hdbscanMinClusterSize);
             spdlog::info("Topology hdbscan_min_cluster_size applied via config: {}",
                          *enginePolicy.hdbscanMinClusterSize);
+        }
+        if (enginePolicy.featureSmoothingHops) {
+            topologyManager_.setFeatureSmoothingHops(*enginePolicy.featureSmoothingHops);
+            spdlog::info("Topology feature_smoothing_hops applied via config: {}",
+                         *enginePolicy.featureSmoothingHops);
         }
     }
 

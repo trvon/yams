@@ -287,6 +287,221 @@ private:
         std::string traceId;
     };
 
+    std::vector<UnifiedItem>
+    makeDaemonUnifiedItems(const yams::daemon::SearchResponse& resp,
+                           const std::vector<std::string>& includeGlobs = {}) const {
+        std::vector<UnifiedItem> items;
+        items.reserve(resp.results.size());
+        for (const auto& r : resp.results) {
+            std::string path = !r.path.empty() ? r.path
+                                               : (r.metadata.count("path") ? r.metadata.at("path")
+                                                                           : std::string{});
+            if (!includeGlobs.empty() && !matchAnyGlob(path, includeGlobs))
+                continue;
+            items.push_back(UnifiedItem::fromDaemon(r));
+        }
+        return items;
+    }
+
+    std::vector<UnifiedItem>
+    makeLocalUnifiedItems(const yams::app::services::SearchResponse& resp,
+                          const std::vector<std::string>& includeGlobs = {}) const {
+        std::vector<UnifiedItem> items;
+        items.reserve(resp.results.size());
+        for (const auto& r : resp.results) {
+            if (!includeGlobs.empty() && !matchAnyGlob(r.path, includeGlobs))
+                continue;
+            items.push_back(UnifiedItem::fromLocal(r));
+        }
+        return items;
+    }
+
+    RenderContext makeDaemonRenderContext(const yams::daemon::SearchResponse& resp) const {
+        RenderContext ctx;
+        ctx.query = query_;
+        ctx.totalCount = resp.totalCount;
+        ctx.elapsedMs = resp.elapsed.count();
+        ctx.method = "daemon";
+        ctx.traceId = resp.traceId;
+        return ctx;
+    }
+
+    RenderContext makeLocalRenderContext(const yams::app::services::SearchResponse& resp) const {
+        RenderContext ctx;
+        ctx.query = query_;
+        ctx.totalCount = resp.total;
+        ctx.elapsedMs = resp.executionTimeMs;
+        ctx.method = resp.type;
+        return ctx;
+    }
+
+    nlohmann::json makeScoreBreakdownJson(const UnifiedItem& item) {
+        nlohmann::json breakdown;
+        if (item.vectorScore)
+            breakdown["vector_score"] = *item.vectorScore;
+        if (item.keywordScore)
+            breakdown["keyword_score"] = *item.keywordScore;
+        if (item.kgEntityScore)
+            breakdown["kg_entity_score"] = *item.kgEntityScore;
+        if (item.structuralScore)
+            breakdown["structural_score"] = *item.structuralScore;
+        return breakdown;
+    }
+
+    nlohmann::json makeSearchItemJson(const UnifiedItem& item) {
+        nlohmann::json doc;
+        doc["id"] = item.id;
+        if (!item.title.empty())
+            doc["title"] = item.title;
+        if (!item.path.empty())
+            doc["path"] = item.path;
+        if (showHash_ && !item.hash.empty())
+            doc["hash"] = item.hash;
+        doc["score"] = item.score;
+        if (auto snippet = buildSnippet(item, 200))
+            doc["snippet"] = *snippet;
+        if (item.relationCount > 0)
+            doc["relation_count"] = item.relationCount;
+        if (!item.relationSummary.empty())
+            doc["relations"] = item.relationSummary;
+
+        if (verbose_ &&
+            (item.vectorScore || item.keywordScore || item.kgEntityScore || item.structuralScore)) {
+            doc["score_breakdown"] = makeScoreBreakdownJson(item);
+        }
+        return doc;
+    }
+
+    nlohmann::json makeGroupedSearchJson(const std::string& path,
+                                         std::vector<UnifiedItem>& versions) {
+        std::stable_sort(versions.begin(), versions.end(), [&](const auto& a, const auto& b) {
+            if (versionsSort_ == "path")
+                return a.path < b.path;
+            if (versionsSort_ == "title")
+                return a.title < b.title;
+            return a.score > b.score;
+        });
+
+        nlohmann::json group;
+        group["path"] = path;
+        group["total_versions"] = versions.size();
+        group["best"] = makeSearchItemJson(versions.front());
+
+        nlohmann::json vers = nlohmann::json::array();
+        std::size_t cap = versionsMode_ == "all" ? versionsTopk_ : 1;
+        for (std::size_t i = 0; i < versions.size() && i < cap; ++i) {
+            vers.push_back(makeSearchItemJson(versions[i]));
+        }
+        group["versions"] = std::move(vers);
+        return group;
+    }
+
+    std::unordered_map<std::string, std::vector<UnifiedItem>>
+    groupItemsByDisplayPath(std::vector<UnifiedItem>& items) const {
+        std::unordered_map<std::string, std::vector<UnifiedItem>> groups;
+        groups.reserve(items.size());
+        for (auto& item : items) {
+            std::string key = item.getDisplayPath();
+            if (key.empty())
+                continue;
+            groups[key].push_back(std::move(item));
+        }
+        return groups;
+    }
+
+    void renderFlatHumanResults(const std::vector<UnifiedItem>& items) {
+        for (const auto& item : items) {
+            std::string displayPath = item.getDisplayPath();
+            std::cout << ui::colorize(displayPath, ui::Ansi::MAGENTA);
+
+            const char* scoreColor = ui::Ansi::DIM;
+            if (item.score >= 0.8)
+                scoreColor = ui::Ansi::GREEN;
+            else if (item.score >= 0.5)
+                scoreColor = ui::Ansi::YELLOW;
+            std::cout << " "
+                      << ui::colorize("[" + std::to_string(item.score).substr(0, 4) + "]",
+                                      scoreColor);
+            std::cout << "\n";
+
+            if (auto snippet = buildSnippet(item, 200)) {
+                std::cout << ui::colorize("  1:", ui::Ansi::DIM) << " " << *snippet << "\n";
+            }
+            if (!item.relationSummary.empty()) {
+                std::cout << ui::colorize("  rel: " + item.relationSummary, ui::Ansi::DIM) << "\n";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    void
+    renderGroupedHumanResults(std::unordered_map<std::string, std::vector<UnifiedItem>>& groups) {
+        for (auto& [path, vec] : groups) {
+            std::stable_sort(vec.begin(), vec.end(), [&](const auto& a, const auto& b) {
+                if (versionsSort_ == "path")
+                    return a.path < b.path;
+                if (versionsSort_ == "title")
+                    return a.title < b.title;
+                return a.score > b.score;
+            });
+
+            std::cout << ui::colorize(path, ui::Ansi::MAGENTA);
+            if (vec.size() > 1) {
+                std::cout << " "
+                          << ui::colorize("(" + std::to_string(vec.size()) + " versions)",
+                                          ui::Ansi::DIM);
+            }
+            std::cout << "\n";
+
+            std::size_t cap = (versionsMode_ == "all") ? versionsTopk_ : 1;
+            for (std::size_t i = 0; i < vec.size() && i < cap; ++i) {
+                const auto& v = vec[i];
+                std::string hash8;
+                if (!v.hash.empty() && v.hash.size() >= 8)
+                    hash8 = v.hash.substr(0, 8);
+
+                if (vec.size() > 1 || versionsMode_ == "all") {
+                    std::string hashDisplay = hash8.empty() ? "[--------]" : ("[" + hash8 + "]");
+                    const char* scoreColor = ui::Ansi::DIM;
+                    if (v.score >= 0.8)
+                        scoreColor = ui::Ansi::GREEN;
+                    else if (v.score >= 0.5)
+                        scoreColor = ui::Ansi::YELLOW;
+
+                    std::cout << "  " << ui::colorize(hashDisplay, ui::Ansi::CYAN) << " "
+                              << ui::colorize(std::to_string(v.score).substr(0, 4), scoreColor);
+                    if (!v.title.empty() && v.title != path)
+                        std::cout << "  " << v.title;
+                    std::cout << "\n";
+                }
+
+                if (auto snippet = buildSnippet(v, 200)) {
+                    std::string linePrefix = vec.size() > 1 ? ui::colorize("     1:", ui::Ansi::DIM)
+                                                            : ui::colorize("  1:", ui::Ansi::DIM);
+                    std::cout << linePrefix << " " << *snippet << "\n";
+                }
+                if (!v.relationSummary.empty()) {
+                    const std::string relIndent = vec.size() > 1 ? "     " : "  ";
+                    std::cout << ui::colorize(relIndent + std::string("rel: ") + v.relationSummary,
+                                              ui::Ansi::DIM)
+                              << "\n";
+                }
+
+                if (showTools_ && !hash8.empty() && i == 0) {
+                    std::string indent = vec.size() > 1 ? "       " : "     ";
+                    std::cout << ui::colorize(indent + "yams cat --hash " + v.hash, ui::Ansi::DIM)
+                              << "\n";
+                }
+            }
+            if (versionsMode_ == "all" && vec.size() > cap) {
+                std::cout << ui::colorize("    (+" + std::to_string(vec.size() - cap) + " more)",
+                                          ui::Ansi::DIM)
+                          << "\n";
+            }
+            std::cout << "\n";
+        }
+    }
+
     bool shouldShowSpinner() const {
         bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
         return !jsonMode && !pathsOnly_;
@@ -347,36 +562,7 @@ private:
 
             nlohmann::json results = nlohmann::json::array();
             for (const auto& item : deduplicated) {
-                nlohmann::json doc;
-                doc["id"] = item.id;
-                if (!item.title.empty())
-                    doc["title"] = item.title;
-                if (!item.path.empty())
-                    doc["path"] = item.path;
-                if (showHash_ && !item.hash.empty())
-                    doc["hash"] = item.hash;
-                doc["score"] = item.score;
-                if (auto snippet = buildSnippet(item, 200))
-                    doc["snippet"] = *snippet;
-                if (item.relationCount > 0)
-                    doc["relation_count"] = item.relationCount;
-                if (!item.relationSummary.empty())
-                    doc["relations"] = item.relationSummary;
-
-                if (verbose_ && (item.vectorScore || item.keywordScore || item.kgEntityScore ||
-                                 item.structuralScore)) {
-                    nlohmann::json breakdown;
-                    if (item.vectorScore)
-                        breakdown["vector_score"] = *item.vectorScore;
-                    if (item.keywordScore)
-                        breakdown["keyword_score"] = *item.keywordScore;
-                    if (item.kgEntityScore)
-                        breakdown["kg_entity_score"] = *item.kgEntityScore;
-                    if (item.structuralScore)
-                        breakdown["structural_score"] = *item.structuralScore;
-                    doc["score_breakdown"] = breakdown;
-                }
-                results.push_back(std::move(doc));
+                results.push_back(makeSearchItemJson(item));
             }
             output["results"] = std::move(results);
             std::cout << output.dump(2) << std::endl;
@@ -395,50 +581,9 @@ private:
         }
 
         if (!groupVersions_) {
-            // Flat output
-            for (const auto& item : deduplicated) {
-                // File path in magenta
-                std::string displayPath;
-                if (!item.path.empty())
-                    displayPath = item.path;
-                else if (!item.title.empty())
-                    displayPath = item.title;
-                else
-                    displayPath = item.id;
-
-                std::cout << ui::colorize(displayPath, ui::Ansi::MAGENTA);
-
-                // Score in green/yellow/dim based on relevance
-                const char* scoreColor = ui::Ansi::DIM;
-                if (item.score >= 0.8)
-                    scoreColor = ui::Ansi::GREEN;
-                else if (item.score >= 0.5)
-                    scoreColor = ui::Ansi::YELLOW;
-                std::cout << " "
-                          << ui::colorize("[" + std::to_string(item.score).substr(0, 4) + "]",
-                                          scoreColor);
-                std::cout << "\n";
-
-                // Snippet with line-number-style prefix
-                if (auto snippet = buildSnippet(item, 200)) {
-                    std::cout << ui::colorize("  1:", ui::Ansi::DIM) << " " << *snippet << "\n";
-                }
-                if (!item.relationSummary.empty()) {
-                    std::cout << ui::colorize("  rel: " + item.relationSummary, ui::Ansi::DIM)
-                              << "\n";
-                }
-                std::cout << "\n";
-            }
+            renderFlatHumanResults(deduplicated);
         } else {
-            // Group by path for version display
-            std::unordered_map<std::string, std::vector<UnifiedItem>> groups;
-            groups.reserve(deduplicated.size());
-            for (auto& item : deduplicated) {
-                std::string key = item.getDisplayPath();
-                if (key.empty())
-                    continue;
-                groups[key].push_back(std::move(item));
-            }
+            auto groups = groupItemsByDisplayPath(deduplicated);
 
             if (jsonOutput_ && jsonGrouped_) {
                 // Grouped JSON output
@@ -448,132 +593,12 @@ private:
                 output["total_groups"] = groups.size();
                 nlohmann::json groupsArr = nlohmann::json::array();
                 for (auto& [path, vec] : groups) {
-                    std::stable_sort(vec.begin(), vec.end(), [&](const auto& a, const auto& b) {
-                        if (versionsSort_ == "path")
-                            return a.path < b.path;
-                        if (versionsSort_ == "title")
-                            return a.title < b.title;
-                        return a.score > b.score;
-                    });
-                    const auto& best = vec.front();
-                    nlohmann::json g;
-                    g["path"] = path;
-                    g["total_versions"] = vec.size();
-                    nlohmann::json bestJ;
-                    bestJ["id"] = best.id;
-                    bestJ["title"] = best.title;
-                    bestJ["path"] = best.path;
-                    bestJ["score"] = best.score;
-                    if (showHash_ && !best.hash.empty())
-                        bestJ["hash"] = best.hash;
-                    if (auto snippet = buildSnippet(best, 200))
-                        bestJ["snippet"] = *snippet;
-                    if (best.relationCount > 0)
-                        bestJ["relation_count"] = best.relationCount;
-                    if (!best.relationSummary.empty())
-                        bestJ["relations"] = best.relationSummary;
-                    g["best"] = bestJ;
-                    nlohmann::json vers = nlohmann::json::array();
-                    std::size_t cap = versionsMode_ == "all" ? versionsTopk_ : 1;
-                    for (std::size_t i = 0; i < vec.size() && i < cap; ++i) {
-                        const auto& v = vec[i];
-                        nlohmann::json vj;
-                        vj["id"] = v.id;
-                        vj["title"] = v.title;
-                        vj["path"] = v.path;
-                        vj["score"] = v.score;
-                        if (showHash_ && !v.hash.empty())
-                            vj["hash"] = v.hash;
-                        if (auto snippet = buildSnippet(v, 200))
-                            vj["snippet"] = *snippet;
-                        if (v.relationCount > 0)
-                            vj["relation_count"] = v.relationCount;
-                        if (!v.relationSummary.empty())
-                            vj["relations"] = v.relationSummary;
-                        vers.push_back(vj);
-                    }
-                    g["versions"] = vers;
-                    groupsArr.push_back(g);
+                    groupsArr.push_back(makeGroupedSearchJson(path, vec));
                 }
                 output["groups"] = groupsArr;
                 std::cout << output.dump(2) << std::endl;
             } else {
-                // Grouped output
-                for (auto& [path, vec] : groups) {
-                    std::stable_sort(vec.begin(), vec.end(), [&](const auto& a, const auto& b) {
-                        if (versionsSort_ == "path")
-                            return a.path < b.path;
-                        if (versionsSort_ == "title")
-                            return a.title < b.title;
-                        return a.score > b.score;
-                    });
-
-                    // File path in magenta
-                    std::cout << ui::colorize(path, ui::Ansi::MAGENTA);
-
-                    // Version count in dim
-                    if (vec.size() > 1) {
-                        std::cout << " "
-                                  << ui::colorize("(" + std::to_string(vec.size()) + " versions)",
-                                                  ui::Ansi::DIM);
-                    }
-                    std::cout << "\n";
-
-                    std::size_t cap = (versionsMode_ == "all") ? versionsTopk_ : 1;
-                    for (std::size_t i = 0; i < vec.size() && i < cap; ++i) {
-                        const auto& v = vec[i];
-                        std::string hash8;
-                        if (!v.hash.empty() && v.hash.size() >= 8)
-                            hash8 = v.hash.substr(0, 8);
-
-                        if (vec.size() > 1 || versionsMode_ == "all") {
-                            // Hash in cyan, score colored by relevance
-                            std::string hashDisplay =
-                                hash8.empty() ? "[--------]" : ("[" + hash8 + "]");
-                            const char* scoreColor = ui::Ansi::DIM;
-                            if (v.score >= 0.8)
-                                scoreColor = ui::Ansi::GREEN;
-                            else if (v.score >= 0.5)
-                                scoreColor = ui::Ansi::YELLOW;
-
-                            std::cout
-                                << "  " << ui::colorize(hashDisplay, ui::Ansi::CYAN) << " "
-                                << ui::colorize(std::to_string(v.score).substr(0, 4), scoreColor);
-                            if (!v.title.empty() && v.title != path)
-                                std::cout << "  " << v.title;
-                            std::cout << "\n";
-                        }
-
-                        // Snippet with line-number-style prefix
-                        if (auto snippet = buildSnippet(v, 200)) {
-                            std::string linePrefix = vec.size() > 1
-                                                         ? ui::colorize("     1:", ui::Ansi::DIM)
-                                                         : ui::colorize("  1:", ui::Ansi::DIM);
-                            std::cout << linePrefix << " " << *snippet << "\n";
-                        }
-                        if (!v.relationSummary.empty()) {
-                            const std::string relIndent = vec.size() > 1 ? "     " : "  ";
-                            std::cout << ui::colorize(relIndent + std::string("rel: ") +
-                                                          v.relationSummary,
-                                                      ui::Ansi::DIM)
-                                      << "\n";
-                        }
-
-                        if (showTools_ && !hash8.empty() && i == 0) {
-                            std::string indent = vec.size() > 1 ? "       " : "     ";
-                            std::cout << ui::colorize(indent + "yams cat --hash " + v.hash,
-                                                      ui::Ansi::DIM);
-                            std::cout << "\n";
-                        }
-                    }
-                    if (versionsMode_ == "all" && vec.size() > cap) {
-                        std::cout << ui::colorize("    (+" + std::to_string(vec.size() - cap) +
-                                                      " more)",
-                                                  ui::Ansi::DIM)
-                                  << "\n";
-                    }
-                    std::cout << "\n";
-                }
+                renderGroupedHumanResults(groups);
             }
         }
 
@@ -1300,20 +1325,8 @@ public:
 
             auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
                 stopSpinner();
-                // Convert daemon results to unified items
-                std::vector<UnifiedItem> items;
-                items.reserve(resp.results.size());
-                for (const auto& r : resp.results) {
-                    items.push_back(UnifiedItem::fromDaemon(r));
-                }
-
-                RenderContext ctx;
-                ctx.query = query_;
-                ctx.totalCount = resp.totalCount;
-                ctx.elapsedMs = resp.elapsed.count();
-                ctx.method = "daemon";
-                ctx.traceId = resp.traceId;
-
+                auto items = makeDaemonUnifiedItems(resp);
+                auto ctx = makeDaemonRenderContext(resp);
                 return renderResults(items, ctx);
             };
             auto fallback = [&]() -> Result<void> {
@@ -1437,18 +1450,8 @@ public:
                 }
 
                 // Convert to unified items and render
-                std::vector<UnifiedItem> items;
-                items.reserve(resp.results.size());
-                for (const auto& r : resp.results) {
-                    items.push_back(UnifiedItem::fromLocal(r));
-                }
-
-                RenderContext ctx;
-                ctx.query = query_;
-                ctx.totalCount = resp.total;
-                ctx.elapsedMs = resp.executionTimeMs;
-                ctx.method = resp.type;
-
+                auto items = makeLocalUnifiedItems(resp);
+                auto ctx = makeLocalRenderContext(resp);
                 auto renderResult = renderResults(items, ctx);
                 (void)printDiffForSearchResult(resp);
                 return renderResult;
@@ -1758,21 +1761,8 @@ public:
                     }
 
                     // Convert to unified items and render
-                    std::vector<UnifiedItem> localItems;
-                    localItems.reserve(resp.results.size());
-                    for (const auto& it : resp.results) {
-                        if (!includeGlobsExpanded.empty() &&
-                            !matchAnyGlob(it.path, includeGlobsExpanded))
-                            continue;
-                        localItems.push_back(UnifiedItem::fromLocal(it));
-                    }
-
-                    RenderContext localCtx;
-                    localCtx.query = query_;
-                    localCtx.totalCount = resp.total;
-                    localCtx.elapsedMs = resp.executionTimeMs;
-                    localCtx.method = resp.type;
-
+                    auto localItems = makeLocalUnifiedItems(resp, includeGlobsExpanded);
+                    auto localCtx = makeLocalRenderContext(resp);
                     co_return renderResults(localItems, localCtx);
                 }
             }
@@ -1847,27 +1837,8 @@ public:
         auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
             const auto renderStart = std::chrono::steady_clock::now();
             stopSpinner();
-            // Convert daemon results to unified items
-            std::vector<UnifiedItem> items;
-            items.reserve(resp.results.size());
-            for (const auto& r : resp.results) {
-                // Apply glob filtering during conversion
-                std::string path =
-                    !r.path.empty()
-                        ? r.path
-                        : (r.metadata.count("path") ? r.metadata.at("path") : std::string{});
-                if (!includeGlobsExpanded.empty() && !matchAnyGlob(path, includeGlobsExpanded))
-                    continue;
-                items.push_back(UnifiedItem::fromDaemon(r));
-            }
-
-            RenderContext ctx;
-            ctx.query = query_;
-            ctx.totalCount = resp.totalCount;
-            ctx.elapsedMs = resp.elapsed.count();
-            ctx.method = "daemon";
-            ctx.traceId = resp.traceId;
-
+            auto items = makeDaemonUnifiedItems(resp, includeGlobsExpanded);
+            auto ctx = makeDaemonRenderContext(resp);
             auto rendered = renderResults(items, ctx);
             cli_perf_trace("search.render",
                            std::chrono::duration_cast<std::chrono::microseconds>(

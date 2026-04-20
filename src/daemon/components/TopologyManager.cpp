@@ -350,9 +350,9 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.inputKind = topology::TopologyInputKind::Hybrid;
     buildConfig.reciprocalOnly = true;
     buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
-    buildConfig.kmeansK = kmeansK_.load(std::memory_order_acquire);
     buildConfig.hdbscanMinPoints = hdbscanMinPoints_.load(std::memory_order_acquire);
     buildConfig.hdbscanMinClusterSize = hdbscanMinClusterSize_.load(std::memory_order_acquire);
+    buildConfig.featureSmoothingHops = featureSmoothingHops_.load(std::memory_order_acquire);
 
     topology::TopologyExtractionStats extractionStats;
     auto extracted = extractor->extract(extractionConfig, &extractionStats);

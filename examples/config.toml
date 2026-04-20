@@ -495,13 +495,17 @@ route_scoring = "current"
 
 [topology]
 # Cluster-formation engine used by the background topology rebuild.
-#   "connected"         — reciprocal-edge connected components (default, baseline)
-#   "louvain"           — Blondel 2008 modularity optimization over the weighted graph
-#   "label_propagation" — near-linear propagation; tests whether modularity matters
-#   "kmeans_embedding"  — k-means on document embeddings (bypasses the similarity graph)
+#   "connected" — reciprocal-edge connected components (default, baseline)
+#   "hdbscan"   — density-based clustering (McInnes/Healy 2017) via hdbscan-cpp
 engine = "connected"
-# Cluster count hint for "kmeans_embedding" (0 = auto: round(sqrt(#docs))).
-kmeans_k = 0
+# HDBSCAN minimum points for core-distance (0 = auto from corpus size).
+hdbscan_min_points = 0
+# HDBSCAN minimum cluster size (0 = auto from corpus size).
+hdbscan_min_cluster_size = 0
+# SGC feature propagation hops applied to embeddings before HDBSCAN runs
+# (Wu 2019, X' = S_hat^K * X). 0 disables smoothing; 2-3 is typical.
+# Ignored by the "connected" engine (which uses graph topology only).
+feature_smoothing_hops = 0
 
 [knowledge_graph]
 # Database path for KG (relative to data_dir if not absolute)
