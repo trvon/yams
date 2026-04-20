@@ -64,7 +64,8 @@ TEST_CASE("OnnxProviderPluginTest.RuntimeInfoIncludesHints", "[plugin][onnxprovi
     CHECK(j.contains("execution_provider"));
 }
 
-TEST_CASE("OnnxProviderPluginTest.MissingRuntimeReportedViaHealth", "[plugin][onnxproviderplugintest]") {
+TEST_CASE("OnnxProviderPluginTest.MissingRuntimeReportedViaHealth",
+          "[plugin][onnxproviderplugintest]") {
     setenv("YAMS_ONNX_RUNTIME_LIB", "/nonexistent/libonnxruntime.dylib", 1);
     setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
 
@@ -84,7 +85,8 @@ TEST_CASE("OnnxProviderPluginTest.MissingRuntimeReportedViaHealth", "[plugin][on
     CHECK_FALSE(j.value("runtime_error", "").empty());
 }
 
-TEST_CASE("OnnxProviderPluginTest.ConfigPreloadParsingAndReady", "[plugin][onnxproviderplugintest]") {
+TEST_CASE("OnnxProviderPluginTest.ConfigPreloadParsingAndReady",
+          "[plugin][onnxproviderplugintest]") {
     // Create temp XDG config with preload sections
     namespace fs = std::filesystem;
     fs::path tmp = fs::temp_directory_path() / "yams_test_cfg";
@@ -108,7 +110,8 @@ TEST_CASE("OnnxProviderPluginTest.ConfigPreloadParsingAndReady", "[plugin][onnxp
     CHECK(j.value("status", "ok") == "ok");
 }
 
-TEST_CASE("OnnxProviderPluginTest.GenerateEmbeddingBatchErrors", "[plugin][onnxproviderplugintest]") {
+TEST_CASE("OnnxProviderPluginTest.GenerateEmbeddingBatchErrors",
+          "[plugin][onnxproviderplugintest]") {
     setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
     void* h = nullptr;
     auto* prov = load_provider(&h);
@@ -119,11 +122,11 @@ TEST_CASE("OnnxProviderPluginTest.GenerateEmbeddingBatchErrors", "[plugin][onnxp
     float* out = nullptr;
     size_t b = 0, d = 0;
     CHECK(0 != prov->generate_embedding_batch(prov->self, "bad-model", nullptr, nullptr, 0, &out,
-                                                &b, &d));
+                                              &b, &d));
 
     // Bad model id with empty batch arrays
     const uint8_t* inputs_dummy = nullptr;
     size_t lens_dummy = 0; // not dereferenced for batch_size=0
     CHECK(0 != prov->generate_embedding_batch(prov->self, "bad-model", &inputs_dummy, &lens_dummy,
-                                                0, &out, &b, &d));
+                                              0, &out, &b, &d));
 }

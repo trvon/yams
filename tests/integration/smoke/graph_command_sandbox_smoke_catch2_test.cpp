@@ -85,7 +85,8 @@ int run_cli(const std::vector<std::string>& args, std::string* output = nullptr,
 
 } // namespace
 
-TEST_CASE("IntegrationSmoke.GraphCommandFallsBackToInProcessWhenDaemonUnavailable", "[smoke][integrationsmoke]") {
+TEST_CASE("IntegrationSmoke.GraphCommandFallsBackToInProcessWhenDaemonUnavailable",
+          "[smoke][integrationsmoke]") {
     const fs::path root = yams::test::make_temp_dir("yams_graph_fallback_");
     const fs::path dataDir = root / "data";
     const fs::path blockedSocketDir = root / "blocked-socket";
@@ -110,9 +111,12 @@ TEST_CASE("IntegrationSmoke.GraphCommandFallsBackToInProcessWhenDaemonUnavailabl
 
     fs::permissions(blockedSocketDir, fs::perms::owner_all, fs::perm_options::replace, ec);
 
-    INFO(out); CHECK(rc == 0);
-    INFO(out); CHECK(out.find("Connection failed") == std::string::npos);
-    INFO(out); CHECK(out.find("Operation not permitted") == std::string::npos);
+    INFO(out);
+    CHECK(rc == 0);
+    INFO(out);
+    CHECK(out.find("Connection failed") == std::string::npos);
+    INFO(out);
+    CHECK(out.find("Operation not permitted") == std::string::npos);
 }
 
 TEST_CASE("IntegrationSmoke.GraphCommandRespectsForcedSocketMode", "[smoke][integrationsmoke]") {
@@ -140,5 +144,6 @@ TEST_CASE("IntegrationSmoke.GraphCommandRespectsForcedSocketMode", "[smoke][inte
 
     fs::permissions(blockedSocketDir, fs::perms::owner_all, fs::perm_options::replace, ec);
 
-    INFO(out); CHECK(rc != 0);
+    INFO(out);
+    CHECK(rc != 0);
 }

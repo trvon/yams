@@ -297,7 +297,8 @@ bool wait_for_post_ingest_idle(yams::daemon::DaemonClient& client,
 }
 } // namespace
 
-TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPresets", "[smoke][daemonembeddingsregressionsmoke]") {
+TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPresets",
+          "[smoke][daemonembeddingsregressionsmoke]") {
     if (std::getenv("GTEST_DISCOVERY_MODE")) {
         SKIP("Skipping during test discovery");
     }
@@ -373,7 +374,8 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
 
     yams::daemon::YamsDaemon daemon(cfg);
     auto started = daemon.start();
-    INFO((started ? std::string{} : started.error().message)); REQUIRE(started);
+    INFO((started ? std::string{} : started.error().message));
+    REQUIRE(started);
 
     // runLoop is required to drive async initialization. Without it the daemon can
     // remain in initializing state and never become ready.
@@ -419,7 +421,8 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
 
     yams::daemon::DaemonClient client(clientCfg);
     auto connected = yams::cli::run_sync(client.connect(), 5s);
-    INFO("Daemon connect failed: " << connected.error().message); REQUIRE(connected);
+    INFO("Daemon connect failed: " << connected.error().message);
+    REQUIRE(connected);
 
     client.setStreamingEnabled(false);
 
@@ -460,10 +463,12 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
     if (!ready) {
         std::cerr << "final daemon status: " << status << std::endl;
     }
-    INFO("Daemon not ready: " << status); REQUIRE(ready);
+    INFO("Daemon not ready: " << status);
+    REQUIRE(ready);
 
     std::string reason;
-    INFO("Embeddings provider unavailable: " << reason); REQUIRE(ensure_embeddings_provider(client, 30s, modelName, &reason, &daemon));
+    INFO("Embeddings provider unavailable: " << reason);
+    REQUIRE(ensure_embeddings_provider(client, 30s, modelName, &reason, &daemon));
 
     yams::app::services::DocumentIngestionService ingestion;
     yams::app::services::AddOptions baseOpts;
@@ -486,26 +491,29 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
         fileOpts.tags.insert(fileOpts.tags.end(), fixture.tags.begin(), fixture.tags.end());
 
         auto addRes = ingestion.addViaDaemon(fileOpts);
-        INFO("addViaDaemon failed for " << fixture.path << ": "
-                            << addRes.error().message); REQUIRE(addRes);
+        INFO("addViaDaemon failed for " << fixture.path << ": " << addRes.error().message);
+        REQUIRE(addRes);
         if (!addRes.value().hash.empty()) {
             daemonHashes.push_back(addRes.value().hash);
         }
     }
 
     std::string ingestDrainReason;
-    INFO("Post-ingest queue did not drain: " << ingestDrainReason); REQUIRE(wait_for_post_ingest_idle(client, 20s, &ingestDrainReason));
+    INFO("Post-ingest queue did not drain: " << ingestDrainReason);
+    REQUIRE(wait_for_post_ingest_idle(client, 20s, &ingestDrainReason));
 
     // Collect the document hashes directly from the fixtures so we can explicitly
     // request embeddings for the known corpus.
     auto hasher = yams::crypto::createSHA256Hasher();
-    INFO("Failed to create SHA256 hasher"); REQUIRE(hasher);
+    INFO("Failed to create SHA256 hasher");
+    REQUIRE(hasher);
 
     std::vector<std::string> corpusHashes;
     corpusHashes.reserve(corpus.fixtures.size());
     for (const auto& fixture : corpus.fixtures) {
         std::string hash = hasher->hashFile(fixture.path);
-        INFO("Failed to hash fixture: " << fixture.path.string()); REQUIRE_FALSE(hash.empty());
+        INFO("Failed to hash fixture: " << fixture.path.string());
+        REQUIRE_FALSE(hash.empty());
         corpusHashes.push_back(std::move(hash));
     }
     std::sort(corpusHashes.begin(), corpusHashes.end());
@@ -513,14 +521,17 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
 
     std::sort(daemonHashes.begin(), daemonHashes.end());
     daemonHashes.erase(std::unique(daemonHashes.begin(), daemonHashes.end()), daemonHashes.end());
-    INFO("Hashes returned from addViaDaemon did not match corpus hashes"); CHECK(daemonHashes == corpusHashes);
+    INFO("Hashes returned from addViaDaemon did not match corpus hashes");
+    CHECK(daemonHashes == corpusHashes);
 
     std::string documentReadyDetail;
-    INFO("Ingested documents not yet retrievable: " << documentReadyDetail); REQUIRE(wait_for_documents_available(client, corpusHashes, 15s, &documentReadyDetail));
+    INFO("Ingested documents not yet retrievable: " << documentReadyDetail);
+    REQUIRE(wait_for_documents_available(client, corpusHashes, 15s, &documentReadyDetail));
 
     yams::daemon::GetStatsRequest statsReq;
     auto statsBaseline = yams::cli::run_sync(client.getStats(statsReq), 5s);
-    INFO("GetStats baseline failed: " << statsBaseline.error().message); REQUIRE(statsBaseline);
+    INFO("GetStats baseline failed: " << statsBaseline.error().message);
+    REQUIRE(statsBaseline);
     const size_t baseVectorBytes = statsBaseline.value().vectorIndexSize;
     const size_t baseVectorRows =
         parse_counter(statsBaseline.value().additionalStats, "vector_rows");
@@ -535,8 +546,10 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
     embedReq.skipExisting = false;
 
     auto embedRes = yams::cli::run_sync(client.call(embedReq), 60s);
-    INFO("EmbedDocuments failed: " << embedRes.error().message); REQUIRE(embedRes);
-    INFO("Embedding service did not embed expected number of documents"); CHECK(embedRes.value().embedded >= expectedDocs);
+    INFO("EmbedDocuments failed: " << embedRes.error().message);
+    REQUIRE(embedRes);
+    INFO("Embedding service did not embed expected number of documents");
+    CHECK(embedRes.value().embedded >= expectedDocs);
 
     std::string vectorGrowthDetail;
     bool vectorGrowthObserved = wait_for_vector_index_growth(
@@ -559,7 +572,8 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
         }
         std::this_thread::sleep_for(200ms);
     }
-    INFO("vector scoring never reported ready"); CHECK(vectorReady);
+    INFO("vector scoring never reported ready");
+    CHECK(vectorReady);
 
     // Poll stats until embeddings appear in the vector index.
     // Run representative semantic queries drawn from the shared preset.
@@ -587,6 +601,7 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
         }
         std::this_thread::sleep_for(300ms);
     }
-    INFO("Semantic search never returned enough results after "
-                             << maxSearchAttempts << " attempts"); CHECK(searchReady);
+    INFO("Semantic search never returned enough results after " << maxSearchAttempts
+                                                                << " attempts");
+    CHECK(searchReady);
 }

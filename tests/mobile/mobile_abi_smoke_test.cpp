@@ -78,8 +78,8 @@ bool wait_for_corpus_status_documents(yams_mobile_context_t* ctx, std::uint64_t 
         if (status == YAMS_MOBILE_STATUS_OK && result != nullptr) {
             const auto payload = yams_mobile_vector_status_result_json(result);
             if (payload.data != nullptr) {
-                const auto parsed =
-                    nlohmann::json::parse(std::string(payload.data, payload.length), nullptr, false);
+                const auto parsed = nlohmann::json::parse(std::string(payload.data, payload.length),
+                                                          nullptr, false);
                 if (!parsed.is_discarded() && parsed.value("documents", 0ULL) >= minDocuments) {
                     yams_mobile_vector_status_result_destroy(result);
                     return true;
@@ -129,8 +129,8 @@ bool wait_for_search_results(yams_mobile_context_t* ctx, const char* query,
         if (status == YAMS_MOBILE_STATUS_OK && result != nullptr) {
             const auto payload = yams_mobile_search_result_json(result);
             if (payload.data != nullptr) {
-                const auto parsed =
-                    nlohmann::json::parse(std::string(payload.data, payload.length), nullptr, false);
+                const auto parsed = nlohmann::json::parse(std::string(payload.data, payload.length),
+                                                          nullptr, false);
                 if (!parsed.is_discarded() && parsed.value("total", 0ULL) >= 1U) {
                     yams_mobile_search_result_destroy(result);
                     return true;
@@ -423,8 +423,7 @@ TEST_CASE("Embedded mobile corpus status reports readiness without warmup contro
     statusReq.warmup = 1;
 
     yams_mobile_vector_status_result_t* statusResult = nullptr;
-    REQUIRE(yams_mobile_get_vector_status(ctx, &statusReq, &statusResult) ==
-            YAMS_MOBILE_STATUS_OK);
+    REQUIRE(yams_mobile_get_vector_status(ctx, &statusReq, &statusResult) == YAMS_MOBILE_STATUS_OK);
     INFO(yams_mobile_last_error_message());
     REQUIRE(statusResult != nullptr);
 
@@ -610,8 +609,7 @@ TEST_CASE("Mobile update_document returns a stable payload shape across backends
     }
 }
 
-TEST_CASE("Mobile search returns a stable payload shape across backends",
-          "[mobile][abi][parity]") {
+TEST_CASE("Mobile search returns a stable payload shape across backends", "[mobile][abi][parity]") {
     auto run_case = [](yams_mobile_backend_mode backendMode) {
         const auto workingDir = make_unique_temp_dir();
         TempDirGuard guard(workingDir);
@@ -826,9 +824,8 @@ TEST_CASE("Mobile remove_document returns not_found across backends for missing 
         REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
         REQUIRE(ctx != nullptr);
 
-        const auto status =
-            yams_mobile_remove_document(ctx,
-                                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        const auto status = yams_mobile_remove_document(
+            ctx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         CHECK(status == YAMS_MOBILE_STATUS_NOT_FOUND);
 
         yams_mobile_context_destroy(ctx);
@@ -873,7 +870,8 @@ TEST_CASE("Mobile delete_by_name returns an empty result across backends when no
         deleteReq.name = "missing-mobile-delete.txt";
 
         yams_mobile_delete_result_t* deleteResult = nullptr;
-        REQUIRE(yams_mobile_delete_by_name(ctx, &deleteReq, &deleteResult) == YAMS_MOBILE_STATUS_OK);
+        REQUIRE(yams_mobile_delete_by_name(ctx, &deleteReq, &deleteResult) ==
+                YAMS_MOBILE_STATUS_OK);
         REQUIRE(deleteResult != nullptr);
 
         const auto payload = yams_mobile_delete_result_json(deleteResult);
@@ -946,8 +944,7 @@ TEST_CASE("Daemon mobile corpus status reports readiness without warmup control"
     statusReq.warmup = 1;
 
     yams_mobile_vector_status_result_t* statusResult = nullptr;
-    REQUIRE(yams_mobile_get_vector_status(ctx, &statusReq, &statusResult) ==
-            YAMS_MOBILE_STATUS_OK);
+    REQUIRE(yams_mobile_get_vector_status(ctx, &statusReq, &statusResult) == YAMS_MOBILE_STATUS_OK);
     INFO(yams_mobile_last_error_message());
     REQUIRE(statusResult != nullptr);
 

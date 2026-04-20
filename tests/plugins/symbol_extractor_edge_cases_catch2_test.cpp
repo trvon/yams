@@ -47,7 +47,8 @@ std::optional<PluginAPI> loadPlugin() {
 } // namespace
 
 // Unicode identifiers (Python) — ensure extractor handles UTF-8 content
-TEST_CASE("SymbolExtractorPlugins_EdgeCases.UnicodeIdentifiers", "[plugin][symbolextractorplugins_edgecases]") {
+TEST_CASE("SymbolExtractorPlugins_EdgeCases.UnicodeIdentifiers",
+          "[plugin][symbolextractorplugins_edgecases]") {
     auto plug = loadPlugin();
     REQUIRE(plug.has_value());
     auto* api = plug->api;
@@ -87,7 +88,8 @@ TEST_CASE("SymbolExtractorPlugins_EdgeCases.UnicodeIdentifiers", "[plugin][symbo
 }
 
 // Empty input — should return an error (graceful)
-TEST_CASE("SymbolExtractorPlugins_EdgeCases.EmptyFile", "[plugin][symbolextractorplugins_edgecases]") {
+TEST_CASE("SymbolExtractorPlugins_EdgeCases.EmptyFile",
+          "[plugin][symbolextractorplugins_edgecases]") {
     auto plug = loadPlugin();
     REQUIRE(plug.has_value());
     auto* api = plug->api;
@@ -112,7 +114,8 @@ TEST_CASE("SymbolExtractorPlugins_EdgeCases.EmptyFile", "[plugin][symbolextracto
 }
 
 // Large input (~1MB) — ensure no crash and reasonable runtime
-TEST_CASE("SymbolExtractorPlugins_EdgeCases.HugeFileOneMB", "[plugin][symbolextractorplugins_edgecases]") {
+TEST_CASE("SymbolExtractorPlugins_EdgeCases.HugeFileOneMB",
+          "[plugin][symbolextractorplugins_edgecases]") {
     auto plug = loadPlugin();
     REQUIRE(plug.has_value());
     auto* api = plug->api;
@@ -140,7 +143,8 @@ TEST_CASE("SymbolExtractorPlugins_EdgeCases.HugeFileOneMB", "[plugin][symbolextr
 }
 
 // Binary-ish content — ensure graceful handling
-TEST_CASE("SymbolExtractorPlugins_EdgeCases.BinaryContent", "[plugin][symbolextractorplugins_edgecases]") {
+TEST_CASE("SymbolExtractorPlugins_EdgeCases.BinaryContent",
+          "[plugin][symbolextractorplugins_edgecases]") {
     auto plug = loadPlugin();
     REQUIRE(plug.has_value());
     auto* api = plug->api;

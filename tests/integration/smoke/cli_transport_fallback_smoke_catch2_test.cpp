@@ -85,7 +85,8 @@ int run_cli(const std::vector<std::string>& args, std::string* output = nullptr,
 
 } // namespace
 
-TEST_CASE("IntegrationSmoke.CliCommandsPreferInProcessFallbackOverLocalServices", "[smoke][integrationsmoke]") {
+TEST_CASE("IntegrationSmoke.CliCommandsPreferInProcessFallbackOverLocalServices",
+          "[smoke][integrationsmoke]") {
     if (std::getenv("TSAN_OPTIONS") != nullptr) {
         SKIP("TSAN-only teardown flake in repeated CLI fallback path");
     }
@@ -113,27 +114,36 @@ TEST_CASE("IntegrationSmoke.CliCommandsPreferInProcessFallbackOverLocalServices"
 
     int rc = run_cli({"yams", "add", "-", "--name", "transport-smoke.txt", "--sync"}, &out,
                      std::string("transport fallback smoke\n"));
-    INFO(out); CHECK(rc == 0);
+    INFO(out);
+    CHECK(rc == 0);
 
     out.clear();
     rc = run_cli({"yams", "list", "--limit", "10"}, &out);
-    INFO(out); CHECK(rc == 0);
-    INFO(out); CHECK(out.find("Using local list path") == std::string::npos);
+    INFO(out);
+    CHECK(rc == 0);
+    INFO(out);
+    CHECK(out.find("Using local list path") == std::string::npos);
 
     out.clear();
     rc = run_cli({"yams", "search", "transport", "--limit", "5"}, &out);
-    INFO(out); CHECK(rc == 0);
-    INFO(out); CHECK(out.find("falling back to local") == std::string::npos);
+    INFO(out);
+    CHECK(rc == 0);
+    INFO(out);
+    CHECK(out.find("falling back to local") == std::string::npos);
 
     out.clear();
     rc = run_cli({"yams", "grep", "transport", "--max-matches", "10"}, &out);
-    INFO(out); CHECK(rc == 0);
-    INFO(out); CHECK(out.find("falling back to local") == std::string::npos);
+    INFO(out);
+    CHECK(rc == 0);
+    INFO(out);
+    CHECK(out.find("falling back to local") == std::string::npos);
 
     out.clear();
     rc = run_cli({"yams", "get", "--name", "transport-smoke.txt", "--raw"}, &out);
-    INFO(out); CHECK(rc == 0);
-    INFO(out); CHECK(out.find("transport fallback smoke") != std::string::npos);
+    INFO(out);
+    CHECK(rc == 0);
+    INFO(out);
+    CHECK(out.find("transport fallback smoke") != std::string::npos);
 
     fs::permissions(blockedSocketDir, fs::perms::owner_all, fs::perm_options::replace, ec);
 }

@@ -109,8 +109,11 @@ TEST_CASE("topology::makeEngine builds artifacts for the Axis-8 engines",
     cfg.reciprocalOnly = true;
     cfg.inputKind = yams::topology::TopologyInputKind::Hybrid;
     cfg.kmeansK = 2;
+    cfg.hdbscanMinPoints = 2;
+    cfg.hdbscanMinClusterSize = 2;
 
-    for (const char* key : {"connected", "louvain", "label_propagation", "kmeans_embedding"}) {
+    for (const char* key :
+         {"connected", "louvain", "label_propagation", "kmeans_embedding", "hdbscan"}) {
         auto engine = makeEngine(key);
         REQUIRE(engine != nullptr);
         auto result = engine->buildArtifacts(docs, cfg);
@@ -200,4 +203,38 @@ TEST_CASE("topology::louvain splits bridged cliques by modularity",
         CAPTURE(h);
         CHECK(clusterOf.at(h) == clusterE);
     }
+}
+
+TEST_CASE("topology::hdbscan recovers two dense embedding clusters",
+          "[topology][factory][axis8][hdbscan][catch2]") {
+    const auto docs = buildTwoClusterFixture();
+    yams::topology::TopologyBuildConfig cfg;
+    cfg.reciprocalOnly = true;
+    cfg.inputKind = yams::topology::TopologyInputKind::Hybrid;
+    cfg.hdbscanMinPoints = 2;
+    cfg.hdbscanMinClusterSize = 2;
+
+    auto engine = makeEngine("hdbscan");
+    REQUIRE(engine != nullptr);
+    auto result = engine->buildArtifacts(docs, cfg);
+    REQUIRE(result);
+    const auto& batch = result.value();
+    CAPTURE(batch.algorithm);
+    CHECK(batch.algorithm == "hdbscan_v1");
+    CHECK(batch.memberships.size() == docs.size());
+
+    std::unordered_map<std::string, std::string> clusterOf;
+    for (const auto& m : batch.memberships) {
+        clusterOf.emplace(m.documentHash, m.clusterId);
+    }
+    REQUIRE(clusterOf.size() == docs.size());
+    for (const char* h : {"b", "c"}) {
+        CAPTURE(h);
+        CHECK(clusterOf.at(h) == clusterOf.at("a"));
+    }
+    for (const char* h : {"e", "f"}) {
+        CAPTURE(h);
+        CHECK(clusterOf.at(h) == clusterOf.at("d"));
+    }
+    CHECK(clusterOf.at("a") != clusterOf.at("d"));
 }

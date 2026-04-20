@@ -486,7 +486,8 @@ bool waitForCommandSuccess(const fs::path& binary, const std::vector<std::string
 } // namespace
 
 #ifndef _WIN32
-TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly", "[smoke][clisubprocesssegfaultregressionsmoke]") {
+TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly",
+          "[smoke][clisubprocesssegfaultregressionsmoke]") {
     auto yamsBinary = findYamsBinary();
     if (!yamsBinary.has_value()) {
         SKIP("Skipping: built yams-cli binary not found");
@@ -548,7 +549,8 @@ TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly", 
          "--data-dir", dataDir.string(), "--pid-file", pidFile.string(), "--log-file",
          daemonLogPath.string(), "--log-level", "info", "--no-plugins"},
         baseEnv, &daemonStartError);
-    INFO(daemonStartError); REQUIRE(daemonProc.has_value());
+    INFO(daemonStartError);
+    REQUIRE(daemonProc.has_value());
     BackgroundProcess daemon = std::move(*daemonProc);
 
     std::map<std::string, std::string> probeEnv = baseEnv;
@@ -556,24 +558,27 @@ TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly", 
 
     SubprocessResult warmStatus;
     INFO(describeFailure({"daemon", "status", "-d"}, warmStatus) << "\ndaemon log:\n"
-        << readTextFile(daemonLogPath)); REQUIRE(
+                                                                 << readTextFile(daemonLogPath));
+    REQUIRE(
         waitForCommandSuccess(*yamsBinary, {"daemon", "status", "-d"}, probeEnv, 30s, &warmStatus));
 
     SubprocessResult warmList;
     INFO(describeFailure({"list", "--limit", "5"}, warmList) << "\ndaemon log:\n"
-        << readTextFile(daemonLogPath)); REQUIRE(
-        waitForCommandSuccess(*yamsBinary, {"list", "--limit", "5"}, probeEnv, 15s, &warmList));
+                                                             << readTextFile(daemonLogPath));
+    REQUIRE(waitForCommandSuccess(*yamsBinary, {"list", "--limit", "5"}, probeEnv, 15s, &warmList));
 
     SubprocessResult addResult;
     INFO(describeFailure({"add", docPath.string()}, addResult) << "\ndaemon log:\n"
-        << readTextFile(daemonLogPath)); REQUIRE(
+                                                               << readTextFile(daemonLogPath));
+    REQUIRE(
         waitForCommandSuccess(*yamsBinary, {"add", docPath.string()}, baseEnv, 20s, &addResult));
 
     SubprocessResult warmSearch;
     INFO(describeFailure({"search", "turboquant hnsw", "--limit", "5"}, warmSearch)
-        << "\ndaemon log:\n"
-        << readTextFile(daemonLogPath)); REQUIRE(waitForCommandSuccess(*yamsBinary, {"search", "turboquant hnsw", "--limit", "5"},
-                                      probeEnv, 20s, &warmSearch));
+         << "\ndaemon log:\n"
+         << readTextFile(daemonLogPath));
+    REQUIRE(waitForCommandSuccess(*yamsBinary, {"search", "turboquant hnsw", "--limit", "5"},
+                                  probeEnv, 20s, &warmSearch));
 
     const std::vector<std::vector<std::string>> commands = {
         {"list", "--limit", "5"},
@@ -584,12 +589,12 @@ TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly", 
     for (int iteration = 0; iteration < 20; ++iteration) {
         for (const auto& command : commands) {
             auto result = runSubprocess(*yamsBinary, command, probeEnv, 10s);
-            INFO("iteration " << iteration << "\n"
-                                          << describeFailure(command, result)); CHECK_FALSE(result.timedOut);
-            INFO("iteration " << iteration << "\n"
-                                          << describeFailure(command, result)); CHECK_FALSE(result.signaled);
-            INFO("iteration " << iteration << "\n"
-                                          << describeFailure(command, result)); CHECK(result.exitCode == 0);
+            INFO("iteration " << iteration << "\n" << describeFailure(command, result));
+            CHECK_FALSE(result.timedOut);
+            INFO("iteration " << iteration << "\n" << describeFailure(command, result));
+            CHECK_FALSE(result.signaled);
+            INFO("iteration " << iteration << "\n" << describeFailure(command, result));
+            CHECK(result.exitCode == 0);
             if (result.timedOut || result.signaled || result.exitCode != 0) {
                 break;
             }
@@ -600,7 +605,8 @@ TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly", 
     daemon.pid = -1;
 }
 #else
-TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly", "[smoke][clisubprocesssegfaultregressionsmoke]") {
+TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly",
+          "[smoke][clisubprocesssegfaultregressionsmoke]") {
     SKIP("Unix-only subprocess signal smoke test");
 }
 #endif

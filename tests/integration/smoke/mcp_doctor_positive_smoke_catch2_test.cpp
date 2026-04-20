@@ -44,9 +44,11 @@ struct LocalDaemonFixture {
 
         std::error_code ec;
         std::filesystem::create_directories(storageDir_, ec);
-        INFO("Failed to create storage dir: " << ec.message()); REQUIRE_FALSE(ec);
+        INFO("Failed to create storage dir: " << ec.message());
+        REQUIRE_FALSE(ec);
         std::filesystem::create_directories(runtimeRoot_, ec);
-        INFO("Failed to create runtime dir: " << ec.message()); REQUIRE_FALSE(ec);
+        INFO("Failed to create runtime dir: " << ec.message());
+        REQUIRE_FALSE(ec);
 
         fixtures_ = std::make_unique<yams::test::FixtureManager>(root_ / "fixtures");
 
@@ -114,7 +116,8 @@ struct LocalDaemonFixture {
             if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
                 return true;
             } else if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
-                FAIL_CHECK(std::string("Daemon lifecycle reached Failed state: ") + lifecycle.lastError);
+                FAIL_CHECK(std::string("Daemon lifecycle reached Failed state: ") +
+                           lifecycle.lastError);
                 return false;
             }
         }
@@ -248,7 +251,8 @@ bool wait_for_list_tag_match(MCPServer& server, const std::vector<std::string>& 
 
 // Linux-only: relies on AF_UNIX socket semantics and short XDG_RUNTIME_DIR
 #if defined(__linux__)
-TEST_CASE("MCPDoctorPositiveSmoke.DoctorReportsReadyWithLiveDaemon", "[smoke][mcpdoctorpositivesmoke]") {
+TEST_CASE("MCPDoctorPositiveSmoke.DoctorReportsReadyWithLiveDaemon",
+          "[smoke][mcpdoctorpositivesmoke]") {
     using namespace std::chrono_literals;
     namespace fs = std::filesystem;
 
@@ -281,12 +285,14 @@ TEST_CASE("MCPDoctorPositiveSmoke.DoctorReportsReadyWithLiveDaemon", "[smoke][mc
     cfg.logFile = root / "daemon.log";
     yams::daemon::YamsDaemon daemon(cfg);
     auto started = daemon.start();
-    INFO((started ? std::string{} : started.error().message)); REQUIRE(started);
+    INFO((started ? std::string{} : started.error().message));
+    REQUIRE(started);
 
     // Start runLoop in background thread - REQUIRED for daemon to process requests
     std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
 
-    INFO("daemon readiness wait failed"); REQUIRE(wait_for_daemon_ready(socketPath));
+    INFO("daemon readiness wait failed");
+    REQUIRE(wait_for_daemon_ready(socketPath));
 
     // Build an MCP server with a dummy transport and call the doctor tool
     auto t = std::make_unique<NullTransport>();
@@ -299,8 +305,10 @@ TEST_CASE("MCPDoctorPositiveSmoke.DoctorReportsReadyWithLiveDaemon", "[smoke][mc
     runLoopThread.join();
 
     // Validate the doctor result shape and readiness
-    INFO(res.dump()); REQUIRE_FALSE(res.contains("error"));
-    INFO(res.dump()); REQUIRE(res.contains("content"));
+    INFO(res.dump());
+    REQUIRE_FALSE(res.contains("error"));
+    INFO(res.dump());
+    REQUIRE(res.contains("content"));
 
     bool sawReady = false, sawSocket = false, sawExists = false, sawConn = false;
     for (const auto& part : res["content"]) {
@@ -354,14 +362,16 @@ TEST_CASE_METHOD(MCPSmokeFixture, "BasicToolSuccessShapes", "[smoke][mcpsmokefix
         auto res = svr.callToolPublic("search",
                                       json{{"query", "hello"}, {"limit", 1}, {"paths_only", true}});
         // Accept result or error, but ensure it returned promptly and is JSON
-        INFO(res.dump()); REQUIRE(res.is_object());
+        INFO(res.dump());
+        REQUIRE(res.is_object());
     }
 
     // grep: minimal body
     {
         auto res = svr.callToolPublic(
             "grep", json{{"pattern", "hello"}, {"paths", json::array()}, {"paths_only", true}});
-        INFO(res.dump()); REQUIRE(res.is_object());
+        INFO(res.dump());
+        REQUIRE(res.is_object());
     }
 }
 
@@ -383,7 +393,8 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "DocOpsRoundTrip", "[smoke][mcpdocopsfixture]
 
     // Start daemon using fixture helper
     REQUIRE(startDaemon());
-    INFO("daemon readiness wait failed"); REQUIRE(wait_for_daemon_ready(socketPath()));
+    INFO("daemon readiness wait failed");
+    REQUIRE(wait_for_daemon_ready(socketPath()));
 
     // Build an MCP server with a dummy transport (direct callToolPublic)
     auto t = std::make_unique<NullTransport>();
@@ -393,18 +404,23 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "DocOpsRoundTrip", "[smoke][mcpdocopsfixture]
     // 1) add content
     auto addRes =
         svr.callToolPublic("add", json{{"content", "hello world"}, {"name", "mcp_smoke.txt"}});
-    INFO(addRes.dump()); REQUIRE(addRes.is_object());
-    INFO(addRes.dump()); REQUIRE_FALSE(addRes.contains("error"));
+    INFO(addRes.dump());
+    REQUIRE(addRes.is_object());
+    INFO(addRes.dump());
+    REQUIRE_FALSE(addRes.contains("error"));
 
     // 2) list by name (paths_only allowed); tolerate structure variations
     auto listRes = svr.callToolPublic(
         "list", json{{"name", "mcp_smoke.txt"}, {"limit", 5}, {"paths_only", true}});
-    INFO(listRes.dump()); REQUIRE(listRes.is_object());
+    INFO(listRes.dump());
+    REQUIRE(listRes.is_object());
     // 3) get (by name) and assert content round-trip contains seed
     auto getRes =
         svr.callToolPublic("get", json{{"name", "mcp_smoke.txt"}, {"include_content", true}});
-    INFO(getRes.dump()); REQUIRE(getRes.is_object());
-    INFO(getRes.dump()); REQUIRE_FALSE(getRes.contains("error"));
+    INFO(getRes.dump());
+    REQUIRE(getRes.is_object());
+    INFO(getRes.dump());
+    REQUIRE_FALSE(getRes.contains("error"));
     // Result shape: either {content:[{text:...}]} or {result:{...}} depending on framing; accept
     // either
     std::string blob;
@@ -442,7 +458,8 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "SearchAndListTagFiltering", "[smoke][mcpdoco
     using nlohmann::json;
 
     REQUIRE(startDaemon());
-    INFO("daemon readiness wait failed"); REQUIRE(wait_for_daemon_ready(socketPath()));
+    INFO("daemon readiness wait failed");
+    REQUIRE(wait_for_daemon_ready(socketPath()));
 
     auto transport = std::make_unique<NullTransport>();
     MCPServer server(std::move(transport));
@@ -454,58 +471,77 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "SearchAndListTagFiltering", "[smoke][mcpdoco
 
     auto addRed = server.callToolPublic(
         "add", json{{"content", "red content " + queryToken}, {"name", redName}});
-    INFO(addRed.dump()); REQUIRE(addRed.is_object());
-    INFO(addRed.dump()); REQUIRE_FALSE(addRed.contains("error"));
+    INFO(addRed.dump());
+    REQUIRE(addRed.is_object());
+    INFO(addRed.dump());
+    REQUIRE_FALSE(addRed.contains("error"));
 
     auto addBlue = server.callToolPublic(
         "add", json{{"content", "blue content " + queryToken}, {"name", blueName}});
-    INFO(addBlue.dump()); REQUIRE(addBlue.is_object());
-    INFO(addBlue.dump()); REQUIRE_FALSE(addBlue.contains("error"));
+    INFO(addBlue.dump());
+    REQUIRE(addBlue.is_object());
+    INFO(addBlue.dump());
+    REQUIRE_FALSE(addBlue.contains("error"));
 
     auto tagRed = server.callToolPublic(
         "update",
         json{{"name", redName}, {"type", "tags"}, {"tags", json::array({"team-red", "group-a"})}});
-    INFO(tagRed.dump()); REQUIRE(tagRed.is_object());
-    INFO(tagRed.dump()); REQUIRE_FALSE(tagRed.contains("error"));
+    INFO(tagRed.dump());
+    REQUIRE(tagRed.is_object());
+    INFO(tagRed.dump());
+    REQUIRE_FALSE(tagRed.contains("error"));
 
     auto tagBlue =
         server.callToolPublic("update", json{{"name", blueName},
                                              {"type", "tags"},
                                              {"tags", json::array({"team-blue", "group-a"})}});
-    INFO(tagBlue.dump()); REQUIRE(tagBlue.is_object());
-    INFO(tagBlue.dump()); REQUIRE_FALSE(tagBlue.contains("error"));
+    INFO(tagBlue.dump());
+    REQUIRE(tagBlue.is_object());
+    INFO(tagBlue.dump());
+    REQUIRE_FALSE(tagBlue.contains("error"));
 
-    INFO("tag visibility wait failed for " << redName); REQUIRE(wait_for_list_tag_match(server, {"team-red"}, true, redName));
-    INFO("tag visibility wait failed for " << blueName); REQUIRE(wait_for_list_tag_match(server, {"team-blue"}, true, blueName));
+    INFO("tag visibility wait failed for " << redName);
+    REQUIRE(wait_for_list_tag_match(server, {"team-red"}, true, redName));
+    INFO("tag visibility wait failed for " << blueName);
+    REQUIRE(wait_for_list_tag_match(server, {"team-blue"}, true, blueName));
 
     auto listRedOnly = server.callToolPublic("list", json{{"tags", json::array({"team-red"})},
                                                           {"match_all_tags", true},
                                                           {"paths_only", false},
                                                           {"limit", 20}});
-    INFO(listRedOnly.dump()); REQUIRE(listRedOnly.is_object());
-    INFO(listRedOnly.dump()); REQUIRE_FALSE(listRedOnly.contains("error"));
+    INFO(listRedOnly.dump());
+    REQUIRE(listRedOnly.is_object());
+    INFO(listRedOnly.dump());
+    REQUIRE_FALSE(listRedOnly.contains("error"));
     auto listRedData = extract_tool_data(listRedOnly);
-    INFO(listRedOnly.dump()); REQUIRE(listRedData.has_value());
+    INFO(listRedOnly.dump());
+    REQUIRE(listRedData.has_value());
     REQUIRE(listRedData->contains("documents"));
 
     std::vector<std::string> listedNames;
     for (const auto& doc : (*listRedData)["documents"]) {
         listedNames.push_back(doc.value("name", std::string{}));
     }
-    INFO(listRedOnly.dump()); CHECK(contains_subpath(listedNames, redName));
-    INFO(listRedOnly.dump()); CHECK_FALSE(contains_subpath(listedNames, blueName));
+    INFO(listRedOnly.dump());
+    CHECK(contains_subpath(listedNames, redName));
+    INFO(listRedOnly.dump());
+    CHECK_FALSE(contains_subpath(listedNames, blueName));
 
     auto listImpossible =
         server.callToolPublic("list", json{{"tags", json::array({"team-red", "team-blue"})},
                                            {"match_all_tags", true},
                                            {"paths_only", false},
                                            {"limit", 20}});
-    INFO(listImpossible.dump()); REQUIRE(listImpossible.is_object());
-    INFO(listImpossible.dump()); REQUIRE_FALSE(listImpossible.contains("error"));
+    INFO(listImpossible.dump());
+    REQUIRE(listImpossible.is_object());
+    INFO(listImpossible.dump());
+    REQUIRE_FALSE(listImpossible.contains("error"));
     auto listImpossibleData = extract_tool_data(listImpossible);
-    INFO(listImpossible.dump()); REQUIRE(listImpossibleData.has_value());
+    INFO(listImpossible.dump());
+    REQUIRE(listImpossibleData.has_value());
     REQUIRE(listImpossibleData->contains("documents"));
-    INFO(listImpossible.dump()); CHECK((*listImpossibleData)["documents"].empty());
+    INFO(listImpossible.dump());
+    CHECK((*listImpossibleData)["documents"].empty());
 
     auto searchRedOnly = server.callToolPublic("search", json{{"query", queryToken},
                                                               {"type", "keyword"},
@@ -513,18 +549,23 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "SearchAndListTagFiltering", "[smoke][mcpdoco
                                                               {"match_all_tags", true},
                                                               {"paths_only", true},
                                                               {"limit", 20}});
-    INFO(searchRedOnly.dump()); REQUIRE(searchRedOnly.is_object());
-    INFO(searchRedOnly.dump()); REQUIRE_FALSE(searchRedOnly.contains("error"));
+    INFO(searchRedOnly.dump());
+    REQUIRE(searchRedOnly.is_object());
+    INFO(searchRedOnly.dump());
+    REQUIRE_FALSE(searchRedOnly.contains("error"));
     auto searchRedData = extract_tool_data(searchRedOnly);
-    INFO(searchRedOnly.dump()); REQUIRE(searchRedData.has_value());
+    INFO(searchRedOnly.dump());
+    REQUIRE(searchRedData.has_value());
     REQUIRE(searchRedData->contains("paths"));
 
     std::vector<std::string> redPaths;
     for (const auto& p : (*searchRedData)["paths"]) {
         redPaths.push_back(p.get<std::string>());
     }
-    INFO(searchRedOnly.dump()); CHECK(contains_subpath(redPaths, redName));
-    INFO(searchRedOnly.dump()); CHECK_FALSE(contains_subpath(redPaths, blueName));
+    INFO(searchRedOnly.dump());
+    CHECK(contains_subpath(redPaths, redName));
+    INFO(searchRedOnly.dump());
+    CHECK_FALSE(contains_subpath(redPaths, blueName));
 
     auto searchImpossible =
         server.callToolPublic("search", json{{"query", queryToken},
@@ -533,19 +574,25 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "SearchAndListTagFiltering", "[smoke][mcpdoco
                                              {"match_all_tags", true},
                                              {"paths_only", true},
                                              {"limit", 20}});
-    INFO(searchImpossible.dump()); REQUIRE(searchImpossible.is_object());
-    INFO(searchImpossible.dump()); REQUIRE_FALSE(searchImpossible.contains("error"));
+    INFO(searchImpossible.dump());
+    REQUIRE(searchImpossible.is_object());
+    INFO(searchImpossible.dump());
+    REQUIRE_FALSE(searchImpossible.contains("error"));
     auto searchImpossibleData = extract_tool_data(searchImpossible);
-    INFO(searchImpossible.dump()); REQUIRE(searchImpossibleData.has_value());
+    INFO(searchImpossible.dump());
+    REQUIRE(searchImpossibleData.has_value());
     REQUIRE(searchImpossibleData->contains("paths"));
-    INFO(searchImpossible.dump()); CHECK((*searchImpossibleData)["paths"].empty());
+    INFO(searchImpossible.dump());
+    CHECK((*searchImpossibleData)["paths"].empty());
 }
 
-TEST_CASE_METHOD(MCPDocOpsFixture, "SessionStartAloneDoesNotNarrowGrepResults", "[smoke][mcpdocopsfixture]") {
+TEST_CASE_METHOD(MCPDocOpsFixture, "SessionStartAloneDoesNotNarrowGrepResults",
+                 "[smoke][mcpdocopsfixture]") {
     using nlohmann::json;
 
     REQUIRE(startDaemon());
-    INFO("daemon readiness wait failed"); REQUIRE(wait_for_daemon_ready(socketPath()));
+    INFO("daemon readiness wait failed");
+    REQUIRE(wait_for_daemon_ready(socketPath()));
 
     auto transport = std::make_unique<NullTransport>();
     MCPServer server(std::move(transport));
@@ -560,39 +607,56 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "SessionStartAloneDoesNotNarrowGrepResults", 
 
     auto addFirst =
         server.callToolPublic("add", json{{"content", "alpha " + token}, {"name", firstName}});
-    INFO(addFirst.dump()); REQUIRE(addFirst.is_object());
-    INFO(addFirst.dump()); REQUIRE_FALSE(addFirst.contains("error"));
+    INFO(addFirst.dump());
+    REQUIRE(addFirst.is_object());
+    INFO(addFirst.dump());
+    REQUIRE_FALSE(addFirst.contains("error"));
 
     auto addSecond =
         server.callToolPublic("add", json{{"content", "beta " + token}, {"name", secondName}});
-    INFO(addSecond.dump()); REQUIRE(addSecond.is_object());
-    INFO(addSecond.dump()); REQUIRE_FALSE(addSecond.contains("error"));
+    INFO(addSecond.dump());
+    REQUIRE(addSecond.is_object());
+    INFO(addSecond.dump());
+    REQUIRE_FALSE(addSecond.contains("error"));
 
     auto sessionStart =
         server.callToolPublic("session_start", json{{"name", sessionName}, {"warm", false}});
-    INFO(sessionStart.dump()); REQUIRE(sessionStart.is_object());
-    INFO(sessionStart.dump()); REQUIRE_FALSE(sessionStart.contains("error"));
+    INFO(sessionStart.dump());
+    REQUIRE(sessionStart.is_object());
+    INFO(sessionStart.dump());
+    REQUIRE_FALSE(sessionStart.contains("error"));
 
     auto grepGlobal = server.callToolPublic(
         "grep", json{{"pattern", token}, {"use_session", false}, {"with_filename", true}});
-    INFO(grepGlobal.dump()); REQUIRE(grepGlobal.is_object());
-    INFO(grepGlobal.dump()); REQUIRE_FALSE(grepGlobal.contains("error"));
+    INFO(grepGlobal.dump());
+    REQUIRE(grepGlobal.is_object());
+    INFO(grepGlobal.dump());
+    REQUIRE_FALSE(grepGlobal.contains("error"));
     auto grepGlobalData = extract_tool_data(grepGlobal);
-    INFO(grepGlobal.dump()); REQUIRE(grepGlobalData.has_value());
-    INFO(grepGlobal.dump()); REQUIRE(grepGlobalData->contains("match_count"));
+    INFO(grepGlobal.dump());
+    REQUIRE(grepGlobalData.has_value());
+    INFO(grepGlobal.dump());
+    REQUIRE(grepGlobalData->contains("match_count"));
 
     auto grepSession = server.callToolPublic("grep", json{{"pattern", token},
                                                           {"use_session", true},
                                                           {"session", sessionName},
                                                           {"with_filename", true}});
-    INFO(grepSession.dump()); REQUIRE(grepSession.is_object());
-    INFO(grepSession.dump()); REQUIRE_FALSE(grepSession.contains("error"));
+    INFO(grepSession.dump());
+    REQUIRE(grepSession.is_object());
+    INFO(grepSession.dump());
+    REQUIRE_FALSE(grepSession.contains("error"));
     auto grepSessionData = extract_tool_data(grepSession);
-    INFO(grepSession.dump()); REQUIRE(grepSessionData.has_value());
-    INFO(grepSession.dump()); REQUIRE(grepSessionData->contains("match_count"));
+    INFO(grepSession.dump());
+    REQUIRE(grepSessionData.has_value());
+    INFO(grepSession.dump());
+    REQUIRE(grepSessionData->contains("match_count"));
 
-    INFO(grepGlobal.dump()); CHECK((*grepGlobalData)["match_count"].get<int>() >= 2);
-    INFO(grepSession.dump()); CHECK((*grepSessionData)["match_count"].get<int>() == (*grepGlobalData)["match_count"].get<int>());
+    INFO(grepGlobal.dump());
+    CHECK((*grepGlobalData)["match_count"].get<int>() >= 2);
+    INFO(grepSession.dump());
+    CHECK((*grepSessionData)["match_count"].get<int>() ==
+          (*grepGlobalData)["match_count"].get<int>());
 }
 
 // Pagination and dry-run behaviors should be accepted and return structured JSON.
@@ -612,12 +676,14 @@ TEST_CASE_METHOD(MCPSmokeFixture, "ListPaginationAndDryRunDelete", "[smoke][mcps
     // list with pagination params present should return an object with or without results
     auto listRes =
         svr.callToolPublic("list", json{{"limit", 2}, {"offset", 0}, {"paths_only", true}});
-    INFO(listRes.dump()); REQUIRE(listRes.is_object());
+    INFO(listRes.dump());
+    REQUIRE(listRes.is_object());
 
     // delete_by_name with dry_run should return an error (unreachable) but remain structured
     auto delRes =
         svr.callToolPublic("delete_by_name", json{{"name", "nope.txt"}, {"dry_run", true}});
-    INFO(delRes.dump()); REQUIRE(delRes.is_object());
+    INFO(delRes.dump());
+    REQUIRE(delRes.is_object());
     REQUIRE(delRes.contains("error"));
 }
 
@@ -629,7 +695,8 @@ TEST_CASE_METHOD(MCPSmokeFixture, "UpdateMetadataSchemaRoundTrip", "[smoke][mcps
     auto upd = svr.callToolPublic("update", nlohmann::json{{"hash", "deadbeef"},
                                                            {"type", "metadata"},
                                                            {"metadata", nlohmann::json::object()}});
-    INFO(upd.dump()); REQUIRE(upd.is_object());
+    INFO(upd.dump());
+    REQUIRE(upd.is_object());
 }
 
 // Minimal list success-shape (daemon-first path, but tolerant structure check).
@@ -639,11 +706,13 @@ TEST_CASE_METHOD(MCPSmokeFixture, "ListDocumentsResponds", "[smoke][mcpsmokefixt
     MCPServer svr(std::move(t));
     auto res = svr.callToolPublic(
         "list", json{{"paths_only", true}, {"limit", 1}, {"recent", 0}, {"verbose", false}});
-    INFO(res.dump()); REQUIRE(res.is_object());
+    INFO(res.dump());
+    REQUIRE(res.is_object());
 }
 
 // Unreachable envelope checks for daemon-first doc ops: list and add; tolerant checks for get.
-TEST_CASE_METHOD(MCPSmokeFixture, "UnreachableEnvelopeUniformForDocOps", "[smoke][mcpsmokefixture]") {
+TEST_CASE_METHOD(MCPSmokeFixture, "UnreachableEnvelopeUniformForDocOps",
+                 "[smoke][mcpsmokefixture]") {
     using nlohmann::json;
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
@@ -655,13 +724,16 @@ TEST_CASE_METHOD(MCPSmokeFixture, "UnreachableEnvelopeUniformForDocOps", "[smoke
 
     auto assert_unreachable = [&](const std::string& tool, const json& args) {
         auto res = svr.callToolPublic(tool, args);
-        INFO(res.dump()); REQUIRE(res.is_object());
-        INFO(res.dump()); REQUIRE(res.contains("error"));
+        INFO(res.dump());
+        REQUIRE(res.is_object());
+        INFO(res.dump());
+        REQUIRE(res.contains("error"));
         auto msg = res["error"].value("message", std::string{});
         bool ok = (msg.find("YAMS_DAEMON_SOCKET") != std::string::npos ||
                    msg.find("dial") != std::string::npos ||
                    msg.find("Unknown tool") != std::string::npos);
-        INFO((tool + ": " + msg)); CHECK(ok);
+        INFO((tool + ": " + msg));
+        CHECK(ok);
     };
 
     // list uses daemon-first path in MCP
@@ -677,7 +749,8 @@ TEST_CASE_METHOD(MCPSmokeFixture, "UnreachableEnvelopeUniformForDocOps", "[smoke
         bool ok =
             (msg.find("dial") != std::string::npos || msg.find("not found") != std::string::npos ||
              msg.find("not found by name") != std::string::npos);
-        INFO(msg); CHECK(ok);
+        INFO(msg);
+        CHECK(ok);
     }
     // delete/update may resolve locally and not contact daemon on minimal builds; not asserted
     // here.
@@ -685,7 +758,8 @@ TEST_CASE_METHOD(MCPSmokeFixture, "UnreachableEnvelopeUniformForDocOps", "[smoke
 
 // PBI028-45-MCP-PARITY-MOVE: Parity test moved from services shard to smoke and
 // relaxed latency to 2500ms to avoid interference from services' daemon lifecycle.
-TEST_CASE_METHOD(MCPSmokeFixture, "Parity_UnreachableEnvelopeAndToolsListRespondsQuickly", "[smoke][mcpsmokefixture]") {
+TEST_CASE_METHOD(MCPSmokeFixture, "Parity_UnreachableEnvelopeAndToolsListRespondsQuickly",
+                 "[smoke][mcpsmokefixture]") {
     using nlohmann::json;
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
@@ -701,7 +775,8 @@ TEST_CASE_METHOD(MCPSmokeFixture, "Parity_UnreachableEnvelopeAndToolsListRespond
     auto msg = callRes["error"].value("message", std::string{});
     bool ok = (msg.find("YAMS_DAEMON_SOCKET") != std::string::npos ||
                msg.find("dial") != std::string::npos);
-    INFO(msg); CHECK(ok);
+    INFO(msg);
+    CHECK(ok);
 
     // A tool that does not require daemon (search) should still respond promptly (server alive)
     auto start = std::chrono::steady_clock::now();

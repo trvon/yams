@@ -19,9 +19,11 @@
 using namespace yams;
 using namespace yams::daemon;
 
-TEST_CASE("MCPSocketStressTest.ManyConcurrentRequestsSingleSocket", "[stress][mcpsocketstresstest]") {
+TEST_CASE("MCPSocketStressTest.ManyConcurrentRequestsSingleSocket",
+          "[stress][mcpsocketstresstest]") {
     yams::test::DaemonHarness harness;
-    INFO("Failed to start daemon harness"); REQUIRE(harness.start());
+    INFO("Failed to start daemon harness");
+    REQUIRE(harness.start());
 
     ClientConfig cfg;
     cfg.socketPath = harness.socketPath();

@@ -227,7 +227,8 @@ void cleanupChild(pid_t pid) {
 
 } // namespace
 
-TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive", "[smoke][daemonclistartstatusregression]") {
+TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive",
+          "[smoke][daemonclistartstatusregression]") {
     auto yamsBinary = findYamsBinary();
     auto daemonBinary = findYamsDaemonBinary();
     if (!yamsBinary.has_value()) {
@@ -270,7 +271,8 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
     }
     std::error_code symlinkEc;
     fs::create_symlink(psBinary, binDir / "ps", symlinkEc);
-    INFO("failed to create ps symlink: " << symlinkEc.message()); REQUIRE_FALSE(symlinkEc);
+    INFO("failed to create ps symlink: " << symlinkEc.message());
+    REQUIRE_FALSE(symlinkEc);
 #endif
 
     const std::string yams = shellQuote(yamsBinary->string());
@@ -281,7 +283,8 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
     (void)stopRes;
 
     auto startRes = runCommandCapture(yams + " daemon start" + socketArg + pidArg);
-    INFO("daemon start failed:\n" << startRes.output); REQUIRE(startRes.exitCode == 0);
+    INFO("daemon start failed:\n" << startRes.output);
+    REQUIRE(startRes.exitCode == 0);
 
     bool listSucceeded = false;
     CommandResult lastList;
@@ -293,19 +296,20 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
         }
         std::this_thread::sleep_for(250ms);
     }
-    INFO("list never became responsive after daemon start. Last output:\n"
-                               << lastList.output); REQUIRE(listSucceeded);
+    INFO("list never became responsive after daemon start. Last output:\n" << lastList.output);
+    REQUIRE(listSucceeded);
 
 #ifndef _WIN32
     ScopedEnvVar pathEnv("PATH", binDir.string());
 #endif
     auto statusRes = runCommandCapture(yams + " daemon status -d" + socketArg + pidArg);
-    INFO("daemon status -d failed after list succeeded:\n"
-                                     << statusRes.output); CHECK(statusRes.exitCode == 0);
+    INFO("daemon status -d failed after list succeeded:\n" << statusRes.output);
+    CHECK(statusRes.exitCode == 0);
     INFO("status command reported IPC unavailable after daemon was already serving list:\n"
-        << statusRes.output); CHECK(statusRes.output.find("YAMS daemon status unavailable (IPC error)") == std::string::npos);
-    INFO("status command still depends on pgrep:\n"
-        << statusRes.output); CHECK(statusRes.output.find("pgrep: not found") == std::string::npos);
+         << statusRes.output);
+    CHECK(statusRes.output.find("YAMS daemon status unavailable (IPC error)") == std::string::npos);
+    INFO("status command still depends on pgrep:\n" << statusRes.output);
+    CHECK(statusRes.output.find("pgrep: not found") == std::string::npos);
 
     auto finalStop = runCommandCapture(yams + " daemon stop --force" + socketArg + pidArg);
     (void)finalStop;
@@ -315,7 +319,8 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
 }
 
 #ifndef _WIN32
-TEST_CASE("DaemonCliStartStatusRegression.StopTimeoutPathDoesNotEmitWarnNoise", "[smoke][daemonclistartstatusregression]") {
+TEST_CASE("DaemonCliStartStatusRegression.StopTimeoutPathDoesNotEmitWarnNoise",
+          "[smoke][daemonclistartstatusregression]") {
     auto yamsBinary = findYamsBinary();
     if (!yamsBinary.has_value()) {
         SKIP("Skipping: build yams binary not found via MESON_BUILD_ROOT");
@@ -348,7 +353,8 @@ TEST_CASE("DaemonCliStartStatusRegression.StopTimeoutPathDoesNotEmitWarnNoise", 
     (void)runCommandCapture(yams + " daemon stop --force");
 
     auto startRes = runCommandCapture(yams + " daemon start");
-    INFO("daemon start failed:\n" << startRes.output); REQUIRE(startRes.exitCode == 0);
+    INFO("daemon start failed:\n" << startRes.output);
+    REQUIRE(startRes.exitCode == 0);
 
     int heldSocketFd = -1;
     auto holdDeadline = std::chrono::steady_clock::now() + 5s;
@@ -359,16 +365,17 @@ TEST_CASE("DaemonCliStartStatusRegression.StopTimeoutPathDoesNotEmitWarnNoise", 
         }
         std::this_thread::sleep_for(100ms);
     }
-    INFO("failed to establish held socket connection to "
-                               << socketPath.string()); REQUIRE(heldSocketFd >= 0);
+    INFO("failed to establish held socket connection to " << socketPath.string());
+    REQUIRE(heldSocketFd >= 0);
 
     auto stopRes = runCommandCapture(yams + " daemon stop --force");
 
     ::close(heldSocketFd);
 
-    INFO("daemon stop --force failed:\n" << stopRes.output); CHECK(stopRes.exitCode == 0);
-    INFO("expected shutdown timeout path logging to remain debug-only:\n"
-        << stopRes.output); CHECK(stopRes.output.find("Socket shutdown encountered") == std::string::npos);
+    INFO("daemon stop --force failed:\n" << stopRes.output);
+    CHECK(stopRes.exitCode == 0);
+    INFO("expected shutdown timeout path logging to remain debug-only:\n" << stopRes.output);
+    CHECK(stopRes.output.find("Socket shutdown encountered") == std::string::npos);
 
     std::error_code ec;
     fs::remove_all(root, ec);
@@ -376,7 +383,8 @@ TEST_CASE("DaemonCliStartStatusRegression.StopTimeoutPathDoesNotEmitWarnNoise", 
 #endif
 
 #ifndef _WIN32
-TEST_CASE("DaemonCliStartStatusRegression.StartRecoversFromStaleDataDirLockHolder", "[smoke][daemonclistartstatusregression]") {
+TEST_CASE("DaemonCliStartStatusRegression.StartRecoversFromStaleDataDirLockHolder",
+          "[smoke][daemonclistartstatusregression]") {
     auto yamsBinary = findYamsBinary();
     if (!yamsBinary.has_value()) {
         SKIP("Skipping: build yams binary not found via MESON_BUILD_ROOT");
@@ -406,15 +414,18 @@ TEST_CASE("DaemonCliStartStatusRegression.StartRecoversFromStaleDataDirLockHolde
     ScopedEnvVar runtimeEnv("XDG_RUNTIME_DIR", runtimeDir.string());
 
     auto childPid = spawnLockHolder(lockFile, fakeSocket);
-    INFO("Failed to spawn stale lock holder process"); REQUIRE(childPid.has_value());
+    INFO("Failed to spawn stale lock holder process");
+    REQUIRE(childPid.has_value());
     std::this_thread::sleep_for(150ms);
     REQUIRE(isPidAlive(*childPid));
 
     const std::string yams = shellQuote(yamsBinary->string());
     auto startRes = runCommandCapture(yams + " daemon start");
-    INFO("daemon start failed:\n" << startRes.output); CHECK(startRes.exitCode == 0);
+    INFO("daemon start failed:\n" << startRes.output);
+    CHECK(startRes.exitCode == 0);
 
-    INFO("stale lock holder PID still alive after daemon start recovery"); CHECK_FALSE(isPidAlive(*childPid));
+    INFO("stale lock holder PID still alive after daemon start recovery");
+    CHECK_FALSE(isPidAlive(*childPid));
 
     auto stopRes = runCommandCapture(yams + " daemon stop --force");
     (void)stopRes;

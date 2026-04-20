@@ -130,18 +130,22 @@ TEST_CASE("IntegrationSmoke.AddCommandSandboxOperations", "[smoke][integrationsm
     int rc = run_cli({"yams", "--json", "add", fileA.string(), "--name", "single-alpha.txt",
                       "--tags", "sandbox,single", "--metadata", "source=test"},
                      &out);
-    INFO(out); REQUIRE(rc == 0);
+    INFO(out);
+    REQUIRE(rc == 0);
     auto j = parse_json_output(out);
-    INFO(out); REQUIRE(j.is_object());
+    INFO(out);
+    REQUIRE(j.is_object());
     REQUIRE(j.contains("summary"));
     CHECK(j["summary"]["failed"].get<int>() == 0);
 
     rc = run_cli({"yams", "--json", "add", inputDir.string(), "--recursive", "--include",
                   "*.txt,*.md", "--exclude", "*.log", "--tags", "sandbox,dir"},
                  &out);
-    INFO(out); REQUIRE(rc == 0);
+    INFO(out);
+    REQUIRE(rc == 0);
     j = parse_json_output(out);
-    INFO(out); REQUIRE(j.is_object());
+    INFO(out);
+    REQUIRE(j.is_object());
     REQUIRE(j.contains("summary"));
     CHECK(j["summary"]["failed"].get<int>() == 0);
     CHECK(j.contains("results"));
@@ -150,33 +154,40 @@ TEST_CASE("IntegrationSmoke.AddCommandSandboxOperations", "[smoke][integrationsm
     rc = run_cli(
         {"yams", "--json", "add", "-", "--name", "stdin-sandbox.txt", "--tags", "sandbox,stdin"},
         &out, std::string("stdin payload for sandbox add\n"));
-    INFO(out); REQUIRE(rc == 0);
+    INFO(out);
+    REQUIRE(rc == 0);
     j = parse_json_output(out);
-    INFO(out); REQUIRE(j.is_object());
+    INFO(out);
+    REQUIRE(j.is_object());
     REQUIRE(j.contains("summary"));
     CHECK(j["summary"]["failed"].get<int>() == 0);
 
     rc = run_cli(
         {"yams", "--json", "add", fileM1.string(), fileM2.string(), "--tags", "sandbox,multi"},
         &out);
-    INFO(out); REQUIRE(rc == 0);
+    INFO(out);
+    REQUIRE(rc == 0);
     j = parse_json_output(out);
-    INFO(out); REQUIRE(j.is_object());
+    INFO(out);
+    REQUIRE(j.is_object());
     REQUIRE(j.contains("results"));
     CHECK(static_cast<int>(j["results"].size()) >= 2);
     CHECK(j["summary"]["failed"].get<int>() == 0);
 
     rc = run_cli({"yams", "--json", "list", "--limit", "200"}, &out);
-    INFO(out); REQUIRE(rc == 0);
+    INFO(out);
+    REQUIRE(rc == 0);
     j = parse_json_output(out);
-    INFO(out); REQUIRE((j.is_array() || (j.is_object() && j.contains("items")) ||
-                (j.is_object() && j.contains("documents"))));
+    INFO(out);
+    REQUIRE((j.is_array() || (j.is_object() && j.contains("items")) ||
+             (j.is_object() && j.contains("documents"))));
 
     std::error_code ec;
     fs::remove_all(root, ec);
 }
 
-TEST_CASE("IntegrationSmoke.AddCommandFallsBackToInProcessWhenDaemonStartupUnavailable", "[smoke][integrationsmoke]") {
+TEST_CASE("IntegrationSmoke.AddCommandFallsBackToInProcessWhenDaemonStartupUnavailable",
+          "[smoke][integrationsmoke]") {
     const fs::path root = yams::test::make_temp_dir("yams_add_fallback_");
     const fs::path dataDir = root / "data";
     const fs::path blockedSocketDir = root / "blocked-socket";
@@ -205,9 +216,11 @@ TEST_CASE("IntegrationSmoke.AddCommandFallsBackToInProcessWhenDaemonStartupUnava
 
     fs::permissions(blockedSocketDir, fs::perms::owner_all, fs::perm_options::replace, ec);
 
-    INFO(out); REQUIRE(rc == 0);
+    INFO(out);
+    REQUIRE(rc == 0);
     auto j = parse_json_output(out);
-    INFO(out); REQUIRE(j.is_object());
+    INFO(out);
+    REQUIRE(j.is_object());
     REQUIRE(j.contains("summary"));
     CHECK(j["summary"]["failed"].get<int>() == 0);
     REQUIRE(j.contains("results"));

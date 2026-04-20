@@ -89,7 +89,8 @@ double runPoolWorkload(yams::metadata::ConnectionPool& pool, std::size_t workers
     return (elapsed > 0.0) ? ops / elapsed : ops;
 }
 
-TEST_CASE_METHOD(ConcurrentStorageTest, "ThousandConcurrentReaders", "[stress][concurrentstoragetest]") {
+TEST_CASE_METHOD(ConcurrentStorageTest, "ThousandConcurrentReaders",
+                 "[stress][concurrentstoragetest]") {
     // Pre-store test objects with varying sizes
     constexpr size_t numObjects = 100;
     std::vector<std::pair<std::string, std::vector<std::byte>>> testObjects;
@@ -167,7 +168,8 @@ TEST_CASE_METHOD(ConcurrentStorageTest, "ThousandConcurrentReaders", "[stress][c
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
         // Verify results
-        INFO("Errors with " << numReaders << " readers"); CHECK_FALSE(hasErrors.load());
+        INFO("Errors with " << numReaders << " readers");
+        CHECK_FALSE(hasErrors.load());
         CHECK(successfulReads.load() == numReaders * readsPerThread);
 
         // Performance check
@@ -177,11 +179,13 @@ TEST_CASE_METHOD(ConcurrentStorageTest, "ThousandConcurrentReaders", "[stress][c
 
         // Verify < 10ms latency requirement
         auto avgLatency = duration.count() / static_cast<double>(readsPerThread);
-        INFO("Average latency too high with " << numReaders << " readers"); CHECK(avgLatency < 15.0);
+        INFO("Average latency too high with " << numReaders << " readers");
+        CHECK(avgLatency < 15.0);
     }
 }
 
-TEST_CASE_METHOD(ConcurrentStorageTest, "HundredConcurrentWriters", "[stress][concurrentstoragetest]") {
+TEST_CASE_METHOD(ConcurrentStorageTest, "HundredConcurrentWriters",
+                 "[stress][concurrentstoragetest]") {
     constexpr size_t numWriters = 100;
     constexpr size_t writesPerThread = 50;
 
@@ -240,7 +244,8 @@ TEST_CASE_METHOD(ConcurrentStorageTest, "HundredConcurrentWriters", "[stress][co
                  duration.count(), (totalWrites.load() * 1000) / duration.count());
 }
 
-TEST_CASE_METHOD(ConcurrentStorageTest, "MixedReadWriteWorkload", "[stress][concurrentstoragetest]") {
+TEST_CASE_METHOD(ConcurrentStorageTest, "MixedReadWriteWorkload",
+                 "[stress][concurrentstoragetest]") {
     // Test multiple read/write ratios
     struct WorkloadConfig {
         size_t numReaders;
@@ -326,16 +331,20 @@ TEST_CASE_METHOD(ConcurrentStorageTest, "MixedReadWriteWorkload", "[stress][conc
         spdlog::info("  Completed: {} reads, {} writes in {} ms", readOps.load(), writeOps.load(),
                      duration.count());
 
-        INFO("Failed for workload: " << workload.description); CHECK(readOps.load() == workload.numReaders * operationsPerThread);
-        INFO("Failed for workload: " << workload.description); CHECK(writeOps.load() == workload.numWriters * operationsPerThread);
-        INFO("Conflicts in workload: " << workload.description); CHECK(conflicts.load() == 0u);
+        INFO("Failed for workload: " << workload.description);
+        CHECK(readOps.load() == workload.numReaders * operationsPerThread);
+        INFO("Failed for workload: " << workload.description);
+        CHECK(writeOps.load() == workload.numWriters * operationsPerThread);
+        INFO("Conflicts in workload: " << workload.description);
+        CHECK(conflicts.load() == 0u);
 
         // Cleanup for next workload
         existingHashes.clear();
     }
 }
 
-TEST_CASE_METHOD(ConcurrentStorageTest, "HighContentionSameObjects", "[stress][concurrentstoragetest]") {
+TEST_CASE_METHOD(ConcurrentStorageTest, "HighContentionSameObjects",
+                 "[stress][concurrentstoragetest]") {
     // Test with different contention levels
     struct ContentionConfig {
         size_t numThreads;
@@ -403,12 +412,14 @@ TEST_CASE_METHOD(ConcurrentStorageTest, "HighContentionSameObjects", "[stress][c
         spdlog::info("  Ops: {} ({} reads, {} writes)", operations.load(), readOps.load(),
                      writeOps.load());
 
-        INFO("Data corruption in: " << config.description); CHECK_FALSE(dataCorruption.load());
+        INFO("Data corruption in: " << config.description);
+        CHECK_FALSE(dataCorruption.load());
         CHECK(operations.load() == config.numThreads * opsPerThread);
     }
 }
 
-TEST_CASE_METHOD(ConcurrentStorageTest, "RapidCreateDeleteCycles", "[stress][concurrentstoragetest]") {
+TEST_CASE_METHOD(ConcurrentStorageTest, "RapidCreateDeleteCycles",
+                 "[stress][concurrentstoragetest]") {
     constexpr size_t numThreads = 20;
     constexpr size_t cyclesPerThread = 50;
 
@@ -537,13 +548,14 @@ TEST_CASE_METHOD(ConcurrentStorageTest, "LatencyUnderLoad", "[stress][concurrent
     CHECK(p99 < 10.0);
 }
 
-TEST_CASE_METHOD(ConcurrentStorageTest, "ConnectionPoolWorkerSweep", "[stress][concurrentstoragetest]") {
+TEST_CASE_METHOD(ConcurrentStorageTest, "ConnectionPoolWorkerSweep",
+                 "[stress][concurrentstoragetest]") {
     const auto dbPath = storagePath / "pool_bench.db";
     yams::metadata::Database bootstrap;
     REQUIRE(bootstrap.open(dbPath.string(), yams::metadata::ConnectionMode::Create));
     REQUIRE(bootstrap.execute("PRAGMA journal_mode=WAL;").has_value());
     REQUIRE(bootstrap.execute("CREATE TABLE IF NOT EXISTS kv (test_key INTEGER, value TEXT);")
-                    .has_value());
+                .has_value());
     bootstrap.close();
 
     yams::metadata::ConnectionPoolConfig cfg;
@@ -592,7 +604,8 @@ TEST_CASE_METHOD(ConcurrentStorageTest, "ConnectionPoolWorkerSweep", "[stress][c
 }
 
 // New comprehensive stress test: Variable object sizes under concurrent access
-TEST_CASE_METHOD(ConcurrentStorageTest, "VariableObjectSizesConcurrent", "[stress][concurrentstoragetest]") {
+TEST_CASE_METHOD(ConcurrentStorageTest, "VariableObjectSizesConcurrent",
+                 "[stress][concurrentstoragetest]") {
     spdlog::info("Testing variable object sizes under concurrent access");
 
     struct SizeClass {
@@ -736,7 +749,8 @@ TEST_CASE_METHOD(ConcurrentStorageTest, "BurstTrafficPattern", "[stress][concurr
         spdlog::info("    Completed {} ops in {}ms", totalOps.load(),
                      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
 
-        INFO("Errors in burst: " << burst.name); CHECK_FALSE(hasError.load());
+        INFO("Errors in burst: " << burst.name);
+        CHECK_FALSE(hasError.load());
         CHECK(totalOps.load() == burst.numThreads * burst.opsPerThread);
 
         // Idle phase
@@ -745,7 +759,8 @@ TEST_CASE_METHOD(ConcurrentStorageTest, "BurstTrafficPattern", "[stress][concurr
 }
 
 // New stress test: Long-running sustained load
-TEST_CASE_METHOD(ConcurrentStorageTest, "LongRunningSustainedLoad", "[stress][concurrentstoragetest]") {
+TEST_CASE_METHOD(ConcurrentStorageTest, "LongRunningSustainedLoad",
+                 "[stress][concurrentstoragetest]") {
     spdlog::info("Testing long-running sustained load");
 
     constexpr size_t numThreads = 20;

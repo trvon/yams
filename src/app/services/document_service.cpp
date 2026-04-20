@@ -757,8 +757,7 @@ public:
                             docNode.nodeKey = "doc:" + info.sha256Hash;
                             docNode.label = info.filePath;
                             docNode.type = "document";
-                            auto docNodeIds =
-                                ctx_.kgStore->upsertNodes({std::move(docNode)});
+                            auto docNodeIds = ctx_.kgStore->upsertNodes({std::move(docNode)});
                             if (!docNodeIds) {
                                 spdlog::debug("Failed to upsert KG doc node for {}: {}",
                                               info.sha256Hash.substr(0, 8),

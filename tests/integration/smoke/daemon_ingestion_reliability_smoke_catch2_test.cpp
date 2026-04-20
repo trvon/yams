@@ -50,7 +50,8 @@ struct DaemonIngestionReliabilitySmoke {
     }
 };
 
-TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady", "[smoke][daemoningestionreliabilitysmoke]") {
+TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady",
+                 "[smoke][daemoningestionreliabilitysmoke]") {
     // Skip if AF_UNIX bind is forbidden
     auto canBind = []() {
         try {
@@ -77,7 +78,8 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     if (!canBind) {
         SKIP("Skipping smoke: environment forbids AF_UNIX bind (sandbox).");
     }
-    INFO("Fixture manager not initialized"); REQUIRE(fixtures_);
+    INFO("Fixture manager not initialized");
+    REQUIRE(fixtures_);
 
     yams::test::TestDataGenerator generator(4242);
     auto documentFixture = fixtures_->createTextFixture(
@@ -122,7 +124,8 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     cfg.logFile = root_ / "daemon.log";
     yams::daemon::YamsDaemon daemon(cfg);
     auto started = daemon.start();
-    INFO((started ? std::string{} : started.error().message)); REQUIRE(started);
+    INFO((started ? std::string{} : started.error().message));
+    REQUIRE(started);
 
     // Start runLoop in background thread - REQUIRED for daemon to process requests
     std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
@@ -145,7 +148,8 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     // Join worker before assertions complete
     worker.join();
 
-    INFO((addRes ? "" : addRes.error().message)); REQUIRE(addRes);
+    INFO((addRes ? "" : addRes.error().message));
+    REQUIRE(addRes);
     CHECK_FALSE(addRes.value().hash.empty());
 
     // Shutdown daemon cleanly

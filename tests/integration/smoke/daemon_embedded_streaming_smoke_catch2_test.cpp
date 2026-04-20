@@ -30,7 +30,8 @@ bool wait_until(Func&& predicate, std::chrono::milliseconds timeout,
 
 } // namespace
 
-TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList", "[smoke][integrationsmoke]") {
+TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList",
+          "[smoke][integrationsmoke]") {
     const fs::path dataDir = yams::test::make_temp_dir("yams_embedded_stream_smoke_");
 
     yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
@@ -49,7 +50,8 @@ TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList", "[smoke
     yams::daemon::DaemonClient client(cfg);
 
     auto connectRes = yams::cli::run_sync(client.connect(), 20s);
-    INFO((connectRes.has_value() ? std::string{} : connectRes.error().message)); REQUIRE(connectRes.has_value());
+    INFO((connectRes.has_value() ? std::string{} : connectRes.error().message));
+    REQUIRE(connectRes.has_value());
     REQUIRE(client.isConnected());
 
     auto addDoc = [&](const std::string& name, const std::string& content) {
@@ -65,11 +67,13 @@ TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList", "[smoke
 
     auto add1 =
         addDoc("embedded-stream-doc-1.txt", "alpha_embedded_stream_token first document content");
-    INFO((add1.has_value() ? std::string{} : add1.error().message)); REQUIRE(add1.has_value());
+    INFO((add1.has_value() ? std::string{} : add1.error().message));
+    REQUIRE(add1.has_value());
 
     auto add2 =
         addDoc("embedded-stream-doc-2.txt", "second document with beta_embedded_stream_token");
-    INFO((add2.has_value() ? std::string{} : add2.error().message)); REQUIRE(add2.has_value());
+    INFO((add2.has_value() ? std::string{} : add2.error().message));
+    REQUIRE(add2.has_value());
 
     yams::daemon::ListRequest listReq;
     listReq.limit = 100;
@@ -86,7 +90,8 @@ TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList", "[smoke
         15s);
 
     INFO((lastList ? "list returned too few items"
-                                        : std::string("list failed: ") + lastList.error().message)); REQUIRE(listReady);
+                   : std::string("list failed: ") + lastList.error().message));
+    REQUIRE(listReady);
 
     yams::daemon::SearchRequest searchReq;
     searchReq.query = "alpha_embedded_stream_token";
@@ -104,9 +109,9 @@ TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList", "[smoke
         },
         15s);
 
-    INFO((lastSearch
-                                     ? "search returned no results"
-                                     : std::string("search failed: ") + lastSearch.error().message)); REQUIRE(searchReady);
+    INFO((lastSearch ? "search returned no results"
+                     : std::string("search failed: ") + lastSearch.error().message));
+    REQUIRE(searchReady);
     CHECK(lastSearch.value().totalCount >= 1u);
 
     client.disconnect();
