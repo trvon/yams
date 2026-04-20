@@ -144,6 +144,22 @@ public:
 
     [[nodiscard]] std::size_t kmeansK() const { return kmeansK_.load(std::memory_order_acquire); }
 
+    void setHdbscanMinPoints(std::size_t n) {
+        hdbscanMinPoints_.store(n, std::memory_order_release);
+    }
+
+    [[nodiscard]] std::size_t hdbscanMinPoints() const {
+        return hdbscanMinPoints_.load(std::memory_order_acquire);
+    }
+
+    void setHdbscanMinClusterSize(std::size_t n) {
+        hdbscanMinClusterSize_.store(n, std::memory_order_release);
+    }
+
+    [[nodiscard]] std::size_t hdbscanMinClusterSize() const {
+        return hdbscanMinClusterSize_.load(std::memory_order_acquire);
+    }
+
     [[nodiscard]] TelemetrySnapshot getTelemetrySnapshot() const;
 
     Result<RebuildStats> rebuildArtifacts(const std::string& reason, bool dryRun,
@@ -171,6 +187,8 @@ private:
     std::atomic<bool> autoRebuildEnabled_{true};
     std::atomic<std::uint64_t> publishedEpoch_{0};
     std::atomic<std::size_t> kmeansK_{0};
+    std::atomic<std::size_t> hdbscanMinPoints_{0};
+    std::atomic<std::size_t> hdbscanMinClusterSize_{0};
 };
 
 } // namespace yams::daemon

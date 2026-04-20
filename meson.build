@@ -623,6 +623,8 @@ else
   subdir('src/wal')
   subdir('src/manifest')
   subdir('src/metadata')
+  subdir('third_party/hdbscan-cpp')
+  meson.override_dependency('yams_hdbscan_cpp', hdbscan_dep)
   subdir('src/topology')
   subdir('src/integrity')
   subdir('src/config')

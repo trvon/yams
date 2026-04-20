@@ -100,6 +100,51 @@ inline int setenv(const char* name, const char* value, int overwrite) {
 namespace yams::mcp {
 
 namespace {
+MCPDownloadJobResponse makeMcpDownloadJobResponse(const yams::daemon::DownloadResponse& resp) {
+    MCPDownloadJobResponse out;
+    out.jobId = resp.jobId;
+    out.state = resp.state;
+    out.success = resp.success;
+    out.url = resp.url;
+    out.hash = resp.hash;
+    out.storedPath = resp.localPath;
+    out.sizeBytes = resp.size;
+    out.createdAtMs = resp.createdAtMs;
+    out.updatedAtMs = resp.updatedAtMs;
+    out.error = resp.error;
+    return out;
+}
+
+json makeSnapshotJson(const yams::daemon::SnapshotInfo& snap) {
+    return json{{"id", snap.id},
+                {"label", snap.label},
+                {"created_at", snap.createdAt},
+                {"document_count", snap.documentCount}};
+}
+
+MCPUpdateMetadataResponse
+makeUpdateMetadataResponse(const yams::daemon::UpdateDocumentResponse& ur) {
+    MCPUpdateMetadataResponse out;
+    out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
+    out.updated = out.success ? 1 : 0;
+    out.matched = 1;
+    if (!ur.hash.empty()) {
+        out.updatedHashes.push_back(ur.hash);
+    }
+    out.message = out.success ? "Update successful" : "No changes applied";
+    return out;
+}
+
+app::services::RetrievalOptions
+makeMcpRetrievalOptions(const yams::daemon::ClientConfig& daemonClientConfig) {
+    yams::app::services::RetrievalOptions ropts;
+    ropts.socketPath = daemonClientConfig.socketPath;
+    ropts.requestTimeoutMs = 60000;
+    ropts.headerTimeoutMs = 30000;
+    ropts.bodyTimeoutMs = 120000;
+    return ropts;
+}
+
 std::string normalizedTokenString(std::string value) {
     for (char& c : value) {
         if (!std::isalnum(static_cast<unsigned char>(c))) {
@@ -759,6 +804,13 @@ Result<void> MCPServer::ensureDaemonClient() {
 #endif
 }
 
+Result<yams::daemon::DaemonClient*> MCPServer::requireDaemonClient() {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        return ensure.error();
+    }
+    return daemon_client_;
+}
+
 boost::asio::awaitable<Result<std::optional<yams::daemon::StatusResponse>>>
 MCPServer::fetchDaemonStatus(DaemonStatusFetchMode mode) {
 #if defined(YAMS_WASI)
@@ -1210,9 +1262,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     (void)req;
     co_return Error{ErrorCode::NotSupported, "search is not supported on WASI build"};
 #else
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
     yams::daemon::SearchRequest dreq;
     // Preserve the user's query as-is; rely on dedicated fields for filters
     dreq.query = req.query;
@@ -1579,9 +1631,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         (void)req;
         co_return Error{ErrorCode::NotSupported, "grep is not supported on WASI build"};
 #else
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
     daemon::GrepRequest dreq;
     dreq.pattern = req.pattern;
     dreq.paths = req.paths;
@@ -2356,29 +2408,16 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             co_return Error{ErrorCode::NotSupported,
                             "download_status is not supported on WASI build"};
 #else
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
+    auto* client = clientRes.value();
 
-    auto dres =
-        co_await daemon_client_->downloadStatus(yams::daemon::DownloadStatusRequest{req.jobId});
+    auto dres = co_await client->downloadStatus(yams::daemon::DownloadStatusRequest{req.jobId});
     if (!dres) {
         co_return dres.error();
     }
-
-    MCPDownloadJobResponse out;
-    const auto& resp = dres.value();
-    out.jobId = resp.jobId;
-    out.state = resp.state;
-    out.success = resp.success;
-    out.url = resp.url;
-    out.hash = resp.hash;
-    out.storedPath = resp.localPath;
-    out.sizeBytes = resp.size;
-    out.createdAtMs = resp.createdAtMs;
-    out.updatedAtMs = resp.updatedAtMs;
-    out.error = resp.error;
-    co_return out;
+    co_return makeMcpDownloadJobResponse(dres.value());
 #endif
         }
 
@@ -2389,11 +2428,12 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             co_return Error{ErrorCode::NotSupported,
                             "download_list_jobs is not supported on WASI build"};
 #else
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
+    auto* client = clientRes.value();
 
-    auto dres = co_await daemon_client_->listDownloadJobs(yams::daemon::ListDownloadJobsRequest{});
+    auto dres = co_await client->listDownloadJobs(yams::daemon::ListDownloadJobsRequest{});
     if (!dres) {
         co_return dres.error();
     }
@@ -2401,18 +2441,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     MCPListDownloadJobsResponse out;
     out.jobs.reserve(dres.value().jobs.size());
     for (const auto& job : dres.value().jobs) {
-        MCPDownloadJobResponse item;
-        item.jobId = job.jobId;
-        item.state = job.state;
-        item.success = job.success;
-        item.url = job.url;
-        item.hash = job.hash;
-        item.storedPath = job.localPath;
-        item.sizeBytes = job.size;
-        item.createdAtMs = job.createdAtMs;
-        item.updatedAtMs = job.updatedAtMs;
-        item.error = job.error;
-        out.jobs.push_back(std::move(item));
+        out.jobs.push_back(makeMcpDownloadJobResponse(job));
     }
     co_return out;
 #endif
@@ -2425,29 +2454,17 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             co_return Error{ErrorCode::NotSupported,
                             "download_cancel is not supported on WASI build"};
 #else
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
+    auto* client = clientRes.value();
 
-    auto dres = co_await daemon_client_->cancelDownloadJob(
-        yams::daemon::CancelDownloadJobRequest{req.jobId});
+    auto dres =
+        co_await client->cancelDownloadJob(yams::daemon::CancelDownloadJobRequest{req.jobId});
     if (!dres) {
         co_return dres.error();
     }
-
-    MCPDownloadJobResponse out;
-    const auto& resp = dres.value();
-    out.jobId = resp.jobId;
-    out.state = resp.state;
-    out.success = resp.success;
-    out.url = resp.url;
-    out.hash = resp.hash;
-    out.storedPath = resp.localPath;
-    out.sizeBytes = resp.size;
-    out.createdAtMs = resp.createdAtMs;
-    out.updatedAtMs = resp.updatedAtMs;
-    out.error = resp.error;
-    co_return out;
+    co_return makeMcpDownloadJobResponse(dres.value());
 #endif
         }
 
@@ -2470,9 +2487,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                         "instead of a 'paths' array."};
     }
 
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
 
     // Lightweight throttle: limit concurrent add/store operations to avoid stressing the IPC FSM
     {
@@ -2709,9 +2726,9 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     (void)req;
     co_return Error{ErrorCode::NotSupported, "get is not supported on WASI build"};
 #else
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
     // Convert MCP request to daemon request
     daemon::GetRequest daemon_req;
     daemon_req.hash = req.hash;
@@ -2724,7 +2741,7 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     daemon_req.acceptCompressed = true;
 
     // Use shared daemon client directly — avoids creating a new DaemonClient + sync bridge
-    auto dres = co_await daemon_client_->get(daemon_req);
+    auto dres = co_await clientRes.value()->get(daemon_req);
     if (!dres)
         co_return dres.error();
 
@@ -3006,13 +3023,14 @@ MCPServer::handleGetStats(const MCPStatsRequest& req) {
     (void)req;
     co_return Error{ErrorCode::NotSupported, "stats is not supported on WASI build"};
 #else
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
+    auto* client = clientRes.value();
     daemon::GetStatsRequest daemon_req;
     daemon_req.showFileTypes = req.fileTypes;
     daemon_req.detailed = req.verbose;
-    auto dres = co_await daemon_client_->getStats(daemon_req);
+    auto dres = co_await client->getStats(daemon_req);
     if (!dres)
         co_return dres.error();
     MCPStatsResponse out;
@@ -3334,23 +3352,16 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
             else
                 daemon_req.metadata[key] = value.dump();
         }
-        if (auto ensure = ensureDaemonClient(); !ensure) {
-            co_return ensure.error();
-        }
-        auto dres = co_await daemon_client_->updateDocument(daemon_req);
+        auto updateClientRes = requireDaemonClient();
+        if (!updateClientRes)
+            co_return updateClientRes.error();
+        auto dres = co_await updateClientRes.value()->updateDocument(daemon_req);
         if (!dres)
             co_return dres.error();
-        MCPUpdateMetadataResponse out;
-        const auto& ur = dres.value();
-        out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
-        out.updated = out.success ? 1 : 0;
-        out.matched = 1;
-        if (!ur.hash.empty())
-            out.updatedHashes.push_back(ur.hash);
+        auto out = makeUpdateMetadataResponse(dres.value());
         if (out.success) {
-            co_await waitForTagVisibility(ur.hash);
+            co_await waitForTagVisibility(dres.value().hash);
         }
-        out.message = out.success ? "Update successful" : "No changes applied";
         co_return out;
     }
 
@@ -3371,15 +3382,11 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         } catch (...) {
         }
         // Reuse shared daemon client to avoid per-request connection overhead
-        if (auto ensure = ensureDaemonClient(); !ensure) {
-            co_return ensure.error();
-        }
+        auto clientRes = requireDaemonClient();
+        if (!clientRes)
+            co_return clientRes.error();
         auto& rsvc = *retrieval_svc_;
-        yams::app::services::RetrievalOptions ropts;
-        ropts.socketPath = daemon_client_config_.socketPath;
-        ropts.requestTimeoutMs = 60000;
-        ropts.headerTimeoutMs = 30000;
-        ropts.bodyTimeoutMs = 120000;
+        auto ropts = makeMcpRetrievalOptions(daemon_client_config_);
         auto docService = documentService_;
         if (!docService) {
             docService = app::services::makeDocumentService(appContext_);
@@ -3500,23 +3507,16 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
                 else
                     daemon_req.metadata[key] = value.dump();
             }
-            if (auto ensure = ensureDaemonClient(); !ensure) {
-                co_return ensure.error();
-            }
-            auto dres = co_await daemon_client_->updateDocument(daemon_req);
+            auto clientRes = requireDaemonClient();
+            if (!clientRes)
+                co_return clientRes.error();
+            auto dres = co_await clientRes.value()->updateDocument(daemon_req);
             if (!dres)
                 co_return dres.error();
-            MCPUpdateMetadataResponse out;
-            const auto& ur = dres.value();
-            out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
-            out.updated = out.success ? 1 : 0;
-            out.matched = 1;
-            if (!ur.hash.empty())
-                out.updatedHashes.push_back(ur.hash);
+            auto out = makeUpdateMetadataResponse(dres.value());
             if (out.success) {
-                co_await waitForTagVisibility(ur.hash);
+                co_await waitForTagVisibility(dres.value().hash);
             }
-            out.message = out.success ? "Update successful" : "No changes applied";
             co_return out;
         }
 
@@ -3531,23 +3531,16 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
             else
                 daemon_req.metadata[key] = value.dump();
         }
-        if (auto ensure = ensureDaemonClient(); !ensure) {
-            co_return ensure.error();
-        }
-        auto dres = co_await daemon_client_->updateDocument(daemon_req);
+        auto updateClientRes = requireDaemonClient();
+        if (!updateClientRes)
+            co_return updateClientRes.error();
+        auto dres = co_await updateClientRes.value()->updateDocument(daemon_req);
         if (!dres)
             co_return dres.error();
-        MCPUpdateMetadataResponse out;
-        const auto& ur = dres.value();
-        out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
-        out.updated = out.success ? 1 : 0;
-        out.matched = 1;
-        if (!ur.hash.empty())
-            out.updatedHashes.push_back(ur.hash);
+        auto out = makeUpdateMetadataResponse(dres.value());
         if (out.success) {
-            co_await waitForTagVisibility(ur.hash);
+            co_await waitForTagVisibility(dres.value().hash);
         }
-        out.message = out.success ? "Update successful" : "No changes applied";
         co_return out;
     }
 
@@ -3912,9 +3905,9 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
         co_return co_await handleKgIngest(req);
     }
 
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
 
     // Build daemon GraphQueryRequest from MCPGraphRequest
     yams::daemon::GraphQueryRequest dreq;
@@ -3951,7 +3944,7 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
     dreq.scopeToSnapshot = req.scopeSnapshot;
 
     // Send the request
-    auto res = co_await daemon_client_->call<yams::daemon::GraphQueryRequest>(dreq);
+    auto res = co_await clientRes.value()->call<yams::daemon::GraphQueryRequest>(dreq);
     if (!res) {
         co_return res.error();
     }
@@ -4024,9 +4017,9 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
 
 boost::asio::awaitable<Result<MCPGraphResponse>>
 MCPServer::handleKgIngest(const MCPGraphRequest& req) {
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
 
     // Translate MCP DTO → daemon KgIngestRequest
     yams::daemon::KgIngestRequest dreq;
@@ -4067,7 +4060,7 @@ MCPServer::handleKgIngest(const MCPGraphRequest& req) {
         dreq.aliases.push_back(std::move(da));
     }
 
-    auto res = co_await daemon_client_->call<yams::daemon::KgIngestRequest>(dreq);
+    auto res = co_await clientRes.value()->call<yams::daemon::KgIngestRequest>(dreq);
     if (!res) {
         co_return res.error();
     }
@@ -5232,15 +5225,11 @@ void MCPServer::initializeToolRegistry() {
 
             // Try smart retrieval first, then fallback to base-name list + fuzzy selection
             // Reuse shared daemon client to avoid per-request connection overhead
-            if (auto ensure = ensureDaemonClient(); !ensure) {
-                co_return ensure.error();
-            }
+            auto clientRes = requireDaemonClient();
+            if (!clientRes)
+                co_return clientRes.error();
             auto& rsvc = *retrieval_svc_;
-            yams::app::services::RetrievalOptions ropts;
-            ropts.socketPath = daemon_client_config_.socketPath;
-            ropts.requestTimeoutMs = 60000;
-            ropts.headerTimeoutMs = 30000;
-            ropts.bodyTimeoutMs = 120000;
+            auto ropts = makeMcpRetrievalOptions(daemon_client_config_);
             auto docService = documentService_;
             if (!docService) {
                 docService = app::services::makeDocumentService(appContext_);
@@ -5372,10 +5361,10 @@ void MCPServer::initializeToolRegistry() {
             daemon_req.names = req.names;
             daemon_req.pattern = req.pattern;
             daemon_req.dryRun = req.dryRun;
-            if (auto ensure = ensureDaemonClient(); !ensure) {
-                co_return ensure.error();
-            }
-            auto dres = co_await daemon_client_->remove(daemon_req);
+            auto clientRes = requireDaemonClient();
+            if (!clientRes)
+                co_return clientRes.error();
+            auto dres = co_await clientRes.value()->remove(daemon_req);
             if (!dres)
                 co_return dres.error();
             MCPDeleteByNameResponse out;
@@ -5388,14 +5377,10 @@ void MCPServer::initializeToolRegistry() {
         boost::asio::awaitable<yams::Result<yams::mcp::MCPCatDocumentResponse>>
         yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
             // Reuse shared daemon client to avoid per-request connection overhead
-            if (auto ensure = ensureDaemonClient(); !ensure) {
-                co_return ensure.error();
-            }
-            yams::app::services::RetrievalOptions ropts;
-            ropts.socketPath = daemon_client_config_.socketPath;
-            ropts.requestTimeoutMs = 60000;
-            ropts.headerTimeoutMs = 30000;
-            ropts.bodyTimeoutMs = 120000;
+            auto clientRes = requireDaemonClient();
+            if (!clientRes)
+                co_return clientRes.error();
+            auto ropts = makeMcpRetrievalOptions(daemon_client_config_);
 
             yams::app::services::GetOptions dreq;
             dreq.hash = req.hash;
@@ -5624,16 +5609,17 @@ void MCPServer::initializeToolRegistry() {
         boost::asio::awaitable<yams::Result<yams::mcp::MCPRestoreSnapshotResponse>>
         yams::mcp::MCPServer::handleRestoreSnapshot(
             const yams::mcp::MCPRestoreSnapshotRequest& req) {
-            if (auto ensure = ensureDaemonClient(); !ensure) {
-                co_return ensure.error();
-            }
+            auto clientRes = requireDaemonClient();
+            if (!clientRes)
+                co_return clientRes.error();
+            auto* client = clientRes.value();
 
             std::string snapshotId = req.snapshotId;
 
             // Resolve label to ID if needed
             if (snapshotId.empty() && !req.snapshotLabel.empty()) {
                 yams::daemon::ListSnapshotsRequest listReq;
-                auto listResult = co_await daemon_client_->listSnapshots(listReq);
+                auto listResult = co_await client->listSnapshots(listReq);
                 if (!listResult) {
                     co_return listResult.error();
                 }
@@ -5664,7 +5650,7 @@ void MCPServer::initializeToolRegistry() {
             daemonReq.createDirs = req.createDirs;
             daemonReq.dryRun = req.dryRun;
 
-            auto result = co_await daemon_client_->restoreSnapshot(daemonReq);
+            auto result = co_await client->restoreSnapshot(daemonReq);
             if (!result) {
                 co_return result.error();
             }
@@ -5745,14 +5731,15 @@ void MCPServer::initializeToolRegistry() {
             }
 
             // Client mode: route through daemon client
-            if (auto ensure = ensureDaemonClient(); !ensure) {
-                co_return ensure.error();
-            }
+            auto clientRes = requireDaemonClient();
+            if (!clientRes)
+                co_return clientRes.error();
+            auto* client = clientRes.value();
 
             daemon::MetadataValueCountsRequest dreq;
             dreq.keys = {"collection"};
 
-            auto result = co_await daemon_client_->call<daemon::MetadataValueCountsRequest>(dreq);
+            auto result = co_await client->call<daemon::MetadataValueCountsRequest>(dreq);
             if (!result) {
                 co_return result.error();
             }
@@ -5771,24 +5758,21 @@ void MCPServer::initializeToolRegistry() {
             const MCPListSnapshotsRequest& req) {
             (void)req; // Daemon request has no filter fields yet
 
-            if (auto ensure = ensureDaemonClient(); !ensure) {
-                co_return ensure.error();
-            }
+            auto clientRes = requireDaemonClient();
+            if (!clientRes)
+                co_return clientRes.error();
+            auto* client = clientRes.value();
 
             daemon::ListSnapshotsRequest daemonReq;
-            auto result = co_await daemon_client_->listSnapshots(daemonReq);
+            auto result = co_await client->listSnapshots(daemonReq);
 
             if (!result) {
                 co_return result.error();
             }
 
             MCPListSnapshotsResponse response;
-            // Convert SnapshotInfo to JSON objects
             for (const auto& snap : result.value().snapshots) {
-                response.snapshots.push_back(json{{"id", snap.id},
-                                                  {"label", snap.label},
-                                                  {"created_at", snap.createdAt},
-                                                  {"document_count", snap.documentCount}});
+                response.snapshots.push_back(makeSnapshotJson(snap));
             }
             co_return response;
         }

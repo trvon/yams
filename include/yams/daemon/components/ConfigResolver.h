@@ -63,6 +63,8 @@ public:
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
         std::optional<std::size_t> kmeansK;
+        std::optional<std::size_t> hdbscanMinPoints;
+        std::optional<std::size_t> hdbscanMinClusterSize;
     };
 
     struct PostIngestCaps {

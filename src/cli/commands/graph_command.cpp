@@ -598,33 +598,12 @@ private:
         const auto& resp = r.value();
         std::vector<yams::daemon::GraphNode> nodes = resp.connectedNodes;
         const auto cwd = std::filesystem::current_path();
-        std::optional<std::unordered_set<std::string>> scopedPaths;
         if (scopeToCwd_) {
-            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-            if (!appCtx || !appCtx->metadataRepo) {
-                co_return Error{ErrorCode::NotInitialized,
-                                "Path tree scoping unavailable (metadata repo not ready)"};
-            }
-            auto res = buildScopedPathSet(cwd, appCtx->metadataRepo);
+            auto res = buildCurrentScopePathSet(cwd);
             if (!res) {
                 co_return res.error();
             }
-            scopedPaths.emplace(std::move(res.value()));
-        }
-        if (scopeToCwd_ && scopedPaths.has_value()) {
-            std::vector<yams::daemon::GraphNode> filtered;
-            filtered.reserve(nodes.size());
-            for (const auto& node : nodes) {
-                auto nodePathOpt = extractNodePath(node);
-                if (!nodePathOpt.has_value()) {
-                    continue;
-                }
-                auto normalized = normalizePath(nodePathOpt.value(), cwd);
-                if (scopedPaths->count(normalized) > 0) {
-                    filtered.push_back(node);
-                }
-            }
-            nodes.swap(filtered);
+            nodes = filterNodesToScopedPaths(std::move(nodes), res.value(), cwd);
         }
 
         if (jsonOutput_ || outputFormat_ == "json") {
@@ -671,9 +650,7 @@ private:
                                   " node" + (resp.totalNodesFound != 1 ? "s" : "");
             std::cout << yams::cli::ui::status_info(summary) << "\n";
             if (scopeToCwd_) {
-                std::cout << yams::cli::ui::status_info(
-                                 "Scoped to src/** and include/** via path tree (excluding tests/, "
-                                 "benchmarks/, third_party/, node_modules/, build*)")
+                std::cout << yams::cli::ui::status_info(std::string{kScopeToCwdDescription})
                           << "\n";
             }
             std::cout << "Showing: " << nodes.size() << " (offset " << offset_ << ", limit "
@@ -766,38 +743,16 @@ private:
 
         std::vector<yams::daemon::GraphNode> isolatedNodes = result.value().connectedNodes;
         const auto cwd = std::filesystem::current_path();
-        std::optional<std::unordered_set<std::string>> scopedPaths;
         if (scopeToCwd_) {
-            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-            if (appCtx && appCtx->metadataRepo) {
-                auto res = buildScopedPathSet(cwd, appCtx->metadataRepo);
-                if (res) {
-                    scopedPaths.emplace(std::move(res.value()));
-                } else {
-                    std::cerr << yams::cli::ui::status_warning("Path tree scoping unavailable: " +
-                                                               res.error().message)
-                              << "\n";
-                }
-            } else {
-                std::cerr << yams::cli::ui::status_warning(
-                                 "Path tree scoping unavailable (metadata repo not ready)")
+            auto res = buildCurrentScopePathSet(cwd);
+            if (!res) {
+                std::cerr << yams::cli::ui::status_warning("Path tree scoping unavailable: " +
+                                                           res.error().message)
                           << "\n";
+            } else {
+                isolatedNodes =
+                    filterNodesToScopedPaths(std::move(isolatedNodes), res.value(), cwd);
             }
-        }
-        if (scopeToCwd_ && scopedPaths.has_value()) {
-            std::vector<yams::daemon::GraphNode> filtered;
-            filtered.reserve(isolatedNodes.size());
-            for (const auto& node : isolatedNodes) {
-                auto nodePathOpt = extractNodePath(node);
-                if (!nodePathOpt.has_value()) {
-                    continue;
-                }
-                auto normalized = normalizePath(nodePathOpt.value(), cwd);
-                if (scopedPaths->count(normalized) > 0) {
-                    filtered.push_back(node);
-                }
-            }
-            isolatedNodes.swap(filtered);
         }
 
         if (jsonOutput_ || outputFormat_ == "json") {
@@ -829,9 +784,7 @@ private:
                              listNodeType_ + " nodes (no incoming " + relation + " edges)")
                       << "\n\n";
             if (scopeToCwd_) {
-                std::cout << yams::cli::ui::status_info(
-                                 "Scoped to src/** and include/** via path tree (excluding tests/, "
-                                 "benchmarks/, third_party/, node_modules/, build*)")
+                std::cout << yams::cli::ui::status_info(std::string{kScopeToCwdDescription})
                           << "\n\n";
             }
 
@@ -920,6 +873,39 @@ private:
         }
         return paths;
     }
+
+    Result<std::unordered_set<std::string>>
+    buildCurrentScopePathSet(const std::filesystem::path& cwd) const {
+        auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+        if (!appCtx || !appCtx->metadataRepo) {
+            return Error{ErrorCode::NotInitialized,
+                         "Path tree scoping unavailable (metadata repo not ready)"};
+        }
+        return buildScopedPathSet(cwd, appCtx->metadataRepo);
+    }
+
+    static std::vector<yams::daemon::GraphNode>
+    filterNodesToScopedPaths(std::vector<yams::daemon::GraphNode> nodes,
+                             const std::unordered_set<std::string>& scopedPaths,
+                             const std::filesystem::path& cwd) {
+        std::vector<yams::daemon::GraphNode> filtered;
+        filtered.reserve(nodes.size());
+        for (const auto& node : nodes) {
+            auto nodePathOpt = extractNodePath(node);
+            if (!nodePathOpt.has_value()) {
+                continue;
+            }
+            auto normalized = normalizePath(nodePathOpt.value(), cwd);
+            if (scopedPaths.count(normalized) > 0) {
+                filtered.push_back(node);
+            }
+        }
+        return filtered;
+    }
+
+    static constexpr std::string_view kScopeToCwdDescription =
+        "Scoped to src/** and include/** via path tree (excluding tests/, benchmarks/, "
+        "third_party/, node_modules/, build*)";
 
     static bool isWordBoundary(char c) {
         return !(std::isalnum(static_cast<unsigned char>(c)) || c == '_');
@@ -1120,12 +1106,7 @@ private:
         std::vector<DeadCodeRow> allRows;
         std::unordered_set<std::string> scopedPaths;
         {
-            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-            if (!appCtx || !appCtx->metadataRepo) {
-                co_return Error{ErrorCode::NotInitialized,
-                                "Path tree scoping unavailable (metadata repo not ready)"};
-            }
-            auto res = buildScopedPathSet(cwd, appCtx->metadataRepo);
+            auto res = buildCurrentScopePathSet(cwd);
             if (!res) {
                 co_return res.error();
             }
@@ -1255,10 +1236,7 @@ private:
             std::cout << out.dump(2) << "\n";
         } else {
             std::cout << yams::cli::ui::section_header("Unused-candidate report") << "\n\n";
-            std::cout << yams::cli::ui::status_info(
-                             "Scoped to src/** and include/** via path tree (excluding tests/, "
-                             "benchmarks/, third_party/, node_modules/, build*)")
-                      << "\n\n";
+            std::cout << yams::cli::ui::status_info(std::string{kScopeToCwdDescription}) << "\n\n";
             std::cout << yams::cli::ui::status_info("Confidence threshold: " +
                                                     std::to_string(minConfidence_))
                       << "\n\n";

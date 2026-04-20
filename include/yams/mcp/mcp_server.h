@@ -300,6 +300,7 @@ private:
     void recordEarlyFeatureUse();
 
     Result<void> ensureDaemonClient();
+    Result<yams::daemon::DaemonClient*> requireDaemonClient();
 
     // YAMS extensions toggle (independent of strict mode which has been removed)
     bool areYamsExtensionsEnabled() const { return enableYamsExtensions_; }

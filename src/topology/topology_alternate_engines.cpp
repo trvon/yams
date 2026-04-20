@@ -1,5 +1,9 @@
 #include <yams/topology/topology_alternate_engines.h>
 
+#include <Hdbscan/hdbscan.hpp>
+#include <Runner/hdbscanParameters.hpp>
+#include <Runner/hdbscanResult.hpp>
+#include <Runner/hdbscanRunner.hpp>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -437,6 +441,109 @@ double cosineDistance(std::span<const float> a, std::span<const float> b) {
     return 1.0 - std::clamp(cos, -1.0, 1.0);
 }
 
+std::vector<std::int64_t> runHDBSCAN(std::span<const TopologyDocumentInput> documents,
+                                     std::size_t requestedMinPoints,
+                                     std::size_t requestedMinClusterSize) {
+    const std::size_t n = documents.size();
+    std::vector<std::int64_t> assignment(n, -1);
+    if (n == 0) {
+        return assignment;
+    }
+
+    std::vector<std::size_t> usable;
+    usable.reserve(n);
+    std::size_t embeddingDim = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!documents[i].embedding.empty()) {
+            if (embeddingDim == 0) {
+                embeddingDim = documents[i].embedding.size();
+            }
+            if (documents[i].embedding.size() == embeddingDim) {
+                usable.push_back(i);
+            }
+        }
+    }
+    if (usable.size() < 2 || embeddingDim == 0) {
+        std::iota(assignment.begin(), assignment.end(), 0);
+        return assignment;
+    }
+
+    std::size_t minClusterSize = requestedMinClusterSize;
+    if (minClusterSize == 0) {
+        minClusterSize = std::max<std::size_t>(2, static_cast<std::size_t>(std::round(std::log2(
+                                                      static_cast<double>(usable.size()) + 1.0))));
+    }
+    minClusterSize = std::min(minClusterSize, std::max<std::size_t>(2, usable.size() / 2));
+
+    std::size_t minPoints = requestedMinPoints == 0 ? minClusterSize : requestedMinPoints;
+    minPoints = std::min(minPoints, std::max<std::size_t>(2, usable.size() - 1));
+
+    std::vector<std::vector<double>> distances(usable.size(),
+                                               std::vector<double>(usable.size(), 0.0));
+    for (std::size_t i = 0; i < usable.size(); ++i) {
+        for (std::size_t j = i + 1; j < usable.size(); ++j) {
+            const double d =
+                cosineDistance(documents[usable[i]].embedding, documents[usable[j]].embedding);
+            distances[i][j] = d;
+            distances[j][i] = d;
+        }
+    }
+
+    hdbscanParameters params;
+    params.distances = std::move(distances);
+    params.distanceFunction = "";
+    params.minPoints = static_cast<std::uint32_t>(minPoints);
+    params.minClusterSize = static_cast<std::uint32_t>(minClusterSize);
+
+    hdbscanRunner runner;
+    hdbscanResult result;
+    try {
+        result = runner.run(params);
+    } catch (const std::exception& e) {
+        spdlog::warn("[hdbscan] runner threw: {}; falling back to singletons", e.what());
+        std::iota(assignment.begin(), assignment.end(), 0);
+        return assignment;
+    }
+
+    if (result.labels.size() != usable.size()) {
+        spdlog::warn("[hdbscan] label count mismatch ({} vs {}); falling back to singletons",
+                     result.labels.size(), usable.size());
+        std::iota(assignment.begin(), assignment.end(), 0);
+        return assignment;
+    }
+
+    std::unordered_map<int, std::int64_t> canon;
+    for (std::size_t u = 0; u < usable.size(); ++u) {
+        const int lbl = result.labels[u];
+        const auto docIdx = static_cast<std::int64_t>(usable[u]);
+        if (lbl == 0) {
+            continue;
+        }
+        auto it = canon.find(lbl);
+        if (it == canon.end()) {
+            canon.emplace(lbl, docIdx);
+        } else if (docIdx < it->second) {
+            it->second = docIdx;
+        }
+    }
+
+    std::int64_t orphanId = static_cast<std::int64_t>(n);
+    for (std::size_t u = 0; u < usable.size(); ++u) {
+        const int lbl = result.labels[u];
+        if (lbl == 0) {
+            assignment[usable[u]] = orphanId++;
+        } else {
+            assignment[usable[u]] = canon[lbl];
+        }
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        if (assignment[i] < 0) {
+            assignment[i] = orphanId++;
+        }
+    }
+    return assignment;
+}
+
 std::vector<std::int64_t> runKMeansEmbedding(std::span<const TopologyDocumentInput> documents,
                                              std::size_t requestedK) {
     const std::size_t n = documents.size();
@@ -737,6 +844,53 @@ Result<TopologyDirtyRegion> KMeansEmbeddingTopologyEngine::defineDirtyRegion(
 }
 
 Result<TopologyArtifactBatch> KMeansEmbeddingTopologyEngine::updateArtifacts(
+    const TopologyArtifactBatch&, std::span<const TopologyDocumentInput> changedDocuments,
+    const TopologyBuildConfig& config, TopologyUpdateStats* stats) {
+    if (stats != nullptr) {
+        stats->fallbackFullRebuilds = 1;
+    }
+    return buildArtifacts(changedDocuments, config);
+}
+
+// ============================================================================
+// HDBSCANTopologyEngine
+// ============================================================================
+
+Result<TopologyArtifactBatch>
+HDBSCANTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> documents,
+                                      const TopologyBuildConfig& config) {
+    const auto ts = nowStamps();
+    if (documents.empty()) {
+        TopologyArtifactBatch batch;
+        batch.snapshotId = makeSnapshotId(ts.unixMillis);
+        batch.algorithm = "hdbscan_v1";
+        batch.inputKind = config.inputKind;
+        batch.generatedAtUnixSeconds = ts.unixSeconds;
+        return batch;
+    }
+
+    std::unordered_map<std::string, std::size_t> indexByHash;
+    indexByHash.reserve(documents.size());
+    for (std::size_t i = 0; i < documents.size(); ++i) {
+        if (!documents[i].documentHash.empty()) {
+            indexByHash[documents[i].documentHash] = i;
+        }
+    }
+    auto pairWeights = buildPairWeights(documents, indexByHash, config);
+    auto assignment = runHDBSCAN(documents, config.hdbscanMinPoints, config.hdbscanMinClusterSize);
+    auto batch = buildBatchFromAssignment(documents, assignment, pairWeights, "hdbscan_v1", ts);
+    batch.inputKind = config.inputKind;
+    return batch;
+}
+
+Result<TopologyDirtyRegion>
+HDBSCANTopologyEngine::defineDirtyRegion(const TopologyArtifactBatch&,
+                                         std::span<const TopologyDocumentInput> changedDocuments,
+                                         const TopologyBuildConfig&) const {
+    return defaultDirtyRegion(changedDocuments);
+}
+
+Result<TopologyArtifactBatch> HDBSCANTopologyEngine::updateArtifacts(
     const TopologyArtifactBatch&, std::span<const TopologyDocumentInput> changedDocuments,
     const TopologyBuildConfig& config, TopologyUpdateStats* stats) {
     if (stats != nullptr) {

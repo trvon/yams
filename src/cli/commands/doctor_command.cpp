@@ -2000,6 +2000,525 @@ private:
         std::vector<std::string> issues;
     };
 
+    struct DoctorCachedState {
+        bool daemonUp{false};
+        std::string effectiveSocket;
+        std::optional<yams::daemon::StatusResponse> status;
+        std::optional<yams::daemon::GetStatsResponse> stats;
+    };
+
+    DoctorCachedState collectDoctorCachedState() const {
+        DoctorCachedState state;
+
+        using namespace yams::daemon;
+        state.effectiveSocket = YamsCLI::resolveConfiguredDaemonSocketPath().string();
+        state.daemonUp = daemon::DaemonClient::isDaemonRunning(state.effectiveSocket);
+
+        if (!state.daemonUp) {
+            return state;
+        }
+
+        try {
+            ClientConfig cfg;
+            if (cli_ && cli_->hasExplicitDataDir()) {
+                cfg.dataDir = cli_->getDataPath();
+            }
+            cfg.requestTimeout = std::chrono::milliseconds(10000);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes) {
+                return state;
+            }
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
+
+            auto sres =
+                yams::cli::run_result<StatusResponse>(client.status(), std::chrono::seconds(10));
+            if (sres) {
+                state.status = std::move(sres.value());
+            }
+
+            GetStatsRequest req;
+            req.detailed = true;
+            req.showFileTypes = false;
+            auto gres = yams::cli::run_result<GetStatsResponse>(client.getStats(req),
+                                                                std::chrono::milliseconds(10000));
+            if (gres) {
+                state.stats = std::move(gres.value());
+            }
+        } catch (...) {
+        }
+
+        return state;
+    }
+
+    nlohmann::json buildDoctorJsonResult(const DoctorCachedState& cachedState,
+                                         const yams::cli::RecommendationBuilder& recs) {
+        nlohmann::json jsonResult;
+        jsonResult["daemon"]["socket"] = cachedState.effectiveSocket;
+        jsonResult["daemon"]["running"] = cachedState.daemonUp;
+
+        if (cachedState.status) {
+            const auto& s = *cachedState.status;
+            jsonResult["daemon"]["ready"] = s.ready;
+            jsonResult["daemon"]["running"] = s.running;
+            jsonResult["daemon"]["version"] = s.version;
+            jsonResult["daemon"]["lifecycle_state"] = s.lifecycleState;
+            jsonResult["daemon"]["active_connections"] = s.activeConnections;
+            jsonResult["daemon"]["memory_mb"] = s.memoryUsageMb;
+            jsonResult["daemon"]["cpu_percent"] = s.cpuUsagePercent;
+
+            jsonResult["embedding"]["available"] = s.embeddingAvailable;
+            jsonResult["embedding"]["backend"] = s.embeddingBackend;
+            jsonResult["embedding"]["model"] = s.embeddingModel;
+            jsonResult["embedding"]["path"] = s.embeddingModelPath;
+            jsonResult["embedding"]["dimension"] = s.embeddingDim;
+            jsonResult["embedding"]["threads_intra"] = s.embeddingThreadsIntra;
+            jsonResult["embedding"]["threads_inter"] = s.embeddingThreadsInter;
+
+            for (const auto& [k, v] : s.readinessStates) {
+                jsonResult["readiness"][k] = v;
+            }
+
+            nlohmann::json pluginsJson = nlohmann::json::array();
+            for (const auto& p : s.providers) {
+                nlohmann::json pj;
+                pj["name"] = p.name;
+                pj["ready"] = p.ready;
+                pj["degraded"] = p.degraded;
+                pj["is_provider"] = p.isProvider;
+                pj["models_loaded"] = p.modelsLoaded;
+                if (!p.error.empty())
+                    pj["error"] = p.error;
+                pluginsJson.push_back(std::move(pj));
+            }
+            jsonResult["plugins"] = std::move(pluginsJson);
+        }
+
+        try {
+            auto trustRootsFromDaemon = fetchTrustedRootsFromDaemon();
+            bool usedDaemonTrust = trustRootsFromDaemon.has_value();
+
+            std::vector<std::filesystem::path> trustedRoots;
+            if (trustRootsFromDaemon) {
+                trustedRoots = dedupeRoots(*trustRootsFromDaemon);
+            } else {
+                auto localTrusted = readTrusted();
+                trustedRoots.assign(localTrusted.begin(), localTrusted.end());
+            }
+
+            bool strictMode = resolveStrictPluginDirMode();
+            auto defaultRoots = getDefaultPluginRoots(strictMode);
+            auto checks = assessTrustedRoots(trustedRoots, strictMode, defaultRoots);
+
+            nlohmann::json trustJson;
+            trustJson["source"] = usedDaemonTrust ? "daemon" : "local";
+            trustJson["trust_file"] = yams::config::get_daemon_plugin_trust_file().string();
+            trustJson["legacy_trust_file"] = yams::config::get_legacy_plugin_trust_file().string();
+            trustJson["strict_mode"] = strictMode;
+
+            nlohmann::json rootsJson = nlohmann::json::array();
+            for (const auto& check : checks) {
+                nlohmann::json root;
+                root["path"] = check.path.string();
+                root["issues"] = check.issues;
+                root["problematic"] = std::any_of(
+                    check.issues.begin(), check.issues.end(), [](const std::string& issue) {
+                        return issue == "missing" || issue == "temporary-path" ||
+                               issue == "build-artifact-path";
+                    });
+                rootsJson.push_back(std::move(root));
+            }
+            trustJson["roots"] = std::move(rootsJson);
+            jsonResult["plugin_trust"] = std::move(trustJson);
+        } catch (...) {
+        }
+
+        namespace fs = std::filesystem;
+        fs::path modelsPath = cli_ ? cli_->getDataPath() / "models" : fs::path();
+        nlohmann::json modelsJson = nlohmann::json::array();
+        std::error_code ec;
+        if (!modelsPath.empty() && fs::exists(modelsPath, ec) && fs::is_directory(modelsPath, ec)) {
+            for (const auto& entry : fs::directory_iterator(modelsPath, ec)) {
+                if (!entry.is_directory())
+                    continue;
+                fs::path modelOnnx = entry.path() / "model.onnx";
+                if (fs::exists(modelOnnx, ec)) {
+                    nlohmann::json mj;
+                    mj["name"] = entry.path().filename().string();
+                    mj["has_config"] = fs::exists(entry.path() / "config.json", ec) ||
+                                       fs::exists(entry.path() / "sentence_bert_config.json", ec);
+                    mj["has_tokenizer"] = fs::exists(entry.path() / "tokenizer.json", ec);
+                    modelsJson.push_back(std::move(mj));
+                }
+            }
+        }
+        jsonResult["models"] = std::move(modelsJson);
+
+        fs::path vecDbPath = cli_ ? cli_->getDataPath() / "vectors.db" : fs::path();
+        jsonResult["vector_db"]["path"] = vecDbPath.string();
+        jsonResult["vector_db"]["exists"] = !vecDbPath.empty() && fs::exists(vecDbPath, ec);
+
+        try {
+            auto r2Status = evaluateR2KeychainStatus();
+            jsonResult["storage"]["r2"]["enabled"] = r2Status.enabled;
+            jsonResult["storage"]["r2"]["auth_mode"] = r2Status.authMode;
+            jsonResult["storage"]["r2"]["account_id"] = r2Status.accountId;
+            jsonResult["storage"]["r2"]["keychain_supported"] = r2Status.keychainSupported;
+            jsonResult["storage"]["r2"]["keychain_token_present"] = r2Status.tokenPresent;
+            if (!r2Status.detail.empty()) {
+                jsonResult["storage"]["r2"]["detail"] = r2Status.detail;
+            }
+        } catch (...) {
+        }
+
+        try {
+            auto db = cli_->getDatabase();
+            if (db && db->isOpen()) {
+                auto countTable = [&](const char* sql) -> long long {
+                    auto stR = db->prepare(sql);
+                    if (!stR)
+                        return -1;
+                    auto st = std::move(stR).value();
+                    auto step = st.step();
+                    if (step && step.value())
+                        return st.getInt64(0);
+                    return -1;
+                };
+                jsonResult["knowledge_graph"]["nodes"] =
+                    countTable("SELECT COUNT(1) FROM kg_nodes");
+                jsonResult["knowledge_graph"]["edges"] =
+                    countTable("SELECT COUNT(1) FROM kg_edges");
+                jsonResult["knowledge_graph"]["aliases"] =
+                    countTable("SELECT COUNT(1) FROM kg_aliases");
+                jsonResult["knowledge_graph"]["embeddings"] =
+                    countTable("SELECT COUNT(1) FROM kg_node_embeddings");
+                jsonResult["knowledge_graph"]["doc_entities"] =
+                    countTable("SELECT COUNT(1) FROM doc_entities");
+            }
+        } catch (...) {
+        }
+
+        if (!recs.empty()) {
+            jsonResult["recommendations"] = yams::cli::recommendationsToJson(recs);
+        }
+
+        return jsonResult;
+    }
+
+    void renderDoctorR2Credentials(yams::cli::RecommendationBuilder& recs) {
+        try {
+            auto r2Status = evaluateR2KeychainStatus();
+            if (!r2Status.enabled) {
+                return;
+            }
+
+            std::cout << "\n" << yams::cli::ui::section_header("R2 Credentials") << "\n\n";
+            std::vector<yams::cli::ui::Row> rows;
+            rows.push_back({"Auth Mode", r2Status.authMode, ""});
+            rows.push_back(
+                {"Account ID", r2Status.accountId.empty() ? "(unset)" : r2Status.accountId, ""});
+
+            std::string keychainState;
+            if (!r2Status.keychainSupported) {
+                keychainState = yams::cli::ui::colorize("not supported", yams::cli::ui::Ansi::DIM);
+            } else if (r2Status.tokenPresent) {
+                keychainState = yams::cli::ui::colorize("present", yams::cli::ui::Ansi::GREEN);
+            } else {
+                keychainState = yams::cli::ui::colorize("missing", yams::cli::ui::Ansi::YELLOW);
+            }
+            rows.push_back({"Keychain Token", keychainState, ""});
+            if (!r2Status.detail.empty()) {
+                rows.push_back({"Detail", r2Status.detail, ""});
+            }
+            yams::cli::ui::render_rows(std::cout, rows);
+
+            if (r2Status.keychainSupported && !r2Status.tokenPresent) {
+                recs.warning("DOCTOR_R2_KEYCHAIN_MISSING",
+                             "R2 temp-credentials mode is configured but keychain token is "
+                             "missing; set --s3-r2-api-token-keychain or env token.");
+            }
+        } catch (...) {
+        }
+    }
+
+    void
+    renderDoctorEmbeddingRuntime(const std::optional<yams::daemon::StatusResponse>& cachedStatus) {
+        try {
+            if (!cachedStatus) {
+                return;
+            }
+
+            const auto& s = *cachedStatus;
+            std::cout << "\n" << yams::cli::ui::section_header("Embedding Runtime") << "\n\n";
+
+            std::vector<yams::cli::ui::Row> embRows;
+            std::string availStatus =
+                s.embeddingAvailable ? yams::cli::ui::colorize("✓ yes", yams::cli::ui::Ansi::GREEN)
+                                     : yams::cli::ui::colorize("✗ no", yams::cli::ui::Ansi::YELLOW);
+            embRows.push_back({"Available", availStatus, ""});
+
+            if (!s.embeddingBackend.empty())
+                embRows.push_back({"Backend", s.embeddingBackend, ""});
+            if (!s.embeddingModel.empty())
+                embRows.push_back({"Model", s.embeddingModel, ""});
+            if (!s.embeddingModelPath.empty())
+                embRows.push_back({"Path", s.embeddingModelPath, ""});
+            if (s.embeddingDim > 0)
+                embRows.push_back({"Dimension", std::to_string(s.embeddingDim), ""});
+            if (s.embeddingThreadsIntra > 0 || s.embeddingThreadsInter > 0) {
+                std::ostringstream thrStr;
+                thrStr << s.embeddingThreadsIntra << " intra / " << s.embeddingThreadsInter
+                       << " inter";
+                embRows.push_back({"Threads", thrStr.str(), ""});
+            }
+
+            yams::cli::ui::render_rows(std::cout, embRows);
+        } catch (...) {
+        }
+    }
+
+    void renderDoctorKnowledgeGraph(yams::cli::RecommendationBuilder& recs) {
+        try {
+            auto db = cli_->getDatabase();
+            if (!(db && db->isOpen())) {
+                return;
+            }
+
+            auto countTable = [&](const char* sql) -> long long {
+                auto stR = db->prepare(sql);
+                if (!stR)
+                    return -1;
+                auto st = std::move(stR).value();
+                auto step = st.step();
+                if (step && step.value())
+                    return st.getInt64(0);
+                return -1;
+            };
+            long long nodes = countTable("SELECT COUNT(1) FROM kg_nodes");
+            long long edges = countTable("SELECT COUNT(1) FROM kg_edges");
+            long long aliases = countTable("SELECT COUNT(1) FROM kg_aliases");
+            long long embeddings = countTable("SELECT COUNT(1) FROM kg_node_embeddings");
+            long long entities = countTable("SELECT COUNT(1) FROM doc_entities");
+
+            std::cout << "\n" << yams::cli::ui::section_header("Knowledge Graph") << "\n\n";
+            if (entities <= 0 && nodes <= 0) {
+                std::string msg =
+                    "Knowledge graph empty — run 'yams doctor repair --graph' to build from "
+                    "tags/metadata";
+                std::cout << yams::cli::ui::colorize("⚠ " + msg, yams::cli::ui::Ansi::YELLOW)
+                          << "\n";
+                recs.warning("DOCTOR_KG_EMPTY", msg);
+                return;
+            }
+
+            std::vector<yams::cli::ui::Row> kgRows;
+            if (nodes >= 0)
+                kgRows.push_back({"Nodes", std::to_string(nodes), ""});
+            if (edges >= 0)
+                kgRows.push_back({"Edges", std::to_string(edges), ""});
+            if (aliases >= 0)
+                kgRows.push_back({"Aliases", std::to_string(aliases), ""});
+            if (embeddings >= 0)
+                kgRows.push_back({"Embeddings", std::to_string(embeddings), ""});
+            if (entities >= 0)
+                kgRows.push_back({"Doc Entities", std::to_string(entities), ""});
+            yams::cli::ui::render_rows(std::cout, kgRows);
+        } catch (...) {
+        }
+    }
+
+    void
+    renderDoctorLoadedPlugins(const std::optional<yams::daemon::StatusResponse>& cachedStatus,
+                              const std::optional<yams::daemon::GetStatsResponse>& cachedStats) {
+        try {
+            std::cout << "\n" << yams::cli::ui::section_header("Loaded Plugins") << "\n\n";
+
+            if (cachedStatus && !cachedStatus->providers.empty()) {
+                const auto& st = *cachedStatus;
+                for (const auto& p : st.providers) {
+                    std::string status;
+                    if (p.degraded) {
+                        status = yams::cli::ui::colorize("✗", yams::cli::ui::Ansi::RED);
+                    } else if (!p.ready) {
+                        status = yams::cli::ui::colorize("◷", yams::cli::ui::Ansi::YELLOW);
+                    } else {
+                        status = yams::cli::ui::colorize("✓", yams::cli::ui::Ansi::GREEN);
+                    }
+
+                    std::cout << "  " << status << " "
+                              << yams::cli::ui::colorize(p.name, yams::cli::ui::Ansi::CYAN);
+
+                    std::vector<std::string> tags;
+                    if (p.isProvider)
+                        tags.push_back("provider");
+                    if (!p.ready)
+                        tags.push_back("not-ready");
+                    if (p.degraded)
+                        tags.push_back("degraded");
+
+                    if (!tags.empty()) {
+                        std::cout << " ["
+                                  << yams::cli::ui::colorize(tags[0], yams::cli::ui::Ansi::DIM);
+                        for (size_t i = 1; i < tags.size(); ++i) {
+                            std::cout << ", "
+                                      << yams::cli::ui::colorize(tags[i], yams::cli::ui::Ansi::DIM);
+                        }
+                        std::cout << "]";
+                    }
+
+                    if (p.modelsLoaded > 0) {
+                        std::cout << " "
+                                  << yams::cli::ui::colorize("(" + std::to_string(p.modelsLoaded) +
+                                                                 " models)",
+                                                             yams::cli::ui::Ansi::DIM);
+                    }
+                    if (!p.error.empty()) {
+                        std::cout << "\n      "
+                                  << yams::cli::ui::colorize("Error: " + p.error,
+                                                             yams::cli::ui::Ansi::RED);
+                    }
+                    std::cout << "\n";
+                }
+                return;
+            }
+
+            if (cachedStats) {
+                auto it = cachedStats->additionalStats.find("plugins_json");
+                if (it != cachedStats->additionalStats.end() && !it->second.empty()) {
+                    try {
+                        auto j = nlohmann::json::parse(it->second, nullptr, false);
+                        if (!j.is_discarded() && j.is_array() && !j.empty()) {
+                            for (const auto& rec : j) {
+                                std::string name = rec.value("name", std::string("(unknown)"));
+                                std::string line = "- " + name;
+                                try {
+                                    if (rec.value("provider", false))
+                                        line += " [provider]";
+                                    if (rec.value("degraded", false))
+                                        line += " [degraded]";
+                                    if (rec.contains("models_loaded")) {
+                                        int models = 0;
+                                        try {
+                                            models = rec["models_loaded"].get<int>();
+                                        } catch (...) {
+                                        }
+                                        if (models > 0)
+                                            line += " models=" + std::to_string(models);
+                                    }
+                                    if (rec.contains("error")) {
+                                        if (rec["error"].is_string()) {
+                                            auto err = rec["error"].get<std::string>();
+                                            if (!err.empty())
+                                                line += " error=\"" + err + "\"";
+                                        } else {
+                                            line += " error=" + rec["error"].dump();
+                                        }
+                                    }
+                                } catch (...) {
+                                }
+                                std::cout << line << "\n";
+#ifdef __APPLE__
+                                try {
+                                    bool degraded = rec.value("degraded", false);
+                                    std::string pluginPath = rec.value("path", std::string());
+                                    if (degraded && !pluginPath.empty()) {
+                                        std::cout << "  otool -L: " << pluginPath << "\n";
+                                        int rc = std::system(
+                                            (std::string("otool -L \"") + pluginPath + "\"")
+                                                .c_str());
+                                        if (rc == -1) {
+                                            std::cout << "    (failed to execute otool)\n";
+                                        }
+                                    }
+                                } catch (...) {
+                                }
+#endif
+                            }
+                            return;
+                        }
+                    } catch (...) {
+                    }
+                }
+
+                auto eit = cachedStats->additionalStats.find("plugins_error");
+                if (eit != cachedStats->additionalStats.end() && !eit->second.empty()) {
+                    std::cout << "(plugins error: " << eit->second << ")\n";
+                    return;
+                }
+            }
+
+            std::cout << "(none loaded)\n";
+        } catch (...) {
+        }
+    }
+
+    void renderDoctorLiveRepairProgress() {
+        try {
+            using namespace yams::daemon;
+            yams::daemon::ClientConfig cfg;
+            cfg.requestTimeout = std::chrono::milliseconds(1200);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes)
+                throw std::runtime_error(leaseRes.error().message);
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
+
+            uint64_t lastGen = 0, lastFail = 0, lastQ = 0, lastBatches = 0;
+            bool printedHeader = false;
+            for (int i = 0; i < 8; ++i) {
+                GetStatsRequest req;
+                req.detailed = false;
+                req.showFileTypes = false;
+                auto r = yams::cli::run_result<GetStatsResponse>(client.getStats(req),
+                                                                 std::chrono::milliseconds(1300));
+                if (!r)
+                    break;
+
+                const auto& st = r.value();
+                auto getU64 = [&](const char* k) -> uint64_t {
+                    auto it = st.additionalStats.find(k);
+                    if (it == st.additionalStats.end())
+                        return 0;
+                    try {
+                        return static_cast<uint64_t>(std::stoull(it->second));
+                    } catch (...) {
+                        return 0;
+                    }
+                };
+
+                uint64_t gen = getU64("repair_embeddings_generated");
+                uint64_t fail = getU64("repair_failed_operations");
+                uint64_t q = getU64("repair_queue_depth");
+                if (q == 0 && gen == 0 && fail == 0) {
+                    break;
+                }
+
+                uint64_t batches = getU64("repair_batches_attempted");
+                if (!printedHeader) {
+                    std::cout << "\nEmbeddings Repair (live):\n";
+                    printedHeader = true;
+                }
+
+                std::cout << "  generated=" << gen << " failed=" << fail << " pending=" << q
+                          << " batches=" << batches << "\r" << std::flush;
+
+                if (gen == lastGen && fail == lastFail && q == lastQ && batches == lastBatches) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                } else {
+                    lastGen = gen;
+                    lastFail = fail;
+                    lastQ = q;
+                    lastBatches = batches;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                }
+            }
+
+            if (printedHeader)
+                std::cout << "\n";
+        } catch (...) {
+        }
+    }
+
     static std::vector<TrustedRootCheck>
     assessTrustedRoots(const std::vector<std::filesystem::path>& trustedRoots, bool strictMode,
                        const std::vector<std::filesystem::path>& defaultRoots) {
@@ -2238,8 +2757,6 @@ private:
 
     // doctor (no args): quick combined
     void runAll() {
-        // JSON output mode: collect data into structured object
-        nlohmann::json jsonResult;
         bool useJson = jsonOutput_ || (cli_ && cli_->getJsonOutput());
 
         // SQLite + FTS status and migration health
@@ -2259,59 +2776,11 @@ private:
                       << std::flush;
         }
 
-        // Daemon light check first; if not running, fast-fail and only run local checks
-        bool daemon_up = false;
-        std::string effectiveSocket;
-        {
-            using namespace yams::daemon;
-            effectiveSocket = YamsCLI::resolveConfiguredDaemonSocketPath().string();
-            daemon_up = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
-        }
+        const auto cachedState = collectDoctorCachedState();
+        const bool daemon_up = cachedState.daemonUp;
 
-        // Record daemon connectivity for JSON
-        if (useJson) {
-            jsonResult["daemon"]["socket"] = effectiveSocket;
-            jsonResult["daemon"]["running"] = daemon_up;
-        }
-
-        // Fetch daemon status once if available (reuse throughout)
-        std::optional<yams::daemon::StatusResponse> cachedStatus;
-        std::optional<yams::daemon::GetStatsResponse> cachedStats;
-        if (daemon_up) {
-            try {
-                using namespace yams::daemon;
-                ClientConfig cfg;
-                if (cli_ && cli_->hasExplicitDataDir()) {
-                    cfg.dataDir = cli_->getDataPath();
-                }
-                cfg.requestTimeout = std::chrono::milliseconds(10000);
-                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-                if (leaseRes) {
-                    auto leaseHandle = std::move(leaseRes.value());
-                    auto& client = **leaseHandle;
-
-                    {
-                        auto sres = yams::cli::run_result<StatusResponse>(client.status(),
-                                                                          std::chrono::seconds(10));
-                        if (sres) {
-                            cachedStatus = std::move(sres.value());
-                        }
-                    }
-
-                    {
-                        GetStatsRequest req;
-                        req.detailed = true;
-                        req.showFileTypes = false;
-                        auto gres = yams::cli::run_result<GetStatsResponse>(
-                            client.getStats(req), std::chrono::milliseconds(10000));
-                        if (gres) {
-                            cachedStats = std::move(gres.value());
-                        }
-                    }
-                }
-            } catch (...) {
-            }
-        }
+        auto cachedStatus = cachedState.status;
+        auto cachedStats = cachedState.stats;
 
         // Clear loading message
         if (!useJson) {
@@ -2320,165 +2789,7 @@ private:
 
         // For JSON mode, collect all data and output at end
         if (useJson) {
-            // Daemon status
-            if (cachedStatus) {
-                const auto& s = cachedStatus.value();
-                jsonResult["daemon"]["ready"] = s.ready;
-                jsonResult["daemon"]["running"] = s.running;
-                jsonResult["daemon"]["version"] = s.version;
-                jsonResult["daemon"]["lifecycle_state"] = s.lifecycleState;
-                jsonResult["daemon"]["active_connections"] = s.activeConnections;
-                jsonResult["daemon"]["memory_mb"] = s.memoryUsageMb;
-                jsonResult["daemon"]["cpu_percent"] = s.cpuUsagePercent;
-
-                // Embedding info
-                jsonResult["embedding"]["available"] = s.embeddingAvailable;
-                jsonResult["embedding"]["backend"] = s.embeddingBackend;
-                jsonResult["embedding"]["model"] = s.embeddingModel;
-                jsonResult["embedding"]["path"] = s.embeddingModelPath;
-                jsonResult["embedding"]["dimension"] = s.embeddingDim;
-                jsonResult["embedding"]["threads_intra"] = s.embeddingThreadsIntra;
-                jsonResult["embedding"]["threads_inter"] = s.embeddingThreadsInter;
-
-                // Readiness states
-                for (const auto& [k, v] : s.readinessStates) {
-                    jsonResult["readiness"][k] = v;
-                }
-
-                // Plugins/providers
-                nlohmann::json pluginsJson = nlohmann::json::array();
-                for (const auto& p : s.providers) {
-                    nlohmann::json pj;
-                    pj["name"] = p.name;
-                    pj["ready"] = p.ready;
-                    pj["degraded"] = p.degraded;
-                    pj["is_provider"] = p.isProvider;
-                    pj["models_loaded"] = p.modelsLoaded;
-                    if (!p.error.empty())
-                        pj["error"] = p.error;
-                    pluginsJson.push_back(std::move(pj));
-                }
-                jsonResult["plugins"] = std::move(pluginsJson);
-            }
-
-            // Plugin trust diagnostics
-            try {
-                auto trustRootsFromDaemon = fetchTrustedRootsFromDaemon();
-                bool usedDaemonTrust = trustRootsFromDaemon.has_value();
-
-                std::vector<std::filesystem::path> trustedRoots;
-                if (trustRootsFromDaemon) {
-                    trustedRoots = dedupeRoots(*trustRootsFromDaemon);
-                } else {
-                    auto localTrusted = readTrusted();
-                    trustedRoots.assign(localTrusted.begin(), localTrusted.end());
-                }
-
-                bool strictMode = resolveStrictPluginDirMode();
-                auto defaultRoots = getDefaultPluginRoots(strictMode);
-                auto checks = assessTrustedRoots(trustedRoots, strictMode, defaultRoots);
-
-                nlohmann::json trustJson;
-                trustJson["source"] = usedDaemonTrust ? "daemon" : "local";
-                trustJson["trust_file"] = yams::config::get_daemon_plugin_trust_file().string();
-                trustJson["legacy_trust_file"] =
-                    yams::config::get_legacy_plugin_trust_file().string();
-                trustJson["strict_mode"] = strictMode;
-
-                nlohmann::json rootsJson = nlohmann::json::array();
-                for (const auto& check : checks) {
-                    nlohmann::json root;
-                    root["path"] = check.path.string();
-                    root["issues"] = check.issues;
-                    root["problematic"] = std::any_of(
-                        check.issues.begin(), check.issues.end(), [](const std::string& issue) {
-                            return issue == "missing" || issue == "temporary-path" ||
-                                   issue == "build-artifact-path";
-                        });
-                    rootsJson.push_back(std::move(root));
-                }
-                trustJson["roots"] = std::move(rootsJson);
-                jsonResult["plugin_trust"] = std::move(trustJson);
-            } catch (...) {
-            }
-
-            // Models (installed)
-            namespace fs = std::filesystem;
-            fs::path modelsPath = cli_ ? cli_->getDataPath() / "models" : fs::path();
-            nlohmann::json modelsJson = nlohmann::json::array();
-            std::error_code ec;
-            if (!modelsPath.empty() && fs::exists(modelsPath, ec) &&
-                fs::is_directory(modelsPath, ec)) {
-                for (const auto& entry : fs::directory_iterator(modelsPath, ec)) {
-                    if (!entry.is_directory())
-                        continue;
-                    fs::path modelOnnx = entry.path() / "model.onnx";
-                    if (fs::exists(modelOnnx, ec)) {
-                        nlohmann::json mj;
-                        mj["name"] = entry.path().filename().string();
-                        mj["has_config"] =
-                            fs::exists(entry.path() / "config.json", ec) ||
-                            fs::exists(entry.path() / "sentence_bert_config.json", ec);
-                        mj["has_tokenizer"] = fs::exists(entry.path() / "tokenizer.json", ec);
-                        modelsJson.push_back(std::move(mj));
-                    }
-                }
-            }
-            jsonResult["models"] = std::move(modelsJson);
-
-            // Vector DB info
-            fs::path vecDbPath = cli_ ? cli_->getDataPath() / "vectors.db" : fs::path();
-            jsonResult["vector_db"]["path"] = vecDbPath.string();
-            jsonResult["vector_db"]["exists"] = !vecDbPath.empty() && fs::exists(vecDbPath, ec);
-
-            // R2 keychain token readiness for temp-credentials mode
-            try {
-                auto r2Status = evaluateR2KeychainStatus();
-                jsonResult["storage"]["r2"]["enabled"] = r2Status.enabled;
-                jsonResult["storage"]["r2"]["auth_mode"] = r2Status.authMode;
-                jsonResult["storage"]["r2"]["account_id"] = r2Status.accountId;
-                jsonResult["storage"]["r2"]["keychain_supported"] = r2Status.keychainSupported;
-                jsonResult["storage"]["r2"]["keychain_token_present"] = r2Status.tokenPresent;
-                if (!r2Status.detail.empty()) {
-                    jsonResult["storage"]["r2"]["detail"] = r2Status.detail;
-                }
-            } catch (...) {
-            }
-
-            // Knowledge graph stats (if db available)
-            try {
-                auto db = cli_->getDatabase();
-                if (db && db->isOpen()) {
-                    auto countTable = [&](const char* sql) -> long long {
-                        auto stR = db->prepare(sql);
-                        if (!stR)
-                            return -1;
-                        auto st = std::move(stR).value();
-                        auto step = st.step();
-                        if (step && step.value())
-                            return st.getInt64(0);
-                        return -1;
-                    };
-                    jsonResult["knowledge_graph"]["nodes"] =
-                        countTable("SELECT COUNT(1) FROM kg_nodes");
-                    jsonResult["knowledge_graph"]["edges"] =
-                        countTable("SELECT COUNT(1) FROM kg_edges");
-                    jsonResult["knowledge_graph"]["aliases"] =
-                        countTable("SELECT COUNT(1) FROM kg_aliases");
-                    jsonResult["knowledge_graph"]["embeddings"] =
-                        countTable("SELECT COUNT(1) FROM kg_node_embeddings");
-                    jsonResult["knowledge_graph"]["doc_entities"] =
-                        countTable("SELECT COUNT(1) FROM doc_entities");
-                }
-            } catch (...) {
-            }
-
-            // Recommendations
-            if (!recs.empty()) {
-                jsonResult["recommendations"] = yams::cli::recommendationsToJson(recs);
-            }
-
-            // Output JSON and return early
+            auto jsonResult = buildDoctorJsonResult(cachedState, recs);
             std::cout << jsonResult.dump(2) << "\n";
             return;
         }
@@ -2494,243 +2805,11 @@ private:
         checkInstalledModels(cli_);
         checkVec0Module(); // Check vec0 module availability and schema
         checkEmbeddingDimMismatch(cachedStatus);
-        try {
-            auto r2Status = evaluateR2KeychainStatus();
-            if (r2Status.enabled) {
-                std::cout << "\n" << yams::cli::ui::section_header("R2 Credentials") << "\n\n";
-                std::vector<yams::cli::ui::Row> rows;
-                rows.push_back({"Auth Mode", r2Status.authMode, ""});
-                rows.push_back({"Account ID",
-                                r2Status.accountId.empty() ? "(unset)" : r2Status.accountId, ""});
+        renderDoctorR2Credentials(recs);
+        renderDoctorEmbeddingRuntime(cachedStatus);
 
-                std::string keychainState;
-                if (!r2Status.keychainSupported) {
-                    keychainState =
-                        yams::cli::ui::colorize("not supported", yams::cli::ui::Ansi::DIM);
-                } else if (r2Status.tokenPresent) {
-                    keychainState = yams::cli::ui::colorize("present", yams::cli::ui::Ansi::GREEN);
-                } else {
-                    keychainState = yams::cli::ui::colorize("missing", yams::cli::ui::Ansi::YELLOW);
-                }
-                rows.push_back({"Keychain Token", keychainState, ""});
-                if (!r2Status.detail.empty()) {
-                    rows.push_back({"Detail", r2Status.detail, ""});
-                }
-                yams::cli::ui::render_rows(std::cout, rows);
-
-                if (r2Status.keychainSupported && !r2Status.tokenPresent) {
-                    recs.warning("DOCTOR_R2_KEYCHAIN_MISSING",
-                                 "R2 temp-credentials mode is configured but keychain token is "
-                                 "missing; set --s3-r2-api-token-keychain or env token.");
-                }
-            }
-        } catch (...) {
-        }
-        // Show embedding runtime from daemon status (best-effort, use cached data)
-        try {
-            if (cachedStatus) {
-                const auto& s = cachedStatus.value();
-                std::cout << "\n" << yams::cli::ui::section_header("Embedding Runtime") << "\n\n";
-
-                std::vector<yams::cli::ui::Row> embRows;
-                std::string availStatus =
-                    s.embeddingAvailable
-                        ? yams::cli::ui::colorize("✓ yes", yams::cli::ui::Ansi::GREEN)
-                        : yams::cli::ui::colorize("✗ no", yams::cli::ui::Ansi::YELLOW);
-                embRows.push_back({"Available", availStatus, ""});
-
-                if (!s.embeddingBackend.empty())
-                    embRows.push_back({"Backend", s.embeddingBackend, ""});
-                if (!s.embeddingModel.empty())
-                    embRows.push_back({"Model", s.embeddingModel, ""});
-                if (!s.embeddingModelPath.empty())
-                    embRows.push_back({"Path", s.embeddingModelPath, ""});
-                if (s.embeddingDim > 0)
-                    embRows.push_back({"Dimension", std::to_string(s.embeddingDim), ""});
-                if (s.embeddingThreadsIntra > 0 || s.embeddingThreadsInter > 0) {
-                    std::ostringstream thrStr;
-                    thrStr << s.embeddingThreadsIntra << " intra / " << s.embeddingThreadsInter
-                           << " inter";
-                    embRows.push_back({"Threads", thrStr.str(), ""});
-                }
-
-                yams::cli::ui::render_rows(std::cout, embRows);
-            }
-        } catch (...) {
-        }
-
-        // Knowledge graph quick check: show basic index stats and recommend repair when empty
-        try {
-            auto db = cli_->getDatabase();
-            if (db && db->isOpen()) {
-                auto countTable = [&](const char* sql) -> long long {
-                    auto stR = db->prepare(sql);
-                    if (!stR)
-                        return -1;
-                    auto st = std::move(stR).value();
-                    auto step = st.step();
-                    if (step && step.value())
-                        return st.getInt64(0);
-                    return -1;
-                };
-                long long nodes = countTable("SELECT COUNT(1) FROM kg_nodes");
-                long long edges = countTable("SELECT COUNT(1) FROM kg_edges");
-                long long aliases = countTable("SELECT COUNT(1) FROM kg_aliases");
-                long long embeddings = countTable("SELECT COUNT(1) FROM kg_node_embeddings");
-                long long entities = countTable("SELECT COUNT(1) FROM doc_entities");
-
-                std::cout << "\n" << yams::cli::ui::section_header("Knowledge Graph") << "\n\n";
-                if (entities <= 0 && nodes <= 0) {
-                    std::string msg = "Knowledge graph empty — run 'yams doctor repair --graph' to "
-                                      "build from tags/metadata";
-                    std::cout << yams::cli::ui::colorize("⚠ " + msg, yams::cli::ui::Ansi::YELLOW)
-                              << "\n";
-                    recs.warning("DOCTOR_KG_EMPTY", msg);
-                } else {
-                    std::vector<yams::cli::ui::Row> kgRows;
-                    if (nodes >= 0)
-                        kgRows.push_back({"Nodes", std::to_string(nodes), ""});
-                    if (edges >= 0)
-                        kgRows.push_back({"Edges", std::to_string(edges), ""});
-                    if (aliases >= 0)
-                        kgRows.push_back({"Aliases", std::to_string(aliases), ""});
-                    if (embeddings >= 0)
-                        kgRows.push_back({"Embeddings", std::to_string(embeddings), ""});
-                    if (entities >= 0)
-                        kgRows.push_back({"Doc Entities", std::to_string(entities), ""});
-                    yams::cli::ui::render_rows(std::cout, kgRows);
-                }
-            }
-        } catch (...) {
-            // Silent: doctor remains best-effort
-        }
-
-        // Show currently loaded plugins, mirroring `yams plugin list` logic (use cached data)
-        try {
-            std::cout << "\n" << yams::cli::ui::section_header("Loaded Plugins") << "\n\n";
-
-            // Prefer typed providers list from StatusResponse
-            if (cachedStatus && !cachedStatus.value().providers.empty()) {
-                const auto& st = cachedStatus.value();
-                for (const auto& p : st.providers) {
-                    std::string status;
-                    if (p.degraded) {
-                        status = yams::cli::ui::colorize("✗", yams::cli::ui::Ansi::RED);
-                    } else if (!p.ready) {
-                        status = yams::cli::ui::colorize("◷", yams::cli::ui::Ansi::YELLOW);
-                    } else {
-                        status = yams::cli::ui::colorize("✓", yams::cli::ui::Ansi::GREEN);
-                    }
-
-                    std::cout << "  " << status << " "
-                              << yams::cli::ui::colorize(p.name, yams::cli::ui::Ansi::CYAN);
-
-                    std::vector<std::string> tags;
-                    if (p.isProvider)
-                        tags.push_back("provider");
-                    if (!p.ready)
-                        tags.push_back("not-ready");
-                    if (p.degraded)
-                        tags.push_back("degraded");
-
-                    if (!tags.empty()) {
-                        std::cout << " ["
-                                  << yams::cli::ui::colorize(tags[0], yams::cli::ui::Ansi::DIM);
-                        for (size_t i = 1; i < tags.size(); ++i) {
-                            std::cout << ", "
-                                      << yams::cli::ui::colorize(tags[i], yams::cli::ui::Ansi::DIM);
-                        }
-                        std::cout << "]";
-                    }
-
-                    if (p.modelsLoaded > 0)
-                        std::cout << " "
-                                  << yams::cli::ui::colorize("(" + std::to_string(p.modelsLoaded) +
-                                                                 " models)",
-                                                             yams::cli::ui::Ansi::DIM);
-                    if (!p.error.empty())
-                        std::cout << "\n      "
-                                  << yams::cli::ui::colorize("Error: " + p.error,
-                                                             yams::cli::ui::Ansi::RED);
-                    std::cout << "\n";
-                }
-            } else if (cachedStats) {
-                // Fallback to JSON snapshot embedded in stats
-                auto it = cachedStats.value().additionalStats.find("plugins_json");
-                if (it != cachedStats.value().additionalStats.end() && !it->second.empty()) {
-                    try {
-                        auto j = nlohmann::json::parse(it->second, nullptr, false);
-                        if (!j.is_discarded() && j.is_array() && !j.empty()) {
-                            for (const auto& rec : j) {
-                                std::string name = rec.value("name", std::string("(unknown)"));
-                                std::string line = "- " + name;
-                                try {
-                                    if (rec.value("provider", false))
-                                        line += " [provider]";
-                                    if (rec.value("degraded", false))
-                                        line += " [degraded]";
-                                    if (rec.contains("models_loaded")) {
-                                        int models = 0;
-                                        try {
-                                            models = rec["models_loaded"].get<int>();
-                                        } catch (...) {
-                                        }
-                                        if (models > 0)
-                                            line += " models=" + std::to_string(models);
-                                    }
-                                    if (rec.contains("error")) {
-                                        if (rec["error"].is_string()) {
-                                            auto err = rec["error"].get<std::string>();
-                                            if (!err.empty())
-                                                line += " error=\"" + err + "\"";
-                                        } else {
-                                            line += " error=" + rec["error"].dump();
-                                        }
-                                    }
-                                } catch (...) {
-                                }
-                                std::cout << line << "\n";
-#ifdef __APPLE__
-                                // macOS diagnostic: surface DYLIB linkage issues for degraded
-                                try {
-                                    bool __degraded = rec.value("degraded", false);
-                                    std::string __pluginPath = rec.value("path", std::string());
-                                    if (__degraded && !__pluginPath.empty()) {
-                                        std::cout << "  otool -L: " << __pluginPath << "\n";
-                                        int __rc = std::system(
-                                            (std::string("otool -L \"") + __pluginPath + "\"")
-                                                .c_str());
-                                        if (__rc == -1) {
-                                            std::cout << "    (failed to execute otool)\n";
-                                        }
-                                    }
-                                } catch (...) {
-                                }
-#endif
-                            }
-                        } else {
-                            std::cout << "(none loaded)\n";
-                        }
-                    } catch (...) {
-                        std::cout << "(none loaded)\n";
-                    }
-                } else {
-                    std::cout << "(none loaded)\n";
-                }
-
-                // Show any loader errors captured in stats (use cached stats)
-                if (cachedStats) {
-                    auto eit = cachedStats.value().additionalStats.find("plugins_error");
-                    if (eit != cachedStats.value().additionalStats.end() && !eit->second.empty()) {
-                        std::cout << "(plugins error: " << eit->second << ")\n";
-                    }
-                }
-            } else {
-                std::cout << "(none loaded)\n";
-            }
-        } catch (...) {
-            // keep doctor resilient
-        }
+        renderDoctorKnowledgeGraph(recs);
+        renderDoctorLoadedPlugins(cachedStatus, cachedStats);
 
         // Emit collected recommendations (text only for now)
         if (!recs.empty()) {
@@ -2738,70 +2817,7 @@ private:
         }
 
         std::cout << "\nHint: run 'yams doctor plugin <path|name>' for a deep plugin check.\n";
-
-        // Compact live repair progress (short poll). Non-blocking when no repair activity.
-        try {
-            using namespace yams::daemon;
-            yams::daemon::ClientConfig cfg;
-            cfg.requestTimeout = std::chrono::milliseconds(1200);
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-            if (!leaseRes)
-                throw std::runtime_error(leaseRes.error().message);
-            auto leaseHandle = std::move(leaseRes.value());
-            auto& client = **leaseHandle;
-            // Poll a few times; stop early if nothing changes or no queue
-            uint64_t lastGen = 0, lastFail = 0, lastQ = 0, lastBatches = 0;
-            bool printedHeader = false;
-            for (int i = 0; i < 8; ++i) {
-                GetStatsRequest req;
-                req.detailed = false;
-                req.showFileTypes = false;
-                auto r = yams::cli::run_result<GetStatsResponse>(client.getStats(req),
-                                                                 std::chrono::milliseconds(1300));
-                if (!r)
-                    break;
-                const auto& st = r.value();
-                auto getU64 = [&](const char* k) -> uint64_t {
-                    auto it = st.additionalStats.find(k);
-                    if (it == st.additionalStats.end())
-                        return 0;
-                    try {
-                        return static_cast<uint64_t>(std::stoull(it->second));
-                    } catch (...) {
-                        return 0;
-                    }
-                };
-                uint64_t gen = getU64("repair_embeddings_generated");
-                uint64_t fail = getU64("repair_failed_operations");
-                uint64_t q = getU64("repair_queue_depth");
-                if (q == 0 && gen == 0 && fail == 0) {
-                    // No repair activity; stop polling
-                    break;
-                }
-                uint64_t batches = getU64("repair_batches_attempted");
-                if (!printedHeader) {
-                    std::cout << "\nEmbeddings Repair (live):\n";
-                    printedHeader = true;
-                }
-                // Single compact line
-                std::cout << "  generated=" << gen << " failed=" << fail << " pending=" << q
-                          << " batches=" << batches << "\r" << std::flush;
-                // Stop if not changing
-                if (gen == lastGen && fail == lastFail && q == lastQ && batches == lastBatches) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                } else {
-                    lastGen = gen;
-                    lastFail = fail;
-                    lastQ = q;
-                    lastBatches = batches;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-                }
-            }
-            if (printedHeader)
-                std::cout << "\n";
-        } catch (...) {
-            // Ignore doctor progress errors; keep doctor quick
-        }
+        renderDoctorLiveRepairProgress();
     }
 
     static void checkInstalledModels(YamsCLI* cli) {

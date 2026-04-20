@@ -7,6 +7,7 @@
 #include <boost/asio/local/stream_protocol.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/components/AdmissionPolicy.h>
+#include <yams/daemon/ipc/request_handler.h>
 
 #include <atomic>
 #include <chrono>
@@ -185,9 +186,23 @@ private:
     size_t mainActiveConnectionCount() const;
     size_t connectionSlotsFreeForLimit(size_t limit) const;
     bool mainSocketEmergencyGuardRejects() const;
+    void closeAcceptedSocket(boost::asio::local::stream_protocol::socket& socket) const;
+    boost::asio::awaitable<void> backoffAfterReject(std::chrono::milliseconds delay) const;
+    boost::asio::awaitable<void>
+    rejectProxyAcceptForNoSlots(boost::asio::local::stream_protocol::socket& socket,
+                                std::string_view loopLabel, bool trace,
+                                uint32_t rejectStreak) const;
+    boost::asio::awaitable<void>
+    rejectMainAcceptForEmergencyGuard(boost::asio::local::stream_protocol::socket& socket,
+                                      std::string_view loopLabel) const;
+    size_t recordAcceptedConnection(bool isProxy);
+    size_t releaseActiveConnection(bool isProxy);
     void publishConnectionStats(size_t currentActiveConnections,
                                 std::optional<size_t> slotLimitOverride = std::nullopt) const;
     SocketAdmissionVerdict evaluateRequestAdmission(const Request& request, bool isProxy) const;
+    void ensureWriterBudget();
+    RequestDispatcher* currentDispatcher() const;
+    RequestHandler::Config makeHandlerConfig(bool isProxy, RequestDispatcher* dispatcher) const;
     void execute_on_io_context(std::function<void()> fn);
     void close_acceptor_on_executor();
     std::size_t

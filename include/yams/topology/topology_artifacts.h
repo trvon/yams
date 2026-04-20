@@ -75,6 +75,10 @@ struct TopologyBuildConfig {
     // KMeansEmbedding engine: requested cluster count (0 = auto via sqrt_n heuristic);
     // ignored by other engines.
     std::size_t kmeansK{0};
+    // HDBSCAN engine: minimum points for core-distance / minimum cluster size
+    // (0 = auto from corpus size). Ignored by other engines.
+    std::size_t hdbscanMinPoints{0};
+    std::size_t hdbscanMinClusterSize{0};
 };
 
 struct TopologyDirtyRegion {

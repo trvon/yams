@@ -286,6 +286,249 @@ bool YamsCLI::hasExplicitDataDir() const {
     return storageOpt_ && storageOpt_->count() > 0;
 }
 
+void YamsCLI::registerCommandsForRun(std::string_view subcmd) {
+    const auto t0 = std::chrono::steady_clock::now();
+    bool fastPathRegistered = false;
+    if (env_truthy(std::getenv("YAMS_CLI_ONE_SHOT")) && !subcmd.empty()) {
+        fastPathRegistered = registerBuiltinCommandsFor(subcmd);
+    }
+    if (!fastPathRegistered) {
+        registerBuiltinCommands();
+    }
+    cli_perf_trace("cli.register_commands",
+                   std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - t0),
+                   fastPathRegistered ? "minimal" : "full");
+}
+
+YamsCLI::RunParsePlan
+YamsCLI::buildRunParsePlan(int argc, char* argv[],
+                           const std::vector<std::string>& topLevelCommands) const {
+    auto isFlag = [](const char* s) -> bool { return s && s[0] == '-'; };
+    auto hasArg = [&](std::string_view needle) {
+        for (int i = 1; i < argc; ++i) {
+            if (argv[i] == nullptr)
+                continue;
+            if (needle == argv[i])
+                return true;
+        }
+        return false;
+    };
+
+    RunParsePlan plan;
+    plan.argc = argc;
+    static std::string repairStr = std::string("repair");
+    static std::string mimeFlag = std::string("--mime");
+    static std::string queryFlag = std::string("--query");
+    static std::string statusStr = std::string("status");
+
+    bool injectDaemonStatus = false;
+    if (argc > 1 && argv[1] && std::string_view(argv[1]) == "daemon") {
+        bool hasSub = false;
+        for (int i = 2; i < argc; ++i) {
+            if (argv[i] == nullptr)
+                continue;
+            if (!isFlag(argv[i])) {
+                hasSub = true;
+                break;
+            }
+        }
+        if (!hasSub)
+            injectDaemonStatus = true;
+    }
+
+    bool needsSearchQueryRewrite = false;
+    int searchQueryIndex = -1;
+
+    if (argc > 2 && argv[1] && std::string_view(argv[1]) == "search" && !hasArg("-q") &&
+        !hasArg("--query") && !hasArg("--stdin") && !hasArg("--query-file")) {
+        for (int i = 2; i < argc; ++i) {
+            if (argv[i] == nullptr || isFlag(argv[i]))
+                continue;
+            std::string_view token = argv[i];
+            auto it =
+                std::find(topLevelCommands.begin(), topLevelCommands.end(), std::string(token));
+            if (it != topLevelCommands.end()) {
+                needsSearchQueryRewrite = true;
+                searchQueryIndex = i;
+            }
+            break;
+        }
+    }
+
+    static const std::array<std::string_view, 15> kRepairAliases = {
+        "orphans", "mime", "chunks", "embeddings", "fts5",     "optimize", "downloads", "path-tree",
+        "refs",    "ref",  "stuck",  "graph",      "topology", "dedupe",   "all"};
+    auto isRepairAlias = [](std::string_view tok) {
+        for (auto alias : kRepairAliases)
+            if (tok == alias)
+                return true;
+        return false;
+    };
+
+    if (argc > 1 && std::string(argv[1]) == "repair-mime") {
+        plan.argv.reserve(argc + 1);
+        plan.argv.push_back(argv[0]);
+        plan.argv.push_back(const_cast<char*>(repairStr.c_str()));
+        plan.argv.push_back(const_cast<char*>(mimeFlag.c_str()));
+        for (int i = 2; i < argc; ++i)
+            plan.argv.push_back(argv[i]);
+        plan.argv.push_back(nullptr);
+        plan.argc = static_cast<int>(plan.argv.size() - 1);
+        plan.perfLabel = "alias_rewrite";
+    } else if (argc > 2 && argv[1] && argv[2] && std::string_view(argv[1]) == "repair" &&
+               !isFlag(argv[2]) && isRepairAlias(argv[2])) {
+        static std::vector<std::string> repairAliasFlagStorage;
+        repairAliasFlagStorage.emplace_back(std::string("--") + argv[2]);
+        plan.argv.reserve(argc + 1);
+        plan.argv.push_back(argv[0]);
+        plan.argv.push_back(const_cast<char*>(repairStr.c_str()));
+        plan.argv.push_back(const_cast<char*>(repairAliasFlagStorage.back().c_str()));
+        for (int i = 3; i < argc; ++i)
+            plan.argv.push_back(argv[i]);
+        plan.argv.push_back(nullptr);
+        plan.argc = static_cast<int>(plan.argv.size() - 1);
+        plan.perfLabel = "alias_rewrite";
+    } else if (injectDaemonStatus) {
+        plan.argv.reserve(argc + 1);
+        for (int i = 0; i < argc; ++i)
+            plan.argv.push_back(argv[i]);
+        plan.argv.push_back(const_cast<char*>(statusStr.c_str()));
+        plan.argv.push_back(nullptr);
+        plan.argc = argc + 1;
+        plan.perfLabel = "daemon_status_injected";
+    } else if (needsSearchQueryRewrite && searchQueryIndex > 0) {
+        plan.argv.reserve(argc + 2);
+        for (int i = 0; i < searchQueryIndex; ++i)
+            plan.argv.push_back(argv[i]);
+        plan.argv.push_back(const_cast<char*>(queryFlag.c_str()));
+        for (int i = searchQueryIndex; i < argc; ++i)
+            plan.argv.push_back(argv[i]);
+        plan.argv.push_back(nullptr);
+        plan.argc = static_cast<int>(plan.argv.size() - 1);
+        plan.perfLabel = "search_query_rewrite";
+    } else {
+        plan.perfLabel.clear();
+    }
+
+    return plan;
+}
+
+void YamsCLI::parseRunPlan(const RunParsePlan& plan) {
+    const auto t0 = std::chrono::steady_clock::now();
+    app_->parse(plan.argc, const_cast<char**>(plan.argv.data()));
+    cli_perf_trace("cli.parse",
+                   std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - t0),
+                   plan.perfLabel.empty() ? nullptr : plan.perfLabel.c_str());
+}
+
+void YamsCLI::applyParsedLogLevel() {
+    auto parseLevel = [](const std::string& s) -> std::optional<spdlog::level::level_enum> {
+        std::string v;
+        v.reserve(s.size());
+        for (char c : s)
+            v.push_back(static_cast<char>(std::tolower(c)));
+        if (v == "trace")
+            return spdlog::level::trace;
+        if (v == "debug")
+            return spdlog::level::debug;
+        if (v == "info")
+            return spdlog::level::info;
+        if (v == "warn" || v == "warning")
+            return spdlog::level::warn;
+        if (v == "error" || v == "err")
+            return spdlog::level::err;
+        if (v == "critical" || v == "crit")
+            return spdlog::level::critical;
+        if (v == "off" || v == "none" || v == "silent")
+            return spdlog::level::off;
+        return std::nullopt;
+    };
+
+    if (const char* envLvl = std::getenv("YAMS_LOG_LEVEL"); envLvl && *envLvl) {
+        if (auto lvl = parseLevel(envLvl)) {
+            spdlog::set_level(*lvl);
+        }
+    } else if (verbose_) {
+        spdlog::set_level(spdlog::level::debug);
+    } else {
+#ifdef NDEBUG
+        auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
+        auto null_logger = std::make_shared<spdlog::logger>("yams-cli-null", null_sink);
+        spdlog::set_default_logger(null_logger);
+        spdlog::set_level(spdlog::level::off);
+#else
+        spdlog::set_level(spdlog::level::warn);
+#endif
+    }
+}
+
+void YamsCLI::applyParsedDataDirPrecedence() {
+    try {
+        if (storageOpt_ && storageOpt_->count() > 0) {
+            return;
+        }
+        if (configProvidesDataDir_) {
+            return;
+        }
+
+        const char* envStorage = std::getenv("YAMS_STORAGE");
+        const char* envDataDir = std::getenv("YAMS_DATA_DIR");
+        if (envStorage && *envStorage) {
+            dataPath_ = fs::path(envStorage);
+        } else if (envDataDir && *envDataDir) {
+            dataPath_ = fs::path(envDataDir);
+        }
+    } catch (...) {
+    }
+}
+
+void YamsCLI::runConfigMigrationPreflight(std::string_view subcmd) {
+    if (subcmd == "completion") {
+        return;
+    }
+    checkConfigMigration();
+}
+
+int YamsCLI::runPendingCommand() {
+    if (!pendingCommand_) {
+        return 0;
+    }
+
+    std::promise<Result<void>> prom;
+    auto fut = prom.get_future();
+    const auto execStart = std::chrono::steady_clock::now();
+    boost::asio::co_spawn(
+        executor_,
+        [this, &prom]() -> boost::asio::awaitable<void> {
+            auto r = co_await pendingCommand_->executeAsync();
+            prom.set_value(std::move(r));
+            co_return;
+        },
+        boost::asio::detached);
+
+    auto status = fut.wait_for(std::chrono::minutes(10));
+    if (status != std::future_status::ready) {
+        cli_perf_trace("cli.command_wait.timeout",
+                       std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - execStart));
+        spdlog::error("Command timed out");
+        std::cerr << formatErrorWithHint(ErrorCode::Timeout, "Command timed out") << "\n";
+        return 1;
+    }
+
+    auto result = fut.get();
+    cli_perf_trace("cli.command_wait.complete",
+                   std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - execStart));
+    if (!result) {
+        std::cerr << formatErrorWithHint(result.error().code, result.error().message) << "\n";
+        return 1;
+    }
+    return 0;
+}
+
 int YamsCLI::run(int argc, char* argv[]) {
     const auto runStart = std::chrono::steady_clock::now();
     try {
@@ -396,145 +639,14 @@ int YamsCLI::run(int argc, char* argv[]) {
             }
         }
 
-        // Register a minimal command set for hot one-shot commands to reduce fixed startup cost.
-        {
-            const auto t0 = std::chrono::steady_clock::now();
-            bool fastPathRegistered = false;
-            if (env_truthy(std::getenv("YAMS_CLI_ONE_SHOT")) && !subcmd.empty()) {
-                fastPathRegistered = registerBuiltinCommandsFor(subcmd);
-            }
-            if (!fastPathRegistered) {
-                registerBuiltinCommands();
-            }
-            cli_perf_trace("cli.register_commands",
-                           std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - t0),
-                           fastPathRegistered ? "minimal" : "full");
+        registerCommandsForRun(subcmd);
+
+        auto parsePlan = buildRunParsePlan(argc, argv, kCommands);
+        if (parsePlan.argv.empty()) {
+            parsePlan.argc = argc;
+            parsePlan.argv.assign(argv, argv + argc);
         }
-
-        // If 'daemon' is invoked without a subcommand, inject 'status' by default
-        // Detect: first non-flag token is 'daemon' and there is no subsequent non-flag token
-        bool injectDaemonStatus = false;
-        if (argc > 1 && argv[1] && std::string_view(argv[1]) == "daemon") {
-            bool hasSub = false;
-            for (int i = 2; i < argc; ++i) {
-                if (argv[i] == nullptr)
-                    continue;
-                if (!isFlag(argv[i])) {
-                    hasSub = true;
-                    break;
-                }
-            }
-            if (!hasSub)
-                injectDaemonStatus = true;
-        }
-
-        // Handle deprecated command aliases
-        std::vector<char*> argvVec;
-        bool needsAliasRewrite = false;
-        bool needsSearchQueryRewrite = false;
-        int searchQueryIndex = -1;
-        static std::string repairStr = std::string("repair");
-        static std::string mimeFlag = std::string("--mime");
-        static std::string queryFlag = std::string("--query");
-
-        // Fix positional search terms that collide with top-level subcommands (e.g., "daemon")
-        if (argc > 2 && argv[1] && std::string_view(argv[1]) == "search" && !hasArg("-q") &&
-            !hasArg("--query") && !hasArg("--stdin") && !hasArg("--query-file")) {
-            for (int i = 2; i < argc; ++i) {
-                if (argv[i] == nullptr)
-                    continue;
-                if (isFlag(argv[i]))
-                    continue;
-                std::string_view token = argv[i];
-                auto it = std::find(kCommands.begin(), kCommands.end(), std::string(token));
-                if (it != kCommands.end()) {
-                    needsSearchQueryRewrite = true;
-                    searchQueryIndex = i;
-                }
-                break; // Only inspect the first positional
-            }
-        }
-
-        static const std::array<std::string_view, 15> kRepairAliases = {
-            "orphans",  "mime",      "chunks",    "embeddings", "fts5",
-            "optimize", "downloads", "path-tree", "refs",       "ref",
-            "stuck",    "graph",     "topology",  "dedupe",     "all"};
-        auto isRepairAlias = [](std::string_view tok) {
-            for (auto alias : kRepairAliases)
-                if (tok == alias)
-                    return true;
-            return false;
-        };
-
-        if (argc > 1 && std::string(argv[1]) == "repair-mime") {
-            // Rewrite "repair-mime" to "repair --mime"
-            needsAliasRewrite = true;
-            argvVec.reserve(argc + 1);
-            argvVec.push_back(argv[0]); // program name
-            argvVec.push_back(const_cast<char*>(repairStr.c_str()));
-            argvVec.push_back(const_cast<char*>(mimeFlag.c_str()));
-            for (int i = 2; i < argc; ++i)
-                argvVec.push_back(argv[i]);
-            argvVec.push_back(nullptr);
-        } else if (argc > 2 && argv[1] && argv[2] && std::string_view(argv[1]) == "repair" &&
-                   !isFlag(argv[2]) && isRepairAlias(argv[2])) {
-            // Rewrite "repair <alias>" to "repair --<alias>"
-            static std::vector<std::string> repairAliasFlagStorage;
-            repairAliasFlagStorage.emplace_back(std::string("--") + argv[2]);
-            needsAliasRewrite = true;
-            argvVec.reserve(argc + 1);
-            argvVec.push_back(argv[0]);
-            argvVec.push_back(const_cast<char*>(repairStr.c_str()));
-            argvVec.push_back(const_cast<char*>(repairAliasFlagStorage.back().c_str()));
-            for (int i = 3; i < argc; ++i)
-                argvVec.push_back(argv[i]);
-            argvVec.push_back(nullptr);
-        } else if (injectDaemonStatus) {
-            argvVec.reserve(argc + 1);
-            for (int i = 0; i < argc; ++i)
-                argvVec.push_back(argv[i]);
-            static std::string statusStr = std::string("status");
-            argvVec.push_back(const_cast<char*>(statusStr.c_str()));
-            argvVec.push_back(nullptr);
-        } else if (needsSearchQueryRewrite && searchQueryIndex > 0) {
-            argvVec.reserve(argc + 2);
-            for (int i = 0; i < searchQueryIndex; ++i)
-                argvVec.push_back(argv[i]);
-            argvVec.push_back(const_cast<char*>(queryFlag.c_str()));
-            for (int i = searchQueryIndex; i < argc; ++i)
-                argvVec.push_back(argv[i]);
-            argvVec.push_back(nullptr);
-        }
-
-        if (needsAliasRewrite) {
-            const auto t0 = std::chrono::steady_clock::now();
-            app_->parse(static_cast<int>(argvVec.size() - 1), argvVec.data());
-            cli_perf_trace("cli.parse",
-                           std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - t0),
-                           "alias_rewrite");
-        } else if (injectDaemonStatus) {
-            const auto t0 = std::chrono::steady_clock::now();
-            app_->parse(argc + 1, argvVec.data());
-            cli_perf_trace("cli.parse",
-                           std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - t0),
-                           "daemon_status_injected");
-        } else if (needsSearchQueryRewrite) {
-            const auto t0 = std::chrono::steady_clock::now();
-            app_->parse(static_cast<int>(argvVec.size() - 1), argvVec.data());
-            cli_perf_trace("cli.parse",
-                           std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - t0),
-                           "search_query_rewrite");
-        } else {
-            // Parse command line
-            const auto t0 = std::chrono::steady_clock::now();
-            app_->parse(argc, argv);
-            cli_perf_trace("cli.parse", std::chrono::duration_cast<std::chrono::microseconds>(
-                                            std::chrono::steady_clock::now() - t0));
-        }
+        parseRunPlan(parsePlan);
 
         // Disallow multiple top-level subcommands (e.g., "yams search graph"),
         // which can accidentally treat query terms as commands.
@@ -569,115 +681,14 @@ int YamsCLI::run(int argc, char* argv[]) {
             }
         }
 
-        // Apply log level after parsing flags (avoid CLI11 Option::callback dependency)
-        // Precedence: env YAMS_LOG_LEVEL > --verbose > build-type default
-        auto parseLevel = [](const std::string& s) -> std::optional<spdlog::level::level_enum> {
-            std::string v;
-            v.reserve(s.size());
-            for (char c : s)
-                v.push_back(static_cast<char>(std::tolower(c)));
-            if (v == "trace")
-                return spdlog::level::trace;
-            if (v == "debug")
-                return spdlog::level::debug;
-            if (v == "info")
-                return spdlog::level::info;
-            if (v == "warn" || v == "warning")
-                return spdlog::level::warn;
-            if (v == "error" || v == "err")
-                return spdlog::level::err;
-            if (v == "critical" || v == "crit")
-                return spdlog::level::critical;
-            if (v == "off" || v == "none" || v == "silent")
-                return spdlog::level::off;
-            return std::nullopt;
-        };
-
-        if (const char* envLvl = std::getenv("YAMS_LOG_LEVEL"); envLvl && *envLvl) {
-            if (auto lvl = parseLevel(envLvl)) {
-                spdlog::set_level(*lvl);
-            }
-        } else if (verbose_) {
-            spdlog::set_level(spdlog::level::debug);
-        } else {
-#ifdef NDEBUG
-            // Suppress spdlog output in Release unless explicitly enabled
-            auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
-            auto null_logger = std::make_shared<spdlog::logger>("yams-cli-null", null_sink);
-            spdlog::set_default_logger(null_logger);
-            spdlog::set_level(spdlog::level::off);
-#else
-            spdlog::set_level(spdlog::level::warn);
-#endif
-        }
-
-        // Enforce data directory precedence after parsing options.
-        // Order: explicit CLI > config (if present) > env (YAMS_STORAGE/YAMS_DATA_DIR) > default
-        try {
-            if (storageOpt_ && storageOpt_->count() > 0) {
-                // Explicit CLI choice should never be silently overridden.
-            } else if (configProvidesDataDir_) {
-                // Ensure dataPath_ reflects the config-derived default
-                // (already set via default_val in constructor).
-            } else {
-                // If neither CLI nor config set a value, allow environment to override.
-                const char* envStorage = std::getenv("YAMS_STORAGE");
-                const char* envDataDir = std::getenv("YAMS_DATA_DIR");
-                if (envStorage && *envStorage) {
-                    dataPath_ = fs::path(envStorage);
-                } else if (envDataDir && *envDataDir) {
-                    dataPath_ = fs::path(envDataDir);
-                } else {
-                    // Keep constructor default (XDG/HOME-based)
-                }
-            }
-        } catch (...) {
-            // Non-fatal: keep whatever CLI11 assigned
-        }
-
-        // Skip config migration for completion generation so stdout stays script-only.
-        // Homebrew and manual shell setup both consume the command output directly.
-        if (subcmd != "completion") {
-            // Check for config migration before storage initialization unless this is a one-shot
-            // daemon-backed hot path with an explicit socket. Those commands do not need local
-            // storage preflight and can skip filesystem/config churn.
-            checkConfigMigration();
-        }
+        applyParsedLogLevel();
+        applyParsedDataDirPrecedence();
+        runConfigMigrationPreflight(subcmd);
 
         // Storage initialization is performed lazily by commands via ensureStorageInitialized()
 
-        // If a command scheduled deferred execution, run it now once via a single async spawn
-        if (pendingCommand_) {
-            std::promise<Result<void>> prom;
-            auto fut = prom.get_future();
-            const auto execStart = std::chrono::steady_clock::now();
-            boost::asio::co_spawn(
-                executor_,
-                [this, &prom]() -> boost::asio::awaitable<void> {
-                    auto r = co_await pendingCommand_->executeAsync();
-                    prom.set_value(std::move(r));
-                    co_return;
-                },
-                boost::asio::detached);
-            auto status = fut.wait_for(std::chrono::minutes(10));
-            if (status != std::future_status::ready) {
-                cli_perf_trace("cli.command_wait.timeout",
-                               std::chrono::duration_cast<std::chrono::microseconds>(
-                                   std::chrono::steady_clock::now() - execStart));
-                spdlog::error("Command timed out");
-                std::cerr << formatErrorWithHint(ErrorCode::Timeout, "Command timed out") << "\n";
-                return 1;
-            }
-            auto result = fut.get();
-            cli_perf_trace("cli.command_wait.complete",
-                           std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - execStart));
-            if (!result) {
-                // Use error hints for actionable feedback
-                std::cerr << formatErrorWithHint(result.error().code, result.error().message)
-                          << "\n";
-                return 1;
-            }
+        if (int pendingResult = runPendingCommand(); pendingResult != 0) {
+            return pendingResult;
         }
 
         cli_perf_trace("cli.total", std::chrono::duration_cast<std::chrono::microseconds>(

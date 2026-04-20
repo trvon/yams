@@ -16,11 +16,10 @@ constexpr std::string_view kConnectedKey = "connected";
 constexpr std::string_view kLouvainKey = "louvain";
 constexpr std::string_view kLabelPropagationKey = "label_propagation";
 constexpr std::string_view kKMeansEmbeddingKey = "kmeans_embedding";
+constexpr std::string_view kHdbscanKey = "hdbscan";
 
-// Central registry. Kept as a plain array so the factory has no global state
-// and no initialization-order concerns.
-constexpr std::array<std::string_view, 4> kKnownAlgorithms{
-    kConnectedKey, kLouvainKey, kLabelPropagationKey, kKMeansEmbeddingKey};
+constexpr std::array<std::string_view, 5> kKnownAlgorithms{
+    kConnectedKey, kLouvainKey, kLabelPropagationKey, kKMeansEmbeddingKey, kHdbscanKey};
 
 } // namespace
 
@@ -37,6 +36,9 @@ std::shared_ptr<ITopologyEngine> makeEngine(std::string_view algorithm) {
     }
     if (key == kKMeansEmbeddingKey) {
         return std::make_shared<KMeansEmbeddingTopologyEngine>();
+    }
+    if (key == kHdbscanKey) {
+        return std::make_shared<HDBSCANTopologyEngine>();
     }
     // resolveFactoryKey only returns keys we claim to support; this branch
     // exists as a forward-compat safety net for future registrations.

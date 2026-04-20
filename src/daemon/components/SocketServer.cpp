@@ -97,6 +97,90 @@ bool SocketServer::mainSocketEmergencyGuardRejects() const {
     return active >= hardLimit;
 }
 
+void SocketServer::closeAcceptedSocket(local::socket& socket) const {
+    boost::system::error_code shutdown_ec;
+    socket.shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
+    boost::system::error_code close_ec;
+    socket.close(close_ec);
+}
+
+boost::asio::awaitable<void>
+SocketServer::backoffAfterReject(std::chrono::milliseconds delay) const {
+    boost::asio::steady_timer timer(*ioCoordinator_->getIOContext());
+    timer.expires_after(delay);
+    try {
+        co_await timer.async_wait(use_awaitable);
+    } catch (const boost::system::system_error&) {
+    }
+}
+
+boost::asio::awaitable<void>
+SocketServer::rejectProxyAcceptForNoSlots(local::socket& socket, std::string_view loopLabel,
+                                          bool trace, uint32_t rejectStreak) const {
+    closeAcceptedSocket(socket);
+    if (state_) {
+        state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+    }
+
+    if (trace) {
+        spdlog::debug("stream-trace: accept rejected (no slots)");
+    } else {
+        static std::atomic<uint64_t> s_noSlotRejects{0};
+        uint64_t n = s_noSlotRejects.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((n & 0x3FFu) == 0) {
+            spdlog::debug("SocketServer: {} accept rejected (no slots), rejects={}", loopLabel, n);
+        }
+    }
+
+    const auto maxBackoff =
+        std::max<std::chrono::milliseconds>(config_.acceptBackoffMs, std::chrono::milliseconds(4));
+    const auto adaptiveBackoff = std::min<std::chrono::milliseconds>(
+        maxBackoff, std::chrono::milliseconds(1u << rejectStreak));
+    co_await backoffAfterReject(adaptiveBackoff);
+}
+
+boost::asio::awaitable<void>
+SocketServer::rejectMainAcceptForEmergencyGuard(local::socket& socket,
+                                                std::string_view loopLabel) const {
+    const size_t active = mainActiveConnectionCount();
+    const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
+    const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
+
+    closeAcceptedSocket(socket);
+    if (state_) {
+        state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+        state_->stats.forcedCloseCount.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    spdlog::debug("SocketServer: {} accept rejected by emergency session guard "
+                  "(active={} hard_limit={} soft_limit={})",
+                  loopLabel, active, hardLimit, softLimit);
+
+    co_await backoffAfterReject(
+        std::max<std::chrono::milliseconds>(config_.acceptBackoffMs, std::chrono::milliseconds(4)));
+}
+
+size_t SocketServer::recordAcceptedConnection(bool isProxy) {
+    auto current = activeConnections_.fetch_add(1) + 1;
+    totalConnections_.fetch_add(1);
+    if (isProxy) {
+        proxyActiveConnections_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        mainActiveConnections_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return current;
+}
+
+size_t SocketServer::releaseActiveConnection(bool isProxy) {
+    auto current = activeConnections_.fetch_sub(1) - 1;
+    if (isProxy) {
+        proxyActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
+    } else {
+        mainActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
+    }
+    return current;
+}
+
 void SocketServer::publishConnectionStats(size_t currentActiveConnections,
                                           std::optional<size_t> slotLimitOverride) const {
     if (!state_) {
@@ -117,6 +201,90 @@ SocketAdmissionVerdict SocketServer::evaluateRequestAdmission(const Request& req
                                 : mainActiveConnectionCount();
     const auto limit = slotLimit_.load(std::memory_order_relaxed);
     return AdmissionPolicy::evaluateSocketAdmission(active, limit, request, isProxy);
+}
+
+void SocketServer::ensureWriterBudget() {
+    if (writerBudget_) {
+        return;
+    }
+
+    std::size_t initialBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+    if (initialBudget == 0) {
+        initialBudget = TuneAdvisor::writerBudgetBytesPerTurn();
+    }
+    if (initialBudget == 0) {
+        initialBudget = 256ULL * 1024;
+    }
+    writerBudget_ = std::make_shared<std::atomic<std::size_t>>(initialBudget);
+}
+
+RequestDispatcher* SocketServer::currentDispatcher() const {
+    std::lock_guard<std::mutex> lk(dispatcherMutex_);
+    return dispatcher_;
+}
+
+RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
+                                                       RequestDispatcher* dispatcher) const {
+    RequestHandler::Config handlerConfig;
+    handlerConfig.writer_budget_ref = writerBudget_;
+    handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
+    handlerConfig.enable_streaming = true;
+    handlerConfig.enable_multiplexing = true;
+
+    if (dispatcher) {
+        try {
+            handlerConfig.worker_executor = dispatcher->getWorkerExecutor();
+            handlerConfig.cli_executor = dispatcher->getCliExecutor();
+            handlerConfig.worker_job_signal = dispatcher->getWorkerJobSignal();
+        } catch (...) {
+        }
+    }
+
+    handlerConfig.chunk_size = TuneAdvisor::chunkSize();
+    handlerConfig.close_after_response = false;
+    handlerConfig.graceful_half_close = true;
+
+    auto connectionTimeout = config_.connectionTimeout;
+    if (connectionTimeout.count() == 0) {
+        connectionTimeout = std::chrono::milliseconds(TuneAdvisor::ipcTimeoutMs());
+    }
+    auto timeoutSeconds = std::chrono::duration_cast<std::chrono::seconds>(connectionTimeout);
+    if (timeoutSeconds.count() == 0 && connectionTimeout.count() > 0) {
+        timeoutSeconds = std::chrono::seconds(1);
+    }
+    handlerConfig.read_timeout = timeoutSeconds;
+    handlerConfig.write_timeout = timeoutSeconds;
+
+    auto streamChunkTimeoutMs = TuneAdvisor::streamChunkTimeoutMs();
+    if (streamChunkTimeoutMs == 0 && connectionTimeout.count() > 0) {
+        streamChunkTimeoutMs = static_cast<uint32_t>(connectionTimeout.count());
+    }
+    handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
+    handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
+    handlerConfig.admission_control =
+        [this, isProxy](
+            const Request& request) -> std::optional<RequestHandler::Config::AdmissionDecision> {
+        const auto verdict = evaluateRequestAdmission(request, isProxy);
+        if (verdict != SocketAdmissionVerdict::reject) {
+            return std::nullopt;
+        }
+
+        const size_t active = isProxy ? proxyActiveConnections_.load(std::memory_order_relaxed)
+                                      : mainActiveConnectionCount();
+        const size_t limit = slotLimit_.load(std::memory_order_relaxed);
+
+        if (state_) {
+            state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
+            state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+        }
+        TuningManager::notifyWakeup();
+        return makeSocketBusyDecision(dispatcher_, state_, active, limit);
+    };
+
+    if (state_) {
+        handlerConfig.health_check_counter = &state_->stats.healthCheckConnections;
+    }
+    return handlerConfig;
 }
 
 void SocketServer::testing_setConnectionCounts(size_t mainActive, size_t proxyActive) {
@@ -671,36 +839,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
 
             if (isProxy && !slotAcquired) {
                 noSlotRejectStreak = std::min<uint32_t>(noSlotRejectStreak + 1, 7);
-                boost::system::error_code shutdown_ec;
-                socket.shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
-                boost::system::error_code close_ec;
-                socket.close(close_ec);
-                if (state_) {
-                    state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
-                }
-
-                if (trace) {
-                    spdlog::debug("stream-trace: accept rejected (no slots)");
-                } else {
-                    static std::atomic<uint64_t> s_noSlotRejects{0};
-                    uint64_t n = s_noSlotRejects.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if ((n & 0x3FFu) == 0) { // log every 1024th reject
-                        spdlog::debug("SocketServer: {} accept rejected (no slots), rejects={}",
-                                      loopLabel, n);
-                    }
-                }
-
-                // Back off adaptively to avoid an accept/close spin loop under sustained
-                // overload. This reduces connection churn for short UX requests while still
-                // letting the accept loop recover quickly once slots free up.
-                const auto maxBackoff = std::max<std::chrono::milliseconds>(
-                    config_.acceptBackoffMs, std::chrono::milliseconds(4));
-                const auto adaptiveBackoff = std::min<std::chrono::milliseconds>(
-                    maxBackoff, std::chrono::milliseconds(1u << noSlotRejectStreak));
-                boost::asio::steady_timer slot_timer(*ioCoordinator_->getIOContext());
-                slot_timer.expires_after(adaptiveBackoff);
-                co_await slot_timer.async_wait(use_awaitable);
-
+                co_await rejectProxyAcceptForNoSlots(socket, loopLabel, trace, noSlotRejectStreak);
                 continue;
             }
 
@@ -708,27 +847,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
 
             if (!isProxy) {
                 if (mainSocketEmergencyGuardRejects()) {
-                    const size_t active = mainActiveConnectionCount();
-                    const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
-                    const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
-                    boost::system::error_code shutdown_ec;
-                    socket.shutdown(boost::asio::local::stream_protocol::socket::shutdown_both,
-                                    shutdown_ec);
-                    boost::system::error_code close_ec;
-                    socket.close(close_ec);
-                    if (state_) {
-                        state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
-                        state_->stats.forcedCloseCount.fetch_add(1, std::memory_order_relaxed);
-                    }
-
-                    spdlog::debug("SocketServer: {} accept rejected by emergency session guard "
-                                  "(active={} hard_limit={} soft_limit={})",
-                                  loopLabel, active, hardLimit, softLimit);
-
-                    boost::asio::steady_timer slot_timer(*ioCoordinator_->getIOContext());
-                    slot_timer.expires_after(std::max<std::chrono::milliseconds>(
-                        config_.acceptBackoffMs, std::chrono::milliseconds(4)));
-                    co_await slot_timer.async_wait(use_awaitable);
+                    co_await rejectMainAcceptForEmergencyGuard(socket, loopLabel);
                     continue;
                 }
             }
@@ -753,13 +872,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                              totalConnections_.load(std::memory_order_relaxed));
             }
 
-            auto current = activeConnections_.fetch_add(1) + 1;
-            totalConnections_.fetch_add(1);
-            if (isProxy) {
-                proxyActiveConnections_.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                mainActiveConnections_.fetch_add(1, std::memory_order_relaxed);
-            }
+            auto current = recordAcceptedConnection(isProxy);
 
             spdlog::debug("SocketServer: [conn={}] accepted {} connection, active={} total={}",
                           conn_token, loopLabel, current, totalConnections_.load());
@@ -864,12 +977,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         std::chrono::steady_clock::time_point start_time;
         bool proxyConn;
         ~CleanupGuard() {
-            auto current = server->activeConnections_.fetch_sub(1) - 1;
-            if (proxyConn) {
-                server->proxyActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
-            } else {
-                server->mainActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
-            }
+            auto current = server->releaseActiveConnection(proxyConn);
             if (current == 0) {
                 std::lock_guard<std::mutex> lock(server->shutdownMutex_);
                 server->shutdownCv_.notify_all();
@@ -896,84 +1004,10 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
     }
 
     try {
-        if (!writerBudget_) {
-            std::size_t initialBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
-            if (initialBudget == 0)
-                initialBudget = TuneAdvisor::writerBudgetBytesPerTurn();
-            if (initialBudget == 0)
-                initialBudget = 256ULL * 1024;
-            writerBudget_ = std::make_shared<std::atomic<std::size_t>>(initialBudget);
-        }
-
-        RequestHandler::Config handlerConfig;
-        handlerConfig.writer_budget_ref = writerBudget_;
-        handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
-        handlerConfig.enable_streaming = true;
-        handlerConfig.enable_multiplexing = true;
-        // Request coroutines run on the dedicated RequestExecutor (cli_executor).
-        if (dispatcher_) {
-            try {
-                handlerConfig.worker_executor = dispatcher_->getWorkerExecutor();
-                handlerConfig.cli_executor = dispatcher_->getCliExecutor();
-                handlerConfig.worker_job_signal = dispatcher_->getWorkerJobSignal();
-            } catch (...) {
-            }
-        }
-        handlerConfig.chunk_size = TuneAdvisor::chunkSize();
-        handlerConfig.close_after_response = false;
-        handlerConfig.graceful_half_close = true;
-        auto connectionTimeout = config_.connectionTimeout;
-        if (connectionTimeout.count() == 0) {
-            connectionTimeout = std::chrono::milliseconds(TuneAdvisor::ipcTimeoutMs());
-        }
-        auto timeoutSeconds = std::chrono::duration_cast<std::chrono::seconds>(connectionTimeout);
-        if (timeoutSeconds.count() == 0 && connectionTimeout.count() > 0) {
-            timeoutSeconds = std::chrono::seconds(1);
-        }
-        handlerConfig.read_timeout = timeoutSeconds;
-        handlerConfig.write_timeout = timeoutSeconds;
-        auto streamChunkTimeoutMs = TuneAdvisor::streamChunkTimeoutMs();
-        if (streamChunkTimeoutMs == 0 && connectionTimeout.count() > 0) {
-            streamChunkTimeoutMs = static_cast<uint32_t>(connectionTimeout.count());
-        }
-        handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
-        handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
-        handlerConfig.admission_control = [this, isProxy](const Request& request)
-            -> std::optional<RequestHandler::Config::AdmissionDecision> {
-            const auto verdict = evaluateRequestAdmission(request, isProxy);
-            if (verdict != SocketAdmissionVerdict::reject) {
-                return std::nullopt;
-            }
-
-            const size_t active = isProxy ? proxyActiveConnections_.load(std::memory_order_relaxed)
-                                          : mainActiveConnectionCount();
-            const size_t limit = slotLimit_.load(std::memory_order_relaxed);
-
-            if (state_) {
-                state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
-                state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
-            }
-            TuningManager::notifyWakeup();
-            return makeSocketBusyDecision(dispatcher_, state_, active, limit);
-        };
-        // Wire health-check counter so RequestHandler can tag ping/status connections
-        if (state_) {
-            handlerConfig.health_check_counter = &state_->stats.healthCheckConnections;
-        }
+        ensureWriterBudget();
+        auto* disp = currentDispatcher();
+        auto handlerConfig = makeHandlerConfig(isProxy, disp);
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
-        RequestDispatcher* disp = nullptr;
-        {
-            std::lock_guard<std::mutex> lk(dispatcherMutex_);
-            disp = dispatcher_;
-        }
-        // Wire worker_job_signal for cross-executor coordination.
-        // worker_executor is already set above; this path only adds the signal.
-        try {
-            if (disp) {
-                handlerConfig.worker_job_signal = disp->getWorkerJobSignal();
-            }
-        } catch (...) {
-        }
         auto handler = std::make_shared<RequestHandler>(disp, handlerConfig);
 
         // Wrap socket in shared_ptr for tracking and use modern C++20 move semantics

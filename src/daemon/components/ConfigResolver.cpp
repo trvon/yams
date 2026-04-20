@@ -798,6 +798,18 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
                 // Ignore invalid value; leave nullopt.
             }
         }
+        if (auto it = kv.find("topology.hdbscan_min_points"); it != kv.end()) {
+            try {
+                policy.hdbscanMinPoints = static_cast<std::size_t>(std::stoul(it->second));
+            } catch (const std::exception&) {
+            }
+        }
+        if (auto it = kv.find("topology.hdbscan_min_cluster_size"); it != kv.end()) {
+            try {
+                policy.hdbscanMinClusterSize = static_cast<std::size_t>(std::stoul(it->second));
+            } catch (const std::exception&) {
+            }
+        }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology engine policy: {}", e.what());
     }

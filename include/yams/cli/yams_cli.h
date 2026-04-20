@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <vector>
 #include <boost/asio/any_io_executor.hpp>
 #include <CLI/CLI.hpp>
@@ -211,6 +212,21 @@ private:
      * Check if config migration is needed and prompt user
      */
     void checkConfigMigration();
+
+    struct RunParsePlan {
+        std::vector<char*> argv;
+        std::string perfLabel;
+        int argc{0};
+    };
+
+    void registerCommandsForRun(std::string_view subcmd);
+    RunParsePlan buildRunParsePlan(int argc, char* argv[],
+                                   const std::vector<std::string>& topLevelCommands) const;
+    void parseRunPlan(const RunParsePlan& plan);
+    void applyParsedLogLevel();
+    void applyParsedDataDirPrecedence();
+    void runConfigMigrationPreflight(std::string_view subcmd);
+    int runPendingCommand();
 
 private:
     boost::asio::any_io_executor executor_;

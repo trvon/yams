@@ -21,6 +21,30 @@ json makeJsonResourceResult(const std::string& uri, json payload) {
     return makeTextResourceResult(uri, "application/json", payload.dump());
 }
 
+json daemonStatusToJson(const yams::daemon::StatusResponse& s) {
+    json j;
+    j["running"] = s.running;
+    j["ready"] = s.ready;
+    j["uptimeSeconds"] = s.uptimeSeconds;
+    j["requestsProcessed"] = s.requestsProcessed;
+    j["activeConnections"] = s.activeConnections;
+    j["memoryUsageMb"] = s.memoryUsageMb;
+    j["cpuUsagePercent"] = s.cpuUsagePercent;
+    j["version"] = s.version;
+    j["overallStatus"] = s.overallStatus;
+    j["lifecycleState"] = s.lifecycleState;
+    j["lastError"] = s.lastError;
+    j["readinessStates"] = s.readinessStates;
+    j["initProgress"] = s.initProgress;
+    j["counters"] = s.requestCounts;
+    j["counters"]["mcp_worker_threads"] = 0;
+    j["counters"]["mcp_worker_active"] = false;
+    j["counters"]["mcp_worker_queued"] = 0;
+    j["counters"]["mcp_worker_processed"] = 0;
+    j["counters"]["mcp_worker_failed"] = 0;
+    return j;
+}
+
 } // namespace
 
 json MCPServer::listResources() {
@@ -91,39 +115,16 @@ json MCPServer::readResource(const std::string& uri) {
                                                   {"errors", health.errors}}}});
     } else if (uri == "yams://status") {
         try {
-            auto ensure = ensureDaemonClient();
-            if (!ensure) {
-                return makeJsonResourceResult(
-                    uri, json{{"error", std::string("status error: ") + ensure.error().message}});
-            }
-            auto st = yams::cli::run_result(daemon_client_->status(), std::chrono::seconds(3));
+            auto st = yams::cli::run_result(fetchDaemonStatus(DaemonStatusFetchMode::BestEffort),
+                                            std::chrono::seconds(3));
             if (!st) {
                 return makeJsonResourceResult(
                     uri, json{{"error", std::string("status error: ") + st.error().message}});
             }
-            const auto& s = st.value();
-            json j;
-            j["running"] = s.running;
-            j["ready"] = s.ready;
-            j["uptimeSeconds"] = s.uptimeSeconds;
-            j["requestsProcessed"] = s.requestsProcessed;
-            j["activeConnections"] = s.activeConnections;
-            j["memoryUsageMb"] = s.memoryUsageMb;
-            j["cpuUsagePercent"] = s.cpuUsagePercent;
-            j["version"] = s.version;
-            j["overallStatus"] = s.overallStatus;
-            j["lifecycleState"] = s.lifecycleState;
-            j["lastError"] = s.lastError;
-            j["readinessStates"] = s.readinessStates;
-            j["initProgress"] = s.initProgress;
-            j["counters"] = s.requestCounts;
-            // MCP worker counters - thread pool removed, always 0
-            j["counters"]["mcp_worker_threads"] = 0;
-            j["counters"]["mcp_worker_active"] = false;
-            j["counters"]["mcp_worker_queued"] = 0;
-            j["counters"]["mcp_worker_processed"] = 0;
-            j["counters"]["mcp_worker_failed"] = 0;
-            return makeJsonResourceResult(uri, std::move(j));
+            if (!st.value().has_value()) {
+                return makeJsonResourceResult(uri, json{{"error", "status unavailable"}});
+            }
+            return makeJsonResourceResult(uri, daemonStatusToJson(*st.value()));
         } catch (...) {
             return makeJsonResourceResult(uri, json{{"error", "status exception"}});
         }
