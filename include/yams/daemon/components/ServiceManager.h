@@ -370,6 +370,11 @@ public:
     Result<TopologyRebuildStats>
     rebuildTopologyArtifacts(const std::string& reason, bool dryRun = false,
                              const std::vector<std::string>& documentHashes = {});
+
+    // Deterministic corpus-wide rebuild of the semantic_neighbor edges in the KG.
+    // Clears existing edges then rebuilds against every doc-level vector in vdb.
+    // Returns the number of new edges created.
+    Result<std::size_t> rebuildSemanticNeighborGraph(const std::string& reason);
     void requestTopologyRebuild(const std::string& reason,
                                 const std::vector<std::string>& documentHashes = {});
     TopologyTelemetrySnapshot getTopologyTelemetrySnapshot() const {

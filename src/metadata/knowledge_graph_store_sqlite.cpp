@@ -1485,6 +1485,25 @@ public:
         });
     }
 
+    Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto stmtR = db.prepare("DELETE FROM kg_edges WHERE relation = ?");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, relation);
+            if (!br)
+                return br.error();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            auto deleted = db.changes();
+            spdlog::debug("deleteEdgesByRelation: deleted {} edges for relation {}", deleted,
+                          relation);
+            return deleted;
+        });
+    }
+
     Result<std::int64_t> deleteOrphanedEdges() override {
         constexpr std::int64_t kBatchSize = 1000;
         std::int64_t totalDeleted = 0;

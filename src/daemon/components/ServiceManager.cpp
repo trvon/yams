@@ -3232,6 +3232,21 @@ ServiceManager::rebuildTopologyArtifacts(const std::string& reason, bool dryRun,
                                              tuningConfig_.topologyAlgorithm);
 }
 
+Result<std::size_t> ServiceManager::rebuildSemanticNeighborGraph(const std::string& reason) {
+    auto embSvc = std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (!embSvc) {
+        return Error{ErrorCode::InvalidState,
+                     "rebuildSemanticNeighborGraph: embedding service unavailable"};
+    }
+    std::string modelName = embeddingLifecycle_.modelName();
+    if (modelName.empty()) {
+        modelName = "simeon-default";
+    }
+    spdlog::info("ServiceManager: corpus-wide semantic neighbor rebuild (reason={}, model={})",
+                 reason, modelName);
+    return embSvc->rebuildSemanticNeighborGraphForCorpus(modelName);
+}
+
 void ServiceManager::requestTopologyRebuild(const std::string& reason,
                                             const std::vector<std::string>& documentHashes) {
     if (shutdownInvoked_.load(std::memory_order_acquire))

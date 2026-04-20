@@ -88,6 +88,11 @@ public:
     void setCompressedAnnInvalidator(std::function<void()> cb);
     void setTopologyRebuildRequester(std::function<void(const std::vector<std::string>&)> cb);
 
+    // Wipes semantic_neighbor edges and rebuilds against every vdb doc in one
+    // pass. Per-job rebuilds make each doc's top-K depend on job-completion
+    // order; a corpus-wide pass is deterministic.
+    Result<std::size_t> rebuildSemanticNeighborGraphForCorpus(const std::string& modelName);
+
     void start();
 
 private:

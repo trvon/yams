@@ -388,6 +388,10 @@ public:
     // Returns the count of edges deleted.
     virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
 
+    // Delete every edge matching the given relation. Used to clear derived
+    // graphs (e.g. semantic_neighbor) before a deterministic corpus-wide rebuild.
+    virtual Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) = 0;
+
     // Delete edges that reference missing nodes. Returns the count of edges deleted.
     virtual Result<std::int64_t> deleteOrphanedEdges() = 0;
 

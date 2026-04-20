@@ -471,6 +471,49 @@ void EmbeddingService::updateSemanticNeighborGraph(
                  semanticEdges.size(), modelName);
 }
 
+Result<std::size_t>
+EmbeddingService::rebuildSemanticNeighborGraphForCorpus(const std::string& modelName) {
+    auto kgStore = getKgStore_ ? getKgStore_() : nullptr;
+    auto vdb = getVectorDatabase_ ? getVectorDatabase_() : nullptr;
+    if (!kgStore || !vdb) {
+        return Error{ErrorCode::InvalidState,
+                     "rebuildSemanticNeighborGraphForCorpus: kg store or vector db unavailable"};
+    }
+
+    auto deleted = kgStore->deleteEdgesByRelation("semantic_neighbor");
+    if (!deleted) {
+        return deleted.error();
+    }
+    spdlog::info(
+        "EmbeddingService: cleared {} existing semantic_neighbor edges before corpus rebuild",
+        deleted.value());
+
+    const auto corpus = vdb->getDocumentLevelVectorsAll();
+    std::vector<std::tuple<std::string, std::string, std::vector<float>>> documentEmbeddings;
+    documentEmbeddings.reserve(corpus.size());
+    for (const auto& [documentHash, record] : corpus) {
+        if (record.embedding.empty()) {
+            continue;
+        }
+        std::string filePath;
+        if (auto it = record.metadata.find("path"); it != record.metadata.end()) {
+            filePath = it->second;
+        }
+        documentEmbeddings.emplace_back(documentHash, std::move(filePath), record.embedding);
+    }
+    if (documentEmbeddings.size() < 2) {
+        return std::size_t{0};
+    }
+
+    std::sort(documentEmbeddings.begin(), documentEmbeddings.end(),
+              [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
+
+    const auto before = semanticEdgesCreated_.load(std::memory_order_relaxed);
+    updateSemanticNeighborGraph(kgStore, vdb, modelName, {}, documentEmbeddings);
+    const auto after = semanticEdgesCreated_.load(std::memory_order_relaxed);
+    return static_cast<std::size_t>(after >= before ? after - before : 0);
+}
+
 boost::asio::awaitable<void> EmbeddingService::channelPoller() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 

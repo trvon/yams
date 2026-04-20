@@ -1008,6 +1008,16 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
         if (cfg.mode == FixtureMode::Beir) {
             auto* daemon = harness.daemon();
             auto* sm = daemon ? daemon->getServiceManager() : nullptr;
+            if (sm) {
+                auto rebuilt = sm->rebuildSemanticNeighborGraph("bench_corpus_complete");
+                if (!rebuilt) {
+                    spdlog::warn("Bench: corpus-wide semantic neighbor rebuild failed: {}",
+                                 rebuilt.error().message);
+                } else {
+                    spdlog::info("Bench: corpus-wide semantic neighbor rebuild produced {} edges",
+                                 rebuilt.value());
+                }
+            }
             outcome.topologySeeded =
                 runSyncTopologyRebuild(sm, outcome.cellIdentityExpected, outcome);
         } else {
