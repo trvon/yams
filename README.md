@@ -133,6 +133,34 @@ Auto-detected at build. Override with `YAMS_ONNX_GPU=auto|cuda|coreml|directml|m
 
 Recommended model: `all-MiniLM-L6-v2` (384-dim).
 
+### Experimental: simeon embedding backend
+
+YAMS ships an alternative, training-free embedding backend called simeon (third_party submodule). It is **experimental** — API and defaults are not stable, and it is a research vehicle, not a drop-in replacement for learned embeddings like MiniLM. Best suited for first-stage retrieval or hybrid fusion with BM25.
+
+Enable it via config:
+
+```toml
+[embeddings]
+backend = "simeon"
+preferred_model = "simeon-default"
+embedding_dim = 384   # see dim options below
+```
+
+Unlike learned embeddings (MiniLM is fixed at 384), simeon's output dimension is tunable — training-free, so higher dims have no training cost, only storage and compute cost:
+
+| `embedding_dim` | Use when                                              |
+|-----------------|-------------------------------------------------------|
+| 384             | Drop-in parity with MiniLM; smallest index, fastest.  |
+| 768             | More separability, fewer hash collisions; 2× storage. |
+| 1024            | Closer to `bge-large` capacity; 2.6× storage vs 384.  |
+| 1536+           | Experimental headroom; diminishing returns past ~2k.  |
+
+Set via config (`embedding_dim`) or env (`YAMS_SIMEON_OUTPUT_DIM`). Internal ngram/sketch/projection knobs: [third_party/simeon/README.md](third_party/simeon/README.md).
+
+Requirements: no model file, no ONNX, no external runtime deps. When building from source, fetch the submodule: `git submodule update --init --recursive`.
+
+Benchmarks and A/B vs ONNX/MiniLM: [docs/benchmarks/simeon_vs_onnx_embedding_ab.md](docs/benchmarks/simeon_vs_onnx_embedding_ab.md).
+
 ## Troubleshooting
 
 ```bash

@@ -752,6 +752,58 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
     return policy;
 }
 
+ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
+    PostIngestCaps caps;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return caps;
+        }
+
+        auto kv = parseSimpleTomlFlat(cfgPath);
+
+        auto parseBounded = [](const std::string& s, std::uint32_t lo,
+                               std::uint32_t hi) -> std::optional<std::uint32_t> {
+            try {
+                auto raw = static_cast<std::uint32_t>(std::stoul(s));
+                if (raw < lo || raw > hi)
+                    return std::nullopt;
+                return raw;
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        };
+
+        if (auto it = kv.find("tuning.post_ingest.total_concurrent"); it != kv.end()) {
+            caps.totalConcurrent = parseBounded(it->second, 1, 256);
+        }
+        if (auto it = kv.find("tuning.post_ingest.embed_concurrent"); it != kv.end()) {
+            caps.embedConcurrent = parseBounded(it->second, 1, 32);
+        }
+        if (auto it = kv.find("tuning.post_ingest.extraction_concurrent"); it != kv.end()) {
+            caps.extractionConcurrent = parseBounded(it->second, 1, 64);
+        }
+        if (auto it = kv.find("tuning.post_ingest.kg_concurrent"); it != kv.end()) {
+            caps.kgConcurrent = parseBounded(it->second, 1, 64);
+        }
+        if (auto it = kv.find("tuning.post_ingest.symbol_concurrent"); it != kv.end()) {
+            caps.symbolConcurrent = parseBounded(it->second, 1, 32);
+        }
+        if (auto it = kv.find("tuning.post_ingest.entity_concurrent"); it != kv.end()) {
+            caps.entityConcurrent = parseBounded(it->second, 1, 16);
+        }
+        if (auto it = kv.find("tuning.post_ingest.title_concurrent"); it != kv.end()) {
+            caps.titleConcurrent = parseBounded(it->second, 1, 16);
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for post-ingest caps: {}", e.what());
+    }
+
+    return caps;
+}
+
 std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
     std::string preferred;
 

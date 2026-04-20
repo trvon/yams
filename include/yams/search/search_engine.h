@@ -233,12 +233,22 @@ struct SearchEngineConfig {
 
     // Result fusion strategy
     enum class FusionStrategy {
-        WEIGHTED_SUM,        // Sum of weighted scores (simple baseline)
-        RECIPROCAL_RANK,     // Standard Reciprocal Rank Fusion
-        WEIGHTED_RECIPROCAL, // RRF with score boost (good default)
-        COMB_MNZ,            // CombMNZ: score * num_components (recall-focused)
-        CONVEX               // Convex combination of per-component normalized scores
+        WEIGHTED_SUM,          // Sum of weighted scores (simple baseline)
+        RECIPROCAL_RANK,       // Standard Reciprocal Rank Fusion
+        WEIGHTED_RECIPROCAL,   // RRF with score boost (good default)
+        COMB_MNZ,              // CombMNZ: score * num_components (recall-focused)
+        CONVEX,                // Convex combination of per-component normalized scores
+        WEIGHTED_LINEAR_ZSCORE // Cascade: BM25 top-K pool, alpha-weighted z-scored
+                               // linear combination of lexical+vector components
+                               // (training-free recipe; defaults match the simeon
+                               // bench's headline cascade row)
     } fusionStrategy = FusionStrategy::COMB_MNZ; // Default: recall-focused
+
+    // WEIGHTED_LINEAR_ZSCORE knobs. Defaults reproduce simeon's
+    // bm25_pool500_linear_alpha075 bench row on BEIR scifact.
+    size_t weightedLinearZScorePoolSize = 500; // BM25 (lexical) pool depth
+    float weightedLinearZScoreAlpha = 0.75f;   // Weight on the lexical leg in [0,1]
+    bool weightedLinearZScoreUseZScore = true; // Off => raw scores (still alpha-mixed)
 
     // P7: When true, SearchEngine overrides fusionStrategy to CONVEX once the
     // SearchTuner reports convergence. Default off preserves existing behavior.
@@ -337,6 +347,8 @@ struct SearchEngineConfig {
                 return "COMB_MNZ";
             case FusionStrategy::CONVEX:
                 return "CONVEX";
+            case FusionStrategy::WEIGHTED_LINEAR_ZSCORE:
+                return "WEIGHTED_LINEAR_ZSCORE";
         }
         return "UNKNOWN";
     }
@@ -749,6 +761,7 @@ private:
     std::vector<SearchResult> fuseWeightedReciprocal(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseCombMNZ(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseConvex(const std::vector<ComponentResult>& results);
+    std::vector<SearchResult> fuseWeightedLinearZScore(const std::vector<ComponentResult>& results);
 
     template <typename ScoreFunc>
     std::vector<SearchResult> fuseSinglePass(const std::vector<ComponentResult>& results,

@@ -530,3 +530,87 @@ TEST_CASE("YAMS_TUNING_PROFILE env var overrides config", "[daemon][components][
         CHECK(profile == yams::daemon::TuneAdvisor::Profile::Balanced);
     }
 }
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolvePostIngestCaps reads [tuning.post_ingest]",
+                 "[daemon][components][config][post_ingest][catch2]") {
+    SECTION("missing section returns all nullopt") {
+        auto configPath = writeToml("no_post_ingest.toml", R"(
+[tuning]
+profile = "balanced"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto caps = ConfigResolver::resolvePostIngestCaps();
+        CHECK_FALSE(caps.totalConcurrent.has_value());
+        CHECK_FALSE(caps.embedConcurrent.has_value());
+        CHECK_FALSE(caps.extractionConcurrent.has_value());
+        CHECK_FALSE(caps.kgConcurrent.has_value());
+        CHECK_FALSE(caps.symbolConcurrent.has_value());
+        CHECK_FALSE(caps.entityConcurrent.has_value());
+        CHECK_FALSE(caps.titleConcurrent.has_value());
+    }
+
+    SECTION("all keys populate the struct") {
+        auto configPath = writeToml("post_ingest.toml", R"(
+[tuning.post_ingest]
+total_concurrent = 12
+embed_concurrent = 4
+extraction_concurrent = 5
+kg_concurrent = 6
+symbol_concurrent = 3
+entity_concurrent = 2
+title_concurrent = 2
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto caps = ConfigResolver::resolvePostIngestCaps();
+        REQUIRE(caps.totalConcurrent.has_value());
+        CHECK(*caps.totalConcurrent == 12u);
+        REQUIRE(caps.embedConcurrent.has_value());
+        CHECK(*caps.embedConcurrent == 4u);
+        REQUIRE(caps.extractionConcurrent.has_value());
+        CHECK(*caps.extractionConcurrent == 5u);
+        REQUIRE(caps.kgConcurrent.has_value());
+        CHECK(*caps.kgConcurrent == 6u);
+        REQUIRE(caps.symbolConcurrent.has_value());
+        CHECK(*caps.symbolConcurrent == 3u);
+        REQUIRE(caps.entityConcurrent.has_value());
+        CHECK(*caps.entityConcurrent == 2u);
+        REQUIRE(caps.titleConcurrent.has_value());
+        CHECK(*caps.titleConcurrent == 2u);
+    }
+
+    SECTION("out-of-range values are dropped (nullopt)") {
+        auto configPath = writeToml("oor.toml", R"(
+[tuning.post_ingest]
+total_concurrent = 0
+embed_concurrent = 99
+extraction_concurrent = 500
+entity_concurrent = 17
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto caps = ConfigResolver::resolvePostIngestCaps();
+        CHECK_FALSE(caps.totalConcurrent.has_value());
+        CHECK_FALSE(caps.embedConcurrent.has_value());
+        CHECK_FALSE(caps.extractionConcurrent.has_value());
+        CHECK_FALSE(caps.entityConcurrent.has_value());
+    }
+
+    SECTION("partial population — only set keys populate") {
+        auto configPath = writeToml("partial.toml", R"(
+[tuning.post_ingest]
+embed_concurrent = 3
+kg_concurrent = 5
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto caps = ConfigResolver::resolvePostIngestCaps();
+        CHECK_FALSE(caps.totalConcurrent.has_value());
+        REQUIRE(caps.embedConcurrent.has_value());
+        CHECK(*caps.embedConcurrent == 3u);
+        CHECK_FALSE(caps.extractionConcurrent.has_value());
+        REQUIRE(caps.kgConcurrent.has_value());
+        CHECK(*caps.kgConcurrent == 5u);
+        CHECK_FALSE(caps.symbolConcurrent.has_value());
+        CHECK_FALSE(caps.entityConcurrent.has_value());
+        CHECK_FALSE(caps.titleConcurrent.has_value());
+    }
+}

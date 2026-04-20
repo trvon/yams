@@ -31,11 +31,27 @@ simeon::ProjectionMode parse_projection_mode(const char* s) {
         return simeon::ProjectionMode::AchlioptasSparse;
     if (std::strcmp(s, "none") == 0)
         return simeon::ProjectionMode::None;
-    if (std::strcmp(s, "gaussian") == 0)
+    if (std::strcmp(s, "dense_gaussian") == 0 || std::strcmp(s, "gaussian") == 0)
         return simeon::ProjectionMode::DenseGaussian;
     if (std::strcmp(s, "very_sparse") == 0)
         return simeon::ProjectionMode::VerySparse;
+    if (std::strcmp(s, "achlioptas_sparse") == 0 || std::strcmp(s, "achlioptas") == 0)
+        return simeon::ProjectionMode::AchlioptasSparse;
     return simeon::ProjectionMode::AchlioptasSparse;
+}
+
+const char* projection_mode_label(simeon::ProjectionMode m) noexcept {
+    switch (m) {
+        case simeon::ProjectionMode::None:
+            return "none";
+        case simeon::ProjectionMode::AchlioptasSparse:
+            return "achlioptas_sparse";
+        case simeon::ProjectionMode::DenseGaussian:
+            return "dense_gaussian";
+        case simeon::ProjectionMode::VerySparse:
+            return "very_sparse";
+    }
+    return "achlioptas_sparse";
 }
 
 uint32_t env_u32(const char* name, uint32_t fallback) {
@@ -55,10 +71,32 @@ simeon::EncoderConfig build_encoder_config(const EmbeddingConfig& yams_cfg) {
     cfg.ngram_min = env_u32("YAMS_SIMEON_NGRAM_MIN", 3);
     cfg.ngram_max = env_u32("YAMS_SIMEON_NGRAM_MAX", 5);
     cfg.sketch_dim = env_u32("YAMS_SIMEON_SKETCH_DIM", 4096);
-    cfg.output_dim = static_cast<uint32_t>(yams_cfg.embedding_dim);
+    cfg.output_dim =
+        env_u32("YAMS_SIMEON_OUTPUT_DIM", static_cast<uint32_t>(yams_cfg.embedding_dim));
     cfg.projection = parse_projection_mode(std::getenv("YAMS_SIMEON_PROJECTION"));
     cfg.l2_normalize = yams_cfg.normalize_embeddings;
     return cfg;
+}
+
+// One-line recipe identity for telemetry. Format:
+//   <projection>_<sketch>_<output>[+pq<bytes>]
+// Read at process start; YAMS_SIMEON_PQ_BYTES is reserved for the post-encode
+// PQ compression tier (PQ wiring lives in the storage layer, not the encoder).
+std::string compute_simeon_recipe_label() {
+    const auto proj = parse_projection_mode(std::getenv("YAMS_SIMEON_PROJECTION"));
+    const auto sketch = env_u32("YAMS_SIMEON_SKETCH_DIM", 4096);
+    const auto out = env_u32("YAMS_SIMEON_OUTPUT_DIM", 384);
+    const auto pq = env_u32("YAMS_SIMEON_PQ_BYTES", 0);
+    std::string s = projection_mode_label(proj);
+    s += '_';
+    s += std::to_string(sketch);
+    s += '_';
+    s += std::to_string(out);
+    if (pq > 0) {
+        s += "+pq";
+        s += std::to_string(pq);
+    }
+    return s;
 }
 
 class SimeonBackend final : public IEmbeddingBackend {
@@ -184,6 +222,10 @@ private:
 
 std::unique_ptr<IEmbeddingBackend> makeSimeonBackend(const EmbeddingConfig& config) {
     return std::make_unique<SimeonBackend>(config);
+}
+
+std::string simeonRecipeLabel() {
+    return compute_simeon_recipe_label();
 }
 
 } // namespace yams::vector

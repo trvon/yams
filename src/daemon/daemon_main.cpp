@@ -721,6 +721,42 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // Apply [tuning.post_ingest] concurrency caps via ConfigResolver.
+            // Env vars (YAMS_POST_*_CONCURRENT) win over config — we only push
+            // the config value when the env var is unset.
+            {
+                auto caps = yams::daemon::ConfigResolver::resolvePostIngestCaps();
+                auto applyIfNoEnv = [](const char* envName, std::optional<std::uint32_t> v,
+                                       void (*setter)(uint32_t), const char* logName) {
+                    if (!v.has_value())
+                        return;
+                    if (std::getenv(envName) != nullptr)
+                        return;
+                    setter(*v);
+                    spdlog::info("TuneAdvisor {} applied via config: {}", logName, *v);
+                };
+                applyIfNoEnv("YAMS_POST_INGEST_TOTAL_CONCURRENT", caps.totalConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostIngestTotalConcurrent,
+                             "postIngestTotalConcurrent");
+                applyIfNoEnv("YAMS_POST_EMBED_CONCURRENT", caps.embedConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostEmbedConcurrent,
+                             "postEmbedConcurrent");
+                applyIfNoEnv("YAMS_POST_EXTRACTION_CONCURRENT", caps.extractionConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostExtractionConcurrent,
+                             "postExtractionConcurrent");
+                applyIfNoEnv("YAMS_POST_KG_CONCURRENT", caps.kgConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostKgConcurrent, "postKgConcurrent");
+                applyIfNoEnv("YAMS_POST_SYMBOL_CONCURRENT", caps.symbolConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostSymbolConcurrent,
+                             "postSymbolConcurrent");
+                applyIfNoEnv("YAMS_POST_ENTITY_CONCURRENT", caps.entityConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostEntityConcurrent,
+                             "postEntityConcurrent");
+                applyIfNoEnv("YAMS_POST_TITLE_CONCURRENT", caps.titleConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostTitleConcurrent,
+                             "postTitleConcurrent");
+            }
+
             // Apply [gradient_limiter] overrides to TuneAdvisor if present
             if (tomlConfig.find("gradient_limiter") != tomlConfig.end()) {
                 const auto& gl = tomlConfig.at("gradient_limiter");

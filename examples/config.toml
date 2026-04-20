@@ -320,6 +320,20 @@ grep_admission_wait_ms = 20000
 # stream_mux_light2_bytes = 33554432       # 32 MiB
 # stream_mux_light3_bytes = 67108864       # 64 MiB
 
+# Post-ingest pipeline concurrency caps. Omit a key to let the daemon auto-tune from the CPU
+# budget (see TuneAdvisor::postIngestBudgetedConcurrency). Env vars (YAMS_POST_*_CONCURRENT)
+# take precedence over these config keys. Valid ranges match the setter clamps:
+#   total_concurrent: 1..256 ; embed_concurrent, symbol_concurrent: 1..32
+#   extraction_concurrent, kg_concurrent: 1..64 ; entity_concurrent, title_concurrent: 1..16
+[tuning.post_ingest]
+# total_concurrent = 8
+# embed_concurrent = 4
+# extraction_concurrent = 3
+# kg_concurrent = 6
+# symbol_concurrent = 3
+# entity_concurrent = 2
+# title_concurrent = 2
+
 # Notes:
 # - When [embeddings].enable = false, the daemon automatically disables the model provider
 #   and plugin auto-load to reduce startup overhead.

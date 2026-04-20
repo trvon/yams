@@ -595,10 +595,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             } catch (...) {
             }
             // Heal/mirror vector DB readiness from the live handle.
-            // Readiness semantics: false while empty/building; true only when serving (has data).
+            // vectorDbReady semantics: true when the DB has rows (serving).
+            // vectorBackendUsable semantics: true when the backend is functional
+            // (initialized + dim known + provider ready), independent of row count —
+            // a fresh daemon with 0 rows can still answer vector queries.
+            bool vectorBackendUsable = false;
             if (serviceManager_) {
                 try {
-                    // Only check if already initialized - never create/initialize here
                     if (auto vdb = serviceManager_->getVectorDatabase();
                         vdb && vdb->isInitialized()) {
                         const auto dim = vdb->getConfig().embedding_dim;
@@ -609,6 +612,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         if (dim > 0) {
                             res.vectorDbDim = static_cast<uint32_t>(dim);
                         }
+
+                        const bool providerReady =
+                            state_ &&
+                            state_->readiness.modelProviderReady.load(std::memory_order_relaxed);
+                        vectorBackendUsable =
+                            dispatch::compute_vector_backend_usable(dim > 0, providerReady);
 
                         if (state_) {
                             state_->readiness.vectorDbInitAttempted.store(
@@ -625,7 +634,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 }
             }
 
-            // Ensure readinessStates[vector_db] reflects the healed vectorDbReady.
             try {
                 res.readinessStates[std::string(readiness::kVectorDb)] = res.vectorDbReady;
             } catch (...) {
@@ -633,11 +641,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             try {
                 const bool lexicalReady =
                     res.readinessStates[std::string(readiness::kSearchEngine)];
-                const bool hybridUsable = lexicalReady && res.vectorDbReady;
+                const bool hybridUsable = lexicalReady && vectorBackendUsable;
                 res.readinessStates[std::string(readiness::kSearchEngineLexicalReady)] =
                     lexicalReady;
                 res.readinessStates[std::string(readiness::kSearchEngineVectorUsable)] =
-                    res.vectorDbReady;
+                    vectorBackendUsable;
                 res.readinessStates[std::string(readiness::kSearchEngineHybridUsable)] =
                     hybridUsable;
             } catch (...) {
@@ -844,13 +852,18 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         if (auto it = res.readinessStates.find(std::string(readiness::kSearchEngineLexicalReady));
             it == res.readinessStates.end()) {
             const bool lexicalReady = res.readinessStates[std::string(readiness::kSearchEngine)];
-            const bool vectorReady = res.readinessStates[std::string(readiness::kVectorDbReady)];
+            // vector_usable = backend is functional (dim known + provider ready),
+            // NOT "DB has rows" (that is vector_db_ready).
+            const bool dimKnown = res.readinessStates[std::string(readiness::kVectorDbDim)];
+            const bool providerReady = res.readinessStates[std::string(readiness::kModelProvider)];
+            const bool vectorBackendUsable =
+                dispatch::compute_vector_backend_usable(dimKnown, providerReady);
             res.readinessStates.emplace(std::string(readiness::kSearchEngineLexicalReady),
                                         lexicalReady);
             res.readinessStates.emplace(std::string(readiness::kSearchEngineVectorUsable),
-                                        vectorReady);
+                                        vectorBackendUsable);
             res.readinessStates.emplace(std::string(readiness::kSearchEngineHybridUsable),
-                                        lexicalReady && vectorReady);
+                                        lexicalReady && vectorBackendUsable);
         }
 
         // Proto status transport still omits several newer structured fields.

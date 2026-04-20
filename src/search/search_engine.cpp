@@ -20,6 +20,7 @@
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_metadata_store.h>
 #include <yams/vector/compressed_ann.h>
+#include <yams/vector/simeon_embedding_backend.h>
 
 #include <algorithm>
 #include <charconv>
@@ -1116,6 +1117,15 @@ std::vector<SearchResult> ResultFusion::fuse(const std::vector<ComponentResult>&
                 spdlog::warn("[search] convex fusion failed (unknown); falling back to RRF");
                 return fuseReciprocalRank(componentResults);
             }
+        case SearchEngineConfig::FusionStrategy::WEIGHTED_LINEAR_ZSCORE:
+            try {
+                return fuseWeightedLinearZScore(componentResults);
+            } catch (const std::exception& e) {
+                spdlog::warn("[search] weighted-linear-zscore fusion failed ({}); falling back "
+                             "to RRF",
+                             e.what());
+                return fuseReciprocalRank(componentResults);
+            }
     }
     return fuseCombMNZ(componentResults); // Default fallback
 }
@@ -1582,6 +1592,149 @@ std::vector<SearchResult> ResultFusion::fuseConvex(const std::vector<ComponentRe
         const double norm = std::clamp(static_cast<double>(comp.score) / maxScore, 0.0, 1.0);
         return weight * norm;
     });
+}
+
+// Cascade fusion: BM25-pool + alpha-weighted z-scored linear combination.
+// Mirrors simeon's bm25_pool500_linear_alpha075 bench row, the configuration
+// that beat both pure BM25 and global RRF on BEIR scifact in the simeon
+// benchmark. Lexical leg = Text + GraphText. Semantic leg = Vector +
+// CompressedANN + GraphVector + EntityVector. Pool is the top-K docs by max
+// lexical-leg score; docs outside the pool are dropped.
+std::vector<SearchResult>
+ResultFusion::fuseWeightedLinearZScore(const std::vector<ComponentResult>& results) {
+    auto isLexicalLeg = [](ComponentResult::Source s) noexcept {
+        return s == ComponentResult::Source::Text || s == ComponentResult::Source::GraphText;
+    };
+    auto isSemanticLeg = [](ComponentResult::Source s) noexcept {
+        return s == ComponentResult::Source::Vector ||
+               s == ComponentResult::Source::CompressedANN ||
+               s == ComponentResult::Source::GraphVector ||
+               s == ComponentResult::Source::EntityVector;
+    };
+
+    struct DocAcc {
+        SearchResult result;
+        double lexScore = 0.0;
+        double semScore = 0.0;
+        bool hasLex = false;
+        bool hasSem = false;
+    };
+    std::unordered_map<std::string, DocAcc> byDoc;
+    byDoc.reserve(results.size());
+
+    for (const auto& comp : results) {
+        const std::string key = detail::makeFusionDedupKey(comp, config_.enablePathDedupInFusion);
+        auto& acc = byDoc[key];
+        if (acc.result.document.sha256Hash.empty()) {
+            acc.result.document.sha256Hash = comp.documentHash;
+            acc.result.document.filePath = comp.filePath;
+            acc.result.score = 0.0;
+        }
+        if (comp.snippet.has_value() && acc.result.snippet.empty()) {
+            acc.result.snippet = comp.snippet.value();
+        }
+        const double s = static_cast<double>(comp.score);
+        if (isLexicalLeg(comp.source)) {
+            if (!acc.hasLex || s > acc.lexScore) {
+                acc.lexScore = s;
+            }
+            acc.hasLex = true;
+        } else if (isSemanticLeg(comp.source)) {
+            if (!acc.hasSem || s > acc.semScore) {
+                acc.semScore = s;
+            }
+            acc.hasSem = true;
+        }
+        accumulateComponentScore(acc.result, comp.source, s);
+    }
+
+    // Pool = top-K by lexical leg. Docs without any lexical evidence still
+    // enter the pool ordered by semantic score so that pure-vector hits aren't
+    // unconditionally discarded — but the lexical leg dominates the cut.
+    std::vector<std::string> poolKeys;
+    poolKeys.reserve(byDoc.size());
+    for (const auto& [k, acc] : byDoc) {
+        if (acc.hasLex || acc.hasSem) {
+            poolKeys.push_back(k);
+        }
+    }
+    std::sort(poolKeys.begin(), poolKeys.end(), [&](const std::string& a, const std::string& b) {
+        const auto& da = byDoc.at(a);
+        const auto& db = byDoc.at(b);
+        const double la = da.hasLex ? da.lexScore : -std::numeric_limits<double>::infinity();
+        const double lb = db.hasLex ? db.lexScore : -std::numeric_limits<double>::infinity();
+        if (la != lb)
+            return la > lb;
+        if (da.semScore != db.semScore)
+            return da.semScore > db.semScore;
+        return a < b;
+    });
+    const size_t poolSize = std::min(poolKeys.size(), config_.weightedLinearZScorePoolSize);
+    poolKeys.resize(poolSize);
+    if (poolKeys.empty()) {
+        return {};
+    }
+
+    auto computeMoments = [&](auto extract) {
+        double sum = 0.0;
+        size_t n = 0;
+        for (const auto& k : poolKeys) {
+            auto opt = extract(byDoc.at(k));
+            if (!opt)
+                continue;
+            sum += *opt;
+            ++n;
+        }
+        const double mean = n > 0 ? sum / static_cast<double>(n) : 0.0;
+        double sqsum = 0.0;
+        for (const auto& k : poolKeys) {
+            auto opt = extract(byDoc.at(k));
+            if (!opt)
+                continue;
+            const double d = *opt - mean;
+            sqsum += d * d;
+        }
+        const double stddev = n > 1 ? std::sqrt(sqsum / static_cast<double>(n - 1)) : 1.0;
+        return std::pair{mean, stddev > 1e-9 ? stddev : 1.0};
+    };
+    auto extractLex = [](const DocAcc& a) -> std::optional<double> {
+        return a.hasLex ? std::optional{a.lexScore} : std::nullopt;
+    };
+    auto extractSem = [](const DocAcc& a) -> std::optional<double> {
+        return a.hasSem ? std::optional{a.semScore} : std::nullopt;
+    };
+
+    double lexMean = 0.0, lexSd = 1.0, semMean = 0.0, semSd = 1.0;
+    if (config_.weightedLinearZScoreUseZScore) {
+        std::tie(lexMean, lexSd) = computeMoments(extractLex);
+        std::tie(semMean, semSd) = computeMoments(extractSem);
+    }
+
+    const double alpha =
+        std::clamp(static_cast<double>(config_.weightedLinearZScoreAlpha), 0.0, 1.0);
+    std::vector<SearchResult> out;
+    out.reserve(poolKeys.size());
+    for (const auto& k : poolKeys) {
+        auto& acc = byDoc.at(k);
+        double zLex = 0.0;
+        double zSem = 0.0;
+        if (acc.hasLex) {
+            zLex = config_.weightedLinearZScoreUseZScore ? (acc.lexScore - lexMean) / lexSd
+                                                         : acc.lexScore;
+        }
+        if (acc.hasSem) {
+            zSem = config_.weightedLinearZScoreUseZScore ? (acc.semScore - semMean) / semSd
+                                                         : acc.semScore;
+        }
+        acc.result.score = alpha * zLex + (1.0 - alpha) * zSem;
+        out.push_back(std::move(acc.result));
+    }
+    std::sort(out.begin(), out.end(), [](const SearchResult& a, const SearchResult& b) {
+        if (a.score != b.score)
+            return a.score > b.score;
+        return a.document.sha256Hash < b.document.sha256Hash;
+    });
+    return out;
 }
 
 // ============================================================================
@@ -3586,6 +3739,27 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         SearchEngineConfig::fusionStrategyToString(workingConfig.fusionStrategy);
     response.debugStats["fusion_adaptive_applied"] = adaptiveFusionApplied ? "1" : "0";
     response.debugStats["search_tuner_converged"] = tunerConvergedForFusion ? "1" : "0";
+    // Joins per-query traces back to the active simeon encoder recipe (env
+    // controlled). When the cascade fusion is selected the recipe identity
+    // includes the fusion knobs so retrieval-quality runs can be attributed
+    // end-to-end.
+    {
+        std::string recipe = vector::simeonRecipeLabel();
+        if (workingConfig.fusionStrategy ==
+            SearchEngineConfig::FusionStrategy::WEIGHTED_LINEAR_ZSCORE) {
+            recipe += "+linear_a";
+            // emit alpha as e.g. "075" for 0.75 to match the bench row label
+            const int a100 = static_cast<int>(std::lround(
+                std::clamp(static_cast<double>(workingConfig.weightedLinearZScoreAlpha), 0.0, 1.0) *
+                100.0));
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%03d", a100);
+            recipe += buf;
+            recipe += "_pool";
+            recipe += std::to_string(workingConfig.weightedLinearZScorePoolSize);
+        }
+        response.debugStats["simeon_recipe"] = recipe;
+    }
 
     ResultFusion fusion(workingConfig);
     {

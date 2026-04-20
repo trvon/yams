@@ -56,6 +56,16 @@ public:
         std::optional<std::string> routingVariant;
     };
 
+    struct PostIngestCaps {
+        std::optional<std::uint32_t> totalConcurrent;
+        std::optional<std::uint32_t> embedConcurrent;
+        std::optional<std::uint32_t> extractionConcurrent;
+        std::optional<std::uint32_t> kgConcurrent;
+        std::optional<std::uint32_t> symbolConcurrent;
+        std::optional<std::uint32_t> entityConcurrent;
+        std::optional<std::uint32_t> titleConcurrent;
+    };
+
     ConfigResolver() = delete; // Static-only class
 
     /**
@@ -256,6 +266,24 @@ public:
      * - search.topology.routing_variant = baseline|vector_seed|kg_walk|score_replace|medoid_promote
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
+
+    /**
+     * @brief Resolve post-ingest concurrency caps from config file.
+     *
+     * Reads [tuning.post_ingest] keys. Each entry is optional; callers apply
+     * values via TuneAdvisor::setPost*Concurrent() only when the corresponding
+     * YAMS_POST_*_CONCURRENT env var is not set (env wins).
+     *
+     * Config keys:
+     * - tuning.post_ingest.total_concurrent    = int (1..256)
+     * - tuning.post_ingest.embed_concurrent    = int (1..32)
+     * - tuning.post_ingest.extraction_concurrent = int (1..64)
+     * - tuning.post_ingest.kg_concurrent       = int (1..64)
+     * - tuning.post_ingest.symbol_concurrent   = int (1..32)
+     * - tuning.post_ingest.entity_concurrent   = int (1..16)
+     * - tuning.post_ingest.title_concurrent    = int (1..16)
+     */
+    static PostIngestCaps resolvePostIngestCaps();
 
     /**
      * @brief Read an integer timeout from environment with bounds.

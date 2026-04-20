@@ -794,6 +794,24 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_status_readiness_vector_usable_exe = executable('catch2_status_readiness_vector_usable',
+    files('unit/daemon/status_readiness_vector_usable_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_model_provider_registry_exe = executable('catch2_model_provider_registry',
+    files('unit/daemon/model_provider_registry_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_embedding_recovery_exe = executable('catch2_embedding_recovery',
     files('unit/daemon/embedding_provider_recovery_catch2_test.cpp'),
     include_directories: incs,
@@ -2707,6 +2725,18 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('status_readiness_vector_usable', catch2_status_readiness_vector_usable_exe,
+    suite: ['catch2', 'unit', 'daemon', 'readiness'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('model_provider_registry', catch2_model_provider_registry_exe,
+    suite: ['catch2', 'unit', 'daemon', 'model_provider'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('embedding_recovery', catch2_embedding_recovery_exe,

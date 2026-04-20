@@ -213,6 +213,10 @@ generate_batch(IModelProvider* provider, const std::string& model,
     }
 }
 
+inline bool compute_vector_backend_usable(bool dim_known, bool provider_ready) noexcept {
+    return dim_known && provider_ready;
+}
+
 struct VectorDiag {
     bool embeddingsAvailable{false};
     bool scoringEnabled{false};

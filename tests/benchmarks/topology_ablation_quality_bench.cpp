@@ -831,6 +831,9 @@ struct CellOutcome {
     double hybridEvalMs = -1.0;
     std::string fixtureStatus = "ok";
     bool topologySeeded = false;
+    std::uint64_t clusterCount = 0;
+    std::uint64_t documentsProcessed = 0;
+    std::uint64_t documentsMissingEmbeddings = 0;
 };
 
 CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBoost,
@@ -906,6 +909,15 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
         const auto end = std::chrono::steady_clock::now();
         outcome.hybridEvalMs = std::chrono::duration<double, std::milli>(end - start).count();
         outcome.ok = outcome.metrics.numQueries > 0;
+
+        if (auto* daemon = harness.daemon()) {
+            if (auto* sm = daemon->getServiceManager()) {
+                auto snap = sm->getTopologyManager().getTelemetrySnapshot();
+                outcome.clusterCount = snap.lastClustersBuilt;
+                outcome.documentsProcessed = snap.lastDocumentsProcessed;
+                outcome.documentsMissingEmbeddings = snap.lastDocumentsMissingEmbeddings;
+            }
+        }
     } catch (const std::exception& e) {
         spdlog::warn("Cell threw: {}", e.what());
         outcome.fixtureStatus = "missing";
@@ -919,6 +931,9 @@ json toCellJson(const CellOutcome& outcome) {
     json j;
     j[std::string(irm::kIRFixtureStatus)] = outcome.fixtureStatus;
     j["topology_seeded"] = outcome.topologySeeded;
+    j["cluster_count"] = outcome.clusterCount;
+    j["documents_processed"] = outcome.documentsProcessed;
+    j["documents_missing_embeddings"] = outcome.documentsMissingEmbeddings;
     if (outcome.ok) {
         j[std::string(irm::kIRNdcgAtK)] = outcome.metrics.ndcgAtK;
         j[std::string(irm::kIRMrrAtK)] = outcome.metrics.mrrAtK;
@@ -1021,6 +1036,117 @@ TEST_CASE("[!benchmark][topology-ablation-quality] axis-3 routing variants",
         };
         record.update(toCellJson(outcome));
         emitRecord(outputPath, record);
+    }
+}
+
+namespace {
+
+void applyGraphBuildEnv(int topK, const std::string& thresholdLabel) {
+    setenv("YAMS_GRAPH_SEMANTIC_TOPK", std::to_string(topK).c_str(), 1);
+    if (thresholdLabel == "adaptive") {
+        unsetenv("YAMS_GRAPH_SEMANTIC_THRESHOLD");
+    } else {
+        setenv("YAMS_GRAPH_SEMANTIC_THRESHOLD", thresholdLabel.c_str(), 1);
+    }
+}
+
+void clearGraphBuildEnv() {
+    unsetenv("YAMS_GRAPH_SEMANTIC_TOPK");
+    unsetenv("YAMS_GRAPH_SEMANTIC_THRESHOLD");
+}
+
+} // namespace
+
+TEST_CASE("[!benchmark][topology-ablation-quality] axis-4 graph build sweep",
+          "[topology-ablation-quality]") {
+    const auto outputPath = resolveOutputPath();
+    constexpr std::size_t kMidClusters = 2;
+    constexpr std::size_t kMidDocs = 64;
+    constexpr float kMidMedoidBoost = 0.05f;
+    constexpr float kMidBridgeBoost = 0.03f;
+
+    const std::vector<int> topKGrid = {4, 16, 32, 64, 128};
+    const std::vector<std::string> thresholdGrid = {"adaptive", "0.3", "0.5", "0.7"};
+
+    const std::string tier = std::getenv("YAMS_BENCH_TIER") ? std::getenv("YAMS_BENCH_TIER") : "S";
+
+    FixtureConfig cfg = fixtureConfigFromEnv();
+    if (tier == "XL" || tier == "XXL") {
+        cfg.mode = FixtureMode::Beir;
+        cfg.useSimeonEmbeddings = true;
+        if (const char* raw = std::getenv("YAMS_BENCH_BEIR_DATASET"); !(raw && *raw)) {
+            cfg.beirDataset = (tier == "XL") ? "nfcorpus" : "scifact";
+        }
+        if (cfg.beirCacheDir.empty() || cfg.beirCacheDir.filename().string() != cfg.beirDataset) {
+            if (const char* home = std::getenv("HOME"); home && *home) {
+                cfg.beirCacheDir =
+                    fs::path(home) / ".cache" / "yams" / "benchmarks" / cfg.beirDataset;
+            }
+        }
+    } else if (tier == "L+") {
+        cfg.useSimeonEmbeddings = true;
+    }
+
+    const std::size_t expectedCorpusSize = [&]() -> std::size_t {
+        if (cfg.mode == FixtureMode::Beir) {
+            return 0;
+        }
+        const int perTopic = cfg.corePerTopic + cfg.bridgePerTopic + cfg.tangentialPerTopic + 1;
+        return static_cast<std::size_t>(cfg.topicCount) * static_cast<std::size_t>(perTopic) +
+               static_cast<std::size_t>(cfg.noiseDocs);
+    }();
+
+    const std::string topKFilter = std::getenv("YAMS_BENCH_GRAPH_TOPK_FILTER")
+                                       ? std::getenv("YAMS_BENCH_GRAPH_TOPK_FILTER")
+                                       : "";
+    const std::string thresholdFilter = std::getenv("YAMS_BENCH_GRAPH_THRESHOLD_FILTER")
+                                            ? std::getenv("YAMS_BENCH_GRAPH_THRESHOLD_FILTER")
+                                            : "";
+    const int cellCooldownMs = readEnvInt("YAMS_BENCH_VARIANT_COOLDOWN_MS", 0);
+    bool firstEmitted = false;
+
+    for (const int topK : topKGrid) {
+        if (!topKFilter.empty() && topKFilter.find(std::to_string(topK)) == std::string::npos) {
+            continue;
+        }
+        for (const auto& threshold : thresholdGrid) {
+            if (!thresholdFilter.empty() && thresholdFilter.find(threshold) == std::string::npos) {
+                continue;
+            }
+            if (firstEmitted && cellCooldownMs > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(cellCooldownMs));
+            }
+            firstEmitted = true;
+
+            applyGraphBuildEnv(topK, threshold);
+            auto outcome =
+                runCell(kMidClusters, kMidDocs, kMidMedoidBoost, kMidBridgeBoost, nullptr, cfg);
+            clearGraphBuildEnv();
+
+            json record = {
+                {std::string(irm::kIRTestKey), std::string(irm::kIRTestName)},
+                {std::string(irm::kIRAxisKey), "graph_build_sweep"},
+                {std::string(irm::kIRAxisIdKey), 4},
+                {"tier", tier},
+                {"fixture_mode", (cfg.mode == FixtureMode::Beir) ? "beir" : "synthetic"},
+                {"embedding_backend", configUsesRealEmbeddings(cfg) ? "simeon" : "mock"},
+                {"topic_count", cfg.topicCount},
+                {"docs_per_topic_core", cfg.corePerTopic},
+                {"docs_per_topic_bridge", cfg.bridgePerTopic},
+                {"docs_per_topic_tangent", cfg.tangentialPerTopic},
+                {"noise_docs", cfg.noiseDocs},
+                {"corpus_size_expected", expectedCorpusSize},
+                {"beir_dataset", (cfg.mode == FixtureMode::Beir) ? cfg.beirDataset : ""},
+                {"max_clusters", kMidClusters},
+                {"max_docs_cap", kMidDocs},
+                {"medoid_boost", kMidMedoidBoost},
+                {"bridge_boost", kMidBridgeBoost},
+                {"graph_topk", topK},
+                {"graph_threshold", threshold},
+            };
+            record.update(toCellJson(outcome));
+            emitRecord(outputPath, record);
+        }
     }
 }
 
