@@ -290,7 +290,7 @@ std::string TextPreprocessor::decodeToken(int32_t token_id) const {
 #ifdef YAMS_USE_ONNX_RUNTIME
 class ModelManager::Impl {
 public:
-    Impl() : env_(ORT_LOGGING_LEVEL_WARNING, "yams") {
+    explicit Impl(bool deterministic) : env_(ORT_LOGGING_LEVEL_WARNING, "yams") {
 #ifdef _WIN32
         // Windows-specific: Use minimal thread counts to avoid thread pool exhaustion
         // and "resource deadlock would occur" errors.
@@ -312,11 +312,18 @@ public:
                              threads);
             }
         }
+        if (deterministic) {
+            threads = 1;
+        }
         session_options_.SetIntraOpNumThreads(threads);
 #ifdef _WIN32
         session_options_.SetInterOpNumThreads(1);
         session_options_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
 #endif
+        if (deterministic) {
+            session_options_.SetInterOpNumThreads(1);
+            session_options_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        }
         session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     }
 
@@ -770,6 +777,8 @@ private:
 // Stub implementation when ONNX is not available
 class ModelManager::Impl {
 public:
+    Impl() = default;
+    explicit Impl(bool /*deterministic*/) {}
     bool loadModel(const std::string&, const std::string&) { return false; }
     bool isModelLoaded(const std::string&) const { return false; }
     void unloadModel(const std::string&) {}
@@ -787,7 +796,8 @@ public:
 #endif
 
 // ModelManager method implementations
-ModelManager::ModelManager() : pImpl(std::make_unique<Impl>()) {}
+ModelManager::ModelManager() : pImpl(std::make_unique<Impl>(false)) {}
+ModelManager::ModelManager(bool deterministic) : pImpl(std::make_unique<Impl>(deterministic)) {}
 ModelManager::~ModelManager() = default;
 ModelManager::ModelManager(ModelManager&&) noexcept = default;
 ModelManager& ModelManager::operator=(ModelManager&&) noexcept = default;
@@ -843,7 +853,8 @@ std::vector<std::string> ModelManager::getLoadedModels() const {
 class LocalOnnxBackend : public IEmbeddingBackend {
 public:
     explicit LocalOnnxBackend(const EmbeddingConfig& config)
-        : config_(config), preprocessor_(config), initialized_(false) {}
+        : config_(config), preprocessor_(config), model_manager_(config.deterministic),
+          initialized_(false) {}
 
     bool initialize() override {
         YAMS_ZONE_SCOPED_N("LocalOnnxBackend::initialize");

@@ -23,41 +23,6 @@
 
 namespace yams::daemon {
 
-namespace {
-
-std::string deriveBusyMessage(const MetricsSnapshot& snap) {
-    if (snap.repairInProgress || snap.repairRunning || snap.repairQueueDepth > 0) {
-        std::string msg = "daemon busy: running repair";
-        if (snap.repairQueueDepth > 0) {
-            msg += " (queue=" + std::to_string(snap.repairQueueDepth) + ")";
-        }
-        return msg;
-    }
-    if (snap.postIngestInflight > 0 || snap.postIngestQueued > 0 || snap.postIngestRpcQueued > 0 ||
-        snap.workerQueued > 0) {
-        std::string msg = "daemon busy: ingesting docs";
-        const auto queued = snap.postIngestQueued + snap.postIngestRpcQueued;
-        if (queued > 0 || snap.postIngestInflight > 0) {
-            msg += " (queued=" + std::to_string(queued) +
-                   ", inflight=" + std::to_string(snap.postIngestInflight) + ")";
-        }
-        return msg;
-    }
-    if (snap.searchActive > 0 || snap.searchQueued > 0) {
-        std::string msg = "daemon busy: serving queries";
-        if (snap.searchQueued > 0) {
-            msg += " (queued=" + std::to_string(snap.searchQueued) + ")";
-        }
-        return msg;
-    }
-    if (snap.activeConnections >= snap.maxConnections && snap.maxConnections > 0) {
-        return "daemon busy: at connection capacity";
-    }
-    return "daemon busy";
-}
-
-} // namespace
-
 boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const StatusRequest& req) {
     // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
@@ -78,14 +43,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             const bool snapshotBusy =
                 req.detailed ? snap->statusDetailStale : snap->statusSnapshotStale;
             if (snapshotBusy) {
-                const auto retryAfter = std::max<uint32_t>(
+                res.retryAfterMs = std::max<uint32_t>(
                     100u, req.detailed ? static_cast<uint32_t>(std::min<std::uint64_t>(
                                              snap->statusDetailAgeMs, 1000ULL))
                                        : static_cast<uint32_t>(std::min<std::uint64_t>(
                                              snap->statusSnapshotAgeMs, 1000ULL)));
-                co_return dispatch::makeErrorResponse(
-                    ErrorCode::ResourceBusy, deriveBusyMessage(*snap),
-                    ErrorResponse::RetryInfo{retryAfter, "status_freshness"});
             }
             res.running = snap->running;
             res.version = snap->version;
@@ -448,7 +410,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     setVal(metrics::kWatchIntervalMs, snap->watchIntervalMs);
                 }
             }
-            res.retryAfterMs = snap->retryAfterMs;
+            res.retryAfterMs = std::max(res.retryAfterMs, snap->retryAfterMs);
             setVal("status_snapshot_age_ms", static_cast<size_t>(snap->statusSnapshotAgeMs));
             setVal("status_snapshot_stale", snap->statusSnapshotStale ? 1U : 0U);
             setVal("status_detail_age_ms", static_cast<size_t>(snap->statusDetailAgeMs));

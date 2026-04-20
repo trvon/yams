@@ -435,6 +435,14 @@ private:
     // (No additional declarations needed here.)
 #endif
 
+    enum class DaemonStatusFetchMode {
+        Required,
+        BestEffort,
+    };
+
+    boost::asio::awaitable<Result<std::optional<yams::daemon::StatusResponse>>>
+    fetchDaemonStatus(DaemonStatusFetchMode mode);
+
     // Modern C++20 tool handlers (type-safe, clean)
     boost::asio::awaitable<Result<MCPSearchResponse>>
     handleSearchDocuments(const MCPSearchRequest& req);

@@ -252,6 +252,11 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
         extracted.push_back(std::move(input));
     }
 
+    std::sort(extracted.begin(), extracted.end(),
+              [](const TopologyDocumentInput& lhs, const TopologyDocumentInput& rhs) {
+                  return lhs.documentHash < rhs.documentHash;
+              });
+
     localStats.documentsReturned = extracted.size();
     localStats.regionDocuments = extracted.size();
     if (stats != nullptr) {

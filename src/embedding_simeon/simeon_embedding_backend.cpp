@@ -31,6 +31,10 @@ simeon::ProjectionMode parse_projection_mode(const char* s) {
         return simeon::ProjectionMode::AchlioptasSparse;
     if (std::strcmp(s, "none") == 0)
         return simeon::ProjectionMode::None;
+    if (std::strcmp(s, "sparse_jl") == 0 || std::strcmp(s, "sparse-jl") == 0)
+        return simeon::ProjectionMode::SparseJL;
+    if (std::strcmp(s, "fwht") == 0 || std::strcmp(s, "hadamard") == 0)
+        return simeon::ProjectionMode::Fwht;
     if (std::strcmp(s, "dense_gaussian") == 0 || std::strcmp(s, "gaussian") == 0)
         return simeon::ProjectionMode::DenseGaussian;
     if (std::strcmp(s, "very_sparse") == 0)
@@ -50,6 +54,10 @@ const char* projection_mode_label(simeon::ProjectionMode m) noexcept {
             return "dense_gaussian";
         case simeon::ProjectionMode::VerySparse:
             return "very_sparse";
+        case simeon::ProjectionMode::SparseJL:
+            return "sparse_jl";
+        case simeon::ProjectionMode::Fwht:
+            return "fwht";
     }
     return "achlioptas_sparse";
 }

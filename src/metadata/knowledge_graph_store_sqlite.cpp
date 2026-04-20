@@ -1016,7 +1016,7 @@ public:
             if (relation.has_value()) {
                 sql += " AND relation = ?";
             }
-            sql += " LIMIT ?";
+            sql += " ORDER BY id LIMIT ?";
 
             auto stmtR = db.prepare(sql);
             if (!stmtR)

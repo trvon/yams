@@ -6252,7 +6252,7 @@ TEST_CASE("DaemonMetrics: snapshot reports generated build version", "[daemon][m
     CHECK(snap->version == yams::version::string_v);
 }
 
-TEST_CASE("DaemonMetrics: snapshot exposes freshness metadata", "[daemon][metrics][freshness]") {
+TEST_CASE("DaemonMetrics: cold snapshot refreshes synchronously", "[daemon][metrics][freshness]") {
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
     DaemonConfig cfg;
@@ -6262,13 +6262,15 @@ TEST_CASE("DaemonMetrics: snapshot exposes freshness metadata", "[daemon][metric
 
     auto snap = metrics.getSnapshot();
     REQUIRE(snap != nullptr);
-    CHECK(snap->statusSnapshotStale);
+    CHECK_FALSE(snap->statusSnapshotStale);
+    CHECK(snap->statusSnapshotAgeMs == 0);
+    CHECK(snap->statusDetailAgeMs == 0);
     CHECK(snap->statusDetailStale);
     CHECK_FALSE(snap->statusDetailAvailable);
 }
 
-TEST_CASE("RequestDispatcher: status fast-fails busy when no fresh snapshot is available",
-          "[daemon][status][busy]") {
+TEST_CASE("RequestDispatcher: status refreshes cold snapshot without retry hint",
+          "[daemon][status][freshness]") {
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
     DaemonConfig cfg;
@@ -6278,13 +6280,14 @@ TEST_CASE("RequestDispatcher: status fast-fails busy when no fresh snapshot is a
     RequestDispatcher dispatcher(nullptr, &svc, &state, &metrics);
 
     auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
-    REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-    const auto& err = std::get<ErrorResponse>(resp);
-    CHECK(err.code == ErrorCode::ResourceBusy);
-    CHECK(err.message == "daemon busy");
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+    CHECK(status.running);
+    CHECK(status.retryAfterMs == 0);
 }
 
-TEST_CASE("RequestDispatcher: busy status explains active repair work", "[daemon][status][busy]") {
+TEST_CASE("RequestDispatcher: cold status still reports active repair work",
+          "[daemon][status][freshness]") {
     StateComponent state;
     state.stats.repairRunning.store(true, std::memory_order_relaxed);
     state.stats.repairQueueDepth.store(7, std::memory_order_relaxed);
@@ -6296,10 +6299,13 @@ TEST_CASE("RequestDispatcher: busy status explains active repair work", "[daemon
     RequestDispatcher dispatcher(nullptr, &svc, &state, &metrics);
 
     auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
-    REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-    const auto& err = std::get<ErrorResponse>(resp);
-    CHECK(err.code == ErrorCode::ResourceBusy);
-    CHECK(err.message == "daemon busy: running repair (queue=7)");
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+    CHECK(status.retryAfterMs == 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairRunning)) == 1);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairQueueDepth)) == 1);
+    CHECK(status.requestCounts.at(std::string(metrics::kRepairRunning)) == 1);
+    CHECK(status.requestCounts.at(std::string(metrics::kRepairQueueDepth)) == 7);
 }
 
 TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",

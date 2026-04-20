@@ -250,15 +250,6 @@ void recordSuggestContextServed(
 }
 #endif
 
-static bool envTruthy(const char* val) {
-    if (!val || !*val)
-        return false;
-    std::string v(val);
-    std::transform(v.begin(), v.end(), v.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return v == "1" || v == "true" || v == "yes" || v == "on";
-}
-
 static std::filesystem::path findGitRoot(const std::filesystem::path& start) {
     std::error_code ec;
     std::filesystem::path cur = std::filesystem::absolute(start, ec);
@@ -765,6 +756,31 @@ Result<void> MCPServer::ensureDaemonClient() {
     }
 
     return Result<void>();
+#endif
+}
+
+boost::asio::awaitable<Result<std::optional<yams::daemon::StatusResponse>>>
+MCPServer::fetchDaemonStatus(DaemonStatusFetchMode mode) {
+#if defined(YAMS_WASI)
+    (void)mode;
+    co_return Error{ErrorCode::NotSupported, "Daemon status not available on WASI"};
+#else
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        if (mode == DaemonStatusFetchMode::BestEffort) {
+            co_return std::optional<yams::daemon::StatusResponse>{};
+        }
+        co_return ensure.error();
+    }
+
+    auto sres = co_await daemon_client_->status();
+    if (!sres) {
+        if (mode == DaemonStatusFetchMode::BestEffort) {
+            co_return std::optional<yams::daemon::StatusResponse>{};
+        }
+        co_return sres.error();
+    }
+
+    co_return std::optional<yams::daemon::StatusResponse>{std::move(sres.value())};
 #endif
 }
 
@@ -2026,9 +2042,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     // Align downloader CAS root with daemon content store root so returned hashes are
     // retrievable by daemon get/cat operations.
     try {
-        auto sres = co_await daemon_client_->status();
-        if (sres) {
-            const auto& s = sres.value();
+        auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
+        if (sres && sres.value()) {
+            const auto& s = *sres.value();
             if (!s.contentStoreRoot.empty()) {
                 namespace fs = std::filesystem;
                 storage.objectsDir = fs::path(s.contentStoreRoot);
@@ -2173,9 +2189,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         if (__abs.is_relative()) {
             std::filesystem::path __base;
             try {
-                auto sres = co_await daemon_client_->status();
-                if (sres) {
-                    const auto& s = sres.value();
+                auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
+                if (sres && sres.value()) {
+                    const auto& s = *sres.value();
                     if (!s.contentStoreRoot.empty()) {
                         __base = std::filesystem::path(s.contentStoreRoot).parent_path();
                     }
@@ -2292,24 +2308,6 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         for (const auto& [k, v] : req.metadata)
             addReq.metadata[k] = v;
 
-        // Preflight: require daemon content_store readiness
-        try {
-            auto sres = co_await daemon_client_->status();
-            if (!sres)
-                co_return sres.error();
-            const auto& s = sres.value();
-            bool csr = false;
-            if (auto it = s.readinessStates.find("content_store"); it != s.readinessStates.end())
-                csr = it->second;
-            if (!csr) {
-                std::string hint = "Content store not ready. Check daemon status and config.";
-                if (!s.contentStoreError.empty())
-                    hint += std::string(" Error: ") + s.contentStoreError;
-                co_return Error{ErrorCode::InvalidState, hint};
-            }
-        } catch (...) {
-            co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
-        }
         // Call daemon to add/index the downloaded document via ingestion service
         app::services::AddOptions postOpts;
         postOpts.path = addReq.path;
@@ -2325,8 +2323,14 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         postOpts.backoffMs = 250;
         auto addres = co_await ingestion_svc_->addViaDaemonAsync(postOpts);
         if (!addres) {
-            spdlog::error("[MCP] post-index: daemon add failed for path='{}' error='{}'",
-                          addReq.path, addres.error().message);
+            if (addres.error().code == ErrorCode::NotInitialized ||
+                addres.error().code == ErrorCode::InvalidState) {
+                spdlog::warn("[MCP] post-index: daemon not ready for path='{}' error='{}'",
+                             addReq.path, addres.error().message);
+            } else {
+                spdlog::error("[MCP] post-index: daemon add failed for path='{}' error='{}'",
+                              addReq.path, addres.error().message);
+            }
             mcp_response.indexed = false;
             // Do not expose downloader-local hash as retrievable when indexing failed.
             // Agents commonly follow download -> get(hash); returning a non-indexed hash causes
@@ -3054,13 +3058,10 @@ MCPServer::handleGetStatus(const MCPStatusRequest& req) {
     co_return out;
 #else
     (void)req;
-    if (auto ensure = ensureDaemonClient(); !ensure) {
-        co_return ensure.error();
-    }
-    auto sres = co_await daemon_client_->status();
+    auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::Required);
     if (!sres)
         co_return sres.error();
-    const auto& s = sres.value();
+    const auto& s = *sres.value();
     MCPStatusResponse out;
     out.running = s.running;
     out.ready = s.ready;
@@ -3134,31 +3135,6 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
         co_return ensure.error();
     }
 
-    // Wait briefly for daemon readiness (content_store) to avoid transient startup errors
-    {
-        using namespace std::chrono_literals;
-        const auto ready_timeout = 5s; // bounded wait
-        const auto poll_interval = 150ms;
-        auto exec = co_await boost::asio::this_coro::executor;
-        boost::asio::steady_timer timer{exec};
-        auto start = std::chrono::steady_clock::now();
-        for (;;) {
-            auto sres = co_await daemon_client_->status();
-            if (sres) {
-                const auto& s = sres.value();
-                auto it = s.readinessStates.find("content_store");
-                if (it == s.readinessStates.end() || it->second) {
-                    break; // either not exposed or ready
-                }
-            }
-            if (std::chrono::steady_clock::now() - start >= ready_timeout) {
-                break; // proceed; server will return a retryable error if still not ready
-            }
-            timer.expires_after(poll_interval);
-            co_await timer.async_wait(boost::asio::use_awaitable);
-        }
-    }
-
     // Build AddOptions and route through ingestion service
     app::services::AddOptions aopts;
     aopts.path = dir_path.string();
@@ -3230,12 +3206,10 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     // Try daemon status; tolerate failure and still return a response with diagnostics
     yams::daemon::StatusResponse s{};
     bool haveStatus = false;
-    if (auto ensure = ensureDaemonClient(); ensure) {
-        auto sres = co_await daemon_client_->status();
-        if (sres) {
-            s = std::move(sres).value();
-            haveStatus = true;
-        }
+    if (auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
+        sres && sres.value()) {
+        s = std::move(*sres.value());
+        haveStatus = true;
     }
 
     MCPDoctorResponse out;

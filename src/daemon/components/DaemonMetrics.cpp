@@ -762,15 +762,41 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::buildDecoratedSnapshot(boo
         fullAt = lastDetailedUpdate_;
     }
 
+    auto publishSyncSnapshot = [&](bool includeDetailed) -> std::shared_ptr<const MetricsSnapshot> {
+        auto publishedAt = std::chrono::steady_clock::now();
+        auto fastSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(false));
+        std::shared_ptr<MetricsSnapshot> detailedSnapshot;
+        if (includeDetailed) {
+            detailedSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(true));
+        }
+
+        MetricsSnapshot out = includeDetailed ? *detailedSnapshot : *fastSnapshot;
+        out.statusSnapshotAgeMs = 0;
+        out.statusSnapshotStale = false;
+        out.statusDetailAvailable = includeDetailed;
+        out.statusDetailAgeMs = 0;
+        out.statusDetailStale = !includeDetailed;
+
+        {
+            std::unique_lock lock(cacheMutex_);
+            cachedSnapshot_ = fastSnapshot;
+            lastUpdate_ = publishedAt;
+            if (detailedSnapshot) {
+                cachedDetailedSnapshot_ = detailedSnapshot;
+                lastDetailedUpdate_ = publishedAt;
+            }
+        }
+
+        try {
+            MetricsSnapshotRegistry::instance().set(fastSnapshot);
+        } catch (...) {
+        }
+
+        return std::make_shared<const MetricsSnapshot>(std::move(out));
+    };
+
     if (!fast) {
-        scheduleBackgroundRefresh(detailed);
-        auto minimal = buildMinimalSnapshot();
-        minimal.statusSnapshotAgeMs = 0;
-        minimal.statusSnapshotStale = true;
-        minimal.statusDetailAgeMs = 0;
-        minimal.statusDetailStale = true;
-        minimal.statusDetailAvailable = false;
-        return std::make_shared<const MetricsSnapshot>(std::move(minimal));
+        return publishSyncSnapshot(detailed);
     }
 
     MetricsSnapshot out = *fast;
@@ -794,7 +820,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::buildDecoratedSnapshot(boo
     out.statusDetailStale = detailStale;
 
     if (fastStale || (detailed && detailStale)) {
-        scheduleBackgroundRefresh(detailed);
+        return publishSyncSnapshot(detailed);
     }
 
     return std::make_shared<const MetricsSnapshot>(std::move(out));

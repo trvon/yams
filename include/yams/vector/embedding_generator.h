@@ -42,6 +42,11 @@ struct EmbeddingConfig {
     int num_threads = -1;      // -1 for auto-detect
     int inter_op_threads = -1; // -1 for auto-detect
 
+    // When true, force deterministic ONNX runtime: sequential execution,
+    // IntraOpNumThreads=1. Throughput cost is absorbed by bench harnesses; set
+    // from [embeddings].deterministic TOML / bench config — never from env.
+    bool deterministic = false;
+
     // Daemon backend settings
     std::string daemon_socket; // Empty = auto-resolve based on runtime environment
     std::chrono::milliseconds daemon_timeout{5000};
@@ -157,6 +162,7 @@ private:
 class ModelManager {
 public:
     ModelManager();
+    explicit ModelManager(bool deterministic);
     ~ModelManager();
 
     // Non-copyable but movable

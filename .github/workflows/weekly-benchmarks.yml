@@ -102,11 +102,11 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "$BUILD_DIR"
-          
+
           # Keep AF_UNIX socket path short
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           mkdir -p "$XDG_RUNTIME_DIR" || true
-          
+
           # Use setup.sh with CI environment variables for consistent configuration
           export YAMS_CONAN_HOST_PROFILE="./conan/profiles/host-linux-clang"
           export YAMS_CONAN_ARCH="x86_64"
@@ -114,9 +114,24 @@ jobs:
           export YAMS_CONAN_EXTRA_OPTIONS="-o build_tests=True -o build_benchmarks=True"
           export YAMS_EXTRA_MESON_FLAGS="-Dbuild-tests=true -Dbuild-benchmarks=true -Denable-onnx=disabled"
           export YAMS_ENABLE_MOBILE_BINDINGS=false
-          
+
           ./setup.sh Debug
-          meson compile -C builddir
+          CONAN_BUILD_ENV=""
+          for candidate in \
+            "$BUILD_DIR/build-debug/conan/conanbuild.sh" \
+            "$BUILD_DIR/conan/conanbuild.sh"
+          do
+            if [ -f "$candidate" ]; then
+              CONAN_BUILD_ENV="$candidate"
+              break
+            fi
+          done
+          if [ -n "$CONAN_BUILD_ENV" ]; then
+            set +u
+            source "$CONAN_BUILD_ENV"
+            set -u
+          fi
+          meson compile -C "$BUILD_DIR"
 
       - name: Run Bench Test Suite
         shell: bash

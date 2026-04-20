@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstdlib>
 #include "../../common/test_helpers_catch2.h"
 #include <filesystem>
@@ -125,13 +126,13 @@ public:
         TuneAdvisor::setHardwareConcurrencyForTests(32);
         TuneAdvisor::setPostIngestTotalConcurrent(totalConcurrent);
         TuneAdvisor::setPostExtractionConcurrent(extractionConcurrent);
-        TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+        TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
     }
     ~PostIngestConcurrencyGuard() {
         TuneAdvisor::setHardwareConcurrencyForTests(prevHw_);
         TuneAdvisor::setPostIngestTotalConcurrent(prevTotal_);
         TuneAdvisor::setPostExtractionConcurrent(prevExtraction_);
-        TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+        TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
     }
 
 private:

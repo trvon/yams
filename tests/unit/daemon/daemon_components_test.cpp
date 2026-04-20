@@ -209,6 +209,61 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
     fs::remove_all(runtimeDir, ec);
 }
 
+TEST_CASE("SocketServer: main-socket admission ignores proxy connection load",
+          "[daemon][components][socket][admission]") {
+    SocketServer::Config config;
+    config.socketPath = "/tmp/yams-socket-admission-test.sock";
+    config.maxConnections = 4;
+    config.proxyMaxConnections = 64;
+
+    StateComponent state;
+    SocketServer server(config, nullptr, nullptr, nullptr, &state);
+    REQUIRE(server.resizeConnectionSlots(config.maxConnections));
+
+    AddDocumentRequest addRequest;
+    addRequest.path = "src";
+    addRequest.recursive = true;
+
+    SECTION("Main-socket write admission keys off main connections, not total connections") {
+        server.testing_setConnectionCounts(/*mainActive=*/0, /*proxyActive=*/10);
+
+        CHECK(server.activeConnections() == 10);
+        CHECK(server.proxyActiveConnections() == 10);
+        CHECK(server.testing_mainSocketAdmissionVerdict(addRequest) ==
+              SocketAdmissionVerdict::admit);
+        CHECK_FALSE(server.testing_mainSocketEmergencyGuardRejects());
+        CHECK(server.getSlotUtilization() == 0.0);
+        server.testing_setConnectionCounts(0, 0);
+    }
+
+    SECTION("Main-socket pressure still rejects once main connections cross the limit bands") {
+        server.testing_setConnectionCounts(/*mainActive=*/10, /*proxyActive=*/0);
+
+        CHECK(server.testing_mainSocketAdmissionVerdict(addRequest) ==
+              SocketAdmissionVerdict::reject);
+        server.testing_setConnectionCounts(0, 0);
+    }
+
+    SECTION("Control requests remain bypassed on the main socket") {
+        server.testing_setConnectionCounts(/*mainActive=*/10, /*proxyActive=*/20);
+
+        CHECK(server.testing_mainSocketAdmissionVerdict(StatusRequest{}) ==
+              SocketAdmissionVerdict::bypass);
+        server.testing_setConnectionCounts(0, 0);
+    }
+
+    SECTION("Emergency guard is driven only by main active connections") {
+        const auto hardLimit = AdmissionPolicy::emergencySessionLimit(config.maxConnections);
+
+        server.testing_setConnectionCounts(/*mainActive=*/hardLimit - 1, /*proxyActive=*/hardLimit);
+        CHECK_FALSE(server.testing_mainSocketEmergencyGuardRejects());
+
+        server.testing_setConnectionCounts(/*mainActive=*/hardLimit, /*proxyActive=*/0);
+        CHECK(server.testing_mainSocketEmergencyGuardRejects());
+        server.testing_setConnectionCounts(0, 0);
+    }
+}
+
 // =============================================================================
 // Socket Path Resolution Tests
 // =============================================================================

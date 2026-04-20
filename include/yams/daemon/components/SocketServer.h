@@ -6,6 +6,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <yams/core/types.h>
+#include <yams/daemon/components/AdmissionPolicy.h>
 
 #include <atomic>
 #include <chrono>
@@ -92,6 +93,11 @@ public:
     // Check slot utilization: activeConnections / slotLimit (0.0 to 1.0+ if overcommitted)
     double getSlotUtilization() const;
 
+    // Test hooks: keep socket admission accounting observable without needing a live daemon.
+    void testing_setConnectionCounts(size_t mainActive, size_t proxyActive);
+    bool testing_mainSocketEmergencyGuardRejects() const;
+    SocketAdmissionVerdict testing_mainSocketAdmissionVerdict(const Request& request) const;
+
 private:
     // Async operations
     boost::asio::awaitable<void> accept_loop(bool isProxy = false);
@@ -176,6 +182,8 @@ private:
     std::atomic<size_t> slotLimit_{0};   // Current slot limit (tracked for resize decisions)
     std::atomic<int32_t> shrinkDebt_{0}; // Deficit when shrinking below active connections
 
+    size_t mainActiveConnectionCount() const;
+    size_t connectionSlotsFreeForLimit(size_t limit) const;
     void execute_on_io_context(std::function<void()> fn);
     void close_acceptor_on_executor();
     std::size_t
