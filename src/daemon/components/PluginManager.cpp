@@ -334,6 +334,22 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
             co_return Result<size_t>(0);
         }
 
+        bool skipAbiModelProviders = false;
+        std::string inProcessBackend;
+        {
+            auto backend = ConfigResolver::resolveEmbeddingBackend("auto");
+            if (backend != "auto" && backend != "daemon") {
+                const auto known = getRegisteredProviders();
+                if (std::find(known.begin(), known.end(), backend) != known.end()) {
+                    skipAbiModelProviders = true;
+                    inProcessBackend = std::move(backend);
+                    spdlog::info("[PluginManager] model_provider plugins will be filtered: "
+                                 "backend='{}' is satisfied in-process",
+                                 inProcessBackend);
+                }
+            }
+        }
+
         // Build list of plugin directories to scan
         std::vector<std::filesystem::path> roots;
         std::vector<std::filesystem::path> trustedRoots;
@@ -494,6 +510,12 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
                 const bool isModelProvider =
                     std::find(desc.interfaces.begin(), desc.interfaces.end(),
                               "model_provider_v1") != desc.interfaces.end();
+                if (isModelProvider && skipAbiModelProviders) {
+                    spdlog::info("[PluginManager] skipping model_provider plugin '{}' "
+                                 "(path='{}'): backend='{}' is satisfied in-process",
+                                 pluginName, path.string(), inProcessBackend);
+                    continue;
+                }
                 const bool isOnnxPlugin = (pluginName.find("onnx") != std::string::npos);
                 if (isModelProvider && isOnnxPlugin) {
                     std::size_t defaultMax =
@@ -745,9 +767,64 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
             return true;
         };
 
+        auto tryAdoptInProcess = [&](const std::string& backend) -> bool {
+            auto provider = createModelProvider(ModelPoolConfig{}, backend);
+            if (!provider || !provider->isAvailable()) {
+                spdlog::warn("[PluginManager] In-process provider '{}' registered but factory "
+                             "returned unavailable instance",
+                             backend);
+                return false;
+            }
+            modelProvider_ = std::move(provider);
+            adoptedProviderPluginName_ = backend;
+            if (deps_.state) {
+                deps_.state->readiness.modelProviderReady = true;
+            }
+            const auto providerName = modelProvider_->getProviderName();
+            const auto trainingFree = modelProvider_->isTrainingFree();
+            embeddingModelName_ = trainingFree ? providerName : (backend + "-default");
+            const size_t dim = modelProvider_->getEmbeddingDim(embeddingModelName_);
+            spdlog::info("[PluginManager] Adopted in-process model provider: {} "
+                         "(training_free={}, dim={})",
+                         providerName, trainingFree, dim);
+            embeddingFsm_.dispatch(ProviderAdoptedEvent{backend});
+            if (dim > 0) {
+                embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, dim});
+            }
+            if (deps_.lifecycleFsm) {
+                deps_.lifecycleFsm->setSubsystemDegraded("embeddings", false);
+            }
+            try {
+                auto count = static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
+                cachedModelCount_.store(count, std::memory_order_relaxed);
+            } catch (...) {
+                cachedModelCount_.store(0, std::memory_order_relaxed);
+            }
+            refreshStatusSnapshot();
+            return true;
+        };
+
+        const auto configuredBackend = ConfigResolver::resolveEmbeddingBackend("auto");
+        const bool inProcessBackendSelected =
+            configuredBackend != "auto" && configuredBackend != "daemon" && [&]() {
+                const auto known = getRegisteredProviders();
+                return std::find(known.begin(), known.end(), configuredBackend) != known.end();
+            }();
+
         // Try preferred name first
         if (!preferredName.empty() && tryAdopt(preferredName)) {
             return Result<bool>(true);
+        }
+
+        // When the user has selected a specific in-process backend and did not name a
+        // specific plugin, honor that selection before iterating ABI plugins.
+        if (preferredName.empty() && inProcessBackendSelected) {
+            spdlog::info("[PluginManager] adoptModelProvider: preferring in-process backend '{}' "
+                         "over ABI plugins",
+                         configuredBackend);
+            if (tryAdoptInProcess(configuredBackend)) {
+                return Result<bool>(true);
+            }
         }
 
         // Try all loaded plugins
@@ -771,45 +848,8 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         }
 
         // No ABI plugin adopted; try in-process registry if a specific backend is selected.
-        const auto backend = ConfigResolver::resolveEmbeddingBackend("auto");
-        if (backend != "auto" && backend != "daemon") {
-            const auto known = getRegisteredProviders();
-            if (std::find(known.begin(), known.end(), backend) != known.end()) {
-                auto provider = createModelProvider(ModelPoolConfig{}, backend);
-                if (provider && provider->isAvailable()) {
-                    modelProvider_ = std::move(provider);
-                    adoptedProviderPluginName_ = backend;
-                    if (deps_.state) {
-                        deps_.state->readiness.modelProviderReady = true;
-                    }
-                    const auto providerName = modelProvider_->getProviderName();
-                    const auto trainingFree = modelProvider_->isTrainingFree();
-                    embeddingModelName_ = trainingFree ? providerName : (backend + "-default");
-                    const size_t dim = modelProvider_->getEmbeddingDim(embeddingModelName_);
-                    spdlog::info("[PluginManager] Adopted in-process model provider: {} "
-                                 "(training_free={}, dim={})",
-                                 providerName, trainingFree, dim);
-                    embeddingFsm_.dispatch(ProviderAdoptedEvent{backend});
-                    if (dim > 0) {
-                        embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, dim});
-                    }
-                    if (deps_.lifecycleFsm) {
-                        deps_.lifecycleFsm->setSubsystemDegraded("embeddings", false);
-                    }
-                    try {
-                        auto count =
-                            static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
-                        cachedModelCount_.store(count, std::memory_order_relaxed);
-                    } catch (...) {
-                        cachedModelCount_.store(0, std::memory_order_relaxed);
-                    }
-                    refreshStatusSnapshot();
-                    return Result<bool>(true);
-                }
-                spdlog::warn("[PluginManager] In-process provider '{}' registered but factory "
-                             "returned unavailable instance",
-                             backend);
-            }
+        if (inProcessBackendSelected && tryAdoptInProcess(configuredBackend)) {
+            return Result<bool>(true);
         }
 
         // No provider found

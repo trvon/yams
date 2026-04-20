@@ -111,6 +111,11 @@ public:
                             auto it = s.requestCounts.find(key);
                             return it != s.requestCounts.end() ? it->second : 0ULL;
                         };
+                        const auto snapshotAgeMs = getCount("status_snapshot_age_ms");
+                        const auto snapshotStale = getCount("status_snapshot_stale") != 0;
+                        const auto detailAgeMs = getCount("status_detail_age_ms");
+                        const auto detailStale = getCount("status_detail_stale") != 0;
+                        const auto detailAvailable = getCount("status_detail_available") != 0;
                         const auto searchMetrics = effectiveSearchMetrics(s);
                         std::string svcSummary;
                         std::string waitingSummary;
@@ -140,6 +145,11 @@ public:
                             j["cpuUsagePercent"] = s.cpuUsagePercent;
                             if (s.retryAfterMs > 0)
                                 j["retryAfterMs"] = s.retryAfterMs;
+                            j["statusSnapshotAgeMs"] = snapshotAgeMs;
+                            j["statusSnapshotStale"] = snapshotStale;
+                            j["statusDetailAgeMs"] = detailAgeMs;
+                            j["statusDetailStale"] = detailStale;
+                            j["statusDetailAvailable"] = detailAvailable;
                             j["fsmTransitions"] = s.fsmTransitions;
                             j["fsmHeaderReads"] = s.fsmHeaderReads;
                             j["fsmPayloadReads"] = s.fsmPayloadReads;
@@ -938,6 +948,17 @@ public:
                                               << "\n";
                                 }
                             }
+                        }
+                        co_return Result<void>();
+                    }
+                    if (st.error().code == ErrorCode::ResourceBusy) {
+                        if (jsonOutput_) {
+                            nlohmann::json j;
+                            j["error"] = st.error().message;
+                            j["code"] = "resource_busy";
+                            std::cout << j.dump(2) << std::endl;
+                        } else {
+                            std::cout << st.error().message << "\n";
                         }
                         co_return Result<void>();
                     }

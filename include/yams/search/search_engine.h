@@ -218,6 +218,22 @@ struct SearchEngineConfig {
     };
     TopologyRoutingVariant topologyRoutingVariant = TopologyRoutingVariant::Baseline;
 
+    enum class TopologyIntegration {
+        Boost,        // Apply medoid/bridge boost (baseline behavior)
+        RecallExpand, // Disable boost; use routed-cluster expansion only
+        Rrf,          // Keep boost, force RECIPROCAL_RANK fusion with overridden rrfK
+        Both,         // RecallExpand + Rrf combined
+    };
+    TopologyIntegration topologyIntegration = TopologyIntegration::Boost;
+    size_t topologyRecallExpandPerCluster = 0;
+
+    enum class TopologyRouteScoring {
+        Current,      // persistence + 0.5*cohesion + matchedSeed + memberCount/40
+        SizeWeighted, // current * 1/(1+log(size))
+        SeedCoverage, // seeds-in-cluster / seeds-total (+ small persistence/size bias)
+    };
+    TopologyRouteScoring topologyRouteScoring = TopologyRouteScoring::Current;
+
     bool bypassCorpusWarmingGate = false;
 
     // RRF (Reciprocal Rank Fusion) parameter

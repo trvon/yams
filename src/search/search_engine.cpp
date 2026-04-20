@@ -122,6 +122,18 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
     routeRequest.limit = config.topologyWeakQueryMaxClusters;
     routeRequest.preferStableClusters = true;
     routeRequest.weakQueryOnly = true;
+    switch (config.topologyRouteScoring) {
+        case SearchEngineConfig::TopologyRouteScoring::SizeWeighted:
+            routeRequest.scoringMode = yams::topology::RouteScoringMode::SizeWeighted;
+            break;
+        case SearchEngineConfig::TopologyRouteScoring::SeedCoverage:
+            routeRequest.scoringMode = yams::topology::RouteScoringMode::SeedCoverage;
+            break;
+        case SearchEngineConfig::TopologyRouteScoring::Current:
+        default:
+            routeRequest.scoringMode = yams::topology::RouteScoringMode::Current;
+            break;
+    }
 
     auto routesResult = router.route(routeRequest, *latestResult.value());
     if (!routesResult) {
@@ -134,15 +146,26 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
         clustersById.emplace(cluster.clusterId, &cluster);
     }
 
+    const std::size_t perClusterCap =
+        std::min<std::size_t>(config.topologyRecallExpandPerCluster, 512);
+
     auto appendClusterDocuments = [&](const yams::topology::ClusterArtifact& cluster) {
+        std::size_t perClusterAdded = 0;
         if (cluster.medoid.has_value() && !cluster.medoid->documentHash.empty()) {
-            routed.insert(cluster.medoid->documentHash);
+            if (routed.insert(cluster.medoid->documentHash).second) {
+                ++perClusterAdded;
+            }
         }
         for (const auto& documentHash : cluster.memberDocumentHashes) {
             if (routed.size() >= config.topologyWeakQueryMaxDocs) {
                 break;
             }
-            routed.insert(documentHash);
+            if (perClusterCap > 0 && perClusterAdded >= perClusterCap) {
+                break;
+            }
+            if (routed.insert(documentHash).second) {
+                ++perClusterAdded;
+            }
         }
     };
 
@@ -2038,6 +2061,38 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const auto effectiveZoomLevel = policy.effectiveZoomLevel;
     const bool zoomLevelInferredFromIntent = policy.zoomLevelInferredFromIntent;
     workingConfig = std::move(policy.config);
+
+    {
+        using Integration = SearchEngineConfig::TopologyIntegration;
+        const Integration integration = workingConfig.topologyIntegration;
+        const bool disableBoost =
+            (integration == Integration::RecallExpand || integration == Integration::Both);
+        const bool useRrf = (integration == Integration::Rrf || integration == Integration::Both);
+        if (disableBoost) {
+            workingConfig.topologyMedoidBoost = 0.0F;
+            workingConfig.topologyBridgeBoost = 0.0F;
+        }
+        if (useRrf) {
+            workingConfig.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
+        }
+        const char* label = "boost";
+        switch (integration) {
+            case Integration::RecallExpand:
+                label = "recall_expand";
+                break;
+            case Integration::Rrf:
+                label = "rrf";
+                break;
+            case Integration::Both:
+                label = "both";
+                break;
+            case Integration::Boost:
+            default:
+                label = "boost";
+                break;
+        }
+        response.debugStats["topology_integration"] = std::string{label};
+    }
 
     // R2/audit: route-derived query-fast features populated after
     // classification so R4+ contextual policies see real signals instead

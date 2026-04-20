@@ -44,6 +44,16 @@ public:
         std::uint64_t dirtyRegionDocs{0};
         std::uint64_t coalescedDirtySets{0};
         std::uint64_t fallbackFullRebuilds{0};
+        std::uint64_t clusterSizeMax{0};
+        std::uint64_t clusterSizeP50{0};
+        std::uint64_t clusterSizeP90{0};
+        std::uint64_t singletonCount{0};
+        std::uint64_t orphanDocCount{0};
+        double singletonRatio{0.0};
+        double giantClusterRatio{0.0};
+        double clusterSizeGini{0.0};
+        double avgIntraEdgeWeight{0.0};
+        std::string cellIdentity;
         std::vector<std::string> issues;
     };
 
@@ -74,9 +84,19 @@ public:
         std::uint64_t lastDirtyRegionDocs{0};
         std::uint64_t lastCoalescedDirtySets{0};
         std::uint64_t lastFallbackFullRebuilds{0};
+        std::uint64_t lastClusterSizeMax{0};
+        std::uint64_t lastClusterSizeP50{0};
+        std::uint64_t lastClusterSizeP90{0};
+        std::uint64_t lastSingletonCount{0};
+        std::uint64_t lastOrphanDocCount{0};
+        double lastSingletonRatio{0.0};
+        double lastGiantClusterRatio{0.0};
+        double lastClusterSizeGini{0.0};
+        double lastAvgIntraEdgeWeight{0.0};
         std::string lastReason;
         std::string lastSnapshotId;
         std::string lastAlgorithm;
+        std::string lastCellIdentity;
     };
 
     struct Dependencies {
@@ -112,6 +132,18 @@ public:
     [[nodiscard]] bool tryScheduleRebuild();
     void clearScheduled();
 
+    void setAutoRebuildEnabled(bool enabled) {
+        autoRebuildEnabled_.store(enabled, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool autoRebuildEnabled() const {
+        return autoRebuildEnabled_.load(std::memory_order_acquire);
+    }
+
+    void setKmeansK(std::size_t k) { kmeansK_.store(k, std::memory_order_release); }
+
+    [[nodiscard]] std::size_t kmeansK() const { return kmeansK_.load(std::memory_order_acquire); }
+
     [[nodiscard]] TelemetrySnapshot getTelemetrySnapshot() const;
 
     Result<RebuildStats> rebuildArtifacts(const std::string& reason, bool dryRun,
@@ -136,7 +168,9 @@ private:
 
     std::atomic<bool> rebuildRunning_{false};
     std::atomic<bool> rebuildScheduled_{false};
+    std::atomic<bool> autoRebuildEnabled_{true};
     std::atomic<std::uint64_t> publishedEpoch_{0};
+    std::atomic<std::size_t> kmeansK_{0};
 };
 
 } // namespace yams::daemon

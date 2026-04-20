@@ -7,7 +7,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -63,6 +65,56 @@ public:
     generateBatchEmbeddingsFor(const std::string& /*modelName*/,
                                const std::vector<std::string>& texts) override {
         return generateBatchEmbeddings(texts);
+    }
+
+    Result<std::vector<float>> scoreDocuments(const std::string& query,
+                                              const std::vector<std::string>& documents) override {
+        if (!backend_)
+            return Error{ErrorCode::NotInitialized, "SimeonModelProvider not initialized"};
+        if (documents.empty())
+            return std::vector<float>{};
+
+        auto qEmbed = backend_->generateEmbedding(query);
+        if (!qEmbed)
+            return qEmbed.error();
+        const auto& q = qEmbed.value();
+
+        auto dEmbeds = backend_->generateEmbeddings(std::span<const std::string>(documents));
+        if (!dEmbeds)
+            return dEmbeds.error();
+        const auto& ds = dEmbeds.value();
+        if (ds.size() != documents.size())
+            return Error{ErrorCode::InternalError, "SimeonModelProvider: embedding count mismatch"};
+
+        std::vector<float> scores;
+        scores.reserve(ds.size());
+        double qMag = 0.0;
+        for (float f : q)
+            qMag += static_cast<double>(f) * static_cast<double>(f);
+        qMag = std::sqrt(qMag);
+        if (qMag == 0.0)
+            qMag = 1.0;
+
+        for (const auto& d : ds) {
+            if (d.size() != q.size()) {
+                scores.push_back(0.0f);
+                continue;
+            }
+            double dot = 0.0;
+            double dMag = 0.0;
+            for (std::size_t i = 0; i < q.size(); ++i) {
+                const double a = static_cast<double>(q[i]);
+                const double b = static_cast<double>(d[i]);
+                dot += a * b;
+                dMag += b * b;
+            }
+            dMag = std::sqrt(dMag);
+            const double denom = qMag * (dMag == 0.0 ? 1.0 : dMag);
+            scores.push_back(static_cast<float>(dot / denom));
+        }
+
+        requestCount_ += documents.size();
+        return scores;
     }
 
     Result<void> loadModel(const std::string& modelName) override {

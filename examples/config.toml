@@ -477,6 +477,31 @@ bridge_boost = 0.03
 routed_base_multiplier = 0.85
 # Routing variant: "baseline" | "vector_seed" | "kg_walk" | "score_replace" | "medoid_promote"
 routing_variant = "baseline"
+# Topology integration pattern for consuming routed clusters during hybrid search:
+#   "boost"         — apply medoid/bridge boost (default, matches baseline)
+#   "recall_expand" — disable boost; expand vector recall via routed-cluster members
+#   "rrf"           — keep boost but force RECIPROCAL_RANK fusion with rrf_k below
+#   "both"          — recall_expand + rrf combined
+integration = "boost"
+# Per-cluster member cap applied when integration = recall_expand / both (0 = unlimited)
+recall_expand_per_cluster = 0
+# RRF k applied when integration = rrf / both (falls back to [search].rrf_k otherwise)
+rrf_k = 60.0
+# Cluster-route scoring rule for StableClusterTopologyRouter.
+#   "current"        — persistence + 0.5*cohesion + matchedSeed + memberCount/40 (default)
+#   "size_weighted"  — current * 1/(1+log(size)); de-emphasizes giant clusters
+#   "seed_coverage"  — rank by fraction of query seeds covered by each cluster
+route_scoring = "current"
+
+[topology]
+# Cluster-formation engine used by the background topology rebuild.
+#   "connected"         — reciprocal-edge connected components (default, baseline)
+#   "louvain"           — Blondel 2008 modularity optimization over the weighted graph
+#   "label_propagation" — near-linear propagation; tests whether modularity matters
+#   "kmeans_embedding"  — k-means on document embeddings (bypasses the similarity graph)
+engine = "connected"
+# Cluster count hint for "kmeans_embedding" (0 = auto: round(sqrt(#docs))).
+kmeans_k = 0
 
 [knowledge_graph]
 # Database path for KG (relative to data_dir if not absolute)

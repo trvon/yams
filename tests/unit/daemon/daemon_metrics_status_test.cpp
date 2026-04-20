@@ -6252,6 +6252,56 @@ TEST_CASE("DaemonMetrics: snapshot reports generated build version", "[daemon][m
     CHECK(snap->version == yams::version::string_v);
 }
 
+TEST_CASE("DaemonMetrics: snapshot exposes freshness metadata", "[daemon][metrics][freshness]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_freshness_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    CHECK(snap->statusSnapshotStale);
+    CHECK(snap->statusDetailStale);
+    CHECK_FALSE(snap->statusDetailAvailable);
+}
+
+TEST_CASE("RequestDispatcher: status fast-fails busy when no fresh snapshot is available",
+          "[daemon][status][busy]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_busy_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+    RequestDispatcher dispatcher(nullptr, &svc, &state, &metrics);
+
+    auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+    const auto& err = std::get<ErrorResponse>(resp);
+    CHECK(err.code == ErrorCode::ResourceBusy);
+    CHECK(err.message == "daemon busy");
+}
+
+TEST_CASE("RequestDispatcher: busy status explains active repair work", "[daemon][status][busy]") {
+    StateComponent state;
+    state.stats.repairRunning.store(true, std::memory_order_relaxed);
+    state.stats.repairQueueDepth.store(7, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_busy_repair_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+    RequestDispatcher dispatcher(nullptr, &svc, &state, &metrics);
+
+    auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+    const auto& err = std::get<ErrorResponse>(resp);
+    CHECK(err.code == ErrorCode::ResourceBusy);
+    CHECK(err.message == "daemon busy: running repair (queue=7)");
+}
+
 TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",
           "[daemon][status][protocol][post_ingest]") {
     StatusResponse s{};
@@ -6275,6 +6325,35 @@ TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",
     REQUIRE(decoded.requestCounts.at("post_ingest_rpc_queued") == 3);
     REQUIRE(decoded.requestCounts.at("post_ingest_rpc_capacity") == 64);
     REQUIRE(decoded.requestCounts.at("post_ingest_rpc_max_per_batch") == 8);
+}
+
+TEST_CASE("StatusResponse: freshness requestCounts keys round-trip",
+          "[daemon][status][protocol][freshness]") {
+    StatusResponse s{};
+    s.requestCounts["status_snapshot_age_ms"] = 42;
+    s.requestCounts["status_snapshot_stale"] = 0;
+    s.requestCounts["status_detail_age_ms"] = 17;
+    s.requestCounts["status_detail_stale"] = 1;
+    s.requestCounts["status_detail_available"] = 1;
+
+    Message m{};
+    m.payload = Response{std::in_place_type<StatusResponse>, s};
+
+    auto enc = ProtoSerializer::encode_payload(m);
+    REQUIRE(enc.has_value());
+
+    auto dec = ProtoSerializer::decode_payload(enc.value());
+    REQUIRE(dec.has_value());
+
+    const auto& resp = std::get<Response>(dec.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+
+    const auto& decoded = std::get<StatusResponse>(resp);
+    REQUIRE(decoded.requestCounts.at("status_snapshot_age_ms") == 42);
+    REQUIRE(decoded.requestCounts.at("status_snapshot_stale") == 0);
+    REQUIRE(decoded.requestCounts.at("status_detail_age_ms") == 17);
+    REQUIRE(decoded.requestCounts.at("status_detail_stale") == 1);
+    REQUIRE(decoded.requestCounts.at("status_detail_available") == 1);
 }
 
 TEST_CASE("StatusResponse: backpressure requestCounts keys round-trip",

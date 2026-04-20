@@ -3,6 +3,9 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <string>
+#include <string_view>
 
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -18,6 +21,36 @@ namespace yams::daemon {
 using yams::Error;
 using yams::ErrorCode;
 using yams::Result;
+
+namespace {
+
+std::string envOr(const char* name, std::string_view fallback) {
+    const char* raw = std::getenv(name);
+    if (raw != nullptr && *raw != '\0') {
+        return raw;
+    }
+    return std::string{fallback};
+}
+
+std::string computeCellIdentity() {
+    std::string identity;
+    identity.reserve(128);
+    identity.append("topk=");
+    identity.append(envOr("YAMS_GRAPH_SEMANTIC_TOPK", "default"));
+    identity.append(";thr=");
+    identity.append(envOr("YAMS_GRAPH_SEMANTIC_THRESHOLD", "default"));
+    identity.append(";engine=");
+    identity.append(envOr("YAMS_TOPOLOGY_ENGINE", "default"));
+    identity.append(";reciprocal=");
+    identity.append(envOr("YAMS_TOPOLOGY_RECIPROCAL_ONLY", "default"));
+    identity.append(";min_edge=");
+    identity.append(envOr("YAMS_TOPOLOGY_MIN_EDGE_SCORE", "default"));
+    identity.append(";max_neighbors=");
+    identity.append(envOr("YAMS_TOPOLOGY_MAX_NEIGHBORS", "default"));
+    return identity;
+}
+
+} // namespace
 
 TopologyManager::TopologyManager(Dependencies deps) : deps_(std::move(deps)) {}
 
@@ -87,6 +120,9 @@ bool TopologyManager::hasDirtyHashes() const {
 }
 
 bool TopologyManager::tryScheduleRebuild() {
+    if (!autoRebuildEnabled_.load(std::memory_order_acquire)) {
+        return false;
+    }
     bool expected = false;
     return rebuildScheduled_.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
 }
@@ -149,6 +185,7 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
     } guard{rebuildRunning_};
 
     const auto startedAt = std::chrono::steady_clock::now();
+    const std::string cellIdentity = computeCellIdentity();
     {
         std::lock_guard<std::mutex> lock(telemetryMutex_);
         ++telemetry_.rebuildsTotal;
@@ -159,9 +196,13 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
         telemetry_.lastRunFullRebuild = documentHashes.empty();
         telemetry_.lastStartedUnixSeconds = nowUnixSeconds();
         telemetry_.lastDocumentsRequested = documentHashes.size();
+        telemetry_.lastCellIdentity = cellIdentity;
     }
 
     auto result = runRebuild(reason, dryRun, documentHashes, topologyAlgorithm);
+    if (result) {
+        result.value().cellIdentity = cellIdentity;
+    }
     if (!result) {
         spdlog::warn("[TopologyManager] rebuild failed (reason={}): {}", reason,
                      result.error().message);
@@ -198,6 +239,15 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
         telemetry_.lastDirtyRegionDocs = stats.dirtyRegionDocs;
         telemetry_.lastCoalescedDirtySets = stats.coalescedDirtySets;
         telemetry_.lastFallbackFullRebuilds = stats.fallbackFullRebuilds;
+        telemetry_.lastClusterSizeMax = stats.clusterSizeMax;
+        telemetry_.lastClusterSizeP50 = stats.clusterSizeP50;
+        telemetry_.lastClusterSizeP90 = stats.clusterSizeP90;
+        telemetry_.lastSingletonCount = stats.singletonCount;
+        telemetry_.lastOrphanDocCount = stats.orphanDocCount;
+        telemetry_.lastSingletonRatio = stats.singletonRatio;
+        telemetry_.lastGiantClusterRatio = stats.giantClusterRatio;
+        telemetry_.lastClusterSizeGini = stats.clusterSizeGini;
+        telemetry_.lastAvgIntraEdgeWeight = stats.avgIntraEdgeWeight;
     }
     if (stats.skipped) {
         spdlog::info(
@@ -300,6 +350,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.inputKind = topology::TopologyInputKind::Hybrid;
     buildConfig.reciprocalOnly = true;
     buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
+    buildConfig.kmeansK = kmeansK_.load(std::memory_order_acquire);
 
     topology::TopologyExtractionStats extractionStats;
     auto extracted = extractor->extract(extractionConfig, &extractionStats);
@@ -362,6 +413,69 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
                                                             : extractionStats.regionDocuments;
     stats.coalescedDirtySets = updateStats.coalescedDirtySets;
     stats.fallbackFullRebuilds = updateStats.fallbackFullRebuilds;
+
+    if (!artifacts.clusters.empty()) {
+        std::vector<std::size_t> sizes;
+        sizes.reserve(artifacts.clusters.size());
+        double cohesionSum = 0.0;
+        std::size_t cohesionCount = 0;
+        std::size_t totalMembers = 0;
+        std::size_t singletons = 0;
+        std::size_t maxSize = 0;
+        for (const auto& cluster : artifacts.clusters) {
+            const std::size_t sz =
+                cluster.memberCount > 0 ? cluster.memberCount : cluster.memberDocumentHashes.size();
+            sizes.push_back(sz);
+            totalMembers += sz;
+            if (sz == 1)
+                ++singletons;
+            if (sz > maxSize)
+                maxSize = sz;
+            if (cluster.cohesionScore > 0.0) {
+                cohesionSum += cluster.cohesionScore;
+                ++cohesionCount;
+            }
+        }
+        std::sort(sizes.begin(), sizes.end());
+        const auto pct = [&](double p) -> std::size_t {
+            if (sizes.empty())
+                return 0;
+            const auto idx = std::min<std::size_t>(
+                sizes.size() - 1, static_cast<std::size_t>(p * (sizes.size() - 1)));
+            return sizes[idx];
+        };
+        stats.clusterSizeMax = static_cast<std::uint64_t>(maxSize);
+        stats.clusterSizeP50 = static_cast<std::uint64_t>(pct(0.5));
+        stats.clusterSizeP90 = static_cast<std::uint64_t>(pct(0.9));
+        stats.singletonCount = static_cast<std::uint64_t>(singletons);
+        stats.singletonRatio =
+            sizes.empty() ? 0.0
+                          : static_cast<double>(singletons) / static_cast<double>(sizes.size());
+        stats.giantClusterRatio =
+            totalMembers > 0 ? static_cast<double>(maxSize) / static_cast<double>(totalMembers)
+                             : 0.0;
+
+        if (!sizes.empty()) {
+            double cumulative = 0.0;
+            double weightedSum = 0.0;
+            for (std::size_t i = 0; i < sizes.size(); ++i) {
+                cumulative += static_cast<double>(sizes[i]);
+                weightedSum += static_cast<double>(i + 1) * static_cast<double>(sizes[i]);
+            }
+            if (cumulative > 0.0) {
+                const double n = static_cast<double>(sizes.size());
+                stats.clusterSizeGini =
+                    std::clamp((2.0 * weightedSum) / (n * cumulative) - (n + 1.0) / n, 0.0, 1.0);
+            }
+        }
+        stats.avgIntraEdgeWeight =
+            cohesionCount > 0 ? cohesionSum / static_cast<double>(cohesionCount) : 0.0;
+    }
+
+    const auto processed = static_cast<std::uint64_t>(extractionStats.documentsReturned);
+    const auto membershipCount = static_cast<std::uint64_t>(artifacts.memberships.size());
+    stats.orphanDocCount = processed > membershipCount ? processed - membershipCount : 0;
+
     stats.issues.push_back(std::string{"topology_algorithm="} + std::string{algorithmKey});
 
     if (!documentHashes.empty()) {

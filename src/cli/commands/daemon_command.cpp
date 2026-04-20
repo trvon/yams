@@ -1900,6 +1900,10 @@ private:
                 spinner->stop();
             }
             if (!sres) {
+                if (sres.error().code == ErrorCode::ResourceBusy) {
+                    std::cout << sres.error().message << "\n";
+                    return;
+                }
                 // IPC failed — the daemon is likely still initializing (VectorDB, model
                 // loading, etc.) and can't serve requests yet. Fall back to the bootstrap
                 // status file that the daemon writes throughout initialization so the
@@ -2049,7 +2053,13 @@ private:
                 normalizePath(*daemonDataDir) != normalizePath(configuredDataDir);
             const bool daemonUsesEphemeralData =
                 hasDaemonDataDir && isEphemeralDataDir(*daemonDataDir);
+            auto findCompactCount = [&](const char* key) -> uint64_t {
+                auto it = s.requestCounts.find(key);
+                return it != s.requestCounts.end() ? it->second : 0ULL;
+            };
             const auto searchMetrics = effectiveSearchMetrics(s);
+            const auto snapshotAge = findCompactCount("status_snapshot_age_ms");
+            const auto snapshotStale = findCompactCount("status_snapshot_stale") > 0;
 
             std::cout << title_banner("YAMS Daemon") << "\n\n";
 
@@ -2059,6 +2069,14 @@ private:
                                 s.version.empty() ? "" : "v" + s.version});
             overview.push_back({"Uptime", format_duration(s.uptimeSeconds),
                                 std::to_string(s.requestsProcessed) + " requests"});
+            {
+                std::ostringstream freshness;
+                freshness << snapshotAge << " ms";
+                overview.push_back(
+                    {"Freshness",
+                     paintStatus(snapshotStale ? Severity::Warn : Severity::Good, freshness.str()),
+                     snapshotStale ? "stale" : "fresh"});
+            }
 
             // Memory: show governor if available, else basic RSS
             if (s.governorBudgetBytes > 0) {
@@ -2096,10 +2114,6 @@ private:
             overview.push_back({"Embeddings", paintStatus(embSev, embText), embExtra});
 
             // Repair summary
-            auto findCompactCount = [&](const char* key) -> uint64_t {
-                auto it = s.requestCounts.find(key);
-                return it != s.requestCounts.end() ? it->second : 0ULL;
-            };
             const bool repairRunning = findCompactCount("repair_running") > 0;
             const bool repairInProgress = findCompactCount("repair_in_progress") > 0;
             const uint64_t repairQueue = findCompactCount("repair_queue_depth");
@@ -3046,6 +3060,10 @@ private:
         }
         if (spinner) {
             spinner->stop();
+        }
+        if (lastErr.code == ErrorCode::ResourceBusy) {
+            std::cout << lastErr.message << "\n";
+            std::exit(2);
         }
         // All retries exhausted — fall back to bootstrap status file before giving up
         try {

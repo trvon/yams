@@ -72,6 +72,9 @@ struct TopologyBuildConfig {
     DirtyRegionExpansionMode dirtyRegionExpansion{
         DirtyRegionExpansionMode::PriorClusterAndNeighbors};
     Duration budget{Duration{250}};
+    // KMeansEmbedding engine: requested cluster count (0 = auto via sqrt_n heuristic);
+    // ignored by other engines.
+    std::size_t kmeansK{0};
 };
 
 struct TopologyDirtyRegion {
@@ -144,12 +147,19 @@ struct TopologyUpdateStats {
     Duration elapsed{Duration{0}};
 };
 
+enum class RouteScoringMode : uint8_t {
+    Current,
+    SizeWeighted,
+    SeedCoverage,
+};
+
 struct TopologyRouteRequest {
     std::string queryText;
     std::vector<std::string> seedDocumentHashes;
     std::size_t limit{8};
     bool preferStableClusters{true};
     bool weakQueryOnly{true};
+    RouteScoringMode scoringMode{RouteScoringMode::Current};
 };
 
 struct ClusterRoute {

@@ -15,6 +15,12 @@ Options:
   --num-queries <n>         Query count override
   --topk <n>                Top-K override
   --benchmark-bin <path>    Benchmark binary path
+  --embedding-backends <list>
+                            Comma-separated list of YAMS_EMBED_BACKEND values
+                            (e.g. "daemon,simeon"). When provided, the full
+                            matrix is run once per backend under
+                            <output-dir>/<backend>/. When omitted, a single
+                            run is written directly under <output-dir>.
 
 Environment:
   YAMS_TEST_SAFE_SINGLE_INSTANCE=1 is set automatically if unset.
@@ -29,6 +35,7 @@ corpus_size=""
 num_queries=""
 topk=""
 benchmark_bin="build/debug/tests/benchmarks/retrieval_quality_bench"
+embedding_backends=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -62,6 +69,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --benchmark-bin)
       benchmark_bin="$2"
+      shift 2
+      ;;
+    --embedding-backends)
+      embedding_backends="$2"
       shift 2
       ;;
     -h|--help)
@@ -148,63 +159,67 @@ if [[ -n "$topk" ]]; then
   export YAMS_BENCH_TOPK="$topk"
 fi
 
-baseline_jsonl="$output_dir/baseline.jsonl"
-topology_tight_jsonl="$output_dir/topology_tight.jsonl"
-topology_default_jsonl="$output_dir/topology_default.jsonl"
-topology_wide_jsonl="$output_dir/topology_wide.jsonl"
-summary_json="$output_dir/summary.json"
-delta_json="$output_dir/delta_vs_baseline.json"
-delta_csv="$output_dir/delta_vs_baseline.csv"
-
 run_candidate() {
   local name="$1"
   local out_jsonl="$2"
   shift 2
   rm -f "$out_jsonl"
   (
-    export YAMS_BENCH_OPT_OUTPUT="$out_jsonl"
-    export YAMS_BENCH_CANDIDATE_FILTER="$name"
+    export YAMS_BENCH_OPT_LOOP=1
+    export YAMS_BENCH_OPT_RESULTS_FILE="$out_jsonl"
+    export YAMS_BENCH_OPT_CANDIDATE="$name"
     "$@"
   )
 }
 
-run_candidate "auto_baseline" "$baseline_jsonl" "$benchmark_bin"
+run_matrix() {
+  local target_dir="$1"
+  mkdir -p "$target_dir"
+  local baseline_jsonl="$target_dir/baseline.jsonl"
+  local topology_tight_jsonl="$target_dir/topology_tight.jsonl"
+  local topology_default_jsonl="$target_dir/topology_default.jsonl"
+  local topology_wide_jsonl="$target_dir/topology_wide.jsonl"
+  local summary_json="$target_dir/summary.json"
+  local delta_json="$target_dir/delta_vs_baseline.json"
+  local delta_csv="$target_dir/delta_vs_baseline.csv"
 
-(
-  export YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1
-  export YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=1
-  export YAMS_SEARCH_TOPOLOGY_MAX_DOCS=32
-  run_candidate "auto_baseline" "$topology_tight_jsonl" "$benchmark_bin"
-)
+  run_candidate "auto_baseline" "$baseline_jsonl" "$benchmark_bin"
 
-(
-  export YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1
-  export YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=2
-  export YAMS_SEARCH_TOPOLOGY_MAX_DOCS=64
-  run_candidate "auto_baseline" "$topology_default_jsonl" "$benchmark_bin"
-)
+  (
+    export YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1
+    export YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=1
+    export YAMS_SEARCH_TOPOLOGY_MAX_DOCS=32
+    run_candidate "auto_baseline" "$topology_tight_jsonl" "$benchmark_bin"
+  )
 
-(
-  export YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1
-  export YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=4
-  export YAMS_SEARCH_TOPOLOGY_MAX_DOCS=128
-  run_candidate "auto_baseline" "$topology_wide_jsonl" "$benchmark_bin"
-)
+  (
+    export YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1
+    export YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=2
+    export YAMS_SEARCH_TOPOLOGY_MAX_DOCS=64
+    run_candidate "auto_baseline" "$topology_default_jsonl" "$benchmark_bin"
+  )
 
-python3 tests/scripts/summarize_retrieval_opt_jsonl.py \
-  --input "$baseline_jsonl" \
-  --input "$topology_tight_jsonl" \
-  --input "$topology_default_jsonl" \
-  --input "$topology_wide_jsonl" \
-  --output "$summary_json"
+  (
+    export YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1
+    export YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=4
+    export YAMS_SEARCH_TOPOLOGY_MAX_DOCS=128
+    run_candidate "auto_baseline" "$topology_wide_jsonl" "$benchmark_bin"
+  )
 
-python3 tests/scripts/delta_retrieval_matrix.py \
-  --input "$summary_json" \
-  --baseline auto_baseline \
-  --json-out "$delta_json" \
-  --csv-out "$delta_csv"
+  python3 tests/scripts/summarize_retrieval_opt_jsonl.py \
+    --input "$baseline_jsonl" \
+    --input "$topology_tight_jsonl" \
+    --input "$topology_default_jsonl" \
+    --input "$topology_wide_jsonl" \
+    --output "$summary_json"
 
-cat > "$output_dir/manifest.env" <<EOF
+  python3 tests/scripts/delta_retrieval_matrix.py \
+    --input "$summary_json" \
+    --baseline auto_baseline \
+    --json-out "$delta_json" \
+    --csv-out "$delta_csv"
+
+  cat > "$target_dir/manifest.env" <<EOF
 dataset=$dataset
 dataset_path=$dataset_path
 scale=$scale
@@ -212,14 +227,31 @@ corpus_size=$corpus_size
 num_queries=$num_queries
 topk=$topk
 benchmark_bin=$benchmark_bin
+embedding_backend=${YAMS_EMBED_BACKEND:-}
 EOF
 
-echo "Wrote:"
-echo "  $baseline_jsonl"
-echo "  $topology_tight_jsonl"
-echo "  $topology_default_jsonl"
-echo "  $topology_wide_jsonl"
-echo "  $summary_json"
-echo "  $delta_json"
-echo "  $delta_csv"
-echo "  $output_dir/manifest.env"
+  echo "Wrote:"
+  echo "  $baseline_jsonl"
+  echo "  $topology_tight_jsonl"
+  echo "  $topology_default_jsonl"
+  echo "  $topology_wide_jsonl"
+  echo "  $summary_json"
+  echo "  $delta_json"
+  echo "  $delta_csv"
+  echo "  $target_dir/manifest.env"
+}
+
+if [[ -n "$embedding_backends" ]]; then
+  IFS=',' read -r -a backends_arr <<< "$embedding_backends"
+  for backend in "${backends_arr[@]}"; do
+    backend_trimmed="${backend// /}"
+    [[ -z "$backend_trimmed" ]] && continue
+    echo "==> Running matrix with YAMS_EMBED_BACKEND=$backend_trimmed"
+    (
+      export YAMS_EMBED_BACKEND="$backend_trimmed"
+      run_matrix "$output_dir/$backend_trimmed"
+    )
+  done
+else
+  run_matrix "$output_dir"
+fi

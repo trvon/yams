@@ -59,6 +59,7 @@
 #include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
+#include <yams/topology/topology_factory.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
@@ -306,6 +307,20 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
       lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
     tuningConfig_ = config_.tuning;
+
+    {
+        auto enginePolicy = ConfigResolver::resolveTopologyEnginePolicy();
+        if (enginePolicy.engine) {
+            const auto resolved = std::string{topology::resolveFactoryKey(*enginePolicy.engine)};
+            tuningConfig_.topologyAlgorithm = resolved;
+            spdlog::info("Topology engine applied via config: {} (resolved={})",
+                         *enginePolicy.engine, resolved);
+        }
+        if (enginePolicy.kmeansK) {
+            topologyManager_.setKmeansK(*enginePolicy.kmeansK);
+            spdlog::info("Topology kmeans_k applied via config: {}", *enginePolicy.kmeansK);
+        }
+    }
 
     metricsPublisher_.setWorkerTarget(1);
 

@@ -1,5 +1,6 @@
 #include <yams/topology/topology_factory.h>
 
+#include <yams/topology/topology_alternate_engines.h>
 #include <yams/topology/topology_baseline.h>
 
 #include <spdlog/spdlog.h>
@@ -12,10 +13,14 @@ namespace yams::topology {
 namespace {
 
 constexpr std::string_view kConnectedKey = "connected";
+constexpr std::string_view kLouvainKey = "louvain";
+constexpr std::string_view kLabelPropagationKey = "label_propagation";
+constexpr std::string_view kKMeansEmbeddingKey = "kmeans_embedding";
 
 // Central registry. Kept as a plain array so the factory has no global state
 // and no initialization-order concerns.
-constexpr std::array<std::string_view, 1> kKnownAlgorithms{kConnectedKey};
+constexpr std::array<std::string_view, 4> kKnownAlgorithms{
+    kConnectedKey, kLouvainKey, kLabelPropagationKey, kKMeansEmbeddingKey};
 
 } // namespace
 
@@ -23,6 +28,15 @@ std::shared_ptr<ITopologyEngine> makeEngine(std::string_view algorithm) {
     const auto key = resolveFactoryKey(algorithm);
     if (key == kConnectedKey) {
         return std::make_shared<ConnectedComponentTopologyEngine>();
+    }
+    if (key == kLouvainKey) {
+        return std::make_shared<LouvainTopologyEngine>();
+    }
+    if (key == kLabelPropagationKey) {
+        return std::make_shared<LabelPropagationTopologyEngine>();
+    }
+    if (key == kKMeansEmbeddingKey) {
+        return std::make_shared<KMeansEmbeddingTopologyEngine>();
     }
     // resolveFactoryKey only returns keys we claim to support; this branch
     // exists as a forward-compat safety net for future registrations.

@@ -100,6 +100,14 @@ std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {
         if (std::filesystem::exists(p))
             return p;
     }
+    // YAMS_CONFIG is the canonical env var used by test fixtures and
+    // config_helpers.cpp; accept it here so resolver-based policies (topology
+    // engine, routing, integration, ...) respect the harness-supplied TOML.
+    if (const char* fixtureConfig = std::getenv("YAMS_CONFIG")) {
+        std::filesystem::path p{fixtureConfig};
+        if (std::filesystem::exists(p))
+            return p;
+    }
 #ifdef _WIN32
     // Windows: prefer roaming APPDATA for config (matches get_config_dir())
     if (const char* appdata = std::getenv("APPDATA")) {
@@ -745,8 +753,53 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (!it->second.empty())
                 policy.routingVariant = it->second;
         }
+        if (auto it = kv.find("search.topology.integration"); it != kv.end()) {
+            if (!it->second.empty())
+                policy.integration = it->second;
+        }
+        if (auto it = kv.find("search.topology.recall_expand_per_cluster"); it != kv.end()) {
+            policy.recallExpandPerCluster = parseSize(it->second);
+        }
+        if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
+            policy.rrfK = parseFloat(it->second);
+        }
+        if (auto it = kv.find("search.topology.route_scoring"); it != kv.end()) {
+            if (!it->second.empty())
+                policy.routeScoring = it->second;
+        }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology routing policy: {}", e.what());
+    }
+
+    return policy;
+}
+
+ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy() {
+    TopologyEnginePolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return policy;
+        }
+
+        auto kv = parseSimpleTomlFlat(cfgPath);
+
+        if (auto it = kv.find("topology.engine"); it != kv.end()) {
+            if (!it->second.empty()) {
+                policy.engine = it->second;
+            }
+        }
+        if (auto it = kv.find("topology.kmeans_k"); it != kv.end()) {
+            try {
+                policy.kmeansK = static_cast<std::size_t>(std::stoul(it->second));
+            } catch (const std::exception&) {
+                // Ignore invalid value; leave nullopt.
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for topology engine policy: {}", e.what());
     }
 
     return policy;

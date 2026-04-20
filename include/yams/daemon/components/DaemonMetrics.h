@@ -381,6 +381,15 @@ struct MetricsSnapshot {
     std::string topologyLastReason;
     std::string topologyLastSnapshotId;
     std::string topologyLastAlgorithm;
+
+    // Freshness metadata for status consumers. The daemon publishes a fast snapshot on a short
+    // cadence and an optional detailed enrichment snapshot on a slower cadence. Request-time
+    // status calls should return immediately and use these fields to communicate staleness.
+    std::uint64_t statusSnapshotAgeMs{0};
+    bool statusSnapshotStale{false};
+    std::uint64_t statusDetailAgeMs{0};
+    bool statusDetailStale{true};
+    bool statusDetailAvailable{false};
 };
 
 class SocketServer; // Forward declaration
@@ -417,6 +426,10 @@ public:
 
 private:
     boost::asio::awaitable<void> pollingLoop(); // Background polling loop
+    std::shared_ptr<const MetricsSnapshot> buildDecoratedSnapshot(bool detailed) const;
+    MetricsSnapshot buildMinimalSnapshot() const;
+    MetricsSnapshot collectSnapshot(bool detailed) const;
+    void scheduleBackgroundRefresh(bool detailed) const;
 
     const DaemonLifecycleFsm* lifecycle_;
     const StateComponent* state_;
@@ -429,9 +442,13 @@ private:
     // Shared mutex for concurrent reads, exclusive writes
     mutable std::shared_mutex cacheMutex_;
     mutable std::shared_ptr<MetricsSnapshot> cachedSnapshot_{nullptr};
+    mutable std::shared_ptr<MetricsSnapshot> cachedDetailedSnapshot_{nullptr};
     mutable std::chrono::steady_clock::time_point lastUpdate_{};
+    mutable std::chrono::steady_clock::time_point lastDetailedUpdate_{};
     // Physical storage breakdown (updated separately with TTL, reuses cacheMutex_)
     mutable MetricsSnapshot cached_{}; // Only physical storage breakdown fields used
+    mutable std::atomic<bool> refreshQueued_{false};
+    mutable std::atomic<bool> detailedRefreshQueued_{false};
 
     // Background polling control
     std::atomic<bool> pollingActive_{false};

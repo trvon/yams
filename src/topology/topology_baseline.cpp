@@ -523,22 +523,51 @@ StableClusterTopologyRouter::route(const TopologyRouteRequest& request,
                                    const TopologyArtifactBatch& artifacts) const {
     std::unordered_set<std::string> seeds(request.seedDocumentHashes.begin(),
                                           request.seedDocumentHashes.end());
+    const double totalSeeds = static_cast<double>(seeds.size());
     std::vector<ClusterRoute> routes;
     routes.reserve(artifacts.clusters.size());
 
     for (const auto& cluster : artifacts.clusters) {
-        double routeScore = cluster.persistenceScore + (cluster.cohesionScore * 0.5);
-        bool matchedSeed = false;
+        std::size_t seedsInCluster = 0;
         for (const auto& documentHash : cluster.memberDocumentHashes) {
             if (seeds.contains(documentHash)) {
-                matchedSeed = true;
+                ++seedsInCluster;
+            }
+        }
+        const bool matchedSeed = seedsInCluster > 0;
+
+        double routeScore = 0.0;
+        switch (request.scoringMode) {
+            case RouteScoringMode::SizeWeighted: {
+                double base = cluster.persistenceScore + (cluster.cohesionScore * 0.5);
+                if (matchedSeed) {
+                    base += 1.0;
+                }
+                base += std::min<double>(0.25, static_cast<double>(cluster.memberCount) / 40.0);
+                const double sizeDamp =
+                    1.0 / (1.0 + std::log1p(static_cast<double>(cluster.memberCount)));
+                routeScore = base * sizeDamp;
+                break;
+            }
+            case RouteScoringMode::SeedCoverage: {
+                const double coverage =
+                    totalSeeds > 0.0 ? static_cast<double>(seedsInCluster) / totalSeeds : 0.0;
+                routeScore =
+                    coverage + (cluster.persistenceScore * 0.1) +
+                    std::min<double>(0.1, static_cast<double>(cluster.memberCount) / 200.0);
+                break;
+            }
+            case RouteScoringMode::Current:
+            default: {
+                routeScore = cluster.persistenceScore + (cluster.cohesionScore * 0.5);
+                if (matchedSeed) {
+                    routeScore += 1.0;
+                }
+                routeScore +=
+                    std::min<double>(0.25, static_cast<double>(cluster.memberCount) / 40.0);
                 break;
             }
         }
-        if (matchedSeed) {
-            routeScore += 1.0;
-        }
-        routeScore += std::min<double>(0.25, static_cast<double>(cluster.memberCount) / 40.0);
 
         routes.push_back(ClusterRoute{
             .clusterId = cluster.clusterId,

@@ -54,6 +54,15 @@ public:
         std::optional<float> bridgeBoost;
         std::optional<float> routedBaseMultiplier;
         std::optional<std::string> routingVariant;
+        std::optional<std::string> integration;
+        std::optional<std::size_t> recallExpandPerCluster;
+        std::optional<float> rrfK;
+        std::optional<std::string> routeScoring;
+    };
+
+    struct TopologyEnginePolicy {
+        std::optional<std::string> engine;
+        std::optional<std::size_t> kmeansK;
     };
 
     struct PostIngestCaps {
@@ -264,8 +273,26 @@ public:
      * - search.topology.bridge_boost = float
      * - search.topology.routed_base_multiplier = float
      * - search.topology.routing_variant = baseline|vector_seed|kg_walk|score_replace|medoid_promote
+     * - search.topology.integration = boost|recall_expand|rrf|both
+     * - search.topology.recall_expand_per_cluster = int
+     * - search.topology.rrf_k = float
+     * - search.topology.route_scoring = current|size_weighted|seed_coverage
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
+
+    /**
+     * @brief Resolve topology cluster-engine selection from config file.
+     *
+     * Reads [topology] keys. Callers apply `engine` to
+     * TuningConfig::topologyAlgorithm (which seeds
+     * topology::makeEngine dispatch) and `kmeans_k` to the
+     * TopologyBuildConfig consumed by the KMeansEmbedding engine.
+     *
+     * Config keys:
+     * - topology.engine = connected|louvain|label_propagation|kmeans_embedding
+     * - topology.kmeans_k = int (0 = auto: sqrt_n)
+     */
+    static TopologyEnginePolicy resolveTopologyEnginePolicy();
 
     /**
      * @brief Resolve post-ingest concurrency caps from config file.

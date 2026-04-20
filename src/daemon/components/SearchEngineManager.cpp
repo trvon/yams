@@ -260,6 +260,45 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                 opts.config.topologyRoutingVariant = V::Baseline;
             spdlog::info("SearchEngine topologyRoutingVariant applied via config: {}", raw);
         }
+        if (tp.integration) {
+            using I = yams::search::SearchEngineConfig::TopologyIntegration;
+            std::string raw = *tp.integration;
+            std::transform(raw.begin(), raw.end(), raw.begin(), [](char c) {
+                return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            });
+            if (raw == "recall_expand")
+                opts.config.topologyIntegration = I::RecallExpand;
+            else if (raw == "rrf")
+                opts.config.topologyIntegration = I::Rrf;
+            else if (raw == "both")
+                opts.config.topologyIntegration = I::Both;
+            else
+                opts.config.topologyIntegration = I::Boost;
+            spdlog::info("SearchEngine topologyIntegration applied via config: {}", raw);
+        }
+        if (tp.recallExpandPerCluster) {
+            opts.config.topologyRecallExpandPerCluster =
+                std::min<std::size_t>(*tp.recallExpandPerCluster, 512);
+            spdlog::info("SearchEngine topologyRecallExpandPerCluster applied via config: {}",
+                         opts.config.topologyRecallExpandPerCluster);
+        }
+        if (tp.rrfK) {
+            opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);
+            spdlog::info("SearchEngine rrfK applied via config: {:.3f}", opts.config.rrfK);
+        }
+        if (tp.routeScoring) {
+            using RS = yams::search::SearchEngineConfig::TopologyRouteScoring;
+            std::string raw = *tp.routeScoring;
+            std::transform(raw.begin(), raw.end(), raw.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (raw == "size_weighted")
+                opts.config.topologyRouteScoring = RS::SizeWeighted;
+            else if (raw == "seed_coverage")
+                opts.config.topologyRouteScoring = RS::SeedCoverage;
+            else
+                opts.config.topologyRouteScoring = RS::Current;
+            spdlog::info("SearchEngine topologyRouteScoring applied via config: {}", raw);
+        }
     }
 
     if (!vectorEnabled) {
