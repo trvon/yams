@@ -23,6 +23,435 @@
 
 namespace yams::daemon {
 
+namespace {
+
+uint32_t computeSnapshotRetryAfter(const MetricsSnapshot& snap, bool detailed) {
+    const bool snapshotBusy = detailed ? snap.statusDetailStale : snap.statusSnapshotStale;
+    if (!snapshotBusy) {
+        return 0;
+    }
+    return std::max<uint32_t>(
+        100u,
+        detailed
+            ? static_cast<uint32_t>(std::min<std::uint64_t>(snap.statusDetailAgeMs, 1000ULL))
+            : static_cast<uint32_t>(std::min<std::uint64_t>(snap.statusSnapshotAgeMs, 1000ULL)));
+}
+
+void populateStatusCoreFromSnapshot(StatusResponse& res, const MetricsSnapshot& snap) {
+    res.running = snap.running;
+    res.version = snap.version;
+    res.uptimeSeconds = snap.uptimeSeconds;
+    res.requestsProcessed = snap.requestsProcessed;
+    res.activeConnections = snap.activeConnections;
+    res.maxConnections = snap.maxConnections;
+    res.connectionSlotsFree = snap.connectionSlotsFree;
+    res.oldestConnectionAge = snap.oldestConnectionAge;
+    res.forcedCloseCount = snap.forcedCloseCount;
+    res.proxyActiveConnections = snap.proxyActiveConnections;
+    res.proxySocketPath = snap.proxySocketPath;
+    res.memoryUsageMb = snap.memoryUsageMb;
+    res.cpuUsagePercent = snap.cpuUsagePercent;
+    res.ready = snap.ready;
+    res.overallStatus = snap.overallStatus;
+    res.lifecycleState = snap.lifecycleState;
+    res.lastError = snap.lastError;
+    res.fsmTransitions = snap.fsmTransitions;
+    res.fsmHeaderReads = snap.fsmHeaderReads;
+    res.fsmPayloadReads = snap.fsmPayloadReads;
+    res.fsmPayloadWrites = snap.fsmPayloadWrites;
+    res.fsmBytesSent = snap.fsmBytesSent;
+    res.fsmBytesReceived = snap.fsmBytesReceived;
+    res.muxActiveHandlers = snap.muxActiveHandlers;
+    res.muxQueuedBytes = snap.muxQueuedBytes;
+    res.muxWriterBudgetBytes = snap.muxWriterBudgetBytes;
+    res.ipcPoolSize = snap.ipcPoolSize;
+    res.ioPoolSize = snap.ioPoolSize;
+    res.vectorDbInitAttempted = snap.vectorDbInitAttempted;
+    res.vectorDbReady = snap.vectorDbReady;
+    res.vectorDbDim = snap.vectorDbDim;
+    res.readinessStates[std::string(readiness::kVectorDbInitAttempted)] = res.vectorDbInitAttempted;
+    res.readinessStates[std::string(readiness::kVectorDbReady)] = res.vectorDbReady;
+    res.readinessStates[std::string(readiness::kVectorDbDim)] = (res.vectorDbDim > 0);
+    res.embeddingAvailable = snap.embeddingAvailable;
+    res.embeddingBackend = snap.embeddingBackend;
+    res.embeddingModel = snap.embeddingModel;
+    res.embeddingModelPath = snap.embeddingModelPath;
+    res.embeddingDim = snap.embeddingDim;
+    res.dataDir = snap.dataDir;
+    res.metadataDbPath = snap.metadataDbPath;
+    res.vectorDbPath = snap.vectorDbPath;
+    res.searchMetrics.active = snap.searchActive;
+    res.searchMetrics.queued = snap.searchQueued;
+    res.searchMetrics.executed = snap.searchExecuted;
+    res.searchMetrics.cacheHitRate = snap.searchCacheHitRate;
+    res.searchMetrics.avgLatencyUs = snap.searchAvgLatencyUs;
+    res.searchMetrics.concurrencyLimit = snap.searchConcurrencyLimit;
+    res.postIngestQueueDepth = static_cast<uint32_t>(snap.postIngestQueued);
+    res.governorRssBytes = snap.governorRssBytes;
+    res.governorBudgetBytes = snap.governorBudgetBytes;
+    res.governorPressureLevel = snap.governorPressureLevel;
+    res.governorHeadroomPct = snap.governorHeadroomPct;
+    res.onnxTotalSlots = snap.onnxTotalSlots;
+    res.onnxUsedSlots = snap.onnxUsedSlots;
+    res.onnxGlinerUsed = snap.onnxGlinerUsed;
+    res.onnxEmbedUsed = snap.onnxEmbedUsed;
+    res.onnxRerankerUsed = snap.onnxRerankerUsed;
+}
+
+void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot& snap,
+                                      bool includeExtendedStatus,
+                                      const ServiceManager* serviceManager,
+                                      const StateComponent* state) {
+    auto setVal = [&](std::string_view key, size_t val) { res.requestCounts.emplace(key, val); };
+    auto setReady = [&](std::string_view key, bool val) { res.readinessStates.emplace(key, val); };
+
+    setReady(readiness::kVectorEmbeddingsAvailable, snap.vectorEmbeddingsAvailable);
+    setReady(readiness::kVectorScoringEnabled, snap.vectorScoringEnabled);
+    setVal(metrics::kVectorEmbeddingsAvailable, snap.vectorEmbeddingsAvailable ? 1 : 0);
+    setVal(metrics::kVectorScoringEnabled, snap.vectorScoringEnabled ? 1 : 0);
+
+    setReady(readiness::kSearchEngineBuildReasonInitial, snap.searchEngineBuildReason == "initial");
+    setReady(readiness::kSearchEngineBuildReasonRebuild, snap.searchEngineBuildReason == "rebuild");
+    setReady(readiness::kSearchEngineBuildReasonDegraded,
+             snap.searchEngineBuildReason == "degraded");
+
+    setVal(metrics::kWorkerThreads, snap.workerThreads);
+    setVal(metrics::kWorkerActive, snap.workerActive);
+    setVal(metrics::kWorkerQueued, snap.workerQueued);
+    setVal(metrics::kPostIngestThreads, snap.postIngestThreads);
+    setVal(metrics::kPostIngestQueued, snap.postIngestQueued);
+    setVal(metrics::kPostIngestRpcQueued, snap.postIngestRpcQueued);
+    setVal(metrics::kSearchActive, snap.searchActive);
+    setVal(metrics::kSearchQueued, snap.searchQueued);
+    setVal(metrics::kSearchExecuted, static_cast<size_t>(snap.searchExecuted));
+    setVal(metrics::kSearchCacheHitRatePct, static_cast<size_t>(snap.searchCacheHitRate * 100.0));
+    setVal(metrics::kSearchAvgLatencyUs, static_cast<size_t>(snap.searchAvgLatencyUs));
+    setVal(metrics::kSearchConcurrencyLimit, snap.searchConcurrencyLimit);
+    setVal(metrics::kSearchRejected, static_cast<size_t>(snap.searchRejected));
+    setVal(metrics::kListActive, static_cast<size_t>(snap.listActive));
+    setVal(metrics::kListRejected, static_cast<size_t>(snap.listRejected));
+    setVal(metrics::kGrepActive, static_cast<size_t>(snap.grepActive));
+    setVal(metrics::kGrepRejected, static_cast<size_t>(snap.grepRejected));
+    setVal(metrics::kAddDeferred, static_cast<size_t>(snap.addDeferred));
+    setVal(metrics::kAddRejected, static_cast<size_t>(snap.addRejected));
+    setVal(metrics::kDeferredQueueDepth, snap.deferredQueueDepth);
+    setVal(metrics::kPostIngestInflight, snap.postIngestInflight);
+    setVal(metrics::kPostIngestCapacity, snap.postIngestCapacity);
+    setVal(metrics::kPostIngestDrained,
+           (snap.postIngestQueued == 0 && snap.postIngestInflight == 0) ? 1 : 0);
+    setVal(metrics::kPostIngestBackpressureRejects,
+           static_cast<size_t>(snap.postIngestBackpressureRejects));
+
+    if (snap.kgJobsCapacity > 0) {
+        setVal(metrics::kKgQueueDepth, snap.kgJobsDepth);
+        setVal(metrics::kKgJobsCapacity, snap.kgJobsCapacity);
+        setVal(metrics::kKgJobsFillPct,
+               static_cast<size_t>(std::clamp(snap.kgJobsFillRatio * 100.0, 0.0, 100.0)));
+    }
+
+    setVal(metrics::kPostIngestRpcCapacity, snap.postIngestRpcCapacity);
+    setVal(metrics::kPostIngestRpcMaxPerBatch, snap.postIngestRpcMaxPerBatch);
+
+    try {
+        if (serviceManager) {
+            try {
+                auto ss = serviceManager->getServiceManagerFsmSnapshot();
+                setVal(metrics::kServiceFsmState, static_cast<size_t>(ss.state));
+            } catch (...) {
+            }
+            try {
+                auto es = serviceManager->getEmbeddingProviderFsmSnapshot();
+                const bool providerReady =
+                    state && state->readiness.modelProviderReady.load(std::memory_order_relaxed);
+                const bool embeddingOperational =
+                    (es.state == EmbeddingProviderState::ModelReady) ||
+                    ((snap.embeddingAvailable || providerReady) &&
+                     es.state != EmbeddingProviderState::Failed);
+                setVal(metrics::kEmbeddingState, static_cast<size_t>(es.state));
+                setReady(readiness::kEmbeddingReady, embeddingOperational);
+                setReady(readiness::kEmbeddingDegraded,
+                         es.state == EmbeddingProviderState::Degraded ||
+                             es.state == EmbeddingProviderState::Failed);
+            } catch (...) {
+            }
+            try {
+                auto ps = serviceManager->getPluginHostFsmSnapshot();
+                const bool pluginsOperational =
+                    (ps.state == PluginHostState::Ready) ||
+                    (((ps.loadedCount > 0) ||
+                      (state && state->readiness.pluginsReady.load(std::memory_order_relaxed))) &&
+                     ps.state != PluginHostState::Failed);
+                setVal(metrics::kPluginHostState, static_cast<size_t>(ps.state));
+                setReady(readiness::kPluginsReady, pluginsOperational);
+                setReady(readiness::kPluginsDegraded, ps.state == PluginHostState::Failed);
+            } catch (...) {
+            }
+        }
+    } catch (...) {
+    }
+
+    if (includeExtendedStatus) {
+        try {
+            if (serviceManager) {
+                try {
+                    setVal(metrics::kEmbedInflight, serviceManager->getEmbeddingInFlightJobs());
+                    setVal(metrics::kEmbedQueued, serviceManager->getEmbeddingQueuedJobs());
+                    setVal(metrics::kEmbedInferActive,
+                           serviceManager->getEmbeddingActiveInferSubBatches());
+                    setVal(metrics::kEmbedInferOldestMs,
+                           serviceManager->getEmbeddingInferOldestMs());
+                    setVal(metrics::kEmbedInferStarted,
+                           serviceManager->getEmbeddingInferStartedCount());
+                    setVal(metrics::kEmbedInferCompleted,
+                           serviceManager->getEmbeddingInferCompletedCount());
+                    setVal(metrics::kEmbedInferLastMs, serviceManager->getEmbeddingInferLastMs());
+                    setVal(metrics::kEmbedInferMaxMs, serviceManager->getEmbeddingInferMaxMs());
+                    setVal(metrics::kEmbedInferWarnCount,
+                           serviceManager->getEmbeddingInferWarnCount());
+                } catch (...) {
+                }
+                const auto& tc = serviceManager->getConfig().tuning;
+                setVal(metrics::kTuningPostIngestCapacity, tc.postIngestCapacity);
+                setVal(metrics::kTuningPostIngestThreadsMin, tc.postIngestThreadsMin);
+                setVal(metrics::kTuningPostIngestThreadsMax, tc.postIngestThreadsMax);
+                setVal(metrics::kTuningAdmitWarnThreshold, tc.admitWarnThreshold);
+                setVal(metrics::kTuningAdmitStopThreshold, tc.admitStopThreshold);
+            }
+        } catch (...) {
+        }
+    }
+
+    try {
+        if (serviceManager) {
+            setVal(metrics::kWorkCoordinatorActive, snap.workCoordinatorActiveWorkers);
+            setVal(metrics::kWorkCoordinatorRunning, snap.workCoordinatorRunning ? 1 : 0);
+        }
+    } catch (...) {
+    }
+
+    setVal(metrics::kRepairRunning, snap.repairRunning ? 1 : 0);
+    setVal(metrics::kRepairInProgress, snap.repairInProgress ? 1 : 0);
+    setVal(metrics::kRepairQueueDepth, snap.repairQueueDepth);
+    setVal(metrics::kRepairFailedOperations, snap.repairFailedOperations);
+
+    if (includeExtendedStatus) {
+        setVal(metrics::kPostIngestProcessed, snap.postIngestProcessed);
+        setVal(metrics::kPostIngestFailed, snap.postIngestFailed);
+        setVal(metrics::kPostIngestLatencyEma, static_cast<size_t>(snap.postIngestLatencyMsEma));
+        setVal(metrics::kPostIngestRateEma, static_cast<size_t>(snap.postIngestRateSecEma));
+        setVal(metrics::kExtractionInflight, snap.extractionInFlight);
+        setVal(metrics::kKgQueued, snap.kgQueued);
+        setVal(metrics::kKgDropped, snap.kgDropped);
+        setVal(metrics::kKgConsumed, snap.kgConsumed);
+        setVal(metrics::kKgInflight, snap.kgInFlight);
+        setVal(metrics::kKgQueueDepth, snap.kgQueueDepth);
+        setVal(metrics::kSymbolInflight, snap.symbolInFlight);
+        setVal(metrics::kSymbolQueueDepth, snap.symbolQueueDepth);
+        setVal(metrics::kEntityQueued, snap.entityQueued);
+        setVal(metrics::kEntityDropped, snap.entityDropped);
+        setVal(metrics::kEntityConsumed, snap.entityConsumed);
+        setVal(metrics::kEntityInflight, snap.entityInFlight);
+        setVal(metrics::kEntityQueueDepth, snap.entityQueueDepth);
+        setVal(metrics::kTitleQueueDepth, snap.titleQueueDepth);
+        setVal(metrics::kTitleInflight, snap.titleInFlight);
+        setVal(metrics::kPostTitleLimit, snap.titleConcurrencyLimit);
+        setVal(metrics::kTitleQueued, snap.titleQueued);
+        setVal(metrics::kTitleDropped, snap.titleDropped);
+        setVal(metrics::kTitleConsumed, snap.titleConsumed);
+        setVal(metrics::kFts5Queued, snap.fts5Queued);
+        setVal(metrics::kFts5Dropped, snap.fts5Dropped);
+        setVal(metrics::kFts5Consumed, snap.fts5Consumed);
+        setVal(metrics::kSymbolQueued, snap.symbolQueued);
+        setVal(metrics::kSymbolDropped, snap.symbolDropped);
+        setVal(metrics::kSymbolConsumed, snap.symbolConsumed);
+        setVal(metrics::kStreamTotal, snap.streamTotal);
+        setVal(metrics::kStreamBatches, snap.streamBatches);
+        setVal(metrics::kStreamKeepalives, snap.streamKeepalives);
+        setVal(metrics::kStreamTtfbAvgMs, snap.streamTtfbAvgMs);
+        setVal(metrics::kRepairQueueDepth, snap.repairQueueDepth);
+        setVal(metrics::kRepairBatchesAttempted, snap.repairBatchesAttempted);
+        setVal(metrics::kRepairEmbeddingsGenerated, snap.repairEmbeddingsGenerated);
+        setVal(metrics::kRepairEmbeddingsSkipped, snap.repairEmbeddingsSkipped);
+        setVal(metrics::kRepairFailedOperations, snap.repairFailedOperations);
+        setVal(metrics::kRepairIdleTicks, snap.repairIdleTicks);
+        setVal(metrics::kRepairBusyTicks, snap.repairBusyTicks);
+        setVal(metrics::kRepairTotalBacklog, snap.repairTotalBacklog);
+        setVal(metrics::kRepairProcessed, snap.repairProcessed);
+        setVal(metrics::kRepairRunning, snap.repairRunning ? 1 : 0);
+        setVal(metrics::kRepairInProgress, snap.repairInProgress ? 1 : 0);
+        setVal(metrics::kTopologyRebuildRunning, snap.topologyRebuildRunning ? 1 : 0);
+        setVal(metrics::kTopologyDirtyDocuments, static_cast<size_t>(snap.topologyDirtyDocuments));
+        setVal(metrics::kTopologyLastSuccessAgeMs,
+               static_cast<size_t>(snap.topologyLastSuccessAgeMs));
+        setVal(metrics::kTopologyRebuildLagMs, static_cast<size_t>(snap.topologyRebuildLagMs));
+        setVal(metrics::kTopologyRebuildRunningAgeMs,
+               static_cast<size_t>(snap.topologyRebuildRunningAgeMs));
+        setVal(metrics::kTopologyLastDurationMs, static_cast<size_t>(snap.topologyLastDurationMs));
+        setVal(metrics::kTopologyRebuildsTotal, static_cast<size_t>(snap.topologyRebuildsTotal));
+        setVal(metrics::kTopologyRebuildFailuresTotal,
+               static_cast<size_t>(snap.topologyRebuildFailuresTotal));
+        setVal(metrics::kTopologyLastDocumentsRequested,
+               static_cast<size_t>(snap.topologyLastDocumentsRequested));
+        setVal(metrics::kTopologyLastDocumentsProcessed,
+               static_cast<size_t>(snap.topologyLastDocumentsProcessed));
+        setVal(metrics::kTopologyLastClustersBuilt,
+               static_cast<size_t>(snap.topologyLastClustersBuilt));
+        setVal(metrics::kTopologyLastMembershipsBuilt,
+               static_cast<size_t>(snap.topologyLastMembershipsBuilt));
+        setVal(metrics::kTopologyLastDirtySeedCount,
+               static_cast<size_t>(snap.topologyLastDirtySeedCount));
+        setVal(metrics::kTopologyLastDirtyRegionDocs,
+               static_cast<size_t>(snap.topologyLastDirtyRegionDocs));
+        setVal(metrics::kTopologyLastCoalescedDirtySets,
+               static_cast<size_t>(snap.topologyLastCoalescedDirtySets));
+        setVal(metrics::kTopologyLastFallbackFullRebuilds,
+               static_cast<size_t>(snap.topologyLastFallbackFullRebuilds));
+        setVal(metrics::kFilesAdded, static_cast<size_t>(snap.filesAdded));
+        setVal(metrics::kDirectoriesAdded, static_cast<size_t>(snap.directoriesAdded));
+        setVal(metrics::kFilesProcessed, static_cast<size_t>(snap.filesProcessed));
+        setVal(metrics::kDirectoriesProcessed, static_cast<size_t>(snap.directoriesProcessed));
+        setVal(metrics::kPostExtractionLimit, snap.postExtractionLimit);
+        setVal(metrics::kPostKgLimit, snap.postKgLimit);
+        setVal(metrics::kPostSymbolLimit, snap.postSymbolLimit);
+        setVal(metrics::kPostEntityLimit, snap.postEntityLimit);
+        setVal(metrics::kPostEnrichLimit, snap.postEnrichLimit);
+        setVal(metrics::kEnrichInflight, snap.enrichInflight);
+        setVal(metrics::kEnrichQueueDepth, snap.enrichQueueDepth);
+        try {
+            setVal(metrics::kPostIngestUseBus,
+                   yams::daemon::TuneAdvisor::useInternalBusForPostIngest() ? 1 : 0);
+        } catch (...) {
+        }
+        setVal(metrics::kPostEmbedLimit, snap.postEmbedLimit);
+        try {
+            auto& bus = InternalEventBus::instance();
+            setVal(metrics::kBusEmbedQueued, bus.embedQueued());
+            setVal(metrics::kBusEmbedConsumed, bus.embedConsumed());
+            setVal(metrics::kBusEmbedDropped, bus.embedDropped());
+            setVal(metrics::kBusEmbedPreparedDocsQueued, bus.embedPreparedDocsQueued());
+            setVal(metrics::kBusEmbedPreparedChunksQueued, bus.embedPreparedChunksQueued());
+            setVal(metrics::kBusEmbedHashOnlyDocsQueued, bus.embedHashOnlyDocsQueued());
+            setVal(metrics::kBusPostQueued, bus.postQueued());
+            setVal(metrics::kBusPostConsumed, bus.postConsumed());
+            setVal(metrics::kBusPostDropped, bus.postDropped());
+        } catch (...) {
+        }
+        setVal(metrics::kWatchEnabled, snap.watchEnabled ? 1 : 0);
+        if (snap.watchIntervalMs > 0) {
+            setVal(metrics::kWatchIntervalMs, snap.watchIntervalMs);
+        }
+    }
+
+    res.retryAfterMs = std::max(res.retryAfterMs, snap.retryAfterMs);
+    setVal("status_snapshot_age_ms", static_cast<size_t>(snap.statusSnapshotAgeMs));
+    setVal("status_snapshot_stale", snap.statusSnapshotStale ? 1U : 0U);
+    setVal("status_detail_age_ms", static_cast<size_t>(snap.statusDetailAgeMs));
+    setVal("status_detail_stale", snap.statusDetailStale ? 1U : 0U);
+    setVal("status_detail_available", snap.statusDetailAvailable ? 1U : 0U);
+    for (const auto& [k, v] : snap.readinessStates)
+        res.readinessStates[k] = v;
+    for (const auto& [k, v] : snap.initProgress)
+        res.initProgress[k] = v;
+
+    if (includeExtendedStatus) {
+        res.dataDir = snap.dataDir;
+        res.contentStoreRoot = snap.contentStoreRoot;
+        res.contentStoreError = snap.contentStoreError;
+        res.searchTuningState = snap.searchTuningState;
+        res.searchTuningReason = snap.searchTuningReason;
+        res.searchTuningParams = snap.searchTuningParams;
+    }
+
+    setVal(metrics::kPressureLevel, static_cast<size_t>(snap.governorPressureLevel));
+
+    if (includeExtendedStatus) {
+        if (snap.logicalBytes > 0)
+            setVal(metrics::kStorageLogicalBytes, static_cast<size_t>(snap.logicalBytes));
+        if (snap.physicalBytes > 0)
+            setVal(metrics::kStoragePhysicalBytes, static_cast<size_t>(snap.physicalBytes));
+        if (snap.storeObjects > 0)
+            setVal(metrics::kStorageDocuments, static_cast<size_t>(snap.storeObjects));
+        if (snap.logicalBytes > 0 && snap.physicalBytes > 0) {
+            std::uint64_t saved = (snap.logicalBytes > snap.physicalBytes)
+                                      ? (snap.logicalBytes - snap.physicalBytes)
+                                      : 0ULL;
+            setVal(metrics::kStorageSavedBytes, static_cast<size_t>(saved));
+            std::uint64_t pct = snap.logicalBytes ? (saved * 100ULL) / snap.logicalBytes : 0ULL;
+            setVal(metrics::kStorageSavedPct, static_cast<size_t>(pct));
+        } else {
+            res.requestCounts.erase(std::string(metrics::kStorageSavedBytes));
+            res.requestCounts.erase(std::string(metrics::kStorageSavedPct));
+        }
+        if (snap.casPhysicalBytes > 0)
+            setVal(metrics::kCasPhysicalBytes, static_cast<size_t>(snap.casPhysicalBytes));
+        if (snap.casUniqueRawBytes > 0)
+            setVal(metrics::kCasUniqueRawBytes, static_cast<size_t>(snap.casUniqueRawBytes));
+        if (snap.casDedupSavedBytes > 0)
+            setVal(metrics::kCasDedupSavedBytes, static_cast<size_t>(snap.casDedupSavedBytes));
+        if (snap.casCompressSavedBytes > 0)
+            setVal(metrics::kCasCompressSavedBytes,
+                   static_cast<size_t>(snap.casCompressSavedBytes));
+        if (snap.metadataPhysicalBytes > 0)
+            setVal(metrics::kMetadataPhysicalBytes,
+                   static_cast<size_t>(snap.metadataPhysicalBytes));
+        if (snap.indexPhysicalBytes > 0)
+            setVal(metrics::kIndexPhysicalBytes, static_cast<size_t>(snap.indexPhysicalBytes));
+        if (snap.vectorPhysicalBytes > 0)
+            setVal(metrics::kVectorPhysicalBytes, static_cast<size_t>(snap.vectorPhysicalBytes));
+        if (snap.logsTmpPhysicalBytes > 0)
+            setVal(metrics::kLogsTmpPhysicalBytes, static_cast<size_t>(snap.logsTmpPhysicalBytes));
+        if (snap.physicalTotalBytes > 0)
+            setVal(metrics::kPhysicalTotalBytes, static_cast<size_t>(snap.physicalTotalBytes));
+    }
+
+    setVal(metrics::kDbWritePoolWaitingRequests, snap.dbWritePoolWaitingRequests);
+    setVal(metrics::kDbReadPoolWaitingRequests, snap.dbReadPoolWaitingRequests);
+    if (includeExtendedStatus) {
+        setVal(metrics::kDbWritePoolAvailable, snap.dbWritePoolAvailable ? 1 : 0);
+        setVal(metrics::kDbWritePoolTotalConnections, snap.dbWritePoolTotalConnections);
+        setVal(metrics::kDbWritePoolAvailableConnections, snap.dbWritePoolAvailableConnections);
+        setVal(metrics::kDbWritePoolActiveConnections, snap.dbWritePoolActiveConnections);
+        setVal(metrics::kDbWritePoolMaxObservedWaiting, snap.dbWritePoolMaxObservedWaiting);
+        setVal(metrics::kDbWritePoolTotalWaitMicros,
+               static_cast<size_t>(snap.dbWritePoolTotalWaitMicros));
+        setVal(metrics::kDbWritePoolTimeoutCount, snap.dbWritePoolTimeoutCount);
+        setVal(metrics::kDbWritePoolFailedAcquisitions, snap.dbWritePoolFailedAcquisitions);
+        setVal(metrics::kDbReadPoolAvailable, snap.dbReadPoolAvailable ? 1 : 0);
+        setVal(metrics::kDbReadPoolTotalConnections, snap.dbReadPoolTotalConnections);
+        setVal(metrics::kDbReadPoolAvailableConnections, snap.dbReadPoolAvailableConnections);
+        setVal(metrics::kDbReadPoolActiveConnections, snap.dbReadPoolActiveConnections);
+        setVal(metrics::kDbReadPoolMaxObservedWaiting, snap.dbReadPoolMaxObservedWaiting);
+        setVal(metrics::kDbReadPoolTotalWaitMicros,
+               static_cast<size_t>(snap.dbReadPoolTotalWaitMicros));
+        setVal(metrics::kDbReadPoolTimeoutCount, snap.dbReadPoolTimeoutCount);
+        setVal(metrics::kDbReadPoolFailedAcquisitions, snap.dbReadPoolFailedAcquisitions);
+    }
+
+    setVal(metrics::kDocumentsTotal, static_cast<size_t>(snap.documentsTotal));
+    if (includeExtendedStatus) {
+        setVal(metrics::kDocumentsIndexed, static_cast<size_t>(snap.documentsIndexed));
+        setVal(metrics::kDocumentsContentExtracted,
+               static_cast<size_t>(snap.documentsContentExtracted));
+        setVal(metrics::kDocumentsEmbedded, static_cast<size_t>(snap.documentsEmbedded));
+        setVal(metrics::kVectorCount, static_cast<size_t>(snap.vectorRowsExact));
+        setVal(metrics::kIndexVisible, (snap.documentsIndexed > 0) ? 1 : 0);
+        if (serviceManager) {
+            setVal(metrics::kSnapshotPersisted,
+                   static_cast<size_t>(serviceManager->getSnapshotsPersistedCount()));
+        }
+    }
+}
+
+void populateStatusFromSnapshot(StatusResponse& res, const MetricsSnapshot& snap,
+                                bool includeExtendedStatus, const ServiceManager* serviceManager,
+                                const StateComponent* state) {
+    res.retryAfterMs = computeSnapshotRetryAfter(snap, includeExtendedStatus);
+    populateStatusCoreFromSnapshot(res, snap);
+    populateStatusCountsFromSnapshot(res, snap, includeExtendedStatus, serviceManager, state);
+}
+
+} // namespace
+
 boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const StatusRequest& req) {
     // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
@@ -40,514 +469,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.overallStatus = "initializing";
                 co_return res;
             }
-            const bool snapshotBusy =
-                req.detailed ? snap->statusDetailStale : snap->statusSnapshotStale;
-            if (snapshotBusy) {
-                res.retryAfterMs = std::max<uint32_t>(
-                    100u, req.detailed ? static_cast<uint32_t>(std::min<std::uint64_t>(
-                                             snap->statusDetailAgeMs, 1000ULL))
-                                       : static_cast<uint32_t>(std::min<std::uint64_t>(
-                                             snap->statusSnapshotAgeMs, 1000ULL)));
-            }
-            res.running = snap->running;
-            res.version = snap->version;
-            res.uptimeSeconds = snap->uptimeSeconds;
-            res.requestsProcessed = snap->requestsProcessed;
-            res.activeConnections = snap->activeConnections;
-            res.maxConnections = snap->maxConnections;
-            res.connectionSlotsFree = snap->connectionSlotsFree;
-            res.oldestConnectionAge = snap->oldestConnectionAge;
-            res.forcedCloseCount = snap->forcedCloseCount;
-            res.proxyActiveConnections = snap->proxyActiveConnections;
-            res.proxySocketPath = snap->proxySocketPath;
-            res.memoryUsageMb = snap->memoryUsageMb;
-            res.cpuUsagePercent = snap->cpuUsagePercent;
-            // Resolved via DaemonMetrics: ready reflects lifecycle readiness
-            res.ready = snap->ready;
-            res.overallStatus = snap->overallStatus;   // normalized lowercase
-            res.lifecycleState = snap->lifecycleState; // normalized lowercase
-            res.lastError = snap->lastError;
-            res.fsmTransitions = snap->fsmTransitions;
-            res.fsmHeaderReads = snap->fsmHeaderReads;
-            res.fsmPayloadReads = snap->fsmPayloadReads;
-            res.fsmPayloadWrites = snap->fsmPayloadWrites;
-            res.fsmBytesSent = snap->fsmBytesSent;
-            res.fsmBytesReceived = snap->fsmBytesReceived;
-            res.muxActiveHandlers = snap->muxActiveHandlers;
-            res.muxQueuedBytes = snap->muxQueuedBytes;
-            res.muxWriterBudgetBytes = snap->muxWriterBudgetBytes;
-            // Pool sizes via FSM metrics (in DaemonMetrics snapshot)
-            res.ipcPoolSize = snap->ipcPoolSize;
-            res.ioPoolSize = snap->ioPoolSize;
-            // Vector DB snapshot (best-effort)
-            res.vectorDbInitAttempted = snap->vectorDbInitAttempted;
-            res.vectorDbReady = snap->vectorDbReady;
-            res.vectorDbDim = snap->vectorDbDim;
-            res.readinessStates[std::string(readiness::kVectorDbInitAttempted)] =
-                res.vectorDbInitAttempted;
-            res.readinessStates[std::string(readiness::kVectorDbReady)] = res.vectorDbReady;
-            res.readinessStates[std::string(readiness::kVectorDbDim)] = (res.vectorDbDim > 0);
-            // Embedding runtime details (best-effort)
-            res.embeddingAvailable = snap->embeddingAvailable;
-            res.embeddingBackend = snap->embeddingBackend;
-            res.embeddingModel = snap->embeddingModel;
-            res.embeddingModelPath = snap->embeddingModelPath;
-            res.embeddingDim = snap->embeddingDim;
-            res.dataDir = snap->dataDir;
-            res.metadataDbPath = snap->metadataDbPath;
-            res.vectorDbPath = snap->vectorDbPath;
-            // Vector diagnostics (from background snapshot - no blocking)
-            // Helpers to reduce binary bloat from repeated std::string construction
-            auto setVal = [&](std::string_view key, size_t val) {
-                res.requestCounts.emplace(key, val);
-            };
-            auto setReady = [&](std::string_view key, bool val) {
-                res.readinessStates.emplace(key, val);
-            };
-
-            setReady(readiness::kVectorEmbeddingsAvailable, snap->vectorEmbeddingsAvailable);
-            setReady(readiness::kVectorScoringEnabled, snap->vectorScoringEnabled);
-            setVal(metrics::kVectorEmbeddingsAvailable, snap->vectorEmbeddingsAvailable ? 1 : 0);
-            setVal(metrics::kVectorScoringEnabled, snap->vectorScoringEnabled ? 1 : 0);
-
-            setReady(readiness::kSearchEngineBuildReasonInitial,
-                     snap->searchEngineBuildReason == "initial");
-            setReady(readiness::kSearchEngineBuildReasonRebuild,
-                     snap->searchEngineBuildReason == "rebuild");
-            setReady(readiness::kSearchEngineBuildReasonDegraded,
-                     snap->searchEngineBuildReason == "degraded");
-
-            setVal(metrics::kWorkerThreads, snap->workerThreads);
-            setVal(metrics::kWorkerActive, snap->workerActive);
-            setVal(metrics::kWorkerQueued, snap->workerQueued);
-            setVal(metrics::kPostIngestThreads, snap->postIngestThreads);
-            setVal(metrics::kPostIngestQueued, snap->postIngestQueued);
-            setVal(metrics::kPostIngestRpcQueued, snap->postIngestRpcQueued);
-
-            res.searchMetrics.active = snap->searchActive;
-            res.searchMetrics.queued = snap->searchQueued;
-            res.searchMetrics.executed = snap->searchExecuted;
-            res.searchMetrics.cacheHitRate = snap->searchCacheHitRate;
-            res.searchMetrics.avgLatencyUs = snap->searchAvgLatencyUs;
-            res.searchMetrics.concurrencyLimit = snap->searchConcurrencyLimit;
-
-            setVal(metrics::kSearchActive, snap->searchActive);
-            setVal(metrics::kSearchQueued, snap->searchQueued);
-            setVal(metrics::kSearchExecuted, static_cast<size_t>(snap->searchExecuted));
-            setVal(metrics::kSearchCacheHitRatePct,
-                   static_cast<size_t>(snap->searchCacheHitRate * 100.0));
-            setVal(metrics::kSearchAvgLatencyUs, static_cast<size_t>(snap->searchAvgLatencyUs));
-            setVal(metrics::kSearchConcurrencyLimit, snap->searchConcurrencyLimit);
-            setVal(metrics::kSearchRejected, static_cast<size_t>(snap->searchRejected));
-            setVal(metrics::kListActive, static_cast<size_t>(snap->listActive));
-            setVal(metrics::kListRejected, static_cast<size_t>(snap->listRejected));
-            setVal(metrics::kGrepActive, static_cast<size_t>(snap->grepActive));
-            setVal(metrics::kGrepRejected, static_cast<size_t>(snap->grepRejected));
-            setVal(metrics::kAddDeferred, static_cast<size_t>(snap->addDeferred));
-            setVal(metrics::kAddRejected, static_cast<size_t>(snap->addRejected));
-
-            // PBI-040, task 040-1: Expose queue depth for FTS5 readiness checks
-            res.postIngestQueueDepth = static_cast<uint32_t>(snap->postIngestQueued);
-
-            // Deferred ingestion queue depth (adds queued under memory pressure)
-            setVal(metrics::kDeferredQueueDepth, snap->deferredQueueDepth);
-            setVal(metrics::kPostIngestInflight, snap->postIngestInflight);
-            setVal(metrics::kPostIngestCapacity, snap->postIngestCapacity);
-            setVal(metrics::kPostIngestDrained,
-                   (snap->postIngestQueued == 0 && snap->postIngestInflight == 0) ? 1 : 0);
-
-            // KG backpressure observability
-            setVal(metrics::kPostIngestBackpressureRejects,
-                   static_cast<size_t>(snap->postIngestBackpressureRejects));
-
-            if (snap->kgJobsCapacity > 0) {
-                setVal(metrics::kKgQueueDepth, snap->kgJobsDepth);
-                setVal(metrics::kKgJobsCapacity, snap->kgJobsCapacity);
-                setVal(metrics::kKgJobsFillPct,
-                       static_cast<size_t>(std::clamp(snap->kgJobsFillRatio * 100.0, 0.0, 100.0)));
-            }
-
-            setVal(metrics::kPostIngestRpcCapacity, snap->postIngestRpcCapacity);
-            setVal(metrics::kPostIngestRpcMaxPerBatch, snap->postIngestRpcMaxPerBatch);
-
-            // FSM-derived readiness and state codes are authoritative for every client —
-            // hoist them above the extended-status gate so compact responses carry the
-            // correct embedding_ready / plugins_ready values instead of defaulting to false.
-            try {
-                if (serviceManager_) {
-                    try {
-                        auto ss = serviceManager_->getServiceManagerFsmSnapshot();
-                        setVal(metrics::kServiceFsmState, static_cast<size_t>(ss.state));
-                    } catch (...) {
-                    }
-                    try {
-                        auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
-                        const bool providerReady =
-                            state_ &&
-                            state_->readiness.modelProviderReady.load(std::memory_order_relaxed);
-                        const bool embeddingOperational =
-                            (es.state == EmbeddingProviderState::ModelReady) ||
-                            ((snap->embeddingAvailable || providerReady) &&
-                             es.state != EmbeddingProviderState::Failed);
-                        setVal(metrics::kEmbeddingState, static_cast<size_t>(es.state));
-                        setReady(readiness::kEmbeddingReady, embeddingOperational);
-                        setReady(readiness::kEmbeddingDegraded,
-                                 es.state == EmbeddingProviderState::Degraded ||
-                                     es.state == EmbeddingProviderState::Failed);
-                    } catch (...) {
-                    }
-                    try {
-                        auto ps = serviceManager_->getPluginHostFsmSnapshot();
-                        const bool pluginsOperational =
-                            (ps.state == PluginHostState::Ready) ||
-                            (((ps.loadedCount > 0) ||
-                              (state_ &&
-                               state_->readiness.pluginsReady.load(std::memory_order_relaxed))) &&
-                             ps.state != PluginHostState::Failed);
-                        setVal(metrics::kPluginHostState, static_cast<size_t>(ps.state));
-                        setReady(readiness::kPluginsReady, pluginsOperational);
-                        setReady(readiness::kPluginsDegraded, ps.state == PluginHostState::Failed);
-                    } catch (...) {
-                    }
-                }
-            } catch (...) {
-            }
-
-            // Export selected tuning/config diagnostics only for detailed status to keep the
-            // default UX path lean. Benchmarks and clients still get the core cached metrics
-            // above without paying for extra live queries and payload bloat.
-            if (includeExtendedStatus) {
-                try {
-                    if (serviceManager_) {
-                        // EmbeddingService metrics (jobs currently being processed)
-                        try {
-                            setVal(metrics::kEmbedInflight,
-                                   serviceManager_->getEmbeddingInFlightJobs());
-                            setVal(metrics::kEmbedQueued,
-                                   serviceManager_->getEmbeddingQueuedJobs());
-                            setVal(metrics::kEmbedInferActive,
-                                   serviceManager_->getEmbeddingActiveInferSubBatches());
-                            setVal(metrics::kEmbedInferOldestMs,
-                                   serviceManager_->getEmbeddingInferOldestMs());
-                            setVal(metrics::kEmbedInferStarted,
-                                   serviceManager_->getEmbeddingInferStartedCount());
-                            setVal(metrics::kEmbedInferCompleted,
-                                   serviceManager_->getEmbeddingInferCompletedCount());
-                            setVal(metrics::kEmbedInferLastMs,
-                                   serviceManager_->getEmbeddingInferLastMs());
-                            setVal(metrics::kEmbedInferMaxMs,
-                                   serviceManager_->getEmbeddingInferMaxMs());
-                            setVal(metrics::kEmbedInferWarnCount,
-                                   serviceManager_->getEmbeddingInferWarnCount());
-                        } catch (...) {
-                        }
-                        const auto& tc = serviceManager_->getConfig().tuning;
-                        setVal(metrics::kTuningPostIngestCapacity, tc.postIngestCapacity);
-                        setVal(metrics::kTuningPostIngestThreadsMin, tc.postIngestThreadsMin);
-                        setVal(metrics::kTuningPostIngestThreadsMax, tc.postIngestThreadsMax);
-                        setVal(metrics::kTuningAdmitWarnThreshold, tc.admitWarnThreshold);
-                        setVal(metrics::kTuningAdmitStopThreshold, tc.admitStopThreshold);
-                    }
-                } catch (...) {
-                }
-            }
-
-            // WorkCoordinator metrics come from the cached snapshot and are cheap enough to
-            // preserve in the default status path.
-            try {
-                if (serviceManager_) {
-                    // Surface FSM states as numeric codes in requestCounts, and booleans in
-                    setVal(metrics::kWorkCoordinatorActive, snap->workCoordinatorActiveWorkers);
-                    setVal(metrics::kWorkCoordinatorRunning, snap->workCoordinatorRunning ? 1 : 0);
-                }
-            } catch (...) {
-            }
-
-            setVal(metrics::kRepairRunning, snap->repairRunning ? 1 : 0);
-            setVal(metrics::kRepairInProgress, snap->repairInProgress ? 1 : 0);
-            setVal(metrics::kRepairQueueDepth, snap->repairQueueDepth);
-            setVal(metrics::kRepairFailedOperations, snap->repairFailedOperations);
-
-            if (includeExtendedStatus) {
-                setVal(metrics::kPostIngestProcessed, snap->postIngestProcessed);
-                setVal(metrics::kPostIngestFailed, snap->postIngestFailed);
-                setVal(metrics::kPostIngestLatencyEma,
-                       static_cast<size_t>(snap->postIngestLatencyMsEma));
-                setVal(metrics::kPostIngestRateEma,
-                       static_cast<size_t>(snap->postIngestRateSecEma));
-
-                setVal(metrics::kExtractionInflight, snap->extractionInFlight);
-
-                setVal(metrics::kKgQueued, snap->kgQueued);
-                setVal(metrics::kKgDropped, snap->kgDropped);
-                setVal(metrics::kKgConsumed, snap->kgConsumed);
-                setVal(metrics::kKgInflight, snap->kgInFlight);
-                setVal(metrics::kKgQueueDepth, snap->kgQueueDepth);
-
-                setVal(metrics::kSymbolInflight, snap->symbolInFlight);
-                setVal(metrics::kSymbolQueueDepth, snap->symbolQueueDepth);
-
-                // Entity extraction metrics (external plugins like Ghidra)
-                setVal(metrics::kEntityQueued, snap->entityQueued);
-                setVal(metrics::kEntityDropped, snap->entityDropped);
-                setVal(metrics::kEntityConsumed, snap->entityConsumed);
-                setVal(metrics::kEntityInflight, snap->entityInFlight);
-                setVal(metrics::kEntityQueueDepth, snap->entityQueueDepth);
-
-                setVal(metrics::kTitleQueueDepth, snap->titleQueueDepth);
-                setVal(metrics::kTitleInflight, snap->titleInFlight);
-                setVal(metrics::kPostTitleLimit, snap->titleConcurrencyLimit);
-                setVal(metrics::kTitleQueued, snap->titleQueued);
-                setVal(metrics::kTitleDropped, snap->titleDropped);
-                setVal(metrics::kTitleConsumed, snap->titleConsumed);
-
-                // FTS5 indexing metrics
-                setVal(metrics::kFts5Queued, snap->fts5Queued);
-                setVal(metrics::kFts5Dropped, snap->fts5Dropped);
-                setVal(metrics::kFts5Consumed, snap->fts5Consumed);
-
-                // Symbol extraction metrics
-                setVal(metrics::kSymbolQueued, snap->symbolQueued);
-                setVal(metrics::kSymbolDropped, snap->symbolDropped);
-                setVal(metrics::kSymbolConsumed, snap->symbolConsumed);
-
-                // Stream metrics
-                setVal(metrics::kStreamTotal, snap->streamTotal);
-                setVal(metrics::kStreamBatches, snap->streamBatches);
-                setVal(metrics::kStreamKeepalives, snap->streamKeepalives);
-                setVal(metrics::kStreamTtfbAvgMs, snap->streamTtfbAvgMs);
-
-                // Repair service metrics
-                setVal(metrics::kRepairQueueDepth, snap->repairQueueDepth);
-                setVal(metrics::kRepairBatchesAttempted, snap->repairBatchesAttempted);
-                setVal(metrics::kRepairEmbeddingsGenerated, snap->repairEmbeddingsGenerated);
-                setVal(metrics::kRepairEmbeddingsSkipped, snap->repairEmbeddingsSkipped);
-                setVal(metrics::kRepairFailedOperations, snap->repairFailedOperations);
-                setVal(metrics::kRepairIdleTicks, snap->repairIdleTicks);
-                setVal(metrics::kRepairBusyTicks, snap->repairBusyTicks);
-                setVal(metrics::kRepairTotalBacklog, snap->repairTotalBacklog);
-                setVal(metrics::kRepairProcessed, snap->repairProcessed);
-                setVal(metrics::kRepairRunning, snap->repairRunning ? 1 : 0);
-                setVal(metrics::kRepairInProgress, snap->repairInProgress ? 1 : 0);
-
-                // Topology rebuild telemetry. These are operational/background states,
-                // not core readiness gates, so publish them as metrics only.
-                setVal(metrics::kTopologyRebuildRunning, snap->topologyRebuildRunning ? 1 : 0);
-                setVal(metrics::kTopologyDirtyDocuments,
-                       static_cast<size_t>(snap->topologyDirtyDocuments));
-                setVal(metrics::kTopologyLastSuccessAgeMs,
-                       static_cast<size_t>(snap->topologyLastSuccessAgeMs));
-                setVal(metrics::kTopologyRebuildLagMs,
-                       static_cast<size_t>(snap->topologyRebuildLagMs));
-                setVal(metrics::kTopologyRebuildRunningAgeMs,
-                       static_cast<size_t>(snap->topologyRebuildRunningAgeMs));
-                setVal(metrics::kTopologyLastDurationMs,
-                       static_cast<size_t>(snap->topologyLastDurationMs));
-                setVal(metrics::kTopologyRebuildsTotal,
-                       static_cast<size_t>(snap->topologyRebuildsTotal));
-                setVal(metrics::kTopologyRebuildFailuresTotal,
-                       static_cast<size_t>(snap->topologyRebuildFailuresTotal));
-                setVal(metrics::kTopologyLastDocumentsRequested,
-                       static_cast<size_t>(snap->topologyLastDocumentsRequested));
-                setVal(metrics::kTopologyLastDocumentsProcessed,
-                       static_cast<size_t>(snap->topologyLastDocumentsProcessed));
-                setVal(metrics::kTopologyLastClustersBuilt,
-                       static_cast<size_t>(snap->topologyLastClustersBuilt));
-                setVal(metrics::kTopologyLastMembershipsBuilt,
-                       static_cast<size_t>(snap->topologyLastMembershipsBuilt));
-                setVal(metrics::kTopologyLastDirtySeedCount,
-                       static_cast<size_t>(snap->topologyLastDirtySeedCount));
-                setVal(metrics::kTopologyLastDirtyRegionDocs,
-                       static_cast<size_t>(snap->topologyLastDirtyRegionDocs));
-                setVal(metrics::kTopologyLastCoalescedDirtySets,
-                       static_cast<size_t>(snap->topologyLastCoalescedDirtySets));
-                setVal(metrics::kTopologyLastFallbackFullRebuilds,
-                       static_cast<size_t>(snap->topologyLastFallbackFullRebuilds));
-
-                // File/directory add tracking
-                setVal(metrics::kFilesAdded, static_cast<size_t>(snap->filesAdded));
-                setVal(metrics::kDirectoriesAdded, static_cast<size_t>(snap->directoriesAdded));
-                setVal(metrics::kFilesProcessed, static_cast<size_t>(snap->filesProcessed));
-                setVal(metrics::kDirectoriesProcessed,
-                       static_cast<size_t>(snap->directoriesProcessed));
-
-                // Dynamic concurrency limits (PBI-05a)
-                setVal(metrics::kPostExtractionLimit, snap->postExtractionLimit);
-                setVal(metrics::kPostKgLimit, snap->postKgLimit);
-                setVal(metrics::kPostSymbolLimit, snap->postSymbolLimit);
-                setVal(metrics::kPostEntityLimit, snap->postEntityLimit);
-                // Combined enrich (symbol+entity+title) metrics
-                setVal(metrics::kPostEnrichLimit, snap->postEnrichLimit);
-                setVal(metrics::kEnrichInflight, snap->enrichInflight);
-                setVal(metrics::kEnrichQueueDepth, snap->enrichQueueDepth);
-
-                // Surface whether the InternalEventBus is being used for post-ingest
-                try {
-                    setVal(metrics::kPostIngestUseBus,
-                           yams::daemon::TuneAdvisor::useInternalBusForPostIngest() ? 1 : 0);
-                } catch (...) {
-                }
-                setVal(metrics::kPostEmbedLimit, snap->postEmbedLimit);
-
-                // Internal bus metrics
-                try {
-                    auto& bus = InternalEventBus::instance();
-                    setVal(metrics::kBusEmbedQueued, bus.embedQueued());
-                    setVal(metrics::kBusEmbedConsumed, bus.embedConsumed());
-                    setVal(metrics::kBusEmbedDropped, bus.embedDropped());
-                    setVal(metrics::kBusEmbedPreparedDocsQueued, bus.embedPreparedDocsQueued());
-                    setVal(metrics::kBusEmbedPreparedChunksQueued, bus.embedPreparedChunksQueued());
-                    setVal(metrics::kBusEmbedHashOnlyDocsQueued, bus.embedHashOnlyDocsQueued());
-                    setVal(metrics::kBusPostQueued, bus.postQueued());
-                    setVal(metrics::kBusPostConsumed, bus.postConsumed());
-                    setVal(metrics::kBusPostDropped, bus.postDropped());
-                } catch (...) {
-                }
-
-                // Session watch status
-                setVal(metrics::kWatchEnabled, snap->watchEnabled ? 1 : 0);
-                if (snap->watchIntervalMs > 0) {
-                    setVal(metrics::kWatchIntervalMs, snap->watchIntervalMs);
-                }
-            }
-            res.retryAfterMs = std::max(res.retryAfterMs, snap->retryAfterMs);
-            setVal("status_snapshot_age_ms", static_cast<size_t>(snap->statusSnapshotAgeMs));
-            setVal("status_snapshot_stale", snap->statusSnapshotStale ? 1U : 0U);
-            setVal("status_detail_age_ms", static_cast<size_t>(snap->statusDetailAgeMs));
-            setVal("status_detail_stale", snap->statusDetailStale ? 1U : 0U);
-            setVal("status_detail_available", snap->statusDetailAvailable ? 1U : 0U);
-            for (const auto& [k, v] : snap->readinessStates)
-                res.readinessStates[k] = v;
-            for (const auto& [k, v] : snap->initProgress)
-                res.initProgress[k] = v;
-
-            if (includeExtendedStatus) {
-                // Content store diagnostics
-                res.dataDir = snap->dataDir;
-                res.contentStoreRoot = snap->contentStoreRoot;
-                res.contentStoreError = snap->contentStoreError;
-                // Search tuning state (from SearchTuner FSM - epic yams-7ez4)
-                res.searchTuningState = snap->searchTuningState;
-                res.searchTuningReason = snap->searchTuningReason;
-                res.searchTuningParams = snap->searchTuningParams;
-            }
-            // ResourceGovernor metrics (memory pressure management)
-            res.governorRssBytes = snap->governorRssBytes;
-            res.governorBudgetBytes = snap->governorBudgetBytes;
-            res.governorPressureLevel = snap->governorPressureLevel;
-            res.governorHeadroomPct = snap->governorHeadroomPct;
-            setVal(metrics::kPressureLevel, static_cast<size_t>(snap->governorPressureLevel));
-
-            // ONNX concurrency metrics
-            res.onnxTotalSlots = snap->onnxTotalSlots;
-            res.onnxUsedSlots = snap->onnxUsedSlots;
-            res.onnxGlinerUsed = snap->onnxGlinerUsed;
-            res.onnxEmbedUsed = snap->onnxEmbedUsed;
-            res.onnxRerankerUsed = snap->onnxRerankerUsed;
-
-            if (includeExtendedStatus) {
-                // Storage size summary (exposed via requestCounts for backwards compatible clients)
-                if (snap->logicalBytes > 0)
-                    setVal(metrics::kStorageLogicalBytes, static_cast<size_t>(snap->logicalBytes));
-                if (snap->physicalBytes > 0)
-                    setVal(metrics::kStoragePhysicalBytes,
-                           static_cast<size_t>(snap->physicalBytes));
-                if (snap->storeObjects > 0)
-                    setVal(metrics::kStorageDocuments, static_cast<size_t>(snap->storeObjects));
-
-                if (snap->logicalBytes > 0 && snap->physicalBytes > 0) {
-                    std::uint64_t saved = (snap->logicalBytes > snap->physicalBytes)
-                                              ? (snap->logicalBytes - snap->physicalBytes)
-                                              : 0ULL;
-                    setVal(metrics::kStorageSavedBytes, static_cast<size_t>(saved));
-                    std::uint64_t pct =
-                        snap->logicalBytes ? (saved * 100ULL) / snap->logicalBytes : 0ULL;
-                    setVal(metrics::kStorageSavedPct, static_cast<size_t>(pct));
-                } else {
-                    // Avoid signaling 100% savings when physical is unknown
-                    res.requestCounts.erase(std::string(metrics::kStorageSavedBytes));
-                    res.requestCounts.erase(std::string(metrics::kStorageSavedPct));
-                }
-            }
-
-            // New: detailed storage breakdown (when available)
-            if (includeExtendedStatus) {
-                if (snap->casPhysicalBytes > 0)
-                    setVal(metrics::kCasPhysicalBytes, static_cast<size_t>(snap->casPhysicalBytes));
-                if (snap->casUniqueRawBytes > 0)
-                    setVal(metrics::kCasUniqueRawBytes,
-                           static_cast<size_t>(snap->casUniqueRawBytes));
-                if (snap->casDedupSavedBytes > 0)
-                    setVal(metrics::kCasDedupSavedBytes,
-                           static_cast<size_t>(snap->casDedupSavedBytes));
-                if (snap->casCompressSavedBytes > 0)
-                    setVal(metrics::kCasCompressSavedBytes,
-                           static_cast<size_t>(snap->casCompressSavedBytes));
-                if (snap->metadataPhysicalBytes > 0)
-                    setVal(metrics::kMetadataPhysicalBytes,
-                           static_cast<size_t>(snap->metadataPhysicalBytes));
-                if (snap->indexPhysicalBytes > 0)
-                    setVal(metrics::kIndexPhysicalBytes,
-                           static_cast<size_t>(snap->indexPhysicalBytes));
-                if (snap->vectorPhysicalBytes > 0)
-                    setVal(metrics::kVectorPhysicalBytes,
-                           static_cast<size_t>(snap->vectorPhysicalBytes));
-                if (snap->logsTmpPhysicalBytes > 0)
-                    setVal(metrics::kLogsTmpPhysicalBytes,
-                           static_cast<size_t>(snap->logsTmpPhysicalBytes));
-                if (snap->physicalTotalBytes > 0)
-                    setVal(metrics::kPhysicalTotalBytes,
-                           static_cast<size_t>(snap->physicalTotalBytes));
-            }
-
-            setVal(metrics::kDbWritePoolWaitingRequests, snap->dbWritePoolWaitingRequests);
-            setVal(metrics::kDbReadPoolWaitingRequests, snap->dbReadPoolWaitingRequests);
-            if (includeExtendedStatus) {
-                // Route-separated DB pool telemetry for contention attribution
-                setVal(metrics::kDbWritePoolAvailable, snap->dbWritePoolAvailable ? 1 : 0);
-                setVal(metrics::kDbWritePoolTotalConnections, snap->dbWritePoolTotalConnections);
-                setVal(metrics::kDbWritePoolAvailableConnections,
-                       snap->dbWritePoolAvailableConnections);
-                setVal(metrics::kDbWritePoolActiveConnections, snap->dbWritePoolActiveConnections);
-                setVal(metrics::kDbWritePoolMaxObservedWaiting,
-                       snap->dbWritePoolMaxObservedWaiting);
-                setVal(metrics::kDbWritePoolTotalWaitMicros,
-                       static_cast<size_t>(snap->dbWritePoolTotalWaitMicros));
-                setVal(metrics::kDbWritePoolTimeoutCount, snap->dbWritePoolTimeoutCount);
-                setVal(metrics::kDbWritePoolFailedAcquisitions,
-                       snap->dbWritePoolFailedAcquisitions);
-
-                setVal(metrics::kDbReadPoolAvailable, snap->dbReadPoolAvailable ? 1 : 0);
-                setVal(metrics::kDbReadPoolTotalConnections, snap->dbReadPoolTotalConnections);
-                setVal(metrics::kDbReadPoolAvailableConnections,
-                       snap->dbReadPoolAvailableConnections);
-                setVal(metrics::kDbReadPoolActiveConnections, snap->dbReadPoolActiveConnections);
-                setVal(metrics::kDbReadPoolMaxObservedWaiting, snap->dbReadPoolMaxObservedWaiting);
-                setVal(metrics::kDbReadPoolTotalWaitMicros,
-                       static_cast<size_t>(snap->dbReadPoolTotalWaitMicros));
-                setVal(metrics::kDbReadPoolTimeoutCount, snap->dbReadPoolTimeoutCount);
-                setVal(metrics::kDbReadPoolFailedAcquisitions, snap->dbReadPoolFailedAcquisitions);
-            }
-
-            // Document/vector counters from cached metrics (no live DB queries on hot path!).
-            // Always include these keys, even when 0, so clients/benchmarks can distinguish
-            // "zero" from "missing" and avoid fragile presence checks.
-            setVal(metrics::kDocumentsTotal, static_cast<size_t>(snap->documentsTotal));
-            if (includeExtendedStatus) {
-                setVal(metrics::kDocumentsIndexed, static_cast<size_t>(snap->documentsIndexed));
-                setVal(metrics::kDocumentsContentExtracted,
-                       static_cast<size_t>(snap->documentsContentExtracted));
-                setVal(metrics::kDocumentsEmbedded, static_cast<size_t>(snap->documentsEmbedded));
-
-                // Vector count from cached metrics (for benchmarks/tools waiting for embeddings)
-                setVal(metrics::kVectorCount, static_cast<size_t>(snap->vectorRowsExact));
-                setVal(metrics::kIndexVisible, (snap->documentsIndexed > 0) ? 1 : 0);
-
-                if (serviceManager_) {
-                    setVal(metrics::kSnapshotPersisted,
-                           static_cast<size_t>(serviceManager_->getSnapshotsPersistedCount()));
-                }
-            }
+            populateStatusFromSnapshot(res, *snap, includeExtendedStatus, serviceManager_, state_);
         } else {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
             res.running = true;

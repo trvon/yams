@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
+#include <yams/crypto/hasher.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/graph_expansion.h>
 #include <yams/search/kg_scorer.h>
@@ -2779,7 +2780,37 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::size_t topologyWeakQuerySeedCount = 0;
             std::size_t topologyWeakQueryAddedDocs = 0;
             std::size_t topologyRoutingVariantSeedExtension = 0;
+            std::size_t topologyRoutedSeedCount = 0;
             bool topologyWeakQueryRoutingApplied = false;
+
+            std::string tier1HashFingerprint;
+            {
+                std::vector<std::string> tier1HashesSorted;
+                tier1HashesSorted.reserve(allComponentResults.size());
+                for (const auto& r : allComponentResults) {
+                    if (!r.documentHash.empty()) {
+                        tier1HashesSorted.push_back(r.documentHash);
+                    }
+                }
+                std::sort(tier1HashesSorted.begin(), tier1HashesSorted.end());
+                tier1HashesSorted.erase(
+                    std::unique(tier1HashesSorted.begin(), tier1HashesSorted.end()),
+                    tier1HashesSorted.end());
+                if (tier1HashesSorted.empty()) {
+                    tier1HashFingerprint = "empty";
+                } else {
+                    std::string joined;
+                    joined.reserve(tier1HashesSorted.size() * 65);
+                    for (const auto& h : tier1HashesSorted) {
+                        joined.append(h);
+                        joined.push_back('\n');
+                    }
+                    tier1HashFingerprint =
+                        yams::crypto::SHA256Hasher::hash(
+                            std::as_bytes(std::span<const char>(joined.data(), joined.size())))
+                            .substr(0, 16);
+                }
+            }
 
             // --- TIER 2: Vector search NARROWED to Tier 1 candidates ---
             // Always run vector search (never skip), but filter to Tier 1 candidates when
@@ -2868,6 +2899,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     response.debugStats["topology_epoch_mismatch"] = "1";
                 }
                 topologyWeakQuerySeedCount = tier1Candidates.size();
+                topologyRoutedSeedCount = topologyCandidates.size();
                 const auto candidateCountBeforeRouting = tier2Candidates.size();
                 for (const auto& hash : topologyCandidates) {
                     tier2Candidates.insert(hash);
@@ -2995,6 +3027,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 std::string(topologyRoutingVariantToString(workingConfig.topologyRoutingVariant));
             response.debugStats["topology_routing_variant_seed_extension"] =
                 std::to_string(topologyRoutingVariantSeedExtension);
+            response.debugStats["routed_seed_count"] = std::to_string(topologyRoutedSeedCount);
+            response.debugStats["tier1_hash_fingerprint"] = tier1HashFingerprint;
 
             if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_ &&
                 !hasVectorTierDimMismatch()) {

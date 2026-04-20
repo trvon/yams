@@ -32,6 +32,7 @@
 #include "beir_loader.h"
 #include "topology_topic_vocab.h"
 
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
@@ -458,7 +459,110 @@ struct QualityMetrics {
     double recallAtK = 0.0;
     double recallAt100 = 0.0;
     int numQueries = 0;
+    std::uint64_t routedSeedCountTotal = 0;
+    std::uint64_t routedSeedCountQueries = 0;
+    std::string tier1FingerprintJoined;
 };
+
+fs::path benchFixtureDir() {
+    if (const char* v = std::getenv("YAMS_BENCH_FIXTURE_DIR"); v && *v) {
+        return fs::path(v);
+    }
+    return {};
+}
+
+std::string fixtureKey(const FixtureConfig& cfg) {
+    std::string corpus = cfg.mode == FixtureMode::Beir ? cfg.beirDataset : "synthetic";
+    std::string backend = configUsesRealEmbeddings(cfg) ? "simeon" : "mock";
+    return corpus + "_" + backend;
+}
+
+bool copyRecursive(const fs::path& src, const fs::path& dst) {
+    std::error_code ec;
+    fs::create_directories(dst, ec);
+    if (ec) {
+        spdlog::warn("copyRecursive: create_directories({}) failed: {}", dst.string(),
+                     ec.message());
+        return false;
+    }
+    for (auto it = fs::recursive_directory_iterator(src, ec);
+         !ec && it != fs::recursive_directory_iterator(); ++it) {
+        const auto& entry = *it;
+        auto rel = fs::relative(entry.path(), src, ec);
+        if (ec) {
+            return false;
+        }
+        fs::path target = dst / rel;
+        if (entry.is_directory(ec)) {
+            fs::create_directories(target, ec);
+        } else if (entry.is_regular_file(ec)) {
+            fs::create_directories(target.parent_path(), ec);
+            fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing, ec);
+        }
+        if (ec) {
+            spdlog::warn("copyRecursive: copy {} -> {} failed: {}", entry.path().string(),
+                         target.string(), ec.message());
+            return false;
+        }
+    }
+    return !ec;
+}
+
+bool tryLoadBenchFixture(const FixtureConfig& cfg, const fs::path& targetDataDir) {
+    auto fxDir = benchFixtureDir();
+    if (fxDir.empty()) {
+        return false;
+    }
+    fs::path fxPath = fxDir / fixtureKey(cfg);
+    std::error_code ec;
+    if (!fs::exists(fxPath / "yams.db", ec)) {
+        return false;
+    }
+    if (!copyRecursive(fxPath, targetDataDir)) {
+        spdlog::warn("Bench fixture: copy {} -> {} failed; falling back to live ingest",
+                     fxPath.string(), targetDataDir.string());
+        return false;
+    }
+    fs::remove(targetDataDir / ".yams-lock", ec);
+    fs::remove(targetDataDir / "vectors.db.lock", ec);
+    fs::remove(targetDataDir / "vectors.lock", ec);
+    spdlog::info("Bench fixture loaded from {}", fxPath.string());
+    return true;
+}
+
+void saveBenchFixture(const FixtureConfig& cfg, const fs::path& sourceDataDir) {
+    auto fxDir = benchFixtureDir();
+    if (fxDir.empty()) {
+        return;
+    }
+    fs::path fxPath = fxDir / fixtureKey(cfg);
+    std::error_code ec;
+    if (fs::exists(fxPath / "yams.db", ec)) {
+        return;
+    }
+    fs::create_directories(fxPath, ec);
+    static const std::unordered_set<std::string> kExcludeEntries = {".yams-lock", "vectors.db.lock",
+                                                                    "vectors.lock"};
+    for (auto it = fs::recursive_directory_iterator(sourceDataDir, ec);
+         !ec && it != fs::recursive_directory_iterator(); ++it) {
+        const auto& entry = *it;
+        auto rel = fs::relative(entry.path(), sourceDataDir, ec);
+        if (ec) {
+            break;
+        }
+        if (kExcludeEntries.contains(rel.filename().string())) {
+            continue;
+        }
+        fs::path target = fxPath / rel;
+        if (entry.is_directory(ec)) {
+            fs::create_directories(target, ec);
+        } else if (entry.is_regular_file(ec)) {
+            fs::create_directories(target.parent_path(), ec);
+            fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing, ec);
+        }
+    }
+    spdlog::info("Bench fixture saved to {}", fxPath.string());
+}
 
 bool ingestFixtureMode(DaemonClient& client, const Fixture& fx, bool withEmbeddings) {
     for (const auto& d : fx.docs) {
@@ -690,6 +794,22 @@ double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
         return 0.0;
     }
     const auto& results = res.value().results;
+    if (accumulateTopK) {
+        const auto& stats = res.value().searchStats;
+        if (auto it = stats.find("routed_seed_count"); it != stats.end()) {
+            try {
+                acc.routedSeedCountTotal += std::stoull(it->second);
+                ++acc.routedSeedCountQueries;
+            } catch (...) {
+            }
+        }
+        if (auto it = stats.find("tier1_hash_fingerprint"); it != stats.end()) {
+            if (!acc.tier1FingerprintJoined.empty()) {
+                acc.tier1FingerprintJoined.push_back('|');
+            }
+            acc.tier1FingerprintJoined.append(it->second);
+        }
+    }
 
     int firstRelevantRank = -1;
     int numRelevantInTopK = 0;
@@ -762,6 +882,13 @@ QualityMetrics evaluate(DaemonClient& client, const Fixture& fx, const std::stri
     m.map /= m.numQueries;
     m.recallAtK /= m.numQueries;
     m.recallAt100 /= m.numQueries;
+    if (!m.tier1FingerprintJoined.empty()) {
+        const auto& joined = m.tier1FingerprintJoined;
+        m.tier1FingerprintJoined =
+            yams::crypto::SHA256Hasher::hash(
+                std::as_bytes(std::span<const char>(joined.data(), joined.size())))
+                .substr(0, 16);
+    }
     return m;
 }
 
@@ -828,6 +955,10 @@ struct CellOutcome {
     double giantClusterRatio = 0.0;
     double clusterSizeGini = 0.0;
     double avgIntraEdgeWeight = 0.0;
+    double routedSeedCountMean = 0.0;
+    std::uint64_t routedSeedCountTotal = 0;
+    std::uint64_t routedSeedCountQueries = 0;
+    std::string tier1HashFingerprint;
 };
 
 std::string computeCellIdentityFromEnv() {
@@ -974,6 +1105,10 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
             harnessOpts.configPath = configTomlPath;
         }
         DaemonHarness harness(harnessOpts);
+        const fs::path dataDir = harness.rootDir() / "data";
+        std::error_code ec_fx;
+        fs::create_directories(dataDir, ec_fx);
+        const bool fixtureLoaded = tryLoadBenchFixture(cfg, dataDir);
         if (!harness.start(kStartTimeout)) {
             outcome.fixtureStatus = "missing";
             return outcome;
@@ -999,16 +1134,20 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
         DaemonClient client(ccfg);
 
         const bool ingestWithEmbeddings = configUsesRealEmbeddings(cfg);
-        if (!ingestFixtureMode(client, fx, ingestWithEmbeddings)) {
-            outcome.fixtureStatus = "missing";
-            return outcome;
+        if (!fixtureLoaded) {
+            if (!ingestFixtureMode(client, fx, ingestWithEmbeddings)) {
+                outcome.fixtureStatus = "missing";
+                return outcome;
+            }
+        } else {
+            spdlog::info("Bench: skipping ingest (fixture loaded for {})", fixtureKey(cfg));
         }
 
         outcome.cellIdentityExpected = computeCellIdentityFromEnv();
         if (cfg.mode == FixtureMode::Beir) {
             auto* daemon = harness.daemon();
             auto* sm = daemon ? daemon->getServiceManager() : nullptr;
-            if (sm) {
+            if (sm && !fixtureLoaded) {
                 auto rebuilt = sm->rebuildSemanticNeighborGraph("bench_corpus_complete");
                 if (!rebuilt) {
                     spdlog::warn("Bench: corpus-wide semantic neighbor rebuild failed: {}",
@@ -1021,11 +1160,11 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
             outcome.topologySeeded =
                 runSyncTopologyRebuild(sm, outcome.cellIdentityExpected, outcome);
         } else {
-            outcome.topologySeeded = seedTopologyArtifacts(harness, fx);
-            // Run the sync rebuild whenever a topology engine override is supplied
-            // (Axis 8 requires engine selection to actually execute even at tier S
-            // / mock-embedding mode where seedTopologyArtifacts would otherwise be
-            // the terminal step). Real-embedding runs always rebuild.
+            if (!fixtureLoaded) {
+                outcome.topologySeeded = seedTopologyArtifacts(harness, fx);
+            } else {
+                outcome.topologySeeded = true;
+            }
             const bool requiresRebuild = cfg.useSimeonEmbeddings || !topologyConfig.empty();
             if (requiresRebuild) {
                 auto* daemon = harness.daemon();
@@ -1043,6 +1182,19 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
         const auto end = std::chrono::steady_clock::now();
         outcome.hybridEvalMs = std::chrono::duration<double, std::milli>(end - start).count();
         outcome.ok = outcome.metrics.numQueries > 0;
+        outcome.routedSeedCountTotal = outcome.metrics.routedSeedCountTotal;
+        outcome.routedSeedCountQueries = outcome.metrics.routedSeedCountQueries;
+        outcome.routedSeedCountMean =
+            outcome.metrics.routedSeedCountQueries > 0
+                ? static_cast<double>(outcome.metrics.routedSeedCountTotal) /
+                      static_cast<double>(outcome.metrics.routedSeedCountQueries)
+                : 0.0;
+        outcome.tier1HashFingerprint = outcome.metrics.tier1FingerprintJoined;
+
+        if (!fixtureLoaded) {
+            harness.stop();
+            saveBenchFixture(cfg, dataDir);
+        }
     } catch (const std::exception& e) {
         spdlog::warn("Cell threw: {}", e.what());
         outcome.fixtureStatus = "missing";
@@ -1071,6 +1223,10 @@ json toCellJson(const CellOutcome& outcome) {
     j["giant_cluster_ratio"] = outcome.giantClusterRatio;
     j["cluster_size_gini"] = outcome.clusterSizeGini;
     j["avg_intra_edge_weight"] = outcome.avgIntraEdgeWeight;
+    j["routed_seed_count_total"] = outcome.routedSeedCountTotal;
+    j["routed_seed_count_queries"] = outcome.routedSeedCountQueries;
+    j["routed_seed_count_mean"] = outcome.routedSeedCountMean;
+    j["tier1_hash_fingerprint"] = outcome.tier1HashFingerprint;
     j["orphan_doc_count"] = outcome.orphanDocCount;
     j["topology_algorithm"] = outcome.algorithm;
     if (outcome.ok) {

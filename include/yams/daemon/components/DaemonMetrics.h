@@ -425,10 +425,39 @@ public:
     void setSocketServer(const SocketServer* socketServer);
 
 private:
+    struct CachedSnapshotState {
+        std::shared_ptr<const MetricsSnapshot> fast;
+        std::shared_ptr<const MetricsSnapshot> detailed;
+        std::chrono::steady_clock::time_point fastAt{};
+        std::chrono::steady_clock::time_point detailedAt{};
+    };
+
+    struct SnapshotFreshness {
+        std::uint64_t snapshotAgeMs{0};
+        bool snapshotStale{false};
+        std::uint64_t detailAgeMs{0};
+        bool detailStale{true};
+        bool detailAvailable{false};
+        [[nodiscard]] bool needsSyncRefresh(bool detailedRequest) const {
+            return snapshotStale || (detailedRequest && detailStale);
+        }
+    };
+
     boost::asio::awaitable<void> pollingLoop(); // Background polling loop
     std::shared_ptr<const MetricsSnapshot> buildDecoratedSnapshot(bool detailed) const;
     MetricsSnapshot buildMinimalSnapshot() const;
     MetricsSnapshot collectSnapshot(bool detailed) const;
+    void populateCommonSnapshot(MetricsSnapshot& snapshot, bool detailed) const;
+    void enrichDetailedSnapshot(MetricsSnapshot& snapshot) const;
+    CachedSnapshotState loadCachedSnapshotState() const;
+    SnapshotFreshness evaluateSnapshotFreshness(const CachedSnapshotState& state,
+                                                std::chrono::steady_clock::time_point now) const;
+    void applySnapshotFreshness(MetricsSnapshot& snapshot,
+                                const SnapshotFreshness& freshness) const;
+    std::shared_ptr<const MetricsSnapshot> collectAndPublishSnapshot(bool detailed) const;
+    void publishSnapshotPair(const std::shared_ptr<MetricsSnapshot>& fastSnapshot,
+                             const std::shared_ptr<MetricsSnapshot>& detailedSnapshot,
+                             std::chrono::steady_clock::time_point publishedAt) const;
     void scheduleBackgroundRefresh(bool detailed) const;
 
     const DaemonLifecycleFsm* lifecycle_;

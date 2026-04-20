@@ -64,6 +64,23 @@ using boost::asio::detached;
 using boost::asio::use_awaitable;
 using local = boost::asio::local::stream_protocol;
 
+namespace {
+RequestHandler::Config::AdmissionDecision makeSocketBusyDecision(RequestDispatcher* dispatcher,
+                                                                 StateComponent* state,
+                                                                 std::size_t active,
+                                                                 std::size_t limit) {
+    const auto overload = admission::captureSnapshot(
+        dispatcher ? dispatcher->getServiceManager() : nullptr, state,
+        static_cast<std::uint64_t>(active), static_cast<std::uint64_t>(limit));
+    const auto decisionCore = admission::makeBusyDecision("Server busy", overload);
+    RequestHandler::Config::AdmissionDecision decision;
+    decision.code = decisionCore.code;
+    decision.message = decisionCore.message;
+    decision.retry = ErrorResponse::RetryInfo{decisionCore.retryAfterMs, "overload"};
+    return decision;
+}
+} // namespace
+
 size_t SocketServer::mainActiveConnectionCount() const {
     return mainActiveConnections_.load(std::memory_order_relaxed);
 }
@@ -73,6 +90,35 @@ size_t SocketServer::connectionSlotsFreeForLimit(size_t limit) const {
     return (mainActive < limit) ? (limit - mainActive) : 0;
 }
 
+bool SocketServer::mainSocketEmergencyGuardRejects() const {
+    const size_t active = mainActiveConnectionCount();
+    const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
+    const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
+    return active >= hardLimit;
+}
+
+void SocketServer::publishConnectionStats(size_t currentActiveConnections,
+                                          std::optional<size_t> slotLimitOverride) const {
+    if (!state_) {
+        return;
+    }
+
+    const auto slotLimit =
+        slotLimitOverride.value_or(state_->stats.maxConnections.load(std::memory_order_relaxed));
+    const auto effectiveLimit = (slotLimit == 0) ? size_t{1024} : slotLimit;
+    state_->stats.activeConnections.store(currentActiveConnections, std::memory_order_relaxed);
+    state_->stats.connectionSlotsFree.store(connectionSlotsFreeForLimit(effectiveLimit),
+                                            std::memory_order_relaxed);
+}
+
+SocketAdmissionVerdict SocketServer::evaluateRequestAdmission(const Request& request,
+                                                              bool isProxy) const {
+    const auto active = isProxy ? proxyActiveConnections_.load(std::memory_order_relaxed)
+                                : mainActiveConnectionCount();
+    const auto limit = slotLimit_.load(std::memory_order_relaxed);
+    return AdmissionPolicy::evaluateSocketAdmission(active, limit, request, isProxy);
+}
+
 void SocketServer::testing_setConnectionCounts(size_t mainActive, size_t proxyActive) {
     mainActiveConnections_.store(mainActive, std::memory_order_relaxed);
     proxyActiveConnections_.store(proxyActive, std::memory_order_relaxed);
@@ -80,16 +126,12 @@ void SocketServer::testing_setConnectionCounts(size_t mainActive, size_t proxyAc
 }
 
 bool SocketServer::testing_mainSocketEmergencyGuardRejects() const {
-    const size_t active = mainActiveConnectionCount();
-    const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
-    const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
-    return active >= hardLimit;
+    return mainSocketEmergencyGuardRejects();
 }
 
 SocketAdmissionVerdict
 SocketServer::testing_mainSocketAdmissionVerdict(const Request& request) const {
-    return AdmissionPolicy::evaluateSocketAdmission(
-        mainActiveConnectionCount(), slotLimit_.load(std::memory_order_relaxed), request, false);
+    return evaluateRequestAdmission(request, false);
 }
 
 SocketServer::SocketServer(const Config& config, IOCoordinator* ioCoordinator,
@@ -665,10 +707,10 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
             noSlotRejectStreak = 0;
 
             if (!isProxy) {
-                const size_t active = mainActiveConnectionCount();
-                const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
-                const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
-                if (active >= hardLimit) {
+                if (mainSocketEmergencyGuardRejects()) {
+                    const size_t active = mainActiveConnectionCount();
+                    const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
+                    const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
                     boost::system::error_code shutdown_ec;
                     socket.shutdown(boost::asio::local::stream_protocol::socket::shutdown_both,
                                     shutdown_ec);
@@ -722,14 +764,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
             spdlog::debug("SocketServer: [conn={}] accepted {} connection, active={} total={}",
                           conn_token, loopLabel, current, totalConnections_.load());
 
-            if (state_) {
-                state_->stats.activeConnections.store(current);
-                auto maxConn = state_->stats.maxConnections.load(std::memory_order_relaxed);
-                if (maxConn == 0)
-                    maxConn = 1024;
-                auto slotsFree = connectionSlotsFreeForLimit(maxConn);
-                state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
-            }
+            publishConnectionStats(current);
             TuningManager::notifyWakeup();
 
             auto connectionExecutor = boost::asio::make_strand(ioCoordinator_->getExecutor());
@@ -839,15 +874,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                 std::lock_guard<std::mutex> lock(server->shutdownMutex_);
                 server->shutdownCv_.notify_all();
             }
-            if (server->state_) {
-                server->state_->stats.activeConnections.store(current);
-                auto maxConn = server->state_->stats.maxConnections.load(std::memory_order_relaxed);
-                if (maxConn == 0)
-                    maxConn = 1024;
-                auto slotsFree = server->connectionSlotsFreeForLimit(maxConn);
-                server->state_->stats.connectionSlotsFree.store(slotsFree,
-                                                                std::memory_order_relaxed);
-            }
+            server->publishConnectionStats(current);
             auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - start_time)
                                    .count();
@@ -913,10 +940,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
         handlerConfig.admission_control = [this, isProxy](const Request& request)
             -> std::optional<RequestHandler::Config::AdmissionDecision> {
-            const auto verdict = AdmissionPolicy::evaluateSocketAdmission(
-                isProxy ? proxyActiveConnections_.load(std::memory_order_relaxed)
-                        : mainActiveConnectionCount(),
-                slotLimit_.load(std::memory_order_relaxed), request, isProxy);
+            const auto verdict = evaluateRequestAdmission(request, isProxy);
             if (verdict != SocketAdmissionVerdict::reject) {
                 return std::nullopt;
             }
@@ -930,16 +954,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                 state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
             }
             TuningManager::notifyWakeup();
-
-            const auto overload = admission::captureSnapshot(
-                dispatcher_ ? dispatcher_->getServiceManager() : nullptr, state_,
-                static_cast<std::uint64_t>(active), static_cast<std::uint64_t>(limit));
-            const auto decisionCore = admission::makeBusyDecision("Server busy", overload);
-            RequestHandler::Config::AdmissionDecision decision;
-            decision.code = decisionCore.code;
-            decision.message = decisionCore.message;
-            decision.retry = ErrorResponse::RetryInfo{decisionCore.retryAfterMs, "overload"};
-            return decision;
+            return makeSocketBusyDecision(dispatcher_, state_, active, limit);
         };
         // Wire health-check counter so RequestHandler can tag ping/status connections
         if (state_) {
@@ -1246,8 +1261,7 @@ bool SocketServer::resizeConnectionSlots(size_t newSize) {
         // Update state stats
         if (state_) {
             state_->stats.maxConnections.store(newSize, std::memory_order_relaxed);
-            const auto slotsFree = connectionSlotsFreeForLimit(newSize);
-            state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
+            publishConnectionStats(activeConnections_.load(std::memory_order_relaxed), newSize);
         }
 
         spdlog::debug("SocketServer: request admission slots grown from {} to {}", currentLimit,
@@ -1260,8 +1274,7 @@ bool SocketServer::resizeConnectionSlots(size_t newSize) {
     // Update state stats
     if (state_) {
         state_->stats.maxConnections.store(newSize, std::memory_order_relaxed);
-        auto slotsFree = connectionSlotsFreeForLimit(newSize);
-        state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
+        publishConnectionStats(activeConnections_.load(std::memory_order_relaxed), newSize);
     }
 
     spdlog::debug("SocketServer: request admission slots shrunk from {} to {}", currentLimit,

@@ -641,6 +641,84 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     return buildDecoratedSnapshot(detailed);
 }
 
+DaemonMetrics::CachedSnapshotState DaemonMetrics::loadCachedSnapshotState() const {
+    CachedSnapshotState state;
+    std::shared_lock lock(cacheMutex_);
+    state.fast = cachedSnapshot_;
+    state.detailed = cachedDetailedSnapshot_;
+    state.fastAt = lastUpdate_;
+    state.detailedAt = lastDetailedUpdate_;
+    return state;
+}
+
+DaemonMetrics::SnapshotFreshness
+DaemonMetrics::evaluateSnapshotFreshness(const CachedSnapshotState& state,
+                                         std::chrono::steady_clock::time_point now) const {
+    SnapshotFreshness freshness;
+    freshness.snapshotAgeMs = age_ms(now, state.fastAt);
+    freshness.snapshotStale =
+        state.fastAt.time_since_epoch().count() == 0 ||
+        (cacheMs_ > 0 && freshness.snapshotAgeMs >= static_cast<std::uint64_t>(cacheMs_));
+
+    freshness.detailAvailable = (state.detailed != nullptr);
+    freshness.detailAgeMs = freshness.detailAvailable ? age_ms(now, state.detailedAt) : 0ULL;
+    const auto freshnessBudgetMs = static_cast<std::uint64_t>(std::max<uint32_t>(cacheMs_, 1));
+    freshness.detailStale = !freshness.detailAvailable ||
+                            state.detailedAt.time_since_epoch().count() == 0 ||
+                            (freshness.detailAgeMs >= freshnessBudgetMs);
+    return freshness;
+}
+
+void DaemonMetrics::applySnapshotFreshness(MetricsSnapshot& snapshot,
+                                           const SnapshotFreshness& freshness) const {
+    snapshot.statusSnapshotAgeMs = freshness.snapshotAgeMs;
+    snapshot.statusSnapshotStale = freshness.snapshotStale;
+    snapshot.statusDetailAvailable = freshness.detailAvailable;
+    snapshot.statusDetailAgeMs = freshness.detailAgeMs;
+    snapshot.statusDetailStale = freshness.detailStale;
+}
+
+void DaemonMetrics::publishSnapshotPair(const std::shared_ptr<MetricsSnapshot>& fastSnapshot,
+                                        const std::shared_ptr<MetricsSnapshot>& detailedSnapshot,
+                                        std::chrono::steady_clock::time_point publishedAt) const {
+    {
+        std::unique_lock lock(cacheMutex_);
+        cachedSnapshot_ = fastSnapshot;
+        lastUpdate_ = publishedAt;
+        if (detailedSnapshot) {
+            cachedDetailedSnapshot_ = detailedSnapshot;
+            lastDetailedUpdate_ = publishedAt;
+        }
+    }
+
+    try {
+        MetricsSnapshotRegistry::instance().set(fastSnapshot);
+    } catch (...) {
+    }
+}
+
+std::shared_ptr<const MetricsSnapshot>
+DaemonMetrics::collectAndPublishSnapshot(bool detailed) const {
+    auto publishedAt = std::chrono::steady_clock::now();
+    auto fastSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(false));
+    std::shared_ptr<MetricsSnapshot> detailedSnapshot;
+    if (detailed) {
+        detailedSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(true));
+    }
+
+    publishSnapshotPair(fastSnapshot, detailedSnapshot, publishedAt);
+
+    MetricsSnapshot out = detailed ? *detailedSnapshot : *fastSnapshot;
+    SnapshotFreshness freshness;
+    freshness.snapshotAgeMs = 0;
+    freshness.snapshotStale = false;
+    freshness.detailAgeMs = 0;
+    freshness.detailStale = !detailed;
+    freshness.detailAvailable = detailed;
+    applySnapshotFreshness(out, freshness);
+    return std::make_shared<const MetricsSnapshot>(std::move(out));
+}
+
 MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
     MetricsSnapshot out;
     out.version = YAMS_VERSION_STRING;
@@ -750,79 +828,22 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
 std::shared_ptr<const MetricsSnapshot> DaemonMetrics::buildDecoratedSnapshot(bool detailed) const {
     auto now = std::chrono::steady_clock::now();
 
-    std::shared_ptr<const MetricsSnapshot> fast;
-    std::shared_ptr<const MetricsSnapshot> full;
-    std::chrono::steady_clock::time_point fastAt{};
-    std::chrono::steady_clock::time_point fullAt{};
-    {
-        std::shared_lock lock(cacheMutex_);
-        fast = cachedSnapshot_;
-        full = cachedDetailedSnapshot_;
-        fastAt = lastUpdate_;
-        fullAt = lastDetailedUpdate_;
+    const auto state = loadCachedSnapshotState();
+    if (!state.fast) {
+        return collectAndPublishSnapshot(detailed);
     }
 
-    auto publishSyncSnapshot = [&](bool includeDetailed) -> std::shared_ptr<const MetricsSnapshot> {
-        auto publishedAt = std::chrono::steady_clock::now();
-        auto fastSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(false));
-        std::shared_ptr<MetricsSnapshot> detailedSnapshot;
-        if (includeDetailed) {
-            detailedSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(true));
-        }
-
-        MetricsSnapshot out = includeDetailed ? *detailedSnapshot : *fastSnapshot;
-        out.statusSnapshotAgeMs = 0;
-        out.statusSnapshotStale = false;
-        out.statusDetailAvailable = includeDetailed;
-        out.statusDetailAgeMs = 0;
-        out.statusDetailStale = !includeDetailed;
-
-        {
-            std::unique_lock lock(cacheMutex_);
-            cachedSnapshot_ = fastSnapshot;
-            lastUpdate_ = publishedAt;
-            if (detailedSnapshot) {
-                cachedDetailedSnapshot_ = detailedSnapshot;
-                lastDetailedUpdate_ = publishedAt;
-            }
-        }
-
-        try {
-            MetricsSnapshotRegistry::instance().set(fastSnapshot);
-        } catch (...) {
-        }
-
-        return std::make_shared<const MetricsSnapshot>(std::move(out));
-    };
-
-    if (!fast) {
-        return publishSyncSnapshot(detailed);
+    MetricsSnapshot out = *state.fast;
+    if (detailed && state.detailed) {
+        out = *state.detailed;
     }
 
-    MetricsSnapshot out = *fast;
-    if (detailed && full) {
-        out = *full;
+    const auto freshness = evaluateSnapshotFreshness(state, now);
+    if (freshness.needsSyncRefresh(detailed)) {
+        return collectAndPublishSnapshot(detailed);
     }
 
-    const auto fastAgeMs = age_ms(now, fastAt);
-    const bool fastStale = fastAt.time_since_epoch().count() == 0 ||
-                           (cacheMs_ > 0 && fastAgeMs >= static_cast<std::uint64_t>(cacheMs_));
-    out.statusSnapshotAgeMs = fastAgeMs;
-    out.statusSnapshotStale = fastStale;
-
-    const bool haveDetail = (full != nullptr);
-    const auto detailAgeMs = haveDetail ? age_ms(now, fullAt) : 0ULL;
-    const auto freshnessBudgetMs = static_cast<std::uint64_t>(std::max<uint32_t>(cacheMs_, 1));
-    const bool detailStale =
-        !haveDetail || fullAt.time_since_epoch().count() == 0 || (detailAgeMs >= freshnessBudgetMs);
-    out.statusDetailAvailable = haveDetail;
-    out.statusDetailAgeMs = detailAgeMs;
-    out.statusDetailStale = detailStale;
-
-    if (fastStale || (detailed && detailStale)) {
-        return publishSyncSnapshot(detailed);
-    }
-
+    applySnapshotFreshness(out, freshness);
     return std::make_shared<const MetricsSnapshot>(std::move(out));
 }
 
@@ -844,6 +865,14 @@ void DaemonMetrics::scheduleBackgroundRefresh(bool detailed) const {
 MetricsSnapshot DaemonMetrics::collectSnapshot(bool detailed) const {
     MetricsSnapshot out;
     out.version = YAMS_VERSION_STRING;
+    populateCommonSnapshot(out, detailed);
+    if (detailed) {
+        enrichDetailedSnapshot(out);
+    }
+    return out;
+}
+
+void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) const {
     // Uptime and counters
     try {
         auto now = std::chrono::steady_clock::now();
@@ -1672,161 +1701,152 @@ MetricsSnapshot DaemonMetrics::collectSnapshot(bool detailed) const {
         out.searchEngineBuildReason = d.buildReason;
     } catch (...) {
     }
+}
 
-    if (detailed) {
-        try {
-            if (services_) {
-                auto metaRepo = services_->getMetadataRepo();
-                if (metaRepo) {
-                    auto statsResult = metaRepo->getCorpusStats();
-                    if (statsResult) {
-                        const auto& stats = statsResult.value();
-                        auto now = std::chrono::steady_clock::now();
+void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
+    try {
+        if (services_) {
+            auto metaRepo = services_->getMetadataRepo();
+            if (metaRepo) {
+                auto statsResult = metaRepo->getCorpusStats();
+                if (statsResult) {
+                    const auto& stats = statsResult.value();
+                    auto now = std::chrono::steady_clock::now();
 
-                        bool needsRefresh = false;
-                        {
-                            std::shared_lock tunerLock(tunerCacheMutex_);
-                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               now - lastTunerStateAt_)
-                                               .count();
-                            needsRefresh =
-                                (elapsed > tunerStateTtlMs_) ||
-                                (static_cast<uint64_t>(stats.docCount) != cachedTunerDocCount_);
-                        }
+                    bool needsRefresh = false;
+                    {
+                        std::shared_lock tunerLock(tunerCacheMutex_);
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           now - lastTunerStateAt_)
+                                           .count();
+                        needsRefresh =
+                            (elapsed > tunerStateTtlMs_) ||
+                            (static_cast<uint64_t>(stats.docCount) != cachedTunerDocCount_);
+                    }
 
-                        if (needsRefresh) {
-                            yams::search::SearchTuner tuner(stats);
-                            auto newState = yams::search::tuningStateToString(tuner.currentState());
-                            auto newReason = tuner.stateReason();
-                            std::map<std::string, double> newParams;
-
-                            if (auto engine = services_->getSearchEngineSnapshot()) {
-                                const auto& cfg = engine->getConfig();
-                                newParams["rrf_k"] = static_cast<double>(cfg.rrfK);
-                                newParams["text_weight"] = static_cast<double>(cfg.textWeight);
-                                newParams["vector_weight"] = static_cast<double>(cfg.vectorWeight);
-                                newParams["entity_vector_weight"] =
-                                    static_cast<double>(cfg.entityVectorWeight);
-                                newParams["path_tree_weight"] =
-                                    static_cast<double>(cfg.pathTreeWeight);
-                                newParams["kg_weight"] = static_cast<double>(cfg.kgWeight);
-                                newParams["tag_weight"] = static_cast<double>(cfg.tagWeight);
-                                newParams["metadata_weight"] =
-                                    static_cast<double>(cfg.metadataWeight);
-                                newParams["similarity_threshold"] =
-                                    static_cast<double>(cfg.similarityThreshold);
-                                newParams["vector_boost_factor"] =
-                                    static_cast<double>(cfg.vectorBoostFactor);
-                                newParams["enable_graph_rerank"] =
-                                    cfg.enableGraphRerank ? 1.0 : 0.0;
-                                newParams["graph_rerank_topn"] =
-                                    static_cast<double>(cfg.graphRerankTopN);
-                                newParams["graph_rerank_weight"] =
-                                    static_cast<double>(cfg.graphRerankWeight);
-                                newParams["graph_rerank_max_boost"] =
-                                    static_cast<double>(cfg.graphRerankMaxBoost);
-                                newParams["graph_rerank_min_signal"] =
-                                    static_cast<double>(cfg.graphRerankMinSignal);
-                                newParams["graph_community_weight"] =
-                                    static_cast<double>(cfg.graphCommunityWeight);
-                                newParams["kg_max_results"] = static_cast<double>(cfg.kgMaxResults);
-                                newParams["graph_scoring_budget_ms"] =
-                                    static_cast<double>(cfg.graphScoringBudgetMs);
-                            } else {
-                                const auto& p = tuner.getParams();
-                                newParams["rrf_k"] = static_cast<double>(p.rrfK);
-                                newParams["text_weight"] =
-                                    static_cast<double>(p.weights.text.value);
-                                newParams["vector_weight"] =
-                                    static_cast<double>(p.weights.vector.value);
-                                newParams["entity_vector_weight"] =
-                                    static_cast<double>(p.weights.entityVector.value);
-                                newParams["path_tree_weight"] =
-                                    static_cast<double>(p.weights.pathTree.value);
-                                newParams["kg_weight"] = static_cast<double>(p.weights.kg.value);
-                                newParams["tag_weight"] = static_cast<double>(p.weights.tag.value);
-                                newParams["metadata_weight"] =
-                                    static_cast<double>(p.weights.metadata.value);
-                                newParams["similarity_threshold"] =
-                                    static_cast<double>(p.similarityThreshold);
-                                newParams["vector_boost_factor"] =
-                                    static_cast<double>(p.vectorBoostFactor);
-                                newParams["enable_graph_rerank"] = p.enableGraphRerank ? 1.0 : 0.0;
-                                newParams["graph_rerank_topn"] =
-                                    static_cast<double>(p.graphRerankTopN);
-                                newParams["graph_rerank_weight"] =
-                                    static_cast<double>(p.graphRerankWeight);
-                                newParams["graph_rerank_max_boost"] =
-                                    static_cast<double>(p.graphRerankMaxBoost);
-                                newParams["graph_rerank_min_signal"] =
-                                    static_cast<double>(p.graphRerankMinSignal);
-                                newParams["graph_community_weight"] =
-                                    static_cast<double>(p.graphCommunityWeight);
-                                newParams["kg_max_results"] = static_cast<double>(p.kgMaxResults);
-                                newParams["graph_scoring_budget_ms"] =
-                                    static_cast<double>(p.graphScoringBudgetMs);
-                            }
-
-                            std::unique_lock tunerLock(tunerCacheMutex_);
-                            cachedTuningState_ = std::move(newState);
-                            cachedTuningReason_ = std::move(newReason);
-                            cachedTuningParams_ = std::move(newParams);
-                            cachedTunerDocCount_ = stats.docCount;
-                            lastTunerStateAt_ = now;
-                        }
-
-                        {
-                            std::shared_lock tunerLock(tunerCacheMutex_);
-                            out.searchTuningState = cachedTuningState_;
-                            out.searchTuningReason = cachedTuningReason_;
-                            out.searchTuningParams = cachedTuningParams_;
-                        }
+                    if (needsRefresh) {
+                        yams::search::SearchTuner tuner(stats);
+                        auto newState = yams::search::tuningStateToString(tuner.currentState());
+                        auto newReason = tuner.stateReason();
+                        std::map<std::string, double> newParams;
 
                         if (auto engine = services_->getSearchEngineSnapshot()) {
                             const auto& cfg = engine->getConfig();
-                            out.searchTuningParams["rrf_k"] = static_cast<double>(cfg.rrfK);
-                            out.searchTuningParams["text_weight"] =
-                                static_cast<double>(cfg.textWeight);
-                            out.searchTuningParams["vector_weight"] =
-                                static_cast<double>(cfg.vectorWeight);
-                            out.searchTuningParams["entity_vector_weight"] =
+                            newParams["rrf_k"] = static_cast<double>(cfg.rrfK);
+                            newParams["text_weight"] = static_cast<double>(cfg.textWeight);
+                            newParams["vector_weight"] = static_cast<double>(cfg.vectorWeight);
+                            newParams["entity_vector_weight"] =
                                 static_cast<double>(cfg.entityVectorWeight);
-                            out.searchTuningParams["path_tree_weight"] =
-                                static_cast<double>(cfg.pathTreeWeight);
-                            out.searchTuningParams["kg_weight"] = static_cast<double>(cfg.kgWeight);
-                            out.searchTuningParams["tag_weight"] =
-                                static_cast<double>(cfg.tagWeight);
-                            out.searchTuningParams["metadata_weight"] =
-                                static_cast<double>(cfg.metadataWeight);
-                            out.searchTuningParams["similarity_threshold"] =
+                            newParams["path_tree_weight"] = static_cast<double>(cfg.pathTreeWeight);
+                            newParams["kg_weight"] = static_cast<double>(cfg.kgWeight);
+                            newParams["tag_weight"] = static_cast<double>(cfg.tagWeight);
+                            newParams["metadata_weight"] = static_cast<double>(cfg.metadataWeight);
+                            newParams["similarity_threshold"] =
                                 static_cast<double>(cfg.similarityThreshold);
-                            out.searchTuningParams["vector_boost_factor"] =
+                            newParams["vector_boost_factor"] =
                                 static_cast<double>(cfg.vectorBoostFactor);
-                            out.searchTuningParams["enable_graph_rerank"] =
-                                cfg.enableGraphRerank ? 1.0 : 0.0;
-                            out.searchTuningParams["graph_rerank_topn"] =
+                            newParams["enable_graph_rerank"] = cfg.enableGraphRerank ? 1.0 : 0.0;
+                            newParams["graph_rerank_topn"] =
                                 static_cast<double>(cfg.graphRerankTopN);
-                            out.searchTuningParams["graph_rerank_weight"] =
+                            newParams["graph_rerank_weight"] =
                                 static_cast<double>(cfg.graphRerankWeight);
-                            out.searchTuningParams["graph_rerank_max_boost"] =
+                            newParams["graph_rerank_max_boost"] =
                                 static_cast<double>(cfg.graphRerankMaxBoost);
-                            out.searchTuningParams["graph_rerank_min_signal"] =
+                            newParams["graph_rerank_min_signal"] =
                                 static_cast<double>(cfg.graphRerankMinSignal);
-                            out.searchTuningParams["graph_community_weight"] =
+                            newParams["graph_community_weight"] =
                                 static_cast<double>(cfg.graphCommunityWeight);
-                            out.searchTuningParams["kg_max_results"] =
-                                static_cast<double>(cfg.kgMaxResults);
-                            out.searchTuningParams["graph_scoring_budget_ms"] =
+                            newParams["kg_max_results"] = static_cast<double>(cfg.kgMaxResults);
+                            newParams["graph_scoring_budget_ms"] =
                                 static_cast<double>(cfg.graphScoringBudgetMs);
+                        } else {
+                            const auto& p = tuner.getParams();
+                            newParams["rrf_k"] = static_cast<double>(p.rrfK);
+                            newParams["text_weight"] = static_cast<double>(p.weights.text.value);
+                            newParams["vector_weight"] =
+                                static_cast<double>(p.weights.vector.value);
+                            newParams["entity_vector_weight"] =
+                                static_cast<double>(p.weights.entityVector.value);
+                            newParams["path_tree_weight"] =
+                                static_cast<double>(p.weights.pathTree.value);
+                            newParams["kg_weight"] = static_cast<double>(p.weights.kg.value);
+                            newParams["tag_weight"] = static_cast<double>(p.weights.tag.value);
+                            newParams["metadata_weight"] =
+                                static_cast<double>(p.weights.metadata.value);
+                            newParams["similarity_threshold"] =
+                                static_cast<double>(p.similarityThreshold);
+                            newParams["vector_boost_factor"] =
+                                static_cast<double>(p.vectorBoostFactor);
+                            newParams["enable_graph_rerank"] = p.enableGraphRerank ? 1.0 : 0.0;
+                            newParams["graph_rerank_topn"] = static_cast<double>(p.graphRerankTopN);
+                            newParams["graph_rerank_weight"] =
+                                static_cast<double>(p.graphRerankWeight);
+                            newParams["graph_rerank_max_boost"] =
+                                static_cast<double>(p.graphRerankMaxBoost);
+                            newParams["graph_rerank_min_signal"] =
+                                static_cast<double>(p.graphRerankMinSignal);
+                            newParams["graph_community_weight"] =
+                                static_cast<double>(p.graphCommunityWeight);
+                            newParams["kg_max_results"] = static_cast<double>(p.kgMaxResults);
+                            newParams["graph_scoring_budget_ms"] =
+                                static_cast<double>(p.graphScoringBudgetMs);
                         }
+
+                        std::unique_lock tunerLock(tunerCacheMutex_);
+                        cachedTuningState_ = std::move(newState);
+                        cachedTuningReason_ = std::move(newReason);
+                        cachedTuningParams_ = std::move(newParams);
+                        cachedTunerDocCount_ = stats.docCount;
+                        lastTunerStateAt_ = now;
+                    }
+
+                    {
+                        std::shared_lock tunerLock(tunerCacheMutex_);
+                        out.searchTuningState = cachedTuningState_;
+                        out.searchTuningReason = cachedTuningReason_;
+                        out.searchTuningParams = cachedTuningParams_;
+                    }
+
+                    if (auto engine = services_->getSearchEngineSnapshot()) {
+                        const auto& cfg = engine->getConfig();
+                        out.searchTuningParams["rrf_k"] = static_cast<double>(cfg.rrfK);
+                        out.searchTuningParams["text_weight"] = static_cast<double>(cfg.textWeight);
+                        out.searchTuningParams["vector_weight"] =
+                            static_cast<double>(cfg.vectorWeight);
+                        out.searchTuningParams["entity_vector_weight"] =
+                            static_cast<double>(cfg.entityVectorWeight);
+                        out.searchTuningParams["path_tree_weight"] =
+                            static_cast<double>(cfg.pathTreeWeight);
+                        out.searchTuningParams["kg_weight"] = static_cast<double>(cfg.kgWeight);
+                        out.searchTuningParams["tag_weight"] = static_cast<double>(cfg.tagWeight);
+                        out.searchTuningParams["metadata_weight"] =
+                            static_cast<double>(cfg.metadataWeight);
+                        out.searchTuningParams["similarity_threshold"] =
+                            static_cast<double>(cfg.similarityThreshold);
+                        out.searchTuningParams["vector_boost_factor"] =
+                            static_cast<double>(cfg.vectorBoostFactor);
+                        out.searchTuningParams["enable_graph_rerank"] =
+                            cfg.enableGraphRerank ? 1.0 : 0.0;
+                        out.searchTuningParams["graph_rerank_topn"] =
+                            static_cast<double>(cfg.graphRerankTopN);
+                        out.searchTuningParams["graph_rerank_weight"] =
+                            static_cast<double>(cfg.graphRerankWeight);
+                        out.searchTuningParams["graph_rerank_max_boost"] =
+                            static_cast<double>(cfg.graphRerankMaxBoost);
+                        out.searchTuningParams["graph_rerank_min_signal"] =
+                            static_cast<double>(cfg.graphRerankMinSignal);
+                        out.searchTuningParams["graph_community_weight"] =
+                            static_cast<double>(cfg.graphCommunityWeight);
+                        out.searchTuningParams["kg_max_results"] =
+                            static_cast<double>(cfg.kgMaxResults);
+                        out.searchTuningParams["graph_scoring_budget_ms"] =
+                            static_cast<double>(cfg.graphScoringBudgetMs);
                     }
                 }
             }
-        } catch (...) {
         }
+    } catch (...) {
     }
-
-    return out;
 }
 
 EmbeddingServiceInfo DaemonMetrics::getEmbeddingServiceInfo() const {

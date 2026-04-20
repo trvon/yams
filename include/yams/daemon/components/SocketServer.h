@@ -184,6 +184,10 @@ private:
 
     size_t mainActiveConnectionCount() const;
     size_t connectionSlotsFreeForLimit(size_t limit) const;
+    bool mainSocketEmergencyGuardRejects() const;
+    void publishConnectionStats(size_t currentActiveConnections,
+                                std::optional<size_t> slotLimitOverride = std::nullopt) const;
+    SocketAdmissionVerdict evaluateRequestAdmission(const Request& request, bool isProxy) const;
     void execute_on_io_context(std::function<void()> fn);
     void close_acceptor_on_executor();
     std::size_t
