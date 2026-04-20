@@ -77,6 +77,24 @@ public:
         std::optional<std::uint32_t> titleConcurrent;
     };
 
+    struct SimeonEncoderPolicy {
+        std::optional<std::string> ngramMode;
+        std::optional<std::uint32_t> ngramMin;
+        std::optional<std::uint32_t> ngramMax;
+        std::optional<std::uint32_t> sketchDim;
+        std::optional<std::uint32_t> outputDim;
+        std::optional<std::string> projection;
+        std::optional<bool> l2Normalize;
+        std::optional<std::uint32_t> pqBytes;
+    };
+
+    struct SimeonBm25Policy {
+        std::optional<bool> enabled;
+        std::optional<std::string> variant;
+        std::optional<float> subwordGamma;
+        std::optional<std::size_t> maxCorpusDocs;
+    };
+
     ConfigResolver() = delete; // Static-only class
 
     /**
@@ -297,6 +315,36 @@ public:
      *   propagation over the semantic-neighbor graph before clustering)
      */
     static TopologyEnginePolicy resolveTopologyEnginePolicy();
+
+    /**
+     * @brief Resolve Simeon encoder config from env + config file.
+     *
+     * Precedence: env var > TOML > default. Env vars map to legacy
+     * YAMS_SIMEON_* names kept for test-only overrides. Canonical keys:
+     * - embeddings.simeon.ngram_mode     = "char" | "word" | "char_and_word"
+     * - embeddings.simeon.ngram_min      = int
+     * - embeddings.simeon.ngram_max      = int
+     * - embeddings.simeon.sketch_dim     = int (power of two for fwht)
+     * - embeddings.simeon.output_dim     = int
+     * - embeddings.simeon.projection     = "achlioptas_sparse" | "dense_gaussian"
+     *                                    | "very_sparse" | "sparse_jl" | "fwht"
+     * - embeddings.simeon.l2_normalize   = bool
+     * - embeddings.simeon.pq_bytes       = int (0 = off; reserved for
+     *                                          post-encode PQ in storage layer)
+     */
+    static SimeonEncoderPolicy resolveSimeonEncoderPolicy();
+
+    /**
+     * @brief Resolve Simeon BM25 reranker config from env + config file.
+     *
+     * Precedence: env var > TOML > default. Canonical keys:
+     * - embeddings.simeon.bm25.enabled         = bool (default true when
+     *                                                 backend=simeon)
+     * - embeddings.simeon.bm25.variant         = "atire" | "sab_smooth"
+     * - embeddings.simeon.bm25.subword_gamma   = float
+     * - embeddings.simeon.bm25.max_corpus_docs = int
+     */
+    static SimeonBm25Policy resolveSimeonBm25Policy();
 
     /**
      * @brief Resolve post-ingest concurrency caps from config file.

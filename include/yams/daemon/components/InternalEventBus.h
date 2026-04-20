@@ -201,7 +201,7 @@ private:
     std::atomic<std::size_t> tail_;
 };
 
-// Minimal scaffolding for a typed internal event bus; channels will be registered ad-hoc by owners.
+// Typed internal event bus; channel ownership stays with the publishing subsystem.
 class InternalEventBus {
 public:
     static InternalEventBus& instance() {

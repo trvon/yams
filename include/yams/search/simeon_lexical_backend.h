@@ -46,6 +46,11 @@ public:
         std::size_t max_corpus_docs = 200'000;
     };
 
+    // Resolve a Config from ConfigResolver::resolveSimeonBm25Policy(): reads
+    // the typed [embeddings.simeon.bm25] TOML block with env overrides. Unset
+    // fields fall back to Config{} defaults (SabSmooth, gamma=5, cap=200k).
+    static Config resolveConfig();
+
     explicit SimeonLexicalBackend(Config cfg);
     ~SimeonLexicalBackend();
 

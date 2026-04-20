@@ -776,7 +776,7 @@ void RequestDispatcher::__test_forceDownloadServiceSuccessOnce() {
     g_forceDownloadServiceSuccessOnce.store(true, std::memory_order_release);
 }
 
-// PBI-008-11 scaffold: prepare session using app services (no IPC exposure yet)
+// Prepare session using app services.
 int RequestDispatcher::prepareSession(const PrepareSessionOptions& opts) {
     try {
         auto appContext = serviceManager_->getAppContext();

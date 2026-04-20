@@ -254,8 +254,6 @@ private:
     // Document repair handler (RepairService)
     boost::asio::awaitable<Response> handleRepairRequest(const RepairRequest& req);
 
-    // Legacy helper declarations removed after dispatcher split
-
     boost::asio::awaitable<AdmissionGuard>
     acquireBoundedAdmission(std::atomic<uint64_t>& activeCounter,
                             std::atomic<uint64_t>& rejectedCounter, uint32_t limit,

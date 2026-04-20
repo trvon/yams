@@ -2782,6 +2782,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::size_t topologyRoutingVariantSeedExtension = 0;
             std::size_t topologyRoutedSeedCount = 0;
             bool topologyWeakQueryRoutingApplied = false;
+            std::string topologyRoutedSeedFingerprint = "none";
 
             std::string tier1HashFingerprint;
             {
@@ -2900,6 +2901,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 }
                 topologyWeakQuerySeedCount = tier1Candidates.size();
                 topologyRoutedSeedCount = topologyCandidates.size();
+                {
+                    std::vector<std::string> routedSorted(topologyCandidates.begin(),
+                                                          topologyCandidates.end());
+                    std::sort(routedSorted.begin(), routedSorted.end());
+                    if (routedSorted.empty()) {
+                        topologyRoutedSeedFingerprint = "empty";
+                    } else {
+                        std::string joined;
+                        joined.reserve(routedSorted.size() * 65);
+                        for (const auto& h : routedSorted) {
+                            joined.append(h);
+                            joined.push_back('\n');
+                        }
+                        topologyRoutedSeedFingerprint =
+                            yams::crypto::SHA256Hasher::hash(
+                                std::as_bytes(std::span<const char>(joined.data(), joined.size())))
+                                .substr(0, 16);
+                    }
+                }
                 const auto candidateCountBeforeRouting = tier2Candidates.size();
                 for (const auto& hash : topologyCandidates) {
                     tier2Candidates.insert(hash);
@@ -3029,6 +3049,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 std::to_string(topologyRoutingVariantSeedExtension);
             response.debugStats["routed_seed_count"] = std::to_string(topologyRoutedSeedCount);
             response.debugStats["tier1_hash_fingerprint"] = tier1HashFingerprint;
+            response.debugStats["topology_routed_seed_fingerprint"] = topologyRoutedSeedFingerprint;
 
             if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_ &&
                 !hasVectorTierDimMismatch()) {

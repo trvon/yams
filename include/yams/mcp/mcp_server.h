@@ -83,7 +83,7 @@ public:
     void sendNdjson(const json& message);
     // Enqueue a message for the writer thread (non-blocking for request handlers)
     void sendAsync(json message);
-    // Framed send helper for pre-serialized JSON payloads (legacy compatibility)
+    // Framed send helper for pre-serialized JSON payloads.
     void sendFramedSerialized(const std::string& payload);
     MessageResult receive() override;
     bool isConnected() const override { return state_.load() == TransportState::Connected; }
@@ -124,9 +124,6 @@ private:
     void recordError() noexcept;
     void resetErrorCount() noexcept;
 };
-
-// WebSocket transport removed - not needed for current implementation
-// TODO: Add back if WebSocket support is required in the future
 
 /**
  * MCP Server implementation
@@ -193,7 +190,7 @@ private:
 
     // Exposed capability flags (snapshotted during initialize)
     bool cancellationSupported_{true};
-    bool progressSupported_{true}; // progress notifications scaffold enabled
+    bool progressSupported_{true};
     // --- Handshake / protocol behavior flags ---
     bool strictProtocol_{
         false}; // YAMS_MCP_STRICT_PROTOCOL=1 to require explicit supported protocolVersion or fail
@@ -232,7 +229,6 @@ private:
     std::once_flag uiResourcesInitOnce_{};
     std::unordered_map<std::string, UIResource> uiResources_;
 
-    // --- Cancellation scaffolding ---
     // Each in-flight request id can be marked cancelable; a cancellation sets the token to true.
     mutable std::mutex cancelMutex_;
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelTokens_;
@@ -278,22 +274,22 @@ private:
     nlohmann::json createError(const nlohmann::json& id, int code, const std::string& message);
     void sendResponse(const nlohmann::json& message);
 
-    // --- Initialization / lifecycle helpers (added for spec-aligned handshake flexibility) ---
+    // --- Initialization / lifecycle helpers ---
     bool isMethodAllowedBeforeInitialization(const std::string& method) const;
-    void markClientInitialized(); // Accept canonical + legacy initialized notifications
+    void markClientInitialized(); // Accept canonical and compatibility initialized notifications
     void handleExitRequest();     // Graceful handling of 'exit' to set exitRequested_
     // Cancellation helpers
     void registerCancelable(const nlohmann::json& id);
     void cancelRequest(const nlohmann::json& id);
     bool isCanceled(const nlohmann::json& id) const;
-    // Capability builder (augments base capabilities with cancellation / legacy flags)
+    // Capability builder
     nlohmann::json buildServerCapabilities() const;
     // Cancel request handler (JSON-RPC "cancel" -> params { "id": <original request id> })
     void handleCancelRequest(const nlohmann::json& params, const nlohmann::json& id);
     // Progress notification helper (emits "notifications/progress")
     void sendProgress(const std::string& phase, double percent, const std::string& message = "",
                       std::optional<nlohmann::json> progressToken = std::nullopt);
-    // Auto-ready scheduling (fallback when client omits 'initialized')
+    // Spec-defined lifecycle placeholders; no automatic ready transition is performed.
     void scheduleAutoReady();
     bool shouldAutoInitialize() const;
     // Record that a feature was used prior to client 'initialized'
@@ -302,7 +298,7 @@ private:
     Result<void> ensureDaemonClient();
     Result<yams::daemon::DaemonClient*> requireDaemonClient();
 
-    // YAMS extensions toggle (independent of strict mode which has been removed)
+    // YAMS extensions toggle.
     bool areYamsExtensionsEnabled() const { return enableYamsExtensions_; }
 
     // HTTP session context controls
@@ -521,8 +517,6 @@ private:
     json describeOp(const std::string& target) const;
     json describeAllOps() const;
 
-    // (Removed legacy JSON helper declarations – use typed async tool handlers via ToolRegistry)
-
     // Helper methods
 
     // Name resolution helpers (similar to CLI commands)
@@ -602,8 +596,6 @@ private:
 #endif
 
     std::atomic<bool> initialized_{false};
-    // readyPending_ removed (deprecated after canonical tools/call refactor)
-
     // Server info
     struct {
         std::string name = "yams-mcp";

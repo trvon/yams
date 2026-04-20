@@ -816,6 +816,164 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
     return policy;
 }
 
+namespace {
+
+std::optional<std::string> readEnvString(const char* name) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw)
+        return std::nullopt;
+    return std::string(raw);
+}
+
+std::optional<std::uint32_t> readEnvU32(const char* name) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw)
+        return std::nullopt;
+    try {
+        return static_cast<std::uint32_t>(std::stoul(raw));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<float> readEnvFloat(const char* name) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw)
+        return std::nullopt;
+    try {
+        return std::stof(raw);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::uint32_t> parseTomlU32(const std::string& s) {
+    try {
+        return static_cast<std::uint32_t>(std::stoul(s));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::size_t> parseTomlSize(const std::string& s) {
+    try {
+        return static_cast<std::size_t>(std::stoul(s));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<float> parseTomlFloat(const std::string& s) {
+    try {
+        return std::stof(s);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<bool> parseTomlBool(const std::string& s) {
+    std::string v;
+    v.reserve(s.size());
+    for (char c : s)
+        v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (v == "true" || v == "1" || v == "yes" || v == "on")
+        return true;
+    if (v == "false" || v == "0" || v == "no" || v == "off")
+        return false;
+    return std::nullopt;
+}
+
+} // namespace
+
+ConfigResolver::SimeonEncoderPolicy ConfigResolver::resolveSimeonEncoderPolicy() {
+    SimeonEncoderPolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("embeddings.simeon.ngram_mode");
+                it != kv.end() && !it->second.empty())
+                policy.ngramMode = it->second;
+            if (auto it = kv.find("embeddings.simeon.ngram_min"); it != kv.end())
+                policy.ngramMin = parseTomlU32(it->second);
+            if (auto it = kv.find("embeddings.simeon.ngram_max"); it != kv.end())
+                policy.ngramMax = parseTomlU32(it->second);
+            if (auto it = kv.find("embeddings.simeon.sketch_dim"); it != kv.end())
+                policy.sketchDim = parseTomlU32(it->second);
+            if (auto it = kv.find("embeddings.simeon.output_dim"); it != kv.end())
+                policy.outputDim = parseTomlU32(it->second);
+            if (auto it = kv.find("embeddings.simeon.projection");
+                it != kv.end() && !it->second.empty())
+                policy.projection = it->second;
+            if (auto it = kv.find("embeddings.simeon.l2_normalize"); it != kv.end())
+                policy.l2Normalize = parseTomlBool(it->second);
+            if (auto it = kv.find("embeddings.simeon.pq_bytes"); it != kv.end())
+                policy.pqBytes = parseTomlU32(it->second);
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for simeon encoder policy: {}", e.what());
+    }
+
+    if (auto v = readEnvString("YAMS_SIMEON_NGRAM_MODE"))
+        policy.ngramMode = std::move(v);
+    if (auto v = readEnvU32("YAMS_SIMEON_NGRAM_MIN"))
+        policy.ngramMin = v;
+    if (auto v = readEnvU32("YAMS_SIMEON_NGRAM_MAX"))
+        policy.ngramMax = v;
+    if (auto v = readEnvU32("YAMS_SIMEON_SKETCH_DIM"))
+        policy.sketchDim = v;
+    if (auto v = readEnvU32("YAMS_SIMEON_OUTPUT_DIM"))
+        policy.outputDim = v;
+    if (auto v = readEnvString("YAMS_SIMEON_PROJECTION"))
+        policy.projection = std::move(v);
+    if (auto v = readEnvU32("YAMS_SIMEON_PQ_BYTES"))
+        policy.pqBytes = v;
+
+    return policy;
+}
+
+ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
+    SimeonBm25Policy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("embeddings.simeon.bm25.enabled"); it != kv.end())
+                policy.enabled = parseTomlBool(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.variant");
+                it != kv.end() && !it->second.empty())
+                policy.variant = it->second;
+            if (auto it = kv.find("embeddings.simeon.bm25.subword_gamma"); it != kv.end())
+                policy.subwordGamma = parseTomlFloat(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.max_corpus_docs"); it != kv.end())
+                policy.maxCorpusDocs = parseTomlSize(it->second);
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for simeon bm25 policy: {}", e.what());
+    }
+
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_ENABLED")) {
+        if (auto b = parseTomlBool(std::string(raw)))
+            policy.enabled = b;
+    }
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_VARIANT"))
+        policy.variant = std::move(v);
+    if (auto v = readEnvFloat("YAMS_SIMEON_BM25_SUBWORD_GAMMA"))
+        policy.subwordGamma = v;
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_MAX_CORPUS_DOCS")) {
+        try {
+            policy.maxCorpusDocs = static_cast<std::size_t>(std::stoul(raw));
+        } catch (const std::exception&) {
+        }
+    }
+
+    return policy;
+}
+
 ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
     PostIngestCaps caps;
 

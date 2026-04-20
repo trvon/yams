@@ -1,5 +1,7 @@
 #include <yams/vector/simeon_embedding_backend.h>
 
+#include <yams/daemon/components/ConfigResolver.h>
+
 #include <simeon/simeon.hpp>
 
 #include <spdlog/spdlog.h>
@@ -16,30 +18,26 @@ namespace yams::vector {
 
 namespace {
 
-simeon::NGramMode parse_ngram_mode(const char* s) {
-    if (!s)
-        return simeon::NGramMode::CharOnly;
-    if (std::strcmp(s, "word") == 0)
+simeon::NGramMode parse_ngram_mode(const std::string& s) {
+    if (s == "word")
         return simeon::NGramMode::WordOnly;
-    if (std::strcmp(s, "both") == 0 || std::strcmp(s, "char_and_word") == 0)
+    if (s == "both" || s == "char_and_word")
         return simeon::NGramMode::CharAndWord;
     return simeon::NGramMode::CharOnly;
 }
 
-simeon::ProjectionMode parse_projection_mode(const char* s) {
-    if (!s)
-        return simeon::ProjectionMode::AchlioptasSparse;
-    if (std::strcmp(s, "none") == 0)
+simeon::ProjectionMode parse_projection_mode(const std::string& s) {
+    if (s == "none")
         return simeon::ProjectionMode::None;
-    if (std::strcmp(s, "sparse_jl") == 0 || std::strcmp(s, "sparse-jl") == 0)
+    if (s == "sparse_jl" || s == "sparse-jl")
         return simeon::ProjectionMode::SparseJL;
-    if (std::strcmp(s, "fwht") == 0 || std::strcmp(s, "hadamard") == 0)
+    if (s == "fwht" || s == "hadamard")
         return simeon::ProjectionMode::Fwht;
-    if (std::strcmp(s, "dense_gaussian") == 0 || std::strcmp(s, "gaussian") == 0)
+    if (s == "dense_gaussian" || s == "gaussian")
         return simeon::ProjectionMode::DenseGaussian;
-    if (std::strcmp(s, "very_sparse") == 0)
+    if (s == "very_sparse")
         return simeon::ProjectionMode::VerySparse;
-    if (std::strcmp(s, "achlioptas_sparse") == 0 || std::strcmp(s, "achlioptas") == 0)
+    if (s == "achlioptas_sparse" || s == "achlioptas")
         return simeon::ProjectionMode::AchlioptasSparse;
     return simeon::ProjectionMode::AchlioptasSparse;
 }
@@ -62,39 +60,38 @@ const char* projection_mode_label(simeon::ProjectionMode m) noexcept {
     return "achlioptas_sparse";
 }
 
-uint32_t env_u32(const char* name, uint32_t fallback) {
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw)
-        return fallback;
-    try {
-        return static_cast<uint32_t>(std::stoul(raw));
-    } catch (...) {
-        return fallback;
+const char* ngram_mode_label(simeon::NGramMode m) noexcept {
+    switch (m) {
+        case simeon::NGramMode::CharOnly:
+            return "char";
+        case simeon::NGramMode::WordOnly:
+            return "word";
+        case simeon::NGramMode::CharAndWord:
+            return "char_and_word";
+        default:
+            return "unknown";
     }
 }
 
 simeon::EncoderConfig build_encoder_config(const EmbeddingConfig& yams_cfg) {
+    const auto policy = daemon::ConfigResolver::resolveSimeonEncoderPolicy();
     simeon::EncoderConfig cfg;
-    cfg.ngram_mode = parse_ngram_mode(std::getenv("YAMS_SIMEON_NGRAM_MODE"));
-    cfg.ngram_min = env_u32("YAMS_SIMEON_NGRAM_MIN", 3);
-    cfg.ngram_max = env_u32("YAMS_SIMEON_NGRAM_MAX", 5);
-    cfg.sketch_dim = env_u32("YAMS_SIMEON_SKETCH_DIM", 4096);
-    cfg.output_dim =
-        env_u32("YAMS_SIMEON_OUTPUT_DIM", static_cast<uint32_t>(yams_cfg.embedding_dim));
-    cfg.projection = parse_projection_mode(std::getenv("YAMS_SIMEON_PROJECTION"));
-    cfg.l2_normalize = yams_cfg.normalize_embeddings;
+    cfg.ngram_mode = parse_ngram_mode(policy.ngramMode.value_or(std::string{}));
+    cfg.ngram_min = policy.ngramMin.value_or(3);
+    cfg.ngram_max = policy.ngramMax.value_or(5);
+    cfg.sketch_dim = policy.sketchDim.value_or(4096);
+    cfg.output_dim = policy.outputDim.value_or(static_cast<uint32_t>(yams_cfg.embedding_dim));
+    cfg.projection = parse_projection_mode(policy.projection.value_or(std::string{}));
+    cfg.l2_normalize = policy.l2Normalize.value_or(yams_cfg.normalize_embeddings);
     return cfg;
 }
 
-// One-line recipe identity for telemetry. Format:
-//   <projection>_<sketch>_<output>[+pq<bytes>]
-// Read at process start; YAMS_SIMEON_PQ_BYTES is reserved for the post-encode
-// PQ compression tier (PQ wiring lives in the storage layer, not the encoder).
 std::string compute_simeon_recipe_label() {
-    const auto proj = parse_projection_mode(std::getenv("YAMS_SIMEON_PROJECTION"));
-    const auto sketch = env_u32("YAMS_SIMEON_SKETCH_DIM", 4096);
-    const auto out = env_u32("YAMS_SIMEON_OUTPUT_DIM", 384);
-    const auto pq = env_u32("YAMS_SIMEON_PQ_BYTES", 0);
+    const auto policy = daemon::ConfigResolver::resolveSimeonEncoderPolicy();
+    const auto proj = parse_projection_mode(policy.projection.value_or(std::string{}));
+    const auto sketch = policy.sketchDim.value_or(4096);
+    const auto out = policy.outputDim.value_or(384);
+    const auto pq = policy.pqBytes.value_or(0);
     std::string s = projection_mode_label(proj);
     s += '_';
     s += std::to_string(sketch);
@@ -117,8 +114,14 @@ public:
         std::lock_guard<std::mutex> lock(mu_);
         if (initialized_.load())
             return true;
+        auto enc_cfg = build_encoder_config(config_);
+        spdlog::info("SimeonBackend encoder_config: ngram_mode={} ngram_min={} ngram_max={} "
+                     "sketch_dim={} output_dim={} projection={} l2_normalize={}",
+                     ngram_mode_label(enc_cfg.ngram_mode), enc_cfg.ngram_min, enc_cfg.ngram_max,
+                     enc_cfg.sketch_dim, enc_cfg.output_dim,
+                     projection_mode_label(enc_cfg.projection), enc_cfg.l2_normalize);
         try {
-            encoder_ = std::make_unique<simeon::Encoder>(build_encoder_config(config_));
+            encoder_ = std::make_unique<simeon::Encoder>(enc_cfg);
         } catch (const std::exception& e) {
             spdlog::error("SimeonBackend init failed: {}", e.what());
             return false;

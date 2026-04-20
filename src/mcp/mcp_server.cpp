@@ -6235,7 +6235,7 @@ suggest_context_metadata_loaded:
         }
 
         void MCPServer::scheduleAutoReady() {
-            // Removed - not part of MCP spec
+            // Intentionally no-op: readiness requires explicit client lifecycle messages.
         }
 
         bool MCPServer::shouldAutoInitialize() const {

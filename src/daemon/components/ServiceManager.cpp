@@ -534,10 +534,9 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 ingestService_ = std::make_unique<IngestService>(this, workCoordinator_.get());
             }
         } catch (const std::exception& e) {
-            spdlog::warn("ServiceManager: failed to initialize IngestService scaffold: {}",
-                         e.what());
+            spdlog::warn("ServiceManager: failed to initialize IngestService: {}", e.what());
         } catch (...) {
-            spdlog::warn("ServiceManager: unknown error initializing IngestService scaffold");
+            spdlog::warn("ServiceManager: unknown error initializing IngestService");
         }
 
         // PBI-088: Create extracted managers (wiring in progress)
@@ -753,8 +752,7 @@ yams::Result<void> ServiceManager::initialize() {
         spdlog::debug("Pool configure error: {}", e.what());
     }
 
-    // SearchEngine initialization is handled separately via searchEngineManager_
-    // (SearchExecutor has been deprecated and removed)
+    // Search engine initialization is handled separately via searchEngineManager_.
     return Result<void>();
 }
 
@@ -1498,7 +1496,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             boost::asio::detached);
     });
 
-    // Plugins step: mark ready (host scaffolding) and record duration uniformly
+    // Plugins step: record readiness and duration uniformly.
     spdlog::info("[ServiceManager] Phase: Plugins Ready.");
     try {
         (void)init::record_duration(
@@ -1508,7 +1506,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     const auto ps = getPluginHostFsmSnapshot();
                     state_.readiness.pluginsReady = (ps.state == PluginHostState::Ready);
                 } catch (...) {
-                    // Best-effort legacy flag; plugin readiness is authoritative via PluginHostFsm.
+                    // Fall back to ready when the host snapshot is unavailable.
                     state_.readiness.pluginsReady = true;
                 }
                 return yams::Result<void>();
@@ -1621,7 +1619,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     database_ = std::make_shared<metadata::Database>();
     int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 5000, 250);
 
-    // Check stop again before FSM transition
+    // Re-check shutdown before transitioning the database FSM.
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
@@ -1915,15 +1913,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     } catch (...) {
     }
 
-    // Cross-encoder reranker is initialized later after plugins are loaded
-    // See the reranker wiring after search engine build in searchEngine setup
+    // Cross-encoder reranker initialization happens after plugin loading.
 
     // Defer Vector DB initialization until after plugin adoption (provider dim)
     spdlog::info("[ServiceManager] Phase: Vector DB Init (deferred until after plugins).");
 
-    // VectorIndexManager removed - using VectorDatabase directly for vector search.
-    // Do not mark the vector index ready here; VectorSystemManager determines that after
-    // preparing any persisted or rebuilt HNSW structures.
+    // Vector search uses VectorDatabase directly. VectorSystemManager determines readiness
+    // after preparing any persisted or rebuilt HNSW structures.
     if (getVectorDatabase()) {
         writeBootstrapStatusFile(config_, state_);
     }

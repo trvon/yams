@@ -19,8 +19,11 @@
 #include <yams/core/magic_numbers.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/topology/topology_metadata_store.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -84,6 +87,14 @@ public:
         cmd->add_option("--search", searchPattern_,
                         "Search nodes by label pattern (supports * and ? wildcards)");
 
+        cmd->add_flag("--topology-snapshots", topologySnapshots_,
+                      "Show topology snapshot summary from the artifact store");
+        cmd->add_flag("--topology-clusters", topologyClusters_,
+                      "List topology clusters from the artifact store");
+        cmd->add_option("--cluster", topologyClusterId_, "Show detail for a topology cluster id");
+        cmd->add_option("--snapshot", topologySnapshotId_,
+                        "Specific topology snapshot id (defaults to latest)");
+
         cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
 
@@ -106,6 +117,18 @@ public:
             // yams-kt5t: Handle --search mode (search nodes by label pattern)
             if (!searchPattern_.empty()) {
                 co_return co_await executeSearch();
+            }
+
+            if (topologySnapshots_) {
+                co_return executeTopologySnapshots();
+            }
+
+            if (topologyClusters_) {
+                co_return executeTopologyClusters();
+            }
+
+            if (!topologyClusterId_.empty()) {
+                co_return executeTopologyClusterDetail();
             }
 
             // Handle --list-type mode (list nodes by type without traversal)
@@ -270,6 +293,583 @@ private:
                 std::cout << yams::cli::ui::indent(node.properties, 6) << "\n";
             }
         }
+    }
+
+    static std::string topologyInputKindLabel(yams::topology::TopologyInputKind kind) {
+        using yams::topology::TopologyInputKind;
+        switch (kind) {
+            case TopologyInputKind::SemanticNeighborGraph:
+                return "semantic_neighbor_graph";
+            case TopologyInputKind::EmbeddingNeighborhood:
+                return "embedding_neighborhood";
+            case TopologyInputKind::Hybrid:
+                return "hybrid";
+        }
+        return "hybrid";
+    }
+
+    static std::string topologyRoleLabel(yams::topology::DocumentTopologyRole role) {
+        using yams::topology::DocumentTopologyRole;
+        switch (role) {
+            case DocumentTopologyRole::Core:
+                return "core";
+            case DocumentTopologyRole::Bridge:
+                return "bridge";
+            case DocumentTopologyRole::Medoid:
+                return "medoid";
+            case DocumentTopologyRole::Outlier:
+                return "outlier";
+        }
+        return "core";
+    }
+
+    struct TopologyClusterStats {
+        std::size_t scopedMemberCount{0};
+        std::unordered_map<std::string, std::size_t> roleCounts;
+    };
+
+    struct TopologyReadContext {
+        std::shared_ptr<metadata::ConnectionPool> connectionPool;
+        std::shared_ptr<metadata::IMetadataRepository> metadataRepo;
+        std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;
+    };
+
+    Result<std::optional<TopologyReadContext>> buildTopologyReadContext() const {
+        if (cli_ == nullptr) {
+            return std::optional<TopologyReadContext>{std::nullopt};
+        }
+
+        if (auto repo = cli_->getMetadataRepository()) {
+            TopologyReadContext ctx;
+            ctx.metadataRepo = repo;
+            ctx.kgStore = cli_->getKnowledgeGraphStore();
+            return std::optional<TopologyReadContext>{std::move(ctx)};
+        }
+
+        const auto dbPath = cli_->getDataPath() / "yams.db";
+        if (!std::filesystem::exists(dbPath)) {
+            return std::optional<TopologyReadContext>{std::nullopt};
+        }
+
+        metadata::ConnectionPoolConfig poolConfig;
+        poolConfig.maxConnections = 4;
+        poolConfig.minConnections = 1;
+        poolConfig.connectTimeout = std::chrono::seconds(10);
+
+        auto pool = std::make_shared<metadata::ConnectionPool>(dbPath.string(), poolConfig);
+        auto poolInit = pool->initialize();
+        if (!poolInit) {
+            return poolInit.error();
+        }
+
+        TopologyReadContext ctx;
+        ctx.connectionPool = pool;
+        ctx.metadataRepo = std::make_shared<metadata::MetadataRepository>(*pool);
+
+        metadata::KnowledgeGraphStoreConfig kgCfg;
+        kgCfg.enable_alias_fts = true;
+        kgCfg.enable_wal = true;
+        auto kgStoreRes = metadata::makeSqliteKnowledgeGraphStore(dbPath.string(), kgCfg);
+        if (kgStoreRes) {
+            ctx.kgStore =
+                std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgStoreRes.value()));
+        }
+        return std::optional<TopologyReadContext>{std::move(ctx)};
+    }
+
+    Result<std::optional<yams::topology::TopologyArtifactBatch>> loadTopologySnapshot() const {
+        auto ctxRes = buildTopologyReadContext();
+        if (!ctxRes) {
+            return ctxRes.error();
+        }
+        const auto& ctxOpt = ctxRes.value();
+        if (!ctxOpt.has_value() || !ctxOpt->metadataRepo) {
+            return std::optional<yams::topology::TopologyArtifactBatch>{std::nullopt};
+        }
+
+        yams::topology::MetadataKgTopologyArtifactStore store(ctxOpt->metadataRepo,
+                                                              ctxOpt->kgStore);
+        return store.loadLatest(topologySnapshotId_);
+    }
+
+    std::string resolveDocumentPathByHash(const std::string& hash) const {
+        if (hash.empty() || cli_ == nullptr) {
+            return {};
+        }
+        auto ctxRes = buildTopologyReadContext();
+        if (!ctxRes || !ctxRes.value().has_value() || !ctxRes.value()->metadataRepo) {
+            return {};
+        }
+        auto docRes = ctxRes.value()->metadataRepo->getDocumentByHash(hash);
+        if (!docRes || !docRes.value().has_value()) {
+            return {};
+        }
+        return docRes.value()->filePath;
+    }
+
+    static std::vector<std::string> splitPathSegments(const std::filesystem::path& path) {
+        std::vector<std::string> segments;
+        for (const auto& part : path) {
+            auto s = part.generic_string();
+            if (!s.empty() && s != "/") {
+                segments.push_back(std::move(s));
+            }
+        }
+        return segments;
+    }
+
+    static std::string projectPathForDisplay(const std::string& rawPath,
+                                             const std::filesystem::path& cwd) {
+        if (rawPath.empty()) {
+            return {};
+        }
+
+        const auto normalized = yams::metadata::computePathDerivedValues(rawPath).normalizedPath;
+        std::filesystem::path normalizedPath(normalized);
+        std::error_code ec;
+        auto rel = normalizedPath.lexically_relative(cwd);
+        if (!rel.empty() && rel.native().find("..") != 0) {
+            return rel.generic_string();
+        }
+
+        const auto cwdSegs = splitPathSegments(cwd.lexically_normal());
+        const auto pathSegs = splitPathSegments(normalizedPath.lexically_normal());
+        if (cwdSegs.empty() || pathSegs.empty()) {
+            return normalized;
+        }
+
+        std::size_t bestLen = 0;
+        std::size_t bestPathStart = 0;
+        for (std::size_t len = std::min(cwdSegs.size(), pathSegs.size()); len >= 2; --len) {
+            const std::size_t cwdStart = cwdSegs.size() - len;
+            for (std::size_t pathStart = 0; pathStart + len <= pathSegs.size(); ++pathStart) {
+                bool match = true;
+                for (std::size_t i = 0; i < len; ++i) {
+                    if (cwdSegs[cwdStart + i] != pathSegs[pathStart + i]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    bestLen = len;
+                    bestPathStart = pathStart;
+                    break;
+                }
+            }
+            if (bestLen > 0) {
+                break;
+            }
+            if (len == 2) {
+                break;
+            }
+        }
+
+        if (bestLen > 0) {
+            std::filesystem::path projected;
+            for (std::size_t i = bestPathStart + bestLen; i < pathSegs.size(); ++i) {
+                projected /= pathSegs[i];
+            }
+            if (!projected.empty()) {
+                return projected.generic_string();
+            }
+        }
+
+        return normalized;
+    }
+
+    TopologyClusterStats
+    collectTopologyClusterStats(const yams::topology::TopologyArtifactBatch& snapshot,
+                                const yams::topology::ClusterArtifact& cluster,
+                                const std::unordered_set<std::string>* scopedPaths = nullptr,
+                                const std::filesystem::path* cwd = nullptr) const {
+        TopologyClusterStats stats;
+        for (const auto& membership : snapshot.memberships) {
+            if (membership.clusterId != cluster.clusterId) {
+                continue;
+            }
+            stats.roleCounts[topologyRoleLabel(membership.role)]++;
+
+            bool include = true;
+            if (scopedPaths != nullptr && cwd != nullptr) {
+                std::string path = resolveDocumentPathByHash(membership.documentHash);
+                if (path.empty()) {
+                    include = false;
+                } else {
+                    auto normalized = normalizePath(std::filesystem::path(path), *cwd);
+                    include = scopedPaths->count(normalized) > 0;
+                }
+            }
+            if (include) {
+                ++stats.scopedMemberCount;
+            }
+        }
+        return stats;
+    }
+
+    static std::string
+    formatRoleCounts(const std::unordered_map<std::string, std::size_t>& roleCounts) {
+        return formatRelationCounts(roleCounts, 4);
+    }
+
+    Result<void> executeTopologySnapshots() {
+        auto snapshotRes = loadTopologySnapshot();
+        if (!snapshotRes) {
+            return snapshotRes.error();
+        }
+
+        const auto& snapshotOpt = snapshotRes.value();
+        if (!snapshotOpt.has_value()) {
+            if (wantsJsonOutput()) {
+                json out;
+                out["snapshot"] = nullptr;
+                out["requested_snapshot_id"] =
+                    topologySnapshotId_.empty() ? json(nullptr) : json(topologySnapshotId_);
+                std::cout << out.dump(2) << "\n";
+            } else {
+                std::cout << yams::cli::ui::section_header("Topology Snapshots") << "\n\n";
+                std::cout << yams::cli::ui::status_info("No topology snapshot available") << "\n";
+            }
+            return Result<void>();
+        }
+
+        const auto& snapshot = *snapshotOpt;
+        if (wantsJsonOutput()) {
+            json out;
+            out["snapshot"] = {{"snapshot_id", snapshot.snapshotId},
+                               {"algorithm", snapshot.algorithm},
+                               {"input_kind", topologyInputKindLabel(snapshot.inputKind)},
+                               {"generated_at_unix_seconds", snapshot.generatedAtUnixSeconds},
+                               {"topology_epoch", snapshot.topologyEpoch},
+                               {"cluster_count", snapshot.clusters.size()},
+                               {"membership_count", snapshot.memberships.size()}};
+            std::cout << out.dump(2) << "\n";
+            return Result<void>();
+        }
+
+        std::cout << yams::cli::ui::section_header("Topology Snapshots") << "\n\n";
+        yams::cli::ui::Table table;
+        table.headers = {"SNAPSHOT", "ALGORITHM", "INPUT", "CLUSTERS", "MEMBERSHIPS", "EPOCH"};
+        table.has_header = true;
+        table.add_row({snapshot.snapshotId, snapshot.algorithm.empty() ? "-" : snapshot.algorithm,
+                       topologyInputKindLabel(snapshot.inputKind),
+                       yams::cli::ui::format_number(snapshot.clusters.size()),
+                       yams::cli::ui::format_number(snapshot.memberships.size()),
+                       yams::cli::ui::format_number(snapshot.topologyEpoch)});
+        yams::cli::ui::render_table(std::cout, table);
+
+        if (verbose_) {
+            std::cout << "\n"
+                      << yams::cli::ui::key_value("Generated At (unix seconds)",
+                                                  std::to_string(snapshot.generatedAtUnixSeconds))
+                      << "\n";
+            if (!topologySnapshotId_.empty()) {
+                std::cout << yams::cli::ui::key_value("Requested Snapshot", topologySnapshotId_)
+                          << "\n";
+            }
+        }
+        return Result<void>();
+    }
+
+    Result<void> executeTopologyClusters() {
+        auto snapshotRes = loadTopologySnapshot();
+        if (!snapshotRes) {
+            return snapshotRes.error();
+        }
+
+        const auto& snapshotOpt = snapshotRes.value();
+        if (!snapshotOpt.has_value()) {
+            if (wantsJsonOutput()) {
+                json out;
+                out["snapshot_id"] =
+                    topologySnapshotId_.empty() ? json(nullptr) : json(topologySnapshotId_);
+                out["clusters"] = json::array();
+                std::cout << out.dump(2) << "\n";
+            } else {
+                std::cout << yams::cli::ui::section_header("Topology Clusters") << "\n\n";
+                std::cout << yams::cli::ui::status_info("No topology snapshot available") << "\n";
+            }
+            return Result<void>();
+        }
+
+        const auto& snapshot = *snapshotOpt;
+        std::unordered_set<std::string> scopedPaths;
+        const auto cwd = std::filesystem::current_path();
+        if (scopeToCwd_) {
+            auto scopeRes = buildCurrentScopePathSet(cwd);
+            if (!scopeRes) {
+                return scopeRes.error();
+            }
+            scopedPaths = std::move(scopeRes.value());
+        }
+        std::vector<const yams::topology::ClusterArtifact*> clusters;
+        clusters.reserve(snapshot.clusters.size());
+        for (const auto& cluster : snapshot.clusters) {
+            clusters.push_back(&cluster);
+        }
+        std::sort(clusters.begin(), clusters.end(), [](const auto* lhs, const auto* rhs) {
+            if (lhs->bridgeMass != rhs->bridgeMass) {
+                return lhs->bridgeMass > rhs->bridgeMass;
+            }
+            if (lhs->persistenceScore != rhs->persistenceScore) {
+                return lhs->persistenceScore > rhs->persistenceScore;
+            }
+            if (lhs->memberCount != rhs->memberCount) {
+                return lhs->memberCount > rhs->memberCount;
+            }
+            return lhs->clusterId < rhs->clusterId;
+        });
+
+        if (wantsJsonOutput()) {
+            json out;
+            out["snapshot_id"] = snapshot.snapshotId;
+            out["cluster_count"] = snapshot.clusters.size();
+            json clustersJson = json::array();
+            for (const auto* cluster : clusters) {
+                auto stats = collectTopologyClusterStats(snapshot, *cluster,
+                                                         scopeToCwd_ ? &scopedPaths : nullptr,
+                                                         scopeToCwd_ ? &cwd : nullptr);
+                std::string medoidPath;
+                if (cluster->medoid.has_value()) {
+                    medoidPath = !cluster->medoid->filePath.empty()
+                                     ? cluster->medoid->filePath
+                                     : resolveDocumentPathByHash(cluster->medoid->documentHash);
+                    medoidPath = projectPathForDisplay(medoidPath, cwd);
+                }
+                json row;
+                row["cluster_id"] = cluster->clusterId;
+                row["level"] = cluster->level;
+                row["member_count"] = cluster->memberCount;
+                row["scoped_member_count"] = stats.scopedMemberCount;
+                row["persistence_score"] = cluster->persistenceScore;
+                row["cohesion_score"] = cluster->cohesionScore;
+                row["bridge_mass"] = cluster->bridgeMass;
+                row["role_summary"] = formatRoleCounts(stats.roleCounts);
+                row["parent_cluster_id"] = cluster->parentClusterId.has_value()
+                                               ? json(*cluster->parentClusterId)
+                                               : json(nullptr);
+                row["overlap_cluster_ids"] = cluster->overlapClusterIds;
+                if (cluster->medoid.has_value()) {
+                    row["medoid"] = {
+                        {"document_hash", cluster->medoid->documentHash},
+                        {"file_path", medoidPath},
+                        {"representative_score", cluster->medoid->representativeScore}};
+                }
+                clustersJson.push_back(std::move(row));
+            }
+            out["clusters"] = std::move(clustersJson);
+            std::cout << out.dump(2) << "\n";
+            return Result<void>();
+        }
+
+        std::cout << yams::cli::ui::section_header("Topology Clusters") << "\n\n";
+        std::cout << yams::cli::ui::status_info("Snapshot: " + snapshot.snapshotId) << "\n\n";
+
+        yams::cli::ui::Table table;
+        table.headers = {"CLUSTER", "LEVEL",    "MEMBERS", "SCOPED", "ROLES",
+                         "PERSIST", "COHESION", "BRIDGE",  "MEDOID"};
+        table.has_header = true;
+        for (const auto* cluster : clusters) {
+            auto stats = collectTopologyClusterStats(snapshot, *cluster,
+                                                     scopeToCwd_ ? &scopedPaths : nullptr,
+                                                     scopeToCwd_ ? &cwd : nullptr);
+            std::string medoid = "-";
+            if (cluster->medoid.has_value()) {
+                medoid = !cluster->medoid->filePath.empty()
+                             ? cluster->medoid->filePath
+                             : resolveDocumentPathByHash(cluster->medoid->documentHash);
+                medoid = projectPathForDisplay(medoid, cwd);
+                if (medoid.empty()) {
+                    medoid = cluster->medoid->documentHash;
+                }
+            }
+            table.add_row(
+                {yams::cli::ui::truncate_to_width(cluster->clusterId, 28),
+                 std::to_string(cluster->level), yams::cli::ui::format_number(cluster->memberCount),
+                 yams::cli::ui::format_number(stats.scopedMemberCount),
+                 yams::cli::ui::truncate_to_width(formatRoleCounts(stats.roleCounts), 26),
+                 yams::cli::ui::truncate_to_width(std::to_string(cluster->persistenceScore), 6),
+                 yams::cli::ui::truncate_to_width(std::to_string(cluster->cohesionScore), 6),
+                 yams::cli::ui::truncate_to_width(std::to_string(cluster->bridgeMass), 6),
+                 yams::cli::ui::truncate_to_width(medoid, 38)});
+        }
+        yams::cli::ui::render_table(std::cout, table);
+
+        if (verbose_) {
+            std::cout << "\n"
+                      << yams::cli::ui::status_info(
+                             "Sorted by bridge mass, then persistence, then member count")
+                      << "\n";
+        }
+        return Result<void>();
+    }
+
+    Result<void> executeTopologyClusterDetail() {
+        auto snapshotRes = loadTopologySnapshot();
+        if (!snapshotRes) {
+            return snapshotRes.error();
+        }
+
+        const auto& snapshotOpt = snapshotRes.value();
+        if (!snapshotOpt.has_value()) {
+            return Error{ErrorCode::NotFound, "No topology snapshot available"};
+        }
+
+        const auto& snapshot = *snapshotOpt;
+        auto clusterIt = std::find_if(
+            snapshot.clusters.begin(), snapshot.clusters.end(),
+            [&](const auto& cluster) { return cluster.clusterId == topologyClusterId_; });
+        if (clusterIt == snapshot.clusters.end()) {
+            return Error{ErrorCode::NotFound, "Topology cluster not found: " + topologyClusterId_};
+        }
+
+        const auto& cluster = *clusterIt;
+        std::unordered_set<std::string> scopedPaths;
+        const auto cwd = std::filesystem::current_path();
+        if (scopeToCwd_) {
+            auto scopeRes = buildCurrentScopePathSet(cwd);
+            if (!scopeRes) {
+                return scopeRes.error();
+            }
+            scopedPaths = std::move(scopeRes.value());
+        }
+        auto clusterStats = collectTopologyClusterStats(
+            snapshot, cluster, scopeToCwd_ ? &scopedPaths : nullptr, scopeToCwd_ ? &cwd : nullptr);
+
+        json membersJson = json::array();
+        yams::cli::ui::Table membersTable;
+        membersTable.headers = {"ROLE", "PATH", "HASH", "BRIDGE"};
+        membersTable.has_header = true;
+        std::size_t scopedMemberCount = 0;
+
+        for (const auto& membership : snapshot.memberships) {
+            if (membership.clusterId != cluster.clusterId) {
+                continue;
+            }
+
+            std::string path = resolveDocumentPathByHash(membership.documentHash);
+            path = projectPathForDisplay(path, cwd);
+            bool include = true;
+            if (scopeToCwd_) {
+                if (path.empty()) {
+                    include = false;
+                } else {
+                    auto normalized = normalizePath(
+                        std::filesystem::path(resolveDocumentPathByHash(membership.documentHash)),
+                        cwd);
+                    include = scopedPaths.count(normalized) > 0;
+                }
+            }
+            if (!include) {
+                continue;
+            }
+
+            ++scopedMemberCount;
+            json member{{"document_hash", membership.documentHash},
+                        {"path", path.empty() ? json(nullptr) : json(path)},
+                        {"role", topologyRoleLabel(membership.role)},
+                        {"bridge_score", membership.bridgeScore},
+                        {"cluster_level", membership.clusterLevel},
+                        {"persistence_score", membership.persistenceScore},
+                        {"cohesion_score", membership.cohesionScore},
+                        {"overlap_cluster_ids", membership.overlapClusterIds}};
+            membersJson.push_back(std::move(member));
+
+            membersTable.add_row(
+                {topologyRoleLabel(membership.role),
+                 yams::cli::ui::truncate_to_width(path.empty() ? "-" : path, 48),
+                 yams::cli::ui::truncate_to_width(membership.documentHash, 18),
+                 yams::cli::ui::truncate_to_width(std::to_string(membership.bridgeScore), 6)});
+        }
+
+        if (wantsJsonOutput()) {
+            json out;
+            out["snapshot_id"] = snapshot.snapshotId;
+            out["cluster"] = {{"cluster_id", cluster.clusterId},
+                              {"parent_cluster_id", cluster.parentClusterId.has_value()
+                                                        ? json(*cluster.parentClusterId)
+                                                        : json(nullptr)},
+                              {"level", cluster.level},
+                              {"member_count", cluster.memberCount},
+                              {"scoped_member_count", scopedMemberCount},
+                              {"role_summary", formatRoleCounts(clusterStats.roleCounts)},
+                              {"role_counts", clusterStats.roleCounts},
+                              {"persistence_score", cluster.persistenceScore},
+                              {"cohesion_score", cluster.cohesionScore},
+                              {"bridge_mass", cluster.bridgeMass},
+                              {"overlap_cluster_ids", cluster.overlapClusterIds}};
+            if (cluster.medoid.has_value()) {
+                std::string medoidPath =
+                    !cluster.medoid->filePath.empty()
+                        ? cluster.medoid->filePath
+                        : resolveDocumentPathByHash(cluster.medoid->documentHash);
+                medoidPath = projectPathForDisplay(medoidPath, cwd);
+                out["cluster"]["medoid"] = {
+                    {"document_hash", cluster.medoid->documentHash},
+                    {"file_path", medoidPath},
+                    {"representative_score", cluster.medoid->representativeScore}};
+            }
+            out["scope_cwd"] = scopeToCwd_;
+            out["members"] = std::move(membersJson);
+            std::cout << out.dump(2) << "\n";
+            return Result<void>();
+        }
+
+        std::cout << yams::cli::ui::section_header("Topology Cluster") << "\n\n";
+        std::cout << yams::cli::ui::key_value("Snapshot", snapshot.snapshotId) << "\n";
+        std::cout << yams::cli::ui::key_value("Cluster", cluster.clusterId) << "\n";
+        if (cluster.parentClusterId.has_value()) {
+            std::cout << yams::cli::ui::key_value("Parent", *cluster.parentClusterId) << "\n";
+        }
+        std::cout << yams::cli::ui::key_value("Level", std::to_string(cluster.level)) << "\n";
+        std::cout << yams::cli::ui::key_value("Members", std::to_string(cluster.memberCount))
+                  << "\n";
+        if (scopeToCwd_) {
+            std::cout << yams::cli::ui::key_value("Scoped Members",
+                                                  std::to_string(scopedMemberCount))
+                      << "\n";
+        }
+        std::cout << yams::cli::ui::key_value("Roles", formatRoleCounts(clusterStats.roleCounts))
+                  << "\n";
+        std::cout << yams::cli::ui::key_value("Persistence",
+                                              std::to_string(cluster.persistenceScore))
+                  << "\n";
+        std::cout << yams::cli::ui::key_value("Cohesion", std::to_string(cluster.cohesionScore))
+                  << "\n";
+        std::cout << yams::cli::ui::key_value("Bridge", std::to_string(cluster.bridgeMass)) << "\n";
+        if (!cluster.overlapClusterIds.empty()) {
+            std::ostringstream os;
+            for (std::size_t i = 0; i < cluster.overlapClusterIds.size(); ++i) {
+                if (i)
+                    os << ", ";
+                os << cluster.overlapClusterIds[i];
+            }
+            std::cout << yams::cli::ui::key_value("Overlaps", os.str()) << "\n";
+        }
+        if (cluster.medoid.has_value()) {
+            std::string medoidPath = !cluster.medoid->filePath.empty()
+                                         ? cluster.medoid->filePath
+                                         : resolveDocumentPathByHash(cluster.medoid->documentHash);
+            medoidPath = projectPathForDisplay(medoidPath, cwd);
+            std::cout << yams::cli::ui::key_value("Medoid Hash", cluster.medoid->documentHash)
+                      << "\n";
+            if (!medoidPath.empty()) {
+                std::cout << yams::cli::ui::key_value("Medoid Path", medoidPath) << "\n";
+            }
+        }
+
+        std::cout << "\n" << yams::cli::ui::subsection_header("Members") << "\n";
+        if (scopedMemberCount == 0) {
+            std::cout << yams::cli::ui::status_info(scopeToCwd_ ? "No members in current scope"
+                                                                : "No members found")
+                      << "\n";
+        } else {
+            yams::cli::ui::render_table(std::cout, membersTable);
+        }
+        if (scopeToCwd_) {
+            std::cout << "\n"
+                      << yams::cli::ui::status_info(std::string{kScopeToCwdDescription}) << "\n";
+        }
+        return Result<void>();
     }
 
     static std::string
@@ -1162,6 +1762,10 @@ private:
     bool listTypes_{false};
     bool listRelations_{false};
     std::string searchPattern_;
+    bool topologySnapshots_{false};
+    bool topologyClusters_{false};
+    std::string topologyClusterId_;
+    std::string topologySnapshotId_;
     bool scopeToCwd_{false};
 };
 
