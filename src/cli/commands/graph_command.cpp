@@ -1,11 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
-#include <cctype>
-#include <cmath>
 #include <filesystem>
-#include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -75,21 +71,8 @@ public:
         cmd->add_option("--prop-filter", propFilter_,
                         "Filter nodes by JSON property (e.g., 'decompiled:malloc')");
 
-        // Isolated node detection (nodes with no incoming edges of specified relation)
-        cmd->add_flag("--isolated", showIsolated_,
-                      "Find isolated nodes (no incoming edges for --relation type)");
-
-        // Dead-code report (scoped isolated nodes with allowlist)
-        cmd->add_flag("--dead-code-report", deadCodeReport_,
-                      "Generate dead-code report for src/** (scoped isolated nodes)");
-        cmd->add_option("--min-confidence", minConfidence_,
-                        "Minimum confidence threshold for candidate reporting (0.0-1.0)")
-            ->default_val(0.8)
-            ->check(CLI::Range(0.0, 1.0));
-        cmd->add_flag("--show-low-confidence", showLowConfidence_,
-                      "Include low-confidence candidates below --min-confidence");
         cmd->add_flag("--scope-cwd", scopeToCwd_,
-                      "Scope list/isolated results to src/** and include/** under CWD");
+                      "Scope list results to src/** and include/** under CWD");
 
         // yams-66h: List available node types with counts
         cmd->add_flag("--list-types", listTypes_, "List available node types with counts");
@@ -125,15 +108,8 @@ public:
                 co_return co_await executeSearch();
             }
 
-            if (deadCodeReport_) {
-                co_return co_await executeDeadCodeReport();
-            }
-
             // Handle --list-type mode (list nodes by type without traversal)
             if (!listNodeType_.empty()) {
-                if (showIsolated_) {
-                    co_return co_await executeIsolatedNodes();
-                }
                 co_return co_await executeListByType();
             }
 
@@ -157,6 +133,8 @@ private:
             std::chrono::milliseconds(10000));
     }
 
+    bool wantsJsonOutput() const { return jsonOutput_ || outputFormat_ == "json"; }
+
     void printFallbackNoticeIfNeeded(const yams::cli::CliDaemonClientPlan& plan) const {
         if (!plan.usedInProcessFallback) {
             return;
@@ -167,7 +145,7 @@ private:
         } else {
             spdlog::info("graph: socket transport unavailable; using in-process transport");
         }
-        if (jsonOutput_ || outputFormat_ == "json") {
+        if (wantsJsonOutput()) {
             return;
         }
         const bool verboseMode = verbose_ || (cli_ != nullptr && cli_->getVerbose());
@@ -235,6 +213,63 @@ private:
             return extracted->generic_string();
         }
         return {};
+    }
+
+    static json parsePropertiesField(const std::string& properties) {
+        try {
+            return json::parse(properties);
+        } catch (...) {
+            return json(properties);
+        }
+    }
+
+    json makeGraphNodeJson(
+        const yams::daemon::GraphNode& node, bool includeDistance = false,
+        const std::unordered_map<int64_t, std::string>* traversalHints = nullptr) const {
+        json out;
+        out["nodeId"] = node.nodeId;
+        out["nodeKey"] = node.nodeKey;
+        out["label"] = node.label;
+        out["type"] = node.type;
+        if (includeDistance) {
+            out["distance"] = node.distance;
+        }
+        if (!node.documentHash.empty()) {
+            out["documentHash"] = node.documentHash;
+        }
+        if (auto nodePath = displayNodePath(node); !nodePath.empty()) {
+            out["path"] = nodePath;
+        }
+        if (traversalHints != nullptr) {
+            if (auto hintIt = traversalHints->find(node.nodeId); hintIt != traversalHints->end()) {
+                out["via"] = hintIt->second;
+            }
+        }
+        if (!node.properties.empty()) {
+            out["properties"] = parsePropertiesField(node.properties);
+        }
+        return out;
+    }
+
+    void renderNodePropertiesSection(const std::vector<yams::daemon::GraphNode>& nodes) const {
+        bool hasProps = false;
+        for (const auto& node : nodes) {
+            if (!node.properties.empty()) {
+                hasProps = true;
+                break;
+            }
+        }
+        if (!hasProps) {
+            return;
+        }
+
+        std::cout << "\n" << yams::cli::ui::subsection_header("Node Properties") << "\n";
+        for (const auto& node : nodes) {
+            if (!node.properties.empty()) {
+                std::cout << yams::cli::ui::bullet(node.label, 2) << "\n";
+                std::cout << yams::cli::ui::indent(node.properties, 6) << "\n";
+            }
+        }
     }
 
     static std::string
@@ -357,7 +392,7 @@ private:
             co_return Result<void>();
         }
 
-        if (jsonOutput_ || outputFormat_ == "json") {
+        if (wantsJsonOutput()) {
             json out;
             out["totalTypes"] = resp.nodeTypeCounts.size();
             json types = json::array();
@@ -429,7 +464,7 @@ private:
             co_return Result<void>();
         }
 
-        if (jsonOutput_ || outputFormat_ == "json") {
+        if (wantsJsonOutput()) {
             json out;
             out["totalRelations"] = resp.relationTypeCounts.size();
             json relations = json::array();
@@ -506,7 +541,7 @@ private:
             co_return Result<void>();
         }
 
-        if (jsonOutput_ || outputFormat_ == "json") {
+        if (wantsJsonOutput()) {
             json out;
             out["pattern"] = searchPattern_;
             out["limit"] = limit_;
@@ -516,22 +551,7 @@ private:
 
             json jsonNodes = json::array();
             for (const auto& node : resp.connectedNodes) {
-                json n;
-                n["nodeId"] = node.nodeId;
-                n["nodeKey"] = node.nodeKey;
-                n["label"] = node.label;
-                n["type"] = node.type;
-                if (!node.documentHash.empty()) {
-                    n["documentHash"] = node.documentHash;
-                }
-                if (!node.properties.empty()) {
-                    try {
-                        n["properties"] = json::parse(node.properties);
-                    } catch (...) {
-                        n["properties"] = node.properties;
-                    }
-                }
-                jsonNodes.push_back(n);
+                jsonNodes.push_back(makeGraphNodeJson(node));
             }
             out["nodes"] = jsonNodes;
             std::cout << out.dump(2) << "\n";
@@ -606,7 +626,7 @@ private:
             nodes = filterNodesToScopedPaths(std::move(nodes), res.value(), cwd);
         }
 
-        if (jsonOutput_ || outputFormat_ == "json") {
+        if (wantsJsonOutput()) {
             json out;
             out["type"] = listNodeType_;
             out["limit"] = limit_;
@@ -621,23 +641,7 @@ private:
 
             json jsonNodes = json::array();
             for (const auto& node : nodes) {
-                json n;
-                n["nodeId"] = node.nodeId;
-                n["nodeKey"] = node.nodeKey;
-                n["label"] = node.label;
-                n["type"] = node.type;
-                if (!node.documentHash.empty()) {
-                    n["documentHash"] = node.documentHash;
-                }
-                if (!node.properties.empty()) {
-                    // Parse properties JSON string to include as object
-                    try {
-                        n["properties"] = json::parse(node.properties);
-                    } catch (...) {
-                        n["properties"] = node.properties; // fallback to raw string
-                    }
-                }
-                jsonNodes.push_back(n);
+                jsonNodes.push_back(makeGraphNodeJson(node));
             }
             out["nodes"] = jsonNodes;
             std::cout << out.dump(2) << "\n";
@@ -681,23 +685,7 @@ private:
 
             // Properties in verbose mode (after table)
             if (verbose_) {
-                bool hasProps = false;
-                for (const auto& node : nodes) {
-                    if (!node.properties.empty()) {
-                        hasProps = true;
-                        break;
-                    }
-                }
-                if (hasProps) {
-                    std::cout << "\n"
-                              << yams::cli::ui::subsection_header("Node Properties") << "\n";
-                    for (const auto& node : nodes) {
-                        if (!node.properties.empty()) {
-                            std::cout << yams::cli::ui::bullet(node.label, 2) << "\n";
-                            std::cout << yams::cli::ui::indent(node.properties, 6) << "\n";
-                        }
-                    }
-                }
+                renderNodePropertiesSection(nodes);
             }
 
             if (resp.truncated) {
@@ -710,116 +698,6 @@ private:
 
         co_return Result<void>();
     }
-
-    boost::asio::awaitable<Result<void>> executeIsolatedNodes() {
-        using namespace yams::daemon;
-
-        auto leaseRes = acquireGraphClientLease();
-        if (!leaseRes) {
-            co_return leaseRes.error();
-        }
-        auto leaseHandle = std::move(leaseRes.value());
-        printFallbackNoticeIfNeeded(leaseHandle.plan);
-        auto& client = **leaseHandle.lease;
-
-        std::string relation =
-            relationFilter_.empty() ? "calls" : canonicalizeRelationName(relationFilter_);
-        if (relation.empty()) {
-            relation = "calls";
-        }
-
-        // Use optimized isolated mode query (single SQL query instead of N+1)
-        GraphQueryRequest req;
-        req.isolatedMode = true;
-        req.nodeType = listNodeType_;
-        req.isolatedRelation = relation;
-        req.limit = static_cast<uint32_t>(limit_ > 0 ? limit_ : 1000);
-
-        auto result = co_await client.call(req);
-        if (!result) {
-            std::cerr << "Error querying isolated nodes: " << result.error().message << "\n";
-            co_return result.error();
-        }
-
-        std::vector<yams::daemon::GraphNode> isolatedNodes = result.value().connectedNodes;
-        const auto cwd = std::filesystem::current_path();
-        if (scopeToCwd_) {
-            auto res = buildCurrentScopePathSet(cwd);
-            if (!res) {
-                std::cerr << yams::cli::ui::status_warning("Path tree scoping unavailable: " +
-                                                           res.error().message)
-                          << "\n";
-            } else {
-                isolatedNodes =
-                    filterNodesToScopedPaths(std::move(isolatedNodes), res.value(), cwd);
-            }
-        }
-
-        if (jsonOutput_ || outputFormat_ == "json") {
-            json out;
-            out["type"] = listNodeType_;
-            out["relation"] = relation;
-            out["isolatedCount"] = isolatedNodes.size();
-            out["scoped"] = scopeToCwd_;
-            if (scopeToCwd_) {
-                out["cwd"] = cwd.generic_string();
-            }
-
-            json jsonNodes = json::array();
-            for (const auto& node : isolatedNodes) {
-                json n;
-                n["nodeId"] = node.nodeId;
-                n["nodeKey"] = node.nodeKey;
-                n["label"] = node.label;
-                n["type"] = node.type;
-                jsonNodes.push_back(n);
-            }
-            out["isolatedNodes"] = jsonNodes;
-            std::cout << out.dump(2) << "\n";
-        } else {
-            std::cout << yams::cli::ui::section_header("Isolated " + listNodeType_ + " nodes")
-                      << "\n\n";
-            std::cout << yams::cli::ui::status_info(
-                             "Found " + std::to_string(isolatedNodes.size()) + " isolated " +
-                             listNodeType_ + " nodes (no incoming " + relation + " edges)")
-                      << "\n\n";
-            if (scopeToCwd_) {
-                std::cout << yams::cli::ui::status_info(std::string{kScopeToCwdDescription})
-                          << "\n\n";
-            }
-
-            if (!isolatedNodes.empty()) {
-                yams::cli::ui::Table table;
-                table.headers = {"ID", "LABEL", "KEY"};
-                table.has_header = true;
-
-                for (const auto& node : isolatedNodes) {
-                    table.add_row({std::to_string(node.nodeId),
-                                   yams::cli::ui::truncate_to_width(node.label, 40),
-                                   yams::cli::ui::truncate_to_width(node.nodeKey, 50)});
-                }
-                yams::cli::ui::render_table(std::cout, table);
-            }
-        }
-
-        co_return Result<void>();
-    }
-
-    struct DeadCodeTarget {
-        std::string type;
-        std::string relation;
-        std::string label;
-    };
-
-    struct DeadCodeRow {
-        std::string type;
-        std::string relation;
-        std::string label;
-        std::string nodeKey;
-        std::string path;
-        double confidence = 0.0;
-        std::vector<std::string> reasons;
-    };
 
     static std::string normalizePath(const std::filesystem::path& path,
                                      const std::filesystem::path& cwd) {
@@ -907,145 +785,6 @@ private:
         "Scoped to src/** and include/** via path tree (excluding tests/, benchmarks/, "
         "third_party/, node_modules/, build*)";
 
-    static bool isWordBoundary(char c) {
-        return !(std::isalnum(static_cast<unsigned char>(c)) || c == '_');
-    }
-
-    static std::size_t countWholeWordOccurrences(std::string_view text, std::string_view token) {
-        if (token.empty() || text.empty()) {
-            return 0;
-        }
-
-        std::size_t count = 0;
-        std::size_t pos = 0;
-        while (pos < text.size()) {
-            pos = text.find(token, pos);
-            if (pos == std::string_view::npos) {
-                break;
-            }
-
-            const bool leftOk = (pos == 0) || isWordBoundary(text[pos - 1]);
-            const std::size_t end = pos + token.size();
-            const bool rightOk = (end >= text.size()) || isWordBoundary(text[end]);
-
-            if (leftOk && rightOk) {
-                ++count;
-            }
-            pos = end;
-        }
-        return count;
-    }
-
-    static bool hasLocalSymbolUsage(const std::filesystem::path& cwd, const std::string& relPath,
-                                    const std::string& symbol) {
-        if (relPath.empty() || symbol.empty()) {
-            return false;
-        }
-
-        std::error_code ec;
-        auto absPath = (cwd / relPath).lexically_normal();
-        if (!std::filesystem::exists(absPath, ec) || ec) {
-            return false;
-        }
-
-        std::ifstream ifs(absPath, std::ios::in | std::ios::binary);
-        if (!ifs) {
-            return false;
-        }
-        std::string content((std::istreambuf_iterator<char>(ifs)),
-                            std::istreambuf_iterator<char>());
-        // Require at least two additional mentions beyond the likely definition to avoid
-        // suppressing plausible dead-code candidates too aggressively.
-        return countWholeWordOccurrences(content, symbol) >= 3;
-    }
-
-    static bool pathContainsSegment(std::string_view path, std::string_view segment) {
-        return path.find(segment) != std::string_view::npos;
-    }
-
-    static bool fileContainsAnyPattern(const std::filesystem::path& cwd, const std::string& relPath,
-                                       const std::vector<std::string>& patterns) {
-        if (relPath.empty() || patterns.empty()) {
-            return false;
-        }
-        std::error_code ec;
-        auto absPath = (cwd / relPath).lexically_normal();
-        if (!std::filesystem::exists(absPath, ec) || ec) {
-            return false;
-        }
-        std::ifstream ifs(absPath, std::ios::in | std::ios::binary);
-        if (!ifs) {
-            return false;
-        }
-        std::string content((std::istreambuf_iterator<char>(ifs)),
-                            std::istreambuf_iterator<char>());
-        for (const auto& pattern : patterns) {
-            if (!pattern.empty() && content.find(pattern) != std::string::npos) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    static void scoreDeadCodeCandidate(const std::filesystem::path& cwd, DeadCodeRow& row) {
-        double score = 0.45;
-        row.reasons.clear();
-        row.reasons.push_back("isolated_by_" + row.relation);
-
-        if (row.type == "function") {
-            score += 0.20;
-            row.reasons.push_back("function_isolation_signal");
-        } else if (row.type == "file") {
-            score += 0.15;
-            row.reasons.push_back("file_isolation_signal");
-        } else if (row.type == "class") {
-            score += 0.05;
-            row.reasons.push_back("class_isolation_weak_signal");
-        } else if (row.type == "struct") {
-            row.reasons.push_back("struct_isolation_weak_signal");
-        }
-
-        if (pathContainsSegment(row.path, "/tests/") || pathContainsSegment(row.path, "tests/")) {
-            score -= 0.50;
-            row.reasons.push_back("test_path");
-        }
-        if (pathContainsSegment(row.path, "/bench") || pathContainsSegment(row.path, "bench/")) {
-            score -= 0.40;
-            row.reasons.push_back("benchmark_path");
-        }
-        if (pathContainsSegment(row.path, "/examples/") ||
-            pathContainsSegment(row.path, "examples/")) {
-            score -= 0.25;
-            row.reasons.push_back("example_path");
-        }
-        if (pathContainsSegment(row.path, "src/cli/commands/") &&
-            (row.type == "class" || row.type == "function")) {
-            score -= 0.25;
-            row.reasons.push_back("cli_command_pattern_prone");
-        }
-        if (hasLocalSymbolUsage(cwd, row.path, row.label)) {
-            score -= 0.20;
-            row.reasons.push_back("local_symbol_usage");
-        }
-        if (!row.label.empty()) {
-            std::vector<std::string> patterns = {"make_unique<" + row.label + ">",
-                                                 "create" + row.label + "(", "registerCommand("};
-            if (fileContainsAnyPattern(cwd, row.path, patterns)) {
-                score -= 0.25;
-                row.reasons.push_back("local_factory_or_registration_pattern");
-            }
-        }
-
-        score = std::clamp(score, 0.0, 1.0);
-        row.confidence = std::round(score * 100.0) / 100.0;
-    }
-
-    static std::string formatConfidenceScore(double value) {
-        std::ostringstream os;
-        os << std::fixed << std::setprecision(2) << value;
-        return os.str();
-    }
-
     static std::optional<std::filesystem::path>
     extractNodePath(const yams::daemon::GraphNode& node) {
         if (node.nodeKey.rfind("path:file:", 0) == 0) {
@@ -1081,225 +820,6 @@ private:
             }
         }
         return std::nullopt;
-    }
-
-    boost::asio::awaitable<Result<void>> executeDeadCodeReport() {
-        using namespace yams::daemon;
-
-        auto leaseRes = acquireGraphClientLease();
-        if (!leaseRes) {
-            co_return leaseRes.error();
-        }
-        auto leaseHandle = std::move(leaseRes.value());
-        printFallbackNoticeIfNeeded(leaseHandle.plan);
-        auto& client = **leaseHandle.lease;
-
-        std::vector<DeadCodeTarget> targets = {
-            {"function", "calls", "Isolated functions (no incoming calls)"},
-            {"class", "references", "Isolated classes (no incoming references)"},
-            {"struct", "references", "Isolated structs (no incoming references)"},
-            {"file", "includes", "Isolated files (no incoming includes)"},
-        };
-
-        const auto cwd = std::filesystem::current_path();
-
-        std::vector<DeadCodeRow> allRows;
-        std::unordered_set<std::string> scopedPaths;
-        {
-            auto res = buildCurrentScopePathSet(cwd);
-            if (!res) {
-                co_return res.error();
-            }
-            scopedPaths = std::move(res.value());
-        }
-
-        for (const auto& target : targets) {
-            GraphQueryRequest req;
-            req.isolatedMode = true;
-            req.nodeType = target.type;
-            req.isolatedRelation = target.relation;
-            req.limit = static_cast<uint32_t>(limit_ > 0 ? limit_ : 1000);
-            req.includeNodeProperties = true;
-
-            auto result = co_await client.call(req);
-            if (!result) {
-                std::cerr << "Error querying isolated nodes: " << result.error().message << "\n";
-                co_return result.error();
-            }
-
-            for (const auto& node : result.value().connectedNodes) {
-                auto nodePathOpt = extractNodePath(node);
-                if (!nodePathOpt.has_value()) {
-                    continue;
-                }
-                auto normalized = normalizePath(nodePathOpt.value(), cwd);
-                if (scopedPaths.find(normalized) == scopedPaths.end()) {
-                    continue;
-                }
-                std::error_code ec;
-                auto rel = std::filesystem::relative(nodePathOpt.value(), cwd, ec);
-                if (ec) {
-                    rel = std::filesystem::path(normalized).lexically_relative(cwd);
-                }
-                DeadCodeRow row;
-                row.type = target.type;
-                row.relation = target.relation;
-                row.label = node.label;
-                row.nodeKey = node.nodeKey;
-                row.path = rel.generic_string();
-                allRows.push_back(std::move(row));
-            }
-        }
-
-        std::size_t suppressedLocalRefs = 0;
-        std::vector<DeadCodeRow> suppressedRows;
-        if (!allRows.empty()) {
-            std::vector<DeadCodeRow> filtered;
-            filtered.reserve(allRows.size());
-            for (const auto& row : allRows) {
-                if ((row.type == "class" || row.type == "struct") &&
-                    hasLocalSymbolUsage(cwd, row.path, row.label)) {
-                    ++suppressedLocalRefs;
-                    suppressedRows.push_back(row);
-                    continue;
-                }
-                filtered.push_back(row);
-            }
-            allRows.swap(filtered);
-        }
-
-        for (auto& row : allRows) {
-            scoreDeadCodeCandidate(cwd, row);
-        }
-
-        std::vector<DeadCodeRow> lowConfidenceRows;
-        if (!showLowConfidence_ && !allRows.empty()) {
-            std::vector<DeadCodeRow> filtered;
-            filtered.reserve(allRows.size());
-            for (const auto& row : allRows) {
-                if (row.confidence < minConfidence_) {
-                    lowConfidenceRows.push_back(row);
-                    continue;
-                }
-                filtered.push_back(row);
-            }
-            allRows.swap(filtered);
-        }
-
-        if (jsonOutput_ || outputFormat_ == "json") {
-            json out;
-            out["cwd"] = cwd.generic_string();
-            out["mode"] = "unused-candidate-report";
-            out["total"] = allRows.size();
-            out["totalCandidates"] = allRows.size();
-            out["minConfidence"] = minConfidence_;
-            out["showLowConfidence"] = showLowConfidence_;
-            out["suppressedLocalRefs"] = suppressedLocalRefs;
-            out["filteredLowConfidence"] = lowConfidenceRows.size();
-            json rows = json::array();
-            for (const auto& row : allRows) {
-                rows.push_back({{"type", row.type},
-                                {"relation", row.relation},
-                                {"label", row.label},
-                                {"path", row.path},
-                                {"nodeKey", row.nodeKey},
-                                {"confidence", row.confidence},
-                                {"reasons", row.reasons}});
-            }
-            out["candidates"] = rows;
-            // Compatibility: keep legacy key for existing tooling.
-            out["nodes"] = rows;
-            if (!suppressedRows.empty()) {
-                json suppressed = json::array();
-                for (const auto& row : suppressedRows) {
-                    suppressed.push_back({{"type", row.type},
-                                          {"label", row.label},
-                                          {"path", row.path},
-                                          {"nodeKey", row.nodeKey},
-                                          {"reason", "local_symbol_usage"}});
-                }
-                out["suppressedNodes"] = suppressed;
-            }
-            if (!lowConfidenceRows.empty()) {
-                json filtered = json::array();
-                for (const auto& row : lowConfidenceRows) {
-                    filtered.push_back({{"type", row.type},
-                                        {"relation", row.relation},
-                                        {"label", row.label},
-                                        {"path", row.path},
-                                        {"nodeKey", row.nodeKey},
-                                        {"confidence", row.confidence},
-                                        {"reasons", row.reasons}});
-                }
-                out["lowConfidenceCandidates"] = filtered;
-            }
-            std::cout << out.dump(2) << "\n";
-        } else {
-            std::cout << yams::cli::ui::section_header("Unused-candidate report") << "\n\n";
-            std::cout << yams::cli::ui::status_info(std::string{kScopeToCwdDescription}) << "\n\n";
-            std::cout << yams::cli::ui::status_info("Confidence threshold: " +
-                                                    std::to_string(minConfidence_))
-                      << "\n\n";
-            if (suppressedLocalRefs > 0) {
-                std::cout << yams::cli::ui::status_info("Suppressed likely-local references: " +
-                                                        std::to_string(suppressedLocalRefs))
-                          << "\n\n";
-            }
-            if (!lowConfidenceRows.empty() && !showLowConfidence_) {
-                std::cout << yams::cli::ui::status_info("Filtered low-confidence candidates: " +
-                                                        std::to_string(lowConfidenceRows.size()))
-                          << "\n\n";
-            }
-
-            if (allRows.empty()) {
-                if (!suppressedRows.empty()) {
-                    std::cout << yams::cli::ui::status_warning(
-                                     "All candidates were suppressed by local-symbol heuristic")
-                              << "\n\n";
-                    yams::cli::ui::Table suppressedTable;
-                    suppressedTable.headers = {"TYPE", "LABEL", "PATH"};
-                    suppressedTable.has_header = true;
-                    const std::size_t kMaxRows = 10;
-                    std::size_t shown = 0;
-                    for (const auto& row : suppressedRows) {
-                        if (shown++ >= kMaxRows) {
-                            break;
-                        }
-                        suppressedTable.add_row({row.type,
-                                                 yams::cli::ui::truncate_to_width(row.label, 40),
-                                                 yams::cli::ui::truncate_to_width(row.path, 50)});
-                    }
-                    yams::cli::ui::render_table(std::cout, suppressedTable);
-                    if (suppressedRows.size() > kMaxRows) {
-                        std::cout << "\n"
-                                  << yams::cli::ui::status_info(
-                                         "Showing first " + std::to_string(kMaxRows) + " of " +
-                                         std::to_string(suppressedRows.size()) +
-                                         " suppressed nodes")
-                                  << "\n";
-                    }
-                    std::cout << "\n";
-                }
-                std::cout << yams::cli::ui::status_info("No isolated nodes found in scope") << "\n";
-                co_return Result<void>();
-            }
-
-            yams::cli::ui::Table table;
-            table.headers = {"TYPE", "CONF", "LABEL", "PATH"};
-            table.has_header = true;
-            for (const auto& row : allRows) {
-                table.add_row({row.type, formatConfidenceScore(row.confidence),
-                               yams::cli::ui::truncate_to_width(row.label, 40),
-                               yams::cli::ui::truncate_to_width(row.path, 50)});
-            }
-            yams::cli::ui::render_table(std::cout, table);
-            std::cout << "\n"
-                      << yams::cli::ui::status_info("Total: " +
-                                                    yams::cli::ui::format_number(allRows.size()))
-                      << "\n";
-        }
-
-        co_return Result<void>();
     }
 
     boost::asio::awaitable<Result<void>> executeGraphTraversal() {
@@ -1406,7 +926,7 @@ private:
 
         const auto traversalHints = buildTraversalRelationHints(resp);
 
-        if (jsonOutput_ || outputFormat_ == "json") {
+        if (wantsJsonOutput()) {
             json out;
             out["origin"] = {{"nodeId", resp.originNode.nodeId},
                              {"nodeKey", resp.originNode.nodeKey},
@@ -1419,30 +939,7 @@ private:
 
             json nodes = json::array();
             for (const auto& node : resp.connectedNodes) {
-                json n;
-                n["nodeId"] = node.nodeId;
-                n["nodeKey"] = node.nodeKey;
-                n["label"] = node.label;
-                n["type"] = node.type;
-                n["distance"] = node.distance;
-                if (!node.documentHash.empty()) {
-                    n["documentHash"] = node.documentHash;
-                }
-                if (auto nodePath = displayNodePath(node); !nodePath.empty()) {
-                    n["path"] = nodePath;
-                }
-                if (auto hintIt = traversalHints.find(node.nodeId);
-                    hintIt != traversalHints.end()) {
-                    n["via"] = hintIt->second;
-                }
-                if (!node.properties.empty()) {
-                    try {
-                        n["properties"] = json::parse(node.properties);
-                    } catch (...) {
-                        n["properties"] = node.properties;
-                    }
-                }
-                nodes.push_back(n);
+                nodes.push_back(makeGraphNodeJson(node, true, &traversalHints));
             }
             out["connectedNodes"] = nodes;
             if (!resp.edges.empty()) {
@@ -1564,23 +1061,7 @@ private:
 
             // Properties in verbose mode
             if (verbose_) {
-                bool hasProps = false;
-                for (const auto& node : resp.connectedNodes) {
-                    if (!node.properties.empty()) {
-                        hasProps = true;
-                        break;
-                    }
-                }
-                if (hasProps) {
-                    std::cout << "\n"
-                              << yams::cli::ui::subsection_header("Node Properties") << "\n";
-                    for (const auto& node : resp.connectedNodes) {
-                        if (!node.properties.empty()) {
-                            std::cout << yams::cli::ui::bullet(node.label, 2) << "\n";
-                            std::cout << yams::cli::ui::indent(node.properties, 6) << "\n";
-                        }
-                    }
-                }
+                renderNodePropertiesSection(resp.connectedNodes);
             }
 
             if (resp.truncated) {
@@ -1595,7 +1076,7 @@ private:
     }
 
     Result<void> printDocumentGraphResponse(const yams::daemon::GetResponse& resp) {
-        if (jsonOutput_ || outputFormat_ == "json") {
+        if (wantsJsonOutput()) {
             json out;
             out["document"] = resp.fileName;
             out["hash"] = resp.hash;
@@ -1678,10 +1159,6 @@ private:
     bool jsonOutput_{false};
     std::string outputFormat_{"table"};
     std::string propFilter_;
-    bool showIsolated_{false};
-    bool deadCodeReport_{false};
-    double minConfidence_{0.8};
-    bool showLowConfidence_{false};
     bool listTypes_{false};
     bool listRelations_{false};
     std::string searchPattern_;

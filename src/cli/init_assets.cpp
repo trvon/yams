@@ -200,9 +200,6 @@ yams graph --name src/auth/login.ts --depth 2
 # List all symbols of type
 yams graph --list-type function --limit 50
 
-# Find isolated nodes (potential dead code)
-yams graph --list-type symbol --isolated
-
 # Explore graph structure
 yams graph --relations              # List all relation types with counts
 yams graph --search "Request*"      # Find nodes matching pattern (wildcards: *, ?)
