@@ -88,11 +88,11 @@ struct TunedParams {
         return ws;
     }();
 
-    // Similarity threshold for vector search.
-    // Calibrated for FWHT+1024+L2 (Simeon default post-B1): observed cosine-sim ceiling is
-    // 0.21-0.40 on scifact, where 0.65 filtered 100% of HNSW candidates. 0.30 restores the
-    // vector leg on ~50% of queries; the two-tier fallback at std::min(threshold, 0.20f)
-    // covers the tail.
+    // Similarity threshold for vector search. Initial default suits FWHT+1024+L2 (observed
+    // cosine-sim ceiling 0.21-0.40 on scifact). SearchTuner adapts this at runtime based on
+    // the HNSW similarity distribution and vector-pool occupancy telemetry — when most
+    // queries produce empty vector pools while max-similarity sits well above the threshold,
+    // the tuner lowers it; when most candidates pass, it drifts back up to preserve precision.
     TuningSlot<float> similarityThreshold{0.30f};
 
     // Vector boost factor for TEXT_ANCHOR fusion (multiplied with vectorWeight)
@@ -100,7 +100,6 @@ struct TunedParams {
     // Default 1.0 means full vectorWeight is used; lower values reduce vector impact
     float vectorBoostFactor = 1.0f;
 
-    // Fusion strategy (default: COMB_MNZ, but TEXT_ANCHOR for scientific corpora)
     SearchEngineConfig::FusionStrategy fusionStrategy =
         SearchEngineConfig::FusionStrategy::COMB_MNZ;
 
@@ -458,6 +457,12 @@ struct RuntimeStageSignal {
     double durationMs = 0.0;
     std::size_t rawHitCount = 0;
     std::size_t uniqueDocCount = 0;
+    // Per-component score distribution (populated when the stage produced results).
+    // For the "vector" stage these are cosine similarities; SearchTuner consumes them
+    // to drive adaptive similarityThreshold based on the observed distribution.
+    bool scoreStatsValid = false;
+    double minScore = 0.0;
+    double maxScore = 0.0;
 };
 
 struct RuntimeFusionSignal {
@@ -810,6 +815,14 @@ private:
         std::uint64_t relevanceSessions = 0;
         std::uint64_t relevanceQueries = 0;
         std::string lastRelevanceTimestamp;
+        // Adaptive similarity-threshold channel (Phase E7).
+        // `ewmaVectorMaxSimilarity`: EWMA of max cosine similarity among returned vector
+        //   candidates on queries where the stage fired. Seeded to 0 until first observation.
+        // `vectorStageObservations` / `vectorStageEmptyStreak`: gate thresholds so we only
+        //   adapt after seeing enough signal and sustained emptiness.
+        double ewmaVectorMaxSimilarity = 0.0;
+        std::uint64_t vectorStageObservations = 0;
+        std::uint64_t vectorStageEmptyStreak = 0;
         bool lastObservationChanged = false;
         SearchEngineConfig::NavigationZoomLevel lastZoomLevel =
             SearchEngineConfig::NavigationZoomLevel::Auto;

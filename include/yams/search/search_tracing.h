@@ -48,6 +48,12 @@ struct TraceStageSummary {
     std::size_t uniqueDocCount = 0;
     std::vector<std::string> uniqueDocIds;
     std::int64_t durationMicros = 0;
+    // Per-component score stats. Populated by markStageResult when results non-empty.
+    // Vector stage: min/max are cosine similarity (relevance_score from HNSW). SearchTuner
+    // reads these on the "vector" stage to adapt similarityThreshold at runtime.
+    bool scoreStatsValid = false;
+    double minScore = 0.0;
+    double maxScore = 0.0;
 };
 
 class SearchTraceCollector {

@@ -2285,20 +2285,7 @@ FROM vectors WHERE level = ?
             return Result<void>{};
         }
 
-        size_t totalVectors = 0;
-        if (stmt_count_) {
-            sqlite3_reset(stmt_count_);
-            StmtResetGuard guard(stmt_count_);
-            if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
-                totalVectors = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
-            }
-        }
-
-        if (!anyHnswHasData() && (totalVectors > 0 || hasCatchUpSourceUnlocked())) {
-            spdlog::info("[HNSW] optimize preparing search index before checkpoint (vectors={})",
-                         totalVectors);
-            ensureHnswLoadedUnlocked();
-        }
+        bool requireFullSave = false;
 
         // Compact all HNSW indices if needed (lower threshold for explicit optimize)
         for (auto& [dim, hnsw] : hnsw_indices_) {
@@ -2308,19 +2295,40 @@ FROM vectors WHERE level = ?
                                  static_cast<float>(hnsw->size()));
                 *hnsw = hnsw->compact();
                 hnsw_dirty_[dim] = true;
+                requireFullSave = true;
             }
         }
 
-        // Save any dirty indices
-        saveAllHnswUnlocked();
+        return persistHnswStateUnlocked(/*allowPrepare=*/true, requireFullSave);
+    }
 
-        // Checkpoint WAL before vacuum to reclaim WAL space
-        checkpointWalUnlocked();
+    Result<void> persistIndex() {
+        std::unique_lock lock(mutex_);
 
-        // Vacuum SQLite
-        sqlite3_exec(db_, "VACUUM", nullptr, nullptr, nullptr);
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
 
-        return Result<void>{};
+        if (usesVec0SearchEngine()) {
+            if (!vec0_dirty_dims_.empty()) {
+                auto rebuild = rebuildVec0IndicesUnlocked();
+                if (!rebuild) {
+                    return rebuild;
+                }
+            }
+            return checkpointWalUnlocked();
+        }
+        if (usesQuantizedHnswSearchEngine()) {
+            if (!quantized_hnsw_dirty_dims_.empty()) {
+                auto rebuild = rebuildQuantizedHnswIndicesUnlocked();
+                if (!rebuild) {
+                    return rebuild;
+                }
+            }
+            return checkpointWalUnlocked();
+        }
+
+        return persistHnswStateUnlocked(/*allowPrepare=*/false, /*requireFullSave=*/false);
     }
 
     /// Checkpoint vectors.db WAL using PASSIVE mode (non-blocking).
@@ -2338,8 +2346,6 @@ FROM vectors WHERE level = ?
     Result<void> beginBulkLoad() { return beginBulkLoadUnlocked(); }
 
     Result<void> finalizeBulkLoad() { return finalizeBulkLoadUnlocked(); }
-
-    bool bulkLoadActive() const { return bulkLoadActiveUnlocked(); }
 
 private:
     Result<void> checkpointWalUnlocked() {
@@ -3793,9 +3799,54 @@ private:
         return checkpointWalUnlocked();
     }
 
-    bool bulkLoadActiveUnlocked() const {
-        std::shared_lock lock(mutex_);
-        return bulk_load_mode_;
+    Result<void> persistHnswStateUnlocked(bool allowPrepare, bool requireFullSave) {
+        size_t totalVectors = 0;
+        if (stmt_count_) {
+            sqlite3_reset(stmt_count_);
+            StmtResetGuard guard(stmt_count_);
+            if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
+                totalVectors = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
+            }
+        }
+
+        if (allowPrepare && !bulk_load_mode_ && !anyHnswHasData() &&
+            (totalVectors > 0 || hasCatchUpSourceUnlocked())) {
+            spdlog::info("[HNSW] optimize preparing search index before checkpoint (vectors={})",
+                         totalVectors);
+            ensureHnswLoadedUnlocked();
+        }
+
+        bool hasDirtyDims = false;
+        for (const auto& [dim, hnsw] : hnsw_indices_) {
+            if (hnsw && hnsw_dirty_[dim]) {
+                hasDirtyDims = true;
+                break;
+            }
+        }
+
+        if (hasDirtyDims) {
+            if (requireFullSave) {
+                saveAllHnswUnlocked();
+            } else {
+                saveHnswCheckpointUnlocked();
+                for (auto& [dim, hnsw] : hnsw_indices_) {
+                    if (hnsw && hnsw_dirty_[dim]) {
+                        hnsw_dirty_[dim] = false;
+                    }
+                }
+            }
+        }
+
+        auto walResult = checkpointWalUnlocked();
+        if (!walResult) {
+            return walResult;
+        }
+
+        if (requireFullSave) {
+            sqlite3_exec(db_, "VACUUM", nullptr, nullptr, nullptr);
+        }
+
+        return Result<void>{};
     }
 
     struct BackgroundSeedSnapshot {
@@ -5114,6 +5165,10 @@ Result<void> SqliteVecBackend::optimize() {
     return impl_->optimize();
 }
 
+Result<void> SqliteVecBackend::persistIndex() {
+    return impl_->persistIndex();
+}
+
 Result<void> SqliteVecBackend::checkpointWal() {
     return impl_->checkpointWal();
 }
@@ -5124,10 +5179,6 @@ Result<void> SqliteVecBackend::beginBulkLoad() {
 
 Result<void> SqliteVecBackend::finalizeBulkLoad() {
     return impl_->finalizeBulkLoad();
-}
-
-bool SqliteVecBackend::bulkLoadActive() const {
-    return impl_->bulkLoadActive();
 }
 
 Result<void> SqliteVecBackend::beginTransaction() {

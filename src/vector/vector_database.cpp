@@ -989,6 +989,29 @@ public:
         }
     }
 
+    bool persistIndex() {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            setError("Database not initialized");
+            return false;
+        }
+
+        try {
+            auto result = backend_->persistIndex();
+            if (!result) {
+                setError("Backend persistIndex failed: " + result.error().message);
+                return false;
+            }
+            has_error_ = false;
+            return true;
+
+        } catch (const std::exception& e) {
+            setError("Index persistence failed: " + std::string(e.what()));
+            return false;
+        }
+    }
+
     bool beginBulkLoad() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
@@ -1029,24 +1052,8 @@ public:
             setError("Bulk-load finalize failed: " + result.error().message);
             return false;
         }
-        auto walResult = sqliteBackend->checkpointWal();
-        if (!walResult) {
-            setError("Bulk-load finalize checkpoint failed: " + walResult.error().message);
-            return false;
-        }
         has_error_ = false;
         return true;
-    }
-
-    bool bulkLoadActive() const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-
-        if (!initialized_) {
-            return false;
-        }
-
-        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
-        return sqliteBackend && sqliteBackend->bulkLoadActive();
     }
 
     Result<void> checkpointWal() {
@@ -1353,6 +1360,10 @@ bool VectorDatabase::optimizeIndex() {
     return pImpl->optimizeIndex();
 }
 
+bool VectorDatabase::persistIndex() {
+    return pImpl->persistIndex();
+}
+
 void VectorDatabase::compactDatabase() {
     pImpl->optimizeIndex(); // For now, optimization serves as compaction
 }
@@ -1367,10 +1378,6 @@ bool VectorDatabase::beginBulkLoad() {
 
 bool VectorDatabase::finalizeBulkLoad() {
     return pImpl->finalizeBulkLoad();
-}
-
-bool VectorDatabase::bulkLoadActive() const {
-    return pImpl->bulkLoadActive();
 }
 
 Result<void> VectorDatabase::checkpointWal() {

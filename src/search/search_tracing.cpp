@@ -211,6 +211,25 @@ void SearchTraceCollector::markStageResult(const std::string& name,
     stage.uniqueDocCount = uniqueDocs.size();
     stage.uniqueDocIds.assign(uniqueDocs.begin(), uniqueDocs.end());
     std::sort(stage.uniqueDocIds.begin(), stage.uniqueDocIds.end());
+
+    if (!results.empty()) {
+        double minScore = std::numeric_limits<double>::infinity();
+        double maxScore = -std::numeric_limits<double>::infinity();
+        for (const auto& comp : results) {
+            const double score = static_cast<double>(comp.score);
+            if (score < minScore)
+                minScore = score;
+            if (score > maxScore)
+                maxScore = score;
+        }
+        stage.scoreStatsValid = true;
+        stage.minScore = minScore;
+        stage.maxScore = maxScore;
+    } else {
+        stage.scoreStatsValid = false;
+        stage.minScore = 0.0;
+        stage.maxScore = 0.0;
+    }
 }
 
 void SearchTraceCollector::markStageTimeout(const std::string& name, std::int64_t durationMicros) {
@@ -264,6 +283,9 @@ nlohmann::json SearchTraceCollector::buildStageSummaryJson() const {
             {"unique_doc_count", stage.uniqueDocCount},
             {"unique_doc_ids", stage.uniqueDocIds},
             {"duration_ms", static_cast<double>(stage.durationMicros) / 1000.0},
+            {"score_stats_valid", stage.scoreStatsValid},
+            {"min_score", stage.minScore},
+            {"max_score", stage.maxScore},
         };
     }
     return out;

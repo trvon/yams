@@ -323,11 +323,11 @@ public:
     bool prepareSearchIndex();
     bool hasReusablePersistedSearchIndex() const;
     bool optimizeIndex();
+    bool persistIndex();
     void compactDatabase();
     bool rebuildIndex();
     bool beginBulkLoad();
     bool finalizeBulkLoad();
-    bool bulkLoadActive() const;
 
     /// Checkpoint vectors.db WAL to reclaim disk space.
     /// Called periodically by CheckpointManager.

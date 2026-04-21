@@ -93,6 +93,12 @@ public:
         std::optional<std::string> variant;
         std::optional<float> subwordGamma;
         std::optional<std::size_t> maxCorpusDocs;
+        // Per-query router over {Atire, SabSmooth}. When enabled, the
+        // backend builds both indexes and dispatches via simeon::QueryRouter
+        // using `routerPreset`. Recognized presets: "passE_scq0_clar3"
+        // (default — best BEIR result from simeon bench), "off" (disable).
+        std::optional<bool> routerEnabled;
+        std::optional<std::string> routerPreset;
     };
 
     struct RerankerBackendPolicy {

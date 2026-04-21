@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <yams/daemon/components/CheckpointManager.h>
+#include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/hotzone_manager.h>
@@ -124,13 +125,26 @@ bool CheckpointManager::checkpointVectorIndex() {
         return true;
     }
 
+    if (deps_.state) {
+        const bool repairInProgress =
+            deps_.state->stats.repairInProgress.load(std::memory_order_relaxed);
+        const auto repairQueueDepth =
+            deps_.state->stats.repairQueueDepth.load(std::memory_order_relaxed);
+        if (repairInProgress || repairQueueDepth > 0) {
+            spdlog::debug("[CheckpointManager] Skipping vector index persistence during repair "
+                          "(in_progress={} queue_depth={})",
+                          repairInProgress ? 1 : 0, repairQueueDepth);
+            return true;
+        }
+    }
+
     auto vectorDb = deps_.vectorSystemManager->getVectorDatabase();
     if (!vectorDb || !vectorDb->isInitialized()) {
         return true;
     }
 
     try {
-        if (vectorDb->optimizeIndex()) {
+        if (vectorDb->persistIndex()) {
             auto now = std::chrono::system_clock::now();
             auto epoch =
                 std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();

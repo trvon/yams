@@ -170,3 +170,65 @@ TEST_CASE("SimeonLexicalBackend Atire variant also builds", "[search][simeon][ca
     REQUIRE(scores.has_value());
     CHECK(scores.value().size() == corpus.docIds.size());
 }
+
+TEST_CASE("SimeonLexicalBackend scoreRouted passthrough when router disabled",
+          "[search][simeon][catch2]") {
+    auto corpus = makeCorpus({
+        {"hash_a", "alpha beta gamma delta"},
+        {"hash_b", "beta gamma epsilon"},
+        {"hash_c", "omega sigma tau"},
+    });
+
+    SimeonLexicalBackend::Config cfg; // router_enabled=false by default
+    SimeonLexicalBackend backend(cfg);
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(5)));
+
+    auto decision = backend.scoreRouted("beta", corpus.docIds);
+    REQUIRE(decision.has_value());
+    CHECK(decision.value().scores.size() == corpus.docIds.size());
+    // router=off → recipe label falls back to the configured variant.
+    CHECK(std::string(decision.value().recipe_name) == "SabSmooth");
+}
+
+TEST_CASE("SimeonLexicalBackend scoreRouted picks a recipe with router on",
+          "[search][simeon][catch2]") {
+    auto corpus = makeCorpus({
+        {"hash_a", "alpha beta gamma delta"},
+        {"hash_b", "beta gamma epsilon zeta"},
+        {"hash_c", "omega sigma tau upsilon"},
+        {"hash_d", "beta gamma theta iota"},
+    });
+
+    SimeonLexicalBackend::Config cfg;
+    cfg.router_enabled = true; // passE preset defaults
+    SimeonLexicalBackend backend(cfg);
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(5)));
+
+    auto decision = backend.scoreRouted("beta gamma", corpus.docIds);
+    REQUIRE(decision.has_value());
+    CHECK(decision.value().scores.size() == corpus.docIds.size());
+    const std::string name = decision.value().recipe_name;
+    CHECK((name == "Bm25Atire" || name == "Bm25SabSmooth" || name == "CascadeLinearAlpha"));
+}
+
+TEST_CASE("SimeonLexicalBackend scoreRouted routes OOV query to SabSmooth",
+          "[search][simeon][catch2]") {
+    auto corpus = makeCorpus({
+        {"hash_a", "alpha beta gamma delta"},
+        {"hash_b", "beta gamma epsilon zeta"},
+        {"hash_c", "omega sigma tau upsilon"},
+    });
+
+    SimeonLexicalBackend::Config cfg;
+    cfg.router_enabled = true; // passE: oov_threshold=0 → any OOV → SAB
+    SimeonLexicalBackend backend(cfg);
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(5)));
+
+    // "xyzneverpresent" does not appear in any document → oov_rate = 1.0 > 0.
+    auto decision = backend.scoreRouted("xyzneverpresent", corpus.docIds);
+    REQUIRE(decision.has_value());
+    CHECK(std::string(decision.value().recipe_name) == "Bm25SabSmooth");
+}

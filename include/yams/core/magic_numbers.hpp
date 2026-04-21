@@ -746,16 +746,37 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         return false;
     };
 
+    auto has_dir_prefix = [&](std::string_view prefix) -> bool {
+        size_t start = 0;
+        while (start <= filenameLower.size()) {
+            size_t end = filenameLower.find('/', start);
+            if (end == std::string::npos)
+                end = filenameLower.size();
+            auto segment = std::string_view(filenameLower).substr(start, end - start);
+            if (segment.rfind(prefix, 0) == 0)
+                return true;
+            if (end == filenameLower.size())
+                break;
+            start = end + 1;
+        }
+        return false;
+    };
+
+    auto has_suffix = [&](std::string_view suffix) -> bool {
+        return filenameLower.size() >= suffix.size() &&
+               filenameLower.compare(filenameLower.size() - suffix.size(), suffix.size(), suffix) ==
+                   0;
+    };
+
     // === Build Output Directories (language/tool agnostic) ===
     if (has_dir("build") || has_dir("builddir") || has_dir("_build") || has_dir("out") ||
         has_dir("dist") || has_dir("bin") || has_dir("obj") || has_dir("artifacts") ||
-        has_dir("storybook-static")) {
+        has_dir("storybook-static") || has_dir(".build") || has_dir("deriveddata") ||
+        has_dir("buck-out") || has_dir("bazel-bin") || has_dir("bazel-out") ||
+        has_dir("bazel-testlogs") || has_dir(".stack-work")) {
         return PruneCategory::BuildObject;
     }
-    if (filenameLower.find("/cmake-build-") != std::string::npos ||
-        filenameLower.rfind("cmake-build-", 0) == 0 ||
-        filenameLower.find("/bazel-") != std::string::npos ||
-        filenameLower.rfind("bazel-", 0) == 0) {
+    if (has_dir_prefix("builddir-") || has_dir_prefix("cmake-build-") || has_dir_prefix("bazel-")) {
         return PruneCategory::BuildObject;
     }
     if (has_dir(".next") || has_dir(".nuxt") || has_dir(".svelte-kit") ||
@@ -817,6 +838,12 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     }
     if (filenameLower == ".coverage")
         return PruneCategory::Coverage;
+    if (filenameLower == "lcov.info" || has_suffix("/lcov.info") ||
+        filenameLower == ".coverprofile" || has_suffix("/.coverprofile") ||
+        filenameLower == "coverage-final.json" || has_suffix("/coverage-final.json") ||
+        has_dir(".nyc_output") || has_dir("htmlcov")) {
+        return PruneCategory::Coverage;
+    }
 
     // === IDE ===
     if (extLower == "suo" || extLower == "user" || extLower == "sdf" || extLower == "ncb" ||
@@ -825,6 +852,9 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     }
     if (filenameLower == ".ds_store" || filenameLower == "thumbs.db" ||
         filenameLower == ".project" || filenameLower == ".cproject") {
+        return PruneCategory::IdeProject;
+    }
+    if (has_dir(".vs")) {
         return PruneCategory::IdeProject;
     }
 
@@ -849,6 +879,15 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         filename.find("node_modules/") == 0) {
         return PruneCategory::PackageNodeModules;
     }
+    if (filenameLower.find("/.pnpm-store/") != std::string::npos ||
+        filenameLower.rfind(".pnpm-store/", 0) == 0 ||
+        filenameLower.find("/.npm/") != std::string::npos || filenameLower.rfind(".npm/", 0) == 0 ||
+        filenameLower.find("/.yarn/cache/") != std::string::npos ||
+        filenameLower.rfind(".yarn/cache/", 0) == 0 ||
+        filenameLower.find("/.yarn/unplugged/") != std::string::npos ||
+        filenameLower.rfind(".yarn/unplugged/", 0) == 0) {
+        return PruneCategory::PackageNodeModules;
+    }
 
     // Python
     if (filename.find("/__pycache__/") != std::string_view::npos ||
@@ -862,12 +901,21 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         filenameLower.find("/.ruff_cache/") != std::string::npos ||
         filenameLower.rfind(".ruff_cache/", 0) == 0 ||
         filenameLower.find("/.tox/") != std::string::npos || filenameLower.rfind(".tox/", 0) == 0 ||
+        filenameLower.find("/.nox/") != std::string::npos || filenameLower.rfind(".nox/", 0) == 0 ||
+        filenameLower.find("/.hypothesis/") != std::string::npos ||
+        filenameLower.rfind(".hypothesis/", 0) == 0 ||
+        filenameLower.find("/.pyre/") != std::string::npos ||
+        filenameLower.rfind(".pyre/", 0) == 0 ||
+        filenameLower.find("/.pytype/") != std::string::npos ||
+        filenameLower.rfind(".pytype/", 0) == 0 ||
         filenameLower.find("/.venv/") != std::string::npos ||
         filenameLower.rfind(".venv/", 0) == 0 ||
         filenameLower.find("/venv/") != std::string::npos || filenameLower.rfind("venv/", 0) == 0 ||
         filenameLower.find("/.eggs/") != std::string::npos ||
         filenameLower.rfind(".eggs/", 0) == 0 ||
         filenameLower.find(".egg-info/") != std::string::npos ||
+        filenameLower.find("/.ipynb_checkpoints/") != std::string::npos ||
+        filenameLower.rfind(".ipynb_checkpoints/", 0) == 0 ||
         filenameLower.find(".dist-info/") != std::string::npos) {
         return PruneCategory::PackagePythonCache;
     }
@@ -927,6 +975,9 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         filenameLower == "install_manifest.txt" || filenameLower == "cmakeuserpresets.json") {
         return PruneCategory::SystemCMake;
     }
+    if (has_dir("cmakefiles")) {
+        return PruneCategory::SystemCMake;
+    }
 
     // Ninja
     if (filenameLower == "build.ninja" || filenameLower == "rules.ninja" ||
@@ -941,6 +992,9 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     }
     if (extLower == "dat" &&
         (filenameLower == "coredata.dat" || filenameLower == "coredata.dat.prev")) {
+        return PruneCategory::SystemMeson;
+    }
+    if (has_dir("meson-private") || has_dir("meson-logs") || has_dir("meson-info")) {
         return PruneCategory::SystemMeson;
     }
 

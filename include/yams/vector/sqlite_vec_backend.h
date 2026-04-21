@@ -115,6 +115,7 @@ public:
     Result<void> prepareSearchIndex() override;
     Result<bool> hasReusablePersistedSearchIndex() override;
     Result<void> optimize() override;
+    Result<void> persistIndex() override;
 
     Result<void> beginTransaction() override;
     Result<void> commitTransaction() override;
@@ -151,8 +152,6 @@ public:
 
     /// Finish deferred HNSW work after bulk vector regeneration and persist the index.
     Result<void> finalizeBulkLoad();
-
-    bool bulkLoadActive() const;
 
     /// No-op for V2 schema (unified table has no rowid sync issues)
     Result<void> ensureEmbeddingRowIdColumn();

@@ -196,15 +196,36 @@ TEST_CASE("Prune category detection", "[core][magic][prune]") {
         REQUIRE(matchesPruneGroup(getPruneCategory("dist/bundle.js"), "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory("cmake-build-debug/CMakeFiles/app.dir/main.obj"),
                                   "build"));
+        REQUIRE(matchesPruneGroup(
+            getPruneCategory("builddir-nosan/tests/catch2_idle_zero_concurrency"), "build"));
+        REQUIRE(matchesPruneGroup(
+            getPruneCategory("subprojects/foo/builddir-asan/tests/helper_binary"), "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory("target/release/app"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory(".build/debug.yaml"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("DerivedData/App/Logs/build.log"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("buck-out/v2/gen/app"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("bazel-out/darwin-fastbuild/bin/app"), "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory(".next/static/chunks/app.js"), "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory("obj/Debug/app.pdb"), "build"));
     }
 
     SECTION("Package caches and deps") {
         REQUIRE(matchesPruneGroup(getPruneCategory("node_modules/pkg/index.js"), "packages"));
+        REQUIRE(matchesPruneGroup(getPruneCategory(".pnpm-store/v3/files/ab/cd"), "packages"));
+        REQUIRE(matchesPruneGroup(getPruneCategory(".yarn/cache/react-npm.zip"), "packages"));
         REQUIRE(matchesPruneGroup(getPruneCategory(".pytest_cache/v/cache.db"), "packages"));
+        REQUIRE(matchesPruneGroup(getPruneCategory(".hypothesis/examples/123"), "packages"));
+        REQUIRE(
+            matchesPruneGroup(getPruneCategory(".ipynb_checkpoints/notebook.ipynb"), "packages"));
         REQUIRE(matchesPruneGroup(getPruneCategory(".gradle/caches/modules.bin"), "packages"));
+    }
+
+    SECTION("Coverage and IDE outputs") {
+        REQUIRE(getPruneCategory("coverage/lcov.info") == PruneCategory::Coverage);
+        REQUIRE(getPruneCategory(".nyc_output/processinfo/index.json") == PruneCategory::Coverage);
+        REQUIRE(getPruneCategory(".vs/slnx.sqlite") == PruneCategory::IdeProject);
+        REQUIRE(getPruneCategory("meson-private/coredata.dat") == PruneCategory::SystemMeson);
+        REQUIRE(getPruneCategory("CMakeFiles/rules.ninja") == PruneCategory::SystemCMake);
     }
 
     SECTION("Git artifacts") {

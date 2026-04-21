@@ -1580,6 +1580,10 @@ private:
     bool compressedAnnIndexReady_ = false; // True once build() has been called
     std::shared_ptr<SearchTuner> tuner_;   // Adaptive runtime tuner (optional)
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
+    // Recipe label from the last simeon rescore call in this request; empty
+    // when rescoring was skipped (backend off, not ready, or empty result set).
+    // Surfaced to response.debugStats["simeon_route"] for per-query tracing.
+    mutable std::string lastSimeonRouteRecipe_;
 };
 
 Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& query,
@@ -1649,6 +1653,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     auto startTime = std::chrono::steady_clock::now();
     stats_.totalQueries.fetch_add(1, std::memory_order_relaxed);
+    lastSimeonRouteRecipe_.clear();
 
     SearchResponse response;
     std::vector<std::string> timedOut;
@@ -2048,7 +2053,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                        workingConfig.enableTopologyWeakQueryRouting);
     traceCollector.markStageConfigured("graph_rerank",
                                        workingConfig.enableGraphRerank && kgScorer_ != nullptr);
-    traceCollector.markStageConfigured("reranker", false);
 
     auto hasVectorTierDimMismatch = [&]() {
         if (!queryEmbedding.has_value() || !vectorDb_) {
@@ -3543,6 +3547,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             recipe += std::to_string(workingConfig.weightedLinearZScorePoolSize);
         }
         response.debugStats["simeon_recipe"] = recipe;
+        if (!lastSimeonRouteRecipe_.empty()) {
+            response.debugStats["simeon_route"] = lastSimeonRouteRecipe_;
+        }
     }
 
     ResultFusion fusion(workingConfig);
@@ -4182,11 +4189,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     materializeConcepts(workingConfig.waitForConceptExtraction);
-
-    if (workingConfig.enableReranking && !response.results.empty()) {
-        skipped.push_back("reranker");
-        traceCollector.markStageSkipped("reranker", "retired");
-    }
 
     const size_t compactRerankWindow = 0;
     if (effectiveVectorMaxResults == 0) {
@@ -5157,6 +5159,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     signal.durationMs = data.value("duration_ms", 0.0);
                     signal.rawHitCount = data.value("raw_hit_count", 0UL);
                     signal.uniqueDocCount = data.value("unique_doc_count", 0UL);
+                    signal.scoreStatsValid = data.value("score_stats_valid", false);
+                    signal.minScore = data.value("min_score", 0.0);
+                    signal.maxScore = data.value("max_score", 0.0);
                     telemetry.stages.emplace(name, signal);
                 }
             }
@@ -5342,25 +5347,29 @@ void SearchEngine::Impl::applySimeonLexicalRescoring(const std::string& query,
         ids.push_back(r.document.id);
     }
 
-    auto scored = simeonLexical_->score(query, ids);
-    if (!scored) {
+    auto decision = simeonLexical_->scoreRouted(query, ids);
+    if (!decision) {
         spdlog::debug("[simeon-lexical] score failed, keeping FTS5 scores: {}",
-                      scored.error().message);
+                      decision.error().message);
         return;
     }
 
-    const auto& values = scored.value();
+    const auto& values = decision.value().scores;
     if (values.size() != searchResults.results.size()) {
         spdlog::warn("[simeon-lexical] score size mismatch ({} vs {}); keeping FTS5 scores",
                      values.size(), searchResults.results.size());
         return;
     }
+    lastSimeonRouteRecipe_ = decision.value().recipe_name;
+    // Negate so downstream normalizedBm25Score (in lexical_scoring.cpp) — which
+    // assumes FTS5's "lower is better" BM25 convention — maps best Simeon score
+    // to normalized 1.0 instead of 0.0.
     for (size_t i = 0; i < values.size(); ++i) {
-        searchResults.results[i].score = static_cast<double>(values[i]);
+        searchResults.results[i].score = -static_cast<double>(values[i]);
     }
     std::sort(searchResults.results.begin(), searchResults.results.end(),
               [](const yams::metadata::SearchResult& a, const yams::metadata::SearchResult& b) {
-                  return a.score > b.score;
+                  return a.score < b.score;
               });
 }
 

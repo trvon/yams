@@ -628,7 +628,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                 ctx_.getEmbeddingInFlightJobs ? ctx_.getEmbeddingInFlightJobs() : 0;
             if (embedQueued == 0 && embedInFlight == 0) {
                 auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
-                if (vectorDb && vectorDb->bulkLoadActive()) {
+                if (vectorDb) {
                     if (vectorDb->finalizeBulkLoad()) {
                         bulkVectorRebuildActive_.store(false, std::memory_order_relaxed);
                     } else {
@@ -3323,8 +3323,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     };
     auto finalizeBulkVectorRebuild = [&]() {
         auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
-        if (!vectorDb || !bulkVectorRebuildActive_.load(std::memory_order_relaxed) ||
-            !vectorDb->bulkLoadActive()) {
+        if (!vectorDb || !bulkVectorRebuildActive_.load(std::memory_order_relaxed)) {
             return;
         }
         if (!vectorDb->finalizeBulkLoad()) {

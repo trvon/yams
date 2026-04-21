@@ -174,6 +174,11 @@ public:
      */
     virtual Result<void> optimize() = 0;
 
+    /**
+     * @brief Persist an already-prepared search index without triggering heavyweight rebuild work.
+     */
+    virtual Result<void> persistIndex() { return optimize(); }
+
     // =========================================================================
     // Entity Vector Operations (for symbols, functions, classes, etc.)
     // =========================================================================

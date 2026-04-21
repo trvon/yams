@@ -237,7 +237,6 @@ TEST_CASE_METHOD(HnswPersistenceFixture,
         REQUIRE(backend.initialize(dbPath).has_value());
         REQUIRE(backend.createTables(64).has_value());
         REQUIRE(backend.beginBulkLoad().has_value());
-        CHECK(backend.bulkLoadActive());
 
         std::vector<VectorRecord> records;
         for (int i = 0; i < 128; ++i) {
@@ -248,7 +247,6 @@ TEST_CASE_METHOD(HnswPersistenceFixture,
         CHECK(backend.hasReusablePersistedSearchIndex().value() == false);
 
         REQUIRE(backend.finalizeBulkLoad().has_value());
-        CHECK_FALSE(backend.bulkLoadActive());
         CHECK(backend.testingLastHnswMaintenanceMode() ==
               SqliteVecBackend::HnswMaintenanceMode::FullRebuild);
     }
@@ -269,6 +267,63 @@ TEST_CASE_METHOD(HnswPersistenceFixture,
         auto search = backend.searchSimilar(query, 10, -2.0f, std::nullopt, {});
         REQUIRE(search.has_value());
         REQUIRE_FALSE(search.value().empty());
+    }
+}
+
+TEST_CASE_METHOD(HnswPersistenceFixture,
+                 "SqliteVecBackend persistIndex checkpoints incremental HNSW updates for reopen",
+                 "[vector][hnsw][persistence][checkpoint][incremental][catch2]") {
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    config.checkpoint_threshold = 1000; // keep the delta below automatic checkpoint/save
+
+    const std::string dbPath = createTempDbPath();
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(64).has_value());
+
+        std::vector<VectorRecord> seedRecords;
+        for (int i = 0; i < 48; ++i) {
+            seedRecords.push_back(createRecord("seed_incremental_" + std::to_string(i),
+                                               createEmbedding(64, 200.0f + i)));
+        }
+        REQUIRE(backend.insertVectorsBatch(seedRecords).has_value());
+        REQUIRE(backend.buildIndex().has_value());
+    }
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+
+        std::vector<VectorRecord> deltaRecords;
+        for (int i = 0; i < 6; ++i) {
+            deltaRecords.push_back(createRecord("delta_incremental_" + std::to_string(i),
+                                                createEmbedding(64, 400.0f + i)));
+        }
+        REQUIRE(backend.insertVectorsBatch(deltaRecords).has_value());
+        REQUIRE(backend.persistIndex().has_value());
+    }
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.prepareSearchIndex().has_value());
+
+        auto query = createEmbedding(64, 402.0f);
+        auto search = backend.searchSimilar(query, 10, -2.0f, std::nullopt, {});
+        REQUIRE(search.has_value());
+        REQUIRE_FALSE(search.value().empty());
+
+        bool foundDelta = false;
+        for (const auto& rec : search.value()) {
+            if (rec.document_hash.find("doc_delta_incremental_") == 0) {
+                foundDelta = true;
+                break;
+            }
+        }
+        CHECK(foundDelta);
     }
 }
 

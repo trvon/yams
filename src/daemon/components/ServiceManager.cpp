@@ -581,6 +581,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
             CheckpointManager::Dependencies checkpointDeps;
             checkpointDeps.vectorSystemManager = vectorSystemManager_.get();
+            checkpointDeps.state = &state_;
             checkpointDeps.hotzoneManager = nullptr;
             checkpointDeps.metadataRepository = getMetadataRepo().get();
             checkpointDeps.executor = workCoordinator_->getExecutor();
@@ -2225,6 +2226,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
+            try {
+                lifecycleFsm_.setSubsystemDegraded("search", false);
+            } catch (...) {
+            }
             // Track doc count at build time for re-tuning decisions
             if (auto metadataRepo = getMetadataRepo()) {
                 auto countRes = metadataRepo->getDocumentCount();
@@ -2255,14 +2260,22 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } else {
             // Do not leave UI stuck below 100% when we are running degraded.
             try {
+                state_.readiness.searchEngineReady = false;
                 state_.readiness.searchProgress = 100;
             } catch (...) {
             }
-            writeBootstrapStatusFile(config_, state_);
-            spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded");
+            const auto reason = buildResult.error().message.empty()
+                                    ? std::string{"initial search engine build not ready"}
+                                    : buildResult.error().message;
             try {
-                serviceFsm_.dispatch(
-                    InitializationFailedEvent{"initial search engine build not ready"});
+                lifecycleFsm_.setSubsystemDegraded("search", true, reason);
+            } catch (...) {
+            }
+            writeBootstrapStatusFile(config_, state_);
+            spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded: {}",
+                         reason);
+            try {
+                serviceFsm_.dispatch(SearchEngineBuiltEvent{});
             } catch (...) {
             }
         }
@@ -2817,6 +2830,10 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
+            try {
+                lifecycleFsm_.setSubsystemDegraded("search", false);
+            } catch (...) {
+            }
             // Track doc count at build time for re-tuning decisions
             if (auto metadataRepo = getMetadataRepo()) {
                 auto countRes = metadataRepo->getDocumentCount();
@@ -2832,6 +2849,10 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: success (docs={})",
                          state_.readiness.searchEngineDocCount.load());
         } else {
+            try {
+                lifecycleFsm_.setSubsystemDegraded("search", true, rebuildResult.error().message);
+            } catch (...) {
+            }
             spdlog::warn("[ServiceManager] co_enableEmbeddingsAndRebuild: failed");
         }
     } catch (const std::exception& e) {
@@ -2916,6 +2937,10 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 // Update readiness indicators after successful rebuild
                 state_.readiness.searchEngineReady = true;
                 state_.readiness.searchProgress = 100;
+                try {
+                    lifecycleFsm_.setSubsystemDegraded("search", false);
+                } catch (...) {
+                }
                 // Track doc count at build time for re-tuning decisions
                 if (auto metadataRepo = getMetadataRepo()) {
                     auto countRes = metadataRepo->getDocumentCount();
@@ -2933,6 +2958,11 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 spdlog::info("[Rebuild] done ok: vector scoring enabled (docs={})",
                              state_.readiness.searchEngineDocCount.load());
             } else {
+                try {
+                    lifecycleFsm_.setSubsystemDegraded("search", true,
+                                                       rebuildResult.error().message);
+                } catch (...) {
+                }
                 spdlog::warn("[Rebuild] failed: engine rebuild unsuccessful");
             }
 

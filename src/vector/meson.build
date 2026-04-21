@@ -120,6 +120,8 @@ simeon_core_srcs = [
   join_paths(simeon_dir, 'src', 'projection.cpp'),
   join_paths(simeon_dir, 'src', 'pmi.cpp'),
   join_paths(simeon_dir, 'src', 'bm25.cpp'),
+  join_paths(simeon_dir, 'src', 'fusion.cpp'),
+  join_paths(simeon_dir, 'src', 'query_router.cpp'),
   join_paths(simeon_dir, 'src', 'arch', 'scalar.cpp'),
 ]
 

@@ -954,6 +954,11 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
                 policy.subwordGamma = parseTomlFloat(it->second);
             if (auto it = kv.find("embeddings.simeon.bm25.max_corpus_docs"); it != kv.end())
                 policy.maxCorpusDocs = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.router.enabled"); it != kv.end())
+                policy.routerEnabled = parseTomlBool(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.router.preset");
+                it != kv.end() && !it->second.empty())
+                policy.routerPreset = it->second;
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for simeon bm25 policy: {}", e.what());
@@ -973,6 +978,12 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
         } catch (const std::exception&) {
         }
     }
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_ROUTER_ENABLED")) {
+        if (auto b = parseTomlBool(std::string(raw)))
+            policy.routerEnabled = b;
+    }
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_ROUTER_PRESET"))
+        policy.routerPreset = std::move(v);
 
     return policy;
 }

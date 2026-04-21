@@ -27,6 +27,18 @@ constexpr size_t kMinGraphRerankTopN = 10;
 constexpr size_t kMaxGraphRerankTopN = 60;
 constexpr int kMinRrfK = 8;
 constexpr int kMaxRrfK = 80;
+// Adaptive similarity threshold bounds. Floor keeps us above HNSW noise on
+// degenerate corpora; ceiling protects precision on dense, well-separated ones.
+constexpr float kMinSimilarityThreshold = 0.05f;
+constexpr float kMaxSimilarityThreshold = 0.70f;
+// Stream hysteresis: only lower threshold after N consecutive empty vector pools,
+// to avoid oscillating on a handful of odd queries.
+constexpr std::uint64_t kAdaptiveVectorEmptyStreakThreshold = 5;
+// Step sizes for threshold adjustment; small enough to avoid overshoot.
+constexpr float kSimilarityThresholdLowerStep = 0.05f;
+constexpr float kSimilarityThresholdRaiseStep = 0.02f;
+// Margin: only raise threshold when EWMA max-sim is well above current threshold.
+constexpr float kSimilarityThresholdRaiseMargin = 0.20f;
 
 bool statsAreOverlayBacked(const storage::CorpusStats& stats) {
     return stats.usedOnlineOverlay;
@@ -103,6 +115,8 @@ void clampGraphControls(TunedParams& params) {
 void applyAdaptiveClamp(const storage::CorpusStats& stats, TunedParams& params,
                         bool preserveExplicitGraphConfig = false) {
     params.rrfK = std::clamp(params.rrfK, kMinRrfK, kMaxRrfK);
+    setClamp(params.similarityThreshold, params.similarityThreshold.value,
+             params.similarityThreshold.source, kMinSimilarityThreshold, kMaxSimilarityThreshold);
     clampGraphControls(params);
 
     if (stats.hasKnowledgeGraph()) {
@@ -399,7 +413,20 @@ void SearchTuner::observeLocked(const RuntimeTelemetry& telemetry) {
 
     const auto* kgStage = findStage(telemetry, "kg");
     const auto* graphStage = findStage(telemetry, "graph_rerank");
+    const auto* vectorStage = findStage(telemetry, "vector");
     const auto* kgFusion = findFusion(telemetry, "kg");
+
+    if (vectorStage && vectorStage->enabled && vectorStage->attempted && !vectorStage->skipped) {
+        adaptive_.vectorStageObservations++;
+        if (vectorStage->scoreStatsValid) {
+            adaptive_.ewmaVectorMaxSimilarity =
+                ewmaUpdate(adaptive_.ewmaVectorMaxSimilarity, vectorStage->maxScore,
+                           adaptive_.vectorStageObservations);
+            adaptive_.vectorStageEmptyStreak = 0;
+        } else {
+            adaptive_.vectorStageEmptyStreak++;
+        }
+    }
 
     const double latencyMs = std::max(0.0, telemetry.latencyMs);
     const double kgLatencyShare =
@@ -547,6 +574,42 @@ void SearchTuner::observeLocked(const RuntimeTelemetry& telemetry) {
         reasons.push_back("steady_band");
     }
 
+    if (!candidate.similarityThreshold.pinned) {
+        const float currentThreshold = candidate.similarityThreshold.value;
+        const float observedMaxSim = static_cast<float>(adaptive_.ewmaVectorMaxSimilarity);
+        const bool haveVectorSignal =
+            adaptive_.vectorStageObservations >= kAdaptiveWarmupObservations;
+
+        if (haveVectorSignal) {
+            if (adaptive_.vectorStageEmptyStreak >= kAdaptiveVectorEmptyStreakThreshold) {
+                float nextThreshold = currentThreshold - kSimilarityThresholdLowerStep;
+                if (observedMaxSim > 0.0f) {
+                    nextThreshold = std::min(nextThreshold, observedMaxSim * 0.5f);
+                }
+                nextThreshold =
+                    std::clamp(nextThreshold, kMinSimilarityThreshold, kMaxSimilarityThreshold);
+                if (nextThreshold + 1e-5f < currentThreshold) {
+                    if (candidate.similarityThreshold.set(nextThreshold, TuningLayer::Runtime)) {
+                        changed = true;
+                        reasons.push_back("vector_empty_pool_streak");
+                        adaptive_.vectorStageEmptyStreak = 0;
+                    }
+                }
+            } else if (adaptive_.vectorStageEmptyStreak == 0 &&
+                       observedMaxSim > currentThreshold + kSimilarityThresholdRaiseMargin) {
+                const float nextThreshold =
+                    std::clamp(currentThreshold + kSimilarityThresholdRaiseStep,
+                               kMinSimilarityThreshold, kMaxSimilarityThreshold);
+                if (nextThreshold > currentThreshold + 1e-5f) {
+                    if (candidate.similarityThreshold.set(nextThreshold, TuningLayer::Runtime)) {
+                        changed = true;
+                        reasons.push_back("vector_sim_headroom");
+                    }
+                }
+            }
+        }
+    }
+
     applyAdaptiveClamp(stats_, candidate);
     if (changed) {
         params_ = candidate;
@@ -576,6 +639,9 @@ nlohmann::json SearchTuner::adaptiveStateToJsonLocked() const {
         {"relevance_sessions", adaptive_.relevanceSessions},
         {"relevance_queries", adaptive_.relevanceQueries},
         {"last_relevance_timestamp", adaptive_.lastRelevanceTimestamp},
+        {"ewma_vector_max_similarity", adaptive_.ewmaVectorMaxSimilarity},
+        {"vector_stage_observations", adaptive_.vectorStageObservations},
+        {"vector_stage_empty_streak", adaptive_.vectorStageEmptyStreak},
         {"last_zoom_level",
          SearchEngineConfig::navigationZoomLevelToString(adaptive_.lastZoomLevel)},
         {"zoom_level_counts", zoomLevelCountJson(adaptive_.zoomLevelCounts)},
@@ -705,6 +771,12 @@ Result<void> SearchTuner::loadAdaptiveState(const std::filesystem::path& path) {
     adaptive_.relevanceQueries = j.value("relevance_queries", adaptive_.relevanceQueries);
     adaptive_.lastRelevanceTimestamp =
         j.value("last_relevance_timestamp", adaptive_.lastRelevanceTimestamp);
+    adaptive_.ewmaVectorMaxSimilarity =
+        j.value("ewma_vector_max_similarity", adaptive_.ewmaVectorMaxSimilarity);
+    adaptive_.vectorStageObservations =
+        j.value("vector_stage_observations", adaptive_.vectorStageObservations);
+    adaptive_.vectorStageEmptyStreak =
+        j.value("vector_stage_empty_streak", adaptive_.vectorStageEmptyStreak);
     if (j.contains("zoom_level_counts") && j["zoom_level_counts"].is_object()) {
         adaptive_.zoomLevelCounts.clear();
         for (auto it = j["zoom_level_counts"].begin(); it != j["zoom_level_counts"].end(); ++it) {

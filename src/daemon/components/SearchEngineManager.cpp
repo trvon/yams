@@ -225,6 +225,12 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             if (bm25Policy.maxCorpusDocs) {
                 lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
             }
+            // Router: default enabled unless preset="off" or explicit
+            // routerEnabled=false. Only preset currently understood is
+            // "passE_scq0_clar3" (the header's default RouterPreset); any
+            // unknown preset string falls back to that.
+            const bool presetOff = bm25Policy.routerPreset && *bm25Policy.routerPreset == "off";
+            lexicalCfg.router_enabled = bm25Policy.routerEnabled.value_or(true) && !presetOff;
             opts.simeonLexicalConfig = lexicalCfg;
         }
     }

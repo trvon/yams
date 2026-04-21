@@ -147,7 +147,7 @@ struct SearchEngineConfig {
 
     // Search parameters
     size_t maxResults = 100;                     // Maximum results to return
-    float similarityThreshold = 0.30f;           // Calibrated for FWHT+1024+L2 (Simeon default)
+    float similarityThreshold = 0.30f;           // Initial; adapted at runtime by SearchTuner
     bool enableParallelExecution = true;         // Parallel component queries
     std::chrono::milliseconds componentTimeout = // Timeout per component (0 = no timeout)
         std::chrono::milliseconds(0);
@@ -232,7 +232,7 @@ struct SearchEngineConfig {
                                // linear combination of lexical+vector components
                                // (training-free recipe; defaults match the simeon
                                // bench's headline cascade row)
-    } fusionStrategy = FusionStrategy::COMB_MNZ; // Default: recall-focused
+    } fusionStrategy = FusionStrategy::COMB_MNZ;
 
     // WEIGHTED_LINEAR_ZSCORE knobs. Defaults reproduce simeon's
     // bm25_pool500_linear_alpha075 bench row on BEIR scifact.
