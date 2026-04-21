@@ -59,7 +59,9 @@ pkg.generate(yams_search,
 )
 
 yams_search_dep = declare_dependency(
-  link_with: yams_search,
+  # yams_search owns simeon_lexical_backend.cpp, so consumers also need the
+  # vendored simeon archive that provides QueryRouter/recipe_name.
+  link_with: [yams_search, simeon_lib],
   include_directories: [
     include_directories('../../include'),
     include_directories('../../third_party/symspell/include'),

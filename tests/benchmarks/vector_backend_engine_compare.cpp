@@ -127,8 +127,6 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
     SqliteVecBackend::Config backend_cfg;
     backend_cfg.embedding_dim = cfg.dim;
     backend_cfg.search_engine = engine;
-    backend_cfg.quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
-    backend_cfg.quantized_hnsw_rerank_factor = 2;
 
     SqliteVecBackend backend(backend_cfg);
     auto init = backend.initialize(":memory:");
@@ -199,7 +197,10 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
             out.name = "hnsw-cosine";
             break;
         case VectorSearchEngine::HnswQuantizedL2:
-            out.name = "hnsw-q-l2";
+            out.name = "hnsw-q-l2-legacy";
+            break;
+        case VectorSearchEngine::SimeonPqAdc:
+            out.name = "simeon-pq";
             break;
         case VectorSearchEngine::Vec0L2:
             out.name = "vec0-l2";
@@ -248,12 +249,12 @@ int main(int argc, char* argv[]) {
 
         const auto hnsw =
             runEngine(VectorSearchEngine::HnswCosine, cfg, corpus, queries, ground_truth);
-        const auto qhnsw =
-            runEngine(VectorSearchEngine::HnswQuantizedL2, cfg, corpus, queries, ground_truth);
+        const auto spq =
+            runEngine(VectorSearchEngine::SimeonPqAdc, cfg, corpus, queries, ground_truth);
         const auto vec0 = runEngine(VectorSearchEngine::Vec0L2, cfg, corpus, queries, ground_truth);
 
         printResult(hnsw, cfg.k);
-        printResult(qhnsw, cfg.k);
+        printResult(spq, cfg.k);
         printResult(vec0, cfg.k);
         return 0;
     } catch (const std::exception& e) {

@@ -5,6 +5,10 @@
 
 #include <yams/daemon/components/TuneAdvisor.h>
 
+#include "quantized_hnsw_store_codec.h"
+#include "quantized_hnsw_persistence.h"
+#include "simeon_pq_persistence.h"
+
 #include <sqlite3.h>
 #include <algorithm>
 #include <atomic>
@@ -31,6 +35,7 @@
 #include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
 #include <sqlite-vec-cpp/index/hnsw_quantized.hpp>
 #include <sqlite-vec-cpp/sqlite/registration.hpp>
+#include <simeon/pq.hpp>
 
 namespace yams::vector {
 
@@ -41,6 +46,15 @@ using HNSWL2Metric = sqlite_vec_cpp::distances::L2Metric<float>;
 using QuantizedHNSWIndex = sqlite_vec_cpp::index::HNSWIndex<float, HNSWL2Metric>;
 using QuantizedHNSWSearch = sqlite_vec_cpp::index::HNSWQuantizedSearch<float, HNSWL2Metric>;
 using QuantizedSearchType = sqlite_vec_cpp::index::QuantizationType;
+
+struct SimeonPqIndexState {
+    simeon::ProductQuantizer pq;
+    std::vector<std::size_t> rowids;
+    std::vector<std::uint8_t> codes;
+    std::size_t rerank_factor = 2;
+
+    explicit SimeonPqIndexState(simeon::PQConfig cfg) : pq(cfg) {}
+};
 
 namespace {
 
@@ -494,6 +508,39 @@ CREATE TABLE IF NOT EXISTS turboquant_quantizer_meta (
     UNIQUE(dim, bits, seed)
 ))sql";
 
+constexpr const char* kCreateQuantizedHnswMeta = R"sql(
+CREATE TABLE IF NOT EXISTS quantized_hnsw_meta (
+    dim INTEGER PRIMARY KEY,
+    format_version INTEGER NOT NULL DEFAULT 1,
+    quantization_type INTEGER NOT NULL,
+    rerank_factor INTEGER NOT NULL,
+    vector_count INTEGER NOT NULL,
+    store_blob BLOB NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+))sql";
+
+constexpr const char* kCreateSimeonPqMeta = R"sql(
+CREATE TABLE IF NOT EXISTS simeon_pq_meta (
+    dim INTEGER PRIMARY KEY,
+    format_version INTEGER NOT NULL DEFAULT 1,
+    m INTEGER NOT NULL,
+    k INTEGER NOT NULL,
+    seed INTEGER NOT NULL,
+    rerank_factor INTEGER NOT NULL,
+    trained INTEGER NOT NULL DEFAULT 0,
+    vector_count INTEGER NOT NULL,
+    codebooks_blob BLOB NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+))sql";
+
+constexpr const char* kCreateSimeonPqCodes = R"sql(
+CREATE TABLE IF NOT EXISTS simeon_pq_codes (
+    dim INTEGER NOT NULL,
+    rowid INTEGER NOT NULL,
+    code BLOB NOT NULL,
+    PRIMARY KEY (dim, rowid)
+))sql";
+
 constexpr const char* kInsertVector = R"sql(
 INSERT INTO vectors (
     chunk_id, document_hash, embedding, embedding_dim, content,
@@ -690,6 +737,27 @@ public:
         return config_.search_engine == VectorSearchEngine::HnswQuantizedL2;
     }
 
+    bool usesSimeonPqSearchEngine() const {
+        return config_.search_engine == VectorSearchEngine::SimeonPqAdc;
+    }
+
+    std::uint32_t normalizedSimeonPqSubquantizers(size_t dim) const {
+        const std::uint32_t requested =
+            static_cast<std::uint32_t>(std::max<size_t>(1, config_.simeon_pq_subquantizers));
+        if (dim == 0) {
+            return requested;
+        }
+        if (dim % requested == 0) {
+            return requested;
+        }
+        for (std::uint32_t candidate = requested; candidate > 1; --candidate) {
+            if (dim % candidate == 0) {
+                return candidate;
+            }
+        }
+        return 1;
+    }
+
     std::string vec0TableName(size_t dim) const {
         return "vectors_" + std::to_string(dim) + "_vec0";
     }
@@ -719,6 +787,20 @@ public:
     void markQuantizedHnswDimsDirtyUnlocked(const std::unordered_set<size_t>& dims) {
         for (size_t dim : dims) {
             markQuantizedHnswDimDirtyUnlocked(dim);
+        }
+    }
+
+    void markSimeonPqDimDirtyUnlocked(size_t dim) {
+        if (dim == 0) {
+            return;
+        }
+        simeon_pq_dirty_dims_.insert(dim);
+        simeon_pq_ready_dims_.erase(dim);
+    }
+
+    void markSimeonPqDimsDirtyUnlocked(const std::unordered_set<size_t>& dims) {
+        for (size_t dim : dims) {
+            markSimeonPqDimDirtyUnlocked(dim);
         }
     }
 
@@ -890,6 +972,9 @@ public:
         quantized_hnsw_searches_.clear();
         quantized_hnsw_ready_dims_.clear();
         quantized_hnsw_dirty_dims_.clear();
+        simeon_pq_indices_.clear();
+        simeon_pq_ready_dims_.clear();
+        simeon_pq_dirty_dims_.clear();
         trace_vector_db_lifetime("close.end", this, db_path_, db_);
     }
 
@@ -930,6 +1015,28 @@ public:
             sqlite3_free(err_msg);
             return Error{ErrorCode::DatabaseError,
                          "Failed to create turboquant_quantizer_meta table: " + err};
+        }
+
+        rc = sqlite3_exec(db_, kCreateQuantizedHnswMeta, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to create quantized_hnsw_meta table: " + err};
+        }
+
+        rc = sqlite3_exec(db_, kCreateSimeonPqMeta, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            return Error{ErrorCode::DatabaseError, "Failed to create simeon_pq_meta table: " + err};
+        }
+        rc = sqlite3_exec(db_, kCreateSimeonPqCodes, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to create simeon_pq_codes table: " + err};
         }
 
         // Create HNSW shadow tables
@@ -986,6 +1093,9 @@ public:
         if (usesQuantizedHnswSearchEngine()) {
             markQuantizedHnswDimDirtyUnlocked(record_dim);
         }
+        if (usesSimeonPqSearchEngine()) {
+            markSimeonPqDimDirtyUnlocked(record_dim);
+        }
 
         // Skip HNSW insertion for zero-norm vectors (they become dead-ends in the graph)
         if (isZeroNormEmbedding(record.embedding)) {
@@ -1001,6 +1111,9 @@ public:
         }
 
         if (usesQuantizedHnswSearchEngine()) {
+            return Result<void>{};
+        }
+        if (usesSimeonPqSearchEngine()) {
             return Result<void>{};
         }
 
@@ -1128,6 +1241,9 @@ public:
         if (usesQuantizedHnswSearchEngine()) {
             markQuantizedHnswDimsDirtyUnlocked(vec0_affected_dims);
         }
+        if (usesSimeonPqSearchEngine()) {
+            markSimeonPqDimsDirtyUnlocked(vec0_affected_dims);
+        }
 
         // Commit transaction with retry
         if (!execWithRetry(db_, "COMMIT")) {
@@ -1141,6 +1257,9 @@ public:
         }
 
         if (usesQuantizedHnswSearchEngine()) {
+            return Result<void>{};
+        }
+        if (usesSimeonPqSearchEngine()) {
             return Result<void>{};
         }
 
@@ -1372,6 +1491,12 @@ public:
             }
             markQuantizedHnswDimDirtyUnlocked(new_dim);
         }
+        if (usesSimeonPqSearchEngine()) {
+            if (old_dim) {
+                markSimeonPqDimDirtyUnlocked(*old_dim);
+            }
+            markSimeonPqDimDirtyUnlocked(new_dim);
+        }
 
         // Skip HNSW insertion for zero-norm vectors
         if (isZeroNormEmbedding(record.embedding)) {
@@ -1384,6 +1509,9 @@ public:
         }
 
         if (usesQuantizedHnswSearchEngine()) {
+            return Result<void>{};
+        }
+        if (usesSimeonPqSearchEngine()) {
             return Result<void>{};
         }
 
@@ -1450,6 +1578,9 @@ public:
             if (usesQuantizedHnswSearchEngine()) {
                 markQuantizedHnswDimDirtyUnlocked(*dim);
             }
+            if (usesSimeonPqSearchEngine()) {
+                markSimeonPqDimDirtyUnlocked(*dim);
+            }
         }
 
         // Delete from SQLite
@@ -1457,6 +1588,10 @@ public:
             sqlite3_reset(stmt_delete_by_chunk_id_);
             sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
             stepWithRetry(stmt_delete_by_chunk_id_);
+        }
+
+        if (usesSimeonPqSearchEngine()) {
+            return Result<void>{};
         }
 
         // Soft delete from HNSW (dimension-specific index)
@@ -1522,12 +1657,23 @@ public:
             }
             markQuantizedHnswDimsDirtyUnlocked(affected_dims);
         }
+        if (usesSimeonPqSearchEngine()) {
+            std::unordered_set<size_t> affected_dims;
+            for (const auto& [_, dim] : rowid_dims) {
+                affected_dims.insert(dim);
+            }
+            markSimeonPqDimsDirtyUnlocked(affected_dims);
+        }
 
         // Delete from SQLite
         if (stmt_delete_by_doc_) {
             sqlite3_reset(stmt_delete_by_doc_);
             sqlite3_bind_text(stmt_delete_by_doc_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
             stepWithRetry(stmt_delete_by_doc_);
+        }
+
+        if (usesSimeonPqSearchEngine()) {
+            return Result<void>{};
         }
 
         // Soft delete from HNSW (dimension-specific indices)
@@ -1623,6 +1769,29 @@ public:
             }
 
             return quantizedHnswSearchUnlocked(query_embedding, k, similarity_threshold);
+        }
+
+        if (usesSimeonPqSearchEngine()) {
+            const size_t query_dim = query_embedding.size();
+
+            if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
+                spdlog::debug("[SPQ] filtered search falling back to exact cosine scan");
+                return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
+                                                document_hash, candidate_hashes, metadata_filters);
+            }
+
+            {
+                lock.unlock();
+                std::unique_lock write_lock(mutex_);
+                auto ready = ensureSimeonPqReadyUnlocked(query_dim);
+                write_lock.unlock();
+                lock.lock();
+                if (!ready) {
+                    return ready.error();
+                }
+            }
+
+            return simeonPqSearchUnlocked(query_embedding, k, similarity_threshold);
         }
 
         // Ensure HNSW is loaded when an existing persisted/catch-up path is available.
@@ -2184,6 +2353,17 @@ FROM vectors WHERE level = ?
             spdlog::info("[QHNSW] buildIndex completed in {} ms", durMs);
             return Result<void>{};
         }
+        if (usesSimeonPqSearchEngine()) {
+            auto result = rebuildSimeonPqIndicesUnlocked();
+            if (!result) {
+                return result;
+            }
+            const auto durMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count();
+            spdlog::info("[SPQ] buildIndex completed in {} ms", durMs);
+            return Result<void>{};
+        }
 
         spdlog::info("[HNSW] buildIndex starting (loaded={} stale={} dims={})", hnsw_loaded_,
                      hnsw_needs_rebuild_, hnsw_indices_.size());
@@ -2213,7 +2393,24 @@ FROM vectors WHERE level = ?
             return warmVec0IndicesUnlocked();
         }
         if (usesQuantizedHnswSearchEngine()) {
-            return rebuildQuantizedHnswIndicesUnlocked();
+            auto dims = queryVectorDimsUnlocked();
+            for (size_t dim : dims) {
+                auto ready = ensureQuantizedHnswReadyUnlocked(dim);
+                if (!ready) {
+                    return ready;
+                }
+            }
+            return Result<void>{};
+        }
+        if (usesSimeonPqSearchEngine()) {
+            auto dims = queryVectorDimsUnlocked();
+            for (size_t dim : dims) {
+                auto ready = ensureSimeonPqReadyUnlocked(dim);
+                if (!ready) {
+                    return ready;
+                }
+            }
+            return Result<void>{};
         }
 
         ensureHnswLoadedUnlocked();
@@ -2231,6 +2428,21 @@ FROM vectors WHERE level = ?
             return Result<bool>(false);
         }
         if (usesQuantizedHnswSearchEngine()) {
+            auto dims = queryVectorDimsUnlocked();
+            for (size_t dim : dims) {
+                if (hasReusablePersistedQuantizedHnswUnlocked(dim)) {
+                    return Result<bool>(true);
+                }
+            }
+            return Result<bool>(false);
+        }
+        if (usesSimeonPqSearchEngine()) {
+            auto dims = queryVectorDimsUnlocked();
+            for (size_t dim : dims) {
+                if (hasReusablePersistedSimeonPqUnlocked(dim)) {
+                    return Result<bool>(true);
+                }
+            }
             return Result<bool>(false);
         }
 
@@ -2282,7 +2494,28 @@ FROM vectors WHERE level = ?
                     return rebuild;
                 }
             }
+            for (size_t dim : quantized_hnsw_ready_dims_) {
+                auto saved = saveQuantizedHnswDimUnlocked(dim);
+                if (!saved) {
+                    return saved;
+                }
+            }
             return Result<void>{};
+        }
+        if (usesSimeonPqSearchEngine()) {
+            if (!simeon_pq_dirty_dims_.empty()) {
+                auto rebuild = rebuildSimeonPqIndicesUnlocked();
+                if (!rebuild) {
+                    return rebuild;
+                }
+            }
+            for (size_t dim : simeon_pq_ready_dims_) {
+                auto saved = saveSimeonPqDimUnlocked(dim);
+                if (!saved) {
+                    return saved;
+                }
+            }
+            return checkpointWalUnlocked();
         }
 
         bool requireFullSave = false;
@@ -2323,6 +2556,27 @@ FROM vectors WHERE level = ?
                 auto rebuild = rebuildQuantizedHnswIndicesUnlocked();
                 if (!rebuild) {
                     return rebuild;
+                }
+            }
+            for (size_t dim : quantized_hnsw_ready_dims_) {
+                auto saved = saveQuantizedHnswDimUnlocked(dim);
+                if (!saved) {
+                    return saved;
+                }
+            }
+            return checkpointWalUnlocked();
+        }
+        if (usesSimeonPqSearchEngine()) {
+            if (!simeon_pq_dirty_dims_.empty()) {
+                auto rebuild = rebuildSimeonPqIndicesUnlocked();
+                if (!rebuild) {
+                    return rebuild;
+                }
+            }
+            for (size_t dim : simeon_pq_ready_dims_) {
+                auto saved = saveSimeonPqDimUnlocked(dim);
+                if (!saved) {
+                    return saved;
                 }
             }
             return checkpointWalUnlocked();
@@ -2509,6 +2763,10 @@ public:
         hnsw_indices_.clear();
         hnsw_dirty_.clear();
         hnsw_loaded_ = false;
+        quantized_hnsw_indices_.clear();
+        quantized_hnsw_searches_.clear();
+        quantized_hnsw_ready_dims_.clear();
+        quantized_hnsw_dirty_dims_.clear();
 
         // Finalize all prepared statements
         finalizeStatements();
@@ -2519,7 +2777,10 @@ public:
         const char* find_tables =
             "SELECT name FROM sqlite_master WHERE type='table' AND "
             "(name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
-            " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes')";
+            " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes' OR "
+            " name LIKE 'vectors_qhnsw_%_hnsw_meta' OR name LIKE 'vectors_qhnsw_%_hnsw_nodes' OR "
+            " name = 'quantized_hnsw_meta' OR name = 'simeon_pq_meta' OR "
+            " name = 'simeon_pq_codes')";
 
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, find_tables, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -2533,8 +2794,9 @@ public:
             sqlite3_finalize(stmt);
         }
 
-        // Drop main vectors table
+        // Drop main vectors and auxiliary metadata tables
         tables_to_drop.push_back("DROP TABLE IF EXISTS vectors");
+        tables_to_drop.push_back("DROP TABLE IF EXISTS turboquant_quantizer_meta");
 
         for (const auto& sql : tables_to_drop) {
             char* err_msg = nullptr;
@@ -3645,9 +3907,107 @@ private:
         return Result<void>{};
     }
 
+    bool hasPersistedQuantizedHnswNodesUnlocked(size_t dim) {
+        return detail::hasPersistedQuantizedHnswNodes(db_, quantizedHnswTablePrefix(dim));
+    }
+
+    bool loadPersistedQuantizedStoreBlobUnlocked(size_t dim, QuantizedSearchType expectedType,
+                                                 size_t expectedCount,
+                                                 QuantizedHNSWSearch& search) {
+        return detail::loadPersistedQuantizedStoreBlob(db_, dim, expectedType, expectedCount,
+                                                       search);
+    }
+
+    bool loadPersistedQuantizedHnswDimUnlocked(size_t dim) {
+        if (!hasPersistedQuantizedHnswNodesUnlocked(dim)) {
+            return false;
+        }
+
+        QuantizedHNSWSearch::Config search_config;
+        search_config.quantization = toQuantizedSearchType(config_.quantized_hnsw_mode);
+        search_config.rerank_factor = std::max<size_t>(1, config_.quantized_hnsw_rerank_factor);
+
+        try {
+            std::unique_ptr<QuantizedHNSWIndex> base;
+            std::unique_ptr<QuantizedHNSWSearch> search;
+            if (!detail::loadPersistedQuantizedHnswDim<QuantizedHNSWIndex, QuantizedHNSWSearch,
+                                                       HNSWL2Metric>(
+                    db_, dim, quantizedHnswTablePrefix(dim), search_config, base, search)) {
+                return false;
+            }
+            quantized_hnsw_indices_[dim] = std::move(base);
+            quantized_hnsw_searches_[dim] = std::move(search);
+            quantized_hnsw_dirty_dims_.erase(dim);
+            quantized_hnsw_ready_dims_.insert(dim);
+            spdlog::info("[QHNSW] Loaded persisted quantized index for dim={} with {} vectors "
+                         "mode={} rerank={}",
+                         dim, quantized_hnsw_indices_[dim]->size(),
+                         quantizedHnswModeName(config_.quantized_hnsw_mode),
+                         config_.quantized_hnsw_rerank_factor);
+            return true;
+        } catch (const std::exception& e) {
+            spdlog::warn("[QHNSW] Exception loading persisted quantized index for dim={}: {}", dim,
+                         e.what());
+            return false;
+        }
+    }
+
+    Result<void> saveQuantizedHnswDimUnlocked(size_t dim) {
+        auto base_it = quantized_hnsw_indices_.find(dim);
+        auto search_it = quantized_hnsw_searches_.find(dim);
+        if (base_it == quantized_hnsw_indices_.end() ||
+            search_it == quantized_hnsw_searches_.end() || !base_it->second || !search_it->second) {
+            return Result<void>{};
+        }
+
+        std::string errorMessage;
+        if (!detail::savePersistedQuantizedBase<QuantizedHNSWIndex, HNSWL2Metric>(
+                db_, quantizedHnswTablePrefix(dim), dim, *base_it->second, errorMessage)) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to save quantized HNSW base index for dim " + std::to_string(dim) +
+                             ": " + errorMessage};
+        }
+
+        std::vector<uint8_t> storeBlob;
+        const auto mode = toQuantizedSearchType(config_.quantized_hnsw_mode);
+        switch (mode) {
+            case QuantizedSearchType::LVQ8:
+                storeBlob =
+                    detail::serializeQuantizedStoreBlob(mode, search_it->second->lvq8_store());
+                break;
+            case QuantizedSearchType::LVQ4:
+                storeBlob =
+                    detail::serializeQuantizedStoreBlob(mode, search_it->second->lvq4_store());
+                break;
+            case QuantizedSearchType::RaBitQ:
+                storeBlob =
+                    detail::serializeQuantizedStoreBlob(mode, search_it->second->rabitq_store());
+                break;
+            case QuantizedSearchType::None:
+                return Result<void>{};
+        }
+
+        if (!detail::saveQuantizedHnswMeta(db_, dim, mode, config_.quantized_hnsw_rerank_factor,
+                                           base_it->second->size(), storeBlob, errorMessage)) {
+            return Error{ErrorCode::DatabaseError, errorMessage};
+        }
+
+        return Result<void>{};
+    }
+
+    bool hasReusablePersistedQuantizedHnswUnlocked(size_t dim) {
+        return hasPersistedQuantizedHnswNodesUnlocked(dim) &&
+               detail::hasReusablePersistedQuantizedHnsw(
+                   db_, dim, toQuantizedSearchType(config_.quantized_hnsw_mode));
+    }
+
     Result<void> ensureQuantizedHnswReadyUnlocked(size_t dim) {
         if (quantized_hnsw_ready_dims_.contains(dim) && !quantized_hnsw_dirty_dims_.contains(dim) &&
             quantized_hnsw_indices_.contains(dim) && quantized_hnsw_searches_.contains(dim)) {
+            return Result<void>{};
+        }
+        if (!quantized_hnsw_dirty_dims_.contains(dim) &&
+            loadPersistedQuantizedHnswDimUnlocked(dim)) {
             return Result<void>{};
         }
         return rebuildQuantizedHnswIndicesUnlocked(dim);
@@ -3702,6 +4062,223 @@ private:
             records.push_back(std::move(*record_opt));
         }
 
+        return records;
+    }
+
+    Result<void> rebuildSimeonPqDimUnlocked(size_t dim) {
+        auto rows = queryVectorsForDimUnlocked(dim);
+        simeon_pq_indices_.erase(dim);
+
+        if (rows.empty()) {
+            simeon_pq_dirty_dims_.erase(dim);
+            simeon_pq_ready_dims_.insert(dim);
+            return Result<void>{};
+        }
+
+        const std::uint32_t m = normalizedSimeonPqSubquantizers(dim);
+        const std::uint32_t k = static_cast<std::uint32_t>(
+            std::clamp<std::size_t>(config_.simeon_pq_centroids, 2, 256));
+        simeon::PQConfig pqConfig{
+            .dim = static_cast<std::uint32_t>(dim),
+            .m = m,
+            .k = k,
+            .seed = config_.simeon_pq_seed,
+        };
+
+        auto state = std::make_unique<SimeonPqIndexState>(pqConfig);
+        std::vector<float> training;
+        training.reserve(std::min(rows.size(), config_.simeon_pq_train_limit) * dim);
+
+        for (auto& [rowid, embedding] : rows) {
+            if (!normalizeEmbeddingInPlace(embedding)) {
+                continue;
+            }
+            if (training.size() / dim < std::min(rows.size(), config_.simeon_pq_train_limit)) {
+                training.insert(training.end(), embedding.begin(), embedding.end());
+            }
+            state->rowids.push_back(rowid);
+        }
+
+        if (state->rowids.empty()) {
+            simeon_pq_dirty_dims_.erase(dim);
+            simeon_pq_ready_dims_.insert(dim);
+            return Result<void>{};
+        }
+
+        try {
+            if (training.size() / dim >= k) {
+                state->pq.train(training.data(), static_cast<std::uint32_t>(training.size() / dim));
+            } else {
+                state->pq.init_random_gaussian();
+            }
+        } catch (const std::exception&) {
+            state->pq.init_random_gaussian();
+        }
+
+        state->codes.resize(state->rowids.size() * state->pq.m());
+        std::size_t codeOffset = 0;
+        for (auto& [rowid, embedding] : rows) {
+            (void)rowid;
+            if (!normalizeEmbeddingInPlace(embedding)) {
+                continue;
+            }
+            state->pq.encode(embedding.data(), state->codes.data() + codeOffset);
+            codeOffset += state->pq.m();
+        }
+        state->rerank_factor = std::max<std::size_t>(1, config_.simeon_pq_rerank_factor);
+        simeon_pq_indices_[dim] = std::move(state);
+        simeon_pq_dirty_dims_.erase(dim);
+        simeon_pq_ready_dims_.insert(dim);
+        spdlog::info(
+            "[SPQ] Built persisted PQ index for dim={} with {} vectors m={} k={} rerank={}", dim,
+            simeon_pq_indices_[dim]->rowids.size(), m, k, config_.simeon_pq_rerank_factor);
+        return Result<void>{};
+    }
+
+    Result<void> rebuildSimeonPqIndicesUnlocked(std::optional<size_t> focus_dim = std::nullopt) {
+        auto dims = queryVectorDimsUnlocked();
+        std::unordered_set<size_t> available_dims(dims.begin(), dims.end());
+        if (focus_dim) {
+            if (!available_dims.contains(*focus_dim)) {
+                simeon_pq_dirty_dims_.erase(*focus_dim);
+                simeon_pq_ready_dims_.erase(*focus_dim);
+                simeon_pq_indices_.erase(*focus_dim);
+                return Result<void>{};
+            }
+            dims = {*focus_dim};
+        }
+        for (size_t dim : dims) {
+            auto result = rebuildSimeonPqDimUnlocked(dim);
+            if (!result) {
+                return result;
+            }
+        }
+        return Result<void>{};
+    }
+
+    bool loadPersistedSimeonPqDimUnlocked(size_t dim) {
+        std::uint32_t m = 0;
+        std::uint32_t k = 0;
+        std::uint64_t seed = 0;
+        std::size_t rerankFactor = 0;
+        bool trained = false;
+        std::size_t vectorCount = 0;
+        std::vector<float> codebooks;
+        if (!detail::loadPersistedSimeonPqMeta(db_, dim, m, k, seed, rerankFactor, trained,
+                                               vectorCount, codebooks)) {
+            return false;
+        }
+        if (m == 0 || dim % m != 0) {
+            return false;
+        }
+        simeon::PQConfig pqConfig{
+            .dim = static_cast<std::uint32_t>(dim),
+            .m = m,
+            .k = k,
+            .seed = seed,
+        };
+        auto state = std::make_unique<SimeonPqIndexState>(pqConfig);
+        state->pq.import_codebooks(codebooks, trained);
+        state->rerank_factor = std::max<std::size_t>(1, rerankFactor);
+        if (!detail::loadPersistedSimeonPqCodes(db_, dim, m, state->rowids, state->codes) ||
+            state->rowids.size() != vectorCount) {
+            return false;
+        }
+        simeon_pq_indices_[dim] = std::move(state);
+        simeon_pq_dirty_dims_.erase(dim);
+        simeon_pq_ready_dims_.insert(dim);
+        spdlog::info("[SPQ] Loaded persisted PQ index for dim={} with {} vectors m={} k={}", dim,
+                     simeon_pq_indices_[dim]->rowids.size(), m, k);
+        return true;
+    }
+
+    Result<void> saveSimeonPqDimUnlocked(size_t dim) {
+        auto it = simeon_pq_indices_.find(dim);
+        if (it == simeon_pq_indices_.end() || !it->second) {
+            return Result<void>{};
+        }
+        std::string errorMessage;
+        if (!detail::savePersistedSimeonPq(db_, dim, it->second->pq, config_.simeon_pq_seed,
+                                           it->second->rerank_factor, it->second->rowids,
+                                           it->second->codes, errorMessage)) {
+            return Error{ErrorCode::DatabaseError, "Failed to persist Simeon PQ index for dim " +
+                                                       std::to_string(dim) + ": " + errorMessage};
+        }
+        return Result<void>{};
+    }
+
+    bool hasReusablePersistedSimeonPqUnlocked(size_t dim) {
+        return detail::hasPersistedSimeonPqMeta(db_, dim);
+    }
+
+    Result<void> ensureSimeonPqReadyUnlocked(size_t dim) {
+        if (simeon_pq_ready_dims_.contains(dim) && !simeon_pq_dirty_dims_.contains(dim) &&
+            simeon_pq_indices_.contains(dim)) {
+            return Result<void>{};
+        }
+        if (!simeon_pq_dirty_dims_.contains(dim) && loadPersistedSimeonPqDimUnlocked(dim)) {
+            return Result<void>{};
+        }
+        return rebuildSimeonPqIndicesUnlocked(dim);
+    }
+
+    Result<std::vector<VectorRecord>>
+    simeonPqSearchUnlocked(const std::vector<float>& query_embedding, size_t k,
+                           float similarity_threshold) {
+        if (!db_ || query_embedding.empty() || k == 0) {
+            return std::vector<VectorRecord>{};
+        }
+        const size_t query_dim = query_embedding.size();
+        auto it = simeon_pq_indices_.find(query_dim);
+        if (it == simeon_pq_indices_.end() || !it->second || it->second->rowids.empty()) {
+            return std::vector<VectorRecord>{};
+        }
+
+        std::vector<float> normalized_query = query_embedding;
+        if (!normalizeEmbeddingInPlace(normalized_query)) {
+            return std::vector<VectorRecord>{};
+        }
+
+        simeon::PQQuery pqQuery(it->second->pq, normalized_query.data());
+        const size_t m = it->second->pq.m();
+        const size_t approxK = std::min(it->second->rowids.size(),
+                                        std::max<std::size_t>(k, k * it->second->rerank_factor));
+
+        std::vector<std::pair<float, std::size_t>> scores;
+        scores.reserve(it->second->rowids.size());
+        for (std::size_t i = 0; i < it->second->rowids.size(); ++i) {
+            const float approxScore = pqQuery.inner_product(it->second->codes.data() + (i * m));
+            scores.emplace_back(approxScore, i);
+        }
+        const auto cmp = [](const auto& a, const auto& b) { return a.first > b.first; };
+        if (scores.size() > approxK) {
+            std::nth_element(scores.begin(), scores.begin() + approxK, scores.end(), cmp);
+            scores.resize(approxK);
+        }
+        std::sort(scores.begin(), scores.end(), cmp);
+
+        std::vector<VectorRecord> records;
+        records.reserve(k);
+        for (const auto& [approxScore, idx] : scores) {
+            if (records.size() >= k) {
+                break;
+            }
+            auto record_opt =
+                getVectorByRowidUnlocked(static_cast<int64_t>(it->second->rowids[idx]));
+            if (!record_opt) {
+                continue;
+            }
+            float similarity = approxScore;
+            if (!record_opt->embedding.empty()) {
+                similarity = static_cast<float>(VectorDatabase::computeCosineSimilarity(
+                    query_embedding, record_opt->embedding));
+            }
+            if (similarity < similarity_threshold) {
+                continue;
+            }
+            record_opt->relevance_score = similarity;
+            records.push_back(std::move(*record_opt));
+        }
         return records;
     }
 
@@ -4934,6 +5511,9 @@ ORDER BY rowid
     std::unordered_map<size_t, std::unique_ptr<QuantizedHNSWSearch>> quantized_hnsw_searches_;
     std::unordered_set<size_t> quantized_hnsw_ready_dims_;
     std::unordered_set<size_t> quantized_hnsw_dirty_dims_;
+    std::unordered_map<size_t, std::unique_ptr<SimeonPqIndexState>> simeon_pq_indices_;
+    std::unordered_set<size_t> simeon_pq_ready_dims_;
+    std::unordered_set<size_t> simeon_pq_dirty_dims_;
     size_t pending_inserts_ = 0;
     bool bulk_load_mode_ = false;
     std::unordered_map<size_t, size_t> query_dim_counts_;
@@ -4949,6 +5529,10 @@ ORDER BY rowid
 
     // Helper to get table prefix for dimension-specific HNSW tables
     std::string hnswTablePrefix(size_t dim) const { return "vectors_" + std::to_string(dim); }
+
+    std::string quantizedHnswTablePrefix(size_t dim) const {
+        return "vectors_qhnsw_" + std::to_string(dim);
+    }
 
     // Get or create HNSW index for a specific dimension
     HNSWIndex* getOrCreateHnswForDim(size_t dim) {

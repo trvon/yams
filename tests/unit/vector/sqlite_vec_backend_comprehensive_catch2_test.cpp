@@ -530,14 +530,12 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 search engine b
     sqlite3_finalize(stmt);
 }
 
-TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend quantized HNSW search engine basic",
-                 "[vector][backend][search][qhnsw][catch2]") {
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend Simeon PQ search engine basic",
+                 "[vector][backend][search][spq-basic][catch2]") {
     skipIfNeeded();
 
     SqliteVecBackend::Config config;
-    config.search_engine = VectorSearchEngine::HnswQuantizedL2;
-    config.quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
-    config.quantized_hnsw_rerank_factor = 2;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
     SqliteVecBackend backend(config);
     REQUIRE(backend.initialize(":memory:").has_value());
     REQUIRE(backend.createTables(64).has_value());
@@ -562,6 +560,69 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend quantized HNSW searc
     REQUIRE(searchResult.has_value());
     REQUIRE(searchResult.value().size() == 5);
     CHECK(searchResult.value()[0].chunk_id == "chunk_qhnsw_0");
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend legacy quantized HNSW persists and reloads across reopen",
+                 "[vector][backend][search][qhnsw][persistence][legacy][catch2]") {
+    skipIfNeeded();
+
+    const auto dbPath = createTempDbPath();
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.quantized_hnsw_rerank_factor = 2;
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(64).has_value());
+
+        for (int i = 0; i < 10; ++i) {
+            auto emb = createEmbedding(64, static_cast<float>(i + 1));
+            REQUIRE(
+                backend.insertVector(createVectorRecord("persist_qhnsw_" + std::to_string(i), emb))
+                    .has_value());
+        }
+
+        REQUIRE(backend.buildIndex().has_value());
+        REQUIRE(backend.hasReusablePersistedSearchIndex().has_value());
+        CHECK(backend.hasReusablePersistedSearchIndex().value() == false);
+        REQUIRE(backend.persistIndex().has_value());
+        CHECK(backend.hasReusablePersistedSearchIndex().value() == true);
+
+        sqlite3_stmt* stmt = nullptr;
+        REQUIRE(sqlite3_prepare_v2(backend.getDbHandle(),
+                                   "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1", -1,
+                                   &stmt, nullptr) == SQLITE_OK);
+        sqlite3_bind_text(stmt, 1, "quantized_hnsw_meta", -1, SQLITE_TRANSIENT);
+        CHECK(sqlite3_step(stmt) == SQLITE_ROW);
+        sqlite3_finalize(stmt);
+
+        REQUIRE(sqlite3_prepare_v2(backend.getDbHandle(),
+                                   "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1", -1,
+                                   &stmt, nullptr) == SQLITE_OK);
+        sqlite3_bind_text(stmt, 1, "vectors_qhnsw_64_hnsw_nodes", -1, SQLITE_TRANSIENT);
+        CHECK(sqlite3_step(stmt) == SQLITE_ROW);
+        sqlite3_finalize(stmt);
+    }
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(64).has_value());
+        REQUIRE(backend.hasReusablePersistedSearchIndex().has_value());
+        CHECK(backend.hasReusablePersistedSearchIndex().value() == true);
+        REQUIRE(backend.prepareSearchIndex().has_value());
+
+        auto query = createEmbedding(64, 1.0f);
+        auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+        if (!searchResult.has_value()) {
+            INFO(searchResult.error().message);
+        }
+        REQUIRE(searchResult.has_value());
+        REQUIRE_FALSE(searchResult.value().empty());
+        CHECK(searchResult.value()[0].chunk_id == "chunk_persist_qhnsw_0");
+    }
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture,
@@ -668,8 +729,8 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture,
-                 "SqliteVecBackend quantized HNSW preserves filtered search semantics",
-                 "[vector][backend][search][filter][qhnsw][catch2]") {
+                 "SqliteVecBackend Simeon PQ preserves filtered search semantics",
+                 "[vector][backend][search][filter][spq][catch2]") {
     skipIfNeeded();
 
     SqliteVecBackend::Config config;
@@ -2043,4 +2104,61 @@ TEST_CASE_METHOD(
     auto result = backend.initialize(createTempDbPath());
     CHECK(!result.has_value());
     CHECK(result.error().code == yams::ErrorCode::InvalidArgument);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend Simeon PQ persists and reloads across reopen",
+                 "[vector][backend][search][spq][catch2]") {
+    skipIfNeeded();
+
+    const std::string dbPath = createTempDbPath();
+
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 64;
+        config.search_engine = VectorSearchEngine::SimeonPqAdc;
+        config.simeon_pq_subquantizers = 8;
+        config.simeon_pq_centroids = 16;
+        config.simeon_pq_train_limit = 64;
+        config.simeon_pq_rerank_factor = 3;
+        SqliteVecBackend writer(config);
+        REQUIRE(writer.initialize(dbPath).has_value());
+        REQUIRE(writer.createTables(64).has_value());
+
+        std::vector<VectorRecord> records;
+        for (int i = 0; i < 24; ++i) {
+            records.push_back(
+                createVectorRecord("spq_" + std::to_string(i), createEmbedding(64, float(i + 1))));
+        }
+        REQUIRE(writer.insertVectorsBatch(records).has_value());
+        REQUIRE(writer.buildIndex().has_value());
+        auto reusableBefore = writer.hasReusablePersistedSearchIndex();
+        REQUIRE(reusableBefore.has_value());
+        CHECK_FALSE(reusableBefore.value());
+        REQUIRE(writer.persistIndex().has_value());
+        auto reusableAfter = writer.hasReusablePersistedSearchIndex();
+        REQUIRE(reusableAfter.has_value());
+        CHECK(reusableAfter.value());
+    }
+
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 64;
+        config.search_engine = VectorSearchEngine::SimeonPqAdc;
+        config.simeon_pq_subquantizers = 8;
+        config.simeon_pq_centroids = 16;
+        config.simeon_pq_train_limit = 64;
+        config.simeon_pq_rerank_factor = 3;
+        SqliteVecBackend reader(config);
+        REQUIRE(reader.initialize(dbPath).has_value());
+        auto reusable = reader.hasReusablePersistedSearchIndex();
+        REQUIRE(reusable.has_value());
+        CHECK(reusable.value());
+        REQUIRE(reader.prepareSearchIndex().has_value());
+
+        auto result = reader.searchSimilar(createEmbedding(64, 1.0f), 5, 0.0f);
+        REQUIRE(result.has_value());
+        REQUIRE_FALSE(result.value().empty());
+        CHECK(result.value().front().chunk_id == "chunk_spq_0");
+    }
 }

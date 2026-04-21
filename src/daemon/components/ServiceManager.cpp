@@ -2721,20 +2721,6 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     } else {
         spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
     }
-
-    // Milestone 11: wire compressed ANN index invalidation so the search engine
-    // rebuilds its CompressedANNIndex whenever new vectors are ingested.
-    auto embSvc = std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embSvc) {
-        embSvc->setCompressedAnnInvalidator(
-            [weakEngine = std::weak_ptr<search::SearchEngine>(engine)]() {
-                if (auto se = weakEngine.lock()) {
-                    se->invalidateCompressedANNIndex();
-                }
-            });
-        spdlog::info("[{}] CompressedANN index invalidation wired to EmbeddingService",
-                     contextLabel);
-    }
 }
 
 bool ServiceManager::resizeWorkerPool(std::size_t target) {

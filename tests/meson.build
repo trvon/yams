@@ -526,20 +526,6 @@ if catch2_dep.found()
     install: false,
   )
 
-#Compressed ANN fusion / dedup contract and behavior tests
-  catch2_compressed_ann_fusion_exe = executable('catch2_compressed_ann_fusion',
-    files(
-      'unit/search/compressed_ann_fusion_contract_catch2_test.cpp',
-      'unit/search/compressed_ann_fusion_behavior_catch2_test.cpp',
-      'unit/search/compressed_ann_dedup_catch2_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
 #ParallelPostProcessor daemon - aware budgeting tests
   catch2_parallel_post_processor_exe = executable('catch2_parallel_post_processor',
     files('unit/search/parallel_post_processor_catch2_test.cpp'),
@@ -1094,9 +1080,6 @@ if catch2_dep.found()
       'unit/search/query_literal_extractor_catch2_test.cpp',
       'unit/search/search_filters_catch2_test.cpp',
       'unit/search/search_results_catch2_test.cpp',
-      'unit/search/compressed_ann_fusion_contract_catch2_test.cpp',
-      'unit/search/compressed_ann_fusion_behavior_catch2_test.cpp',
-      'unit/search/compressed_ann_dedup_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -1300,7 +1283,6 @@ if catch2_dep.found()
         'unit/vector/turboquant_integration_catch2_test.cpp',
         'unit/vector/turboquant_storage_catch2_test.cpp',
         'unit/vector/turboquant_packed_reranker_catch2_test.cpp',
-        'unit/vector/compressed_ann_catch2_test.cpp',
         'unit/vector/simeon_backend_catch2_test.cpp',
       ),
       include_directories: incs,

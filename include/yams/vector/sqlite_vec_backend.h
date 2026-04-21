@@ -57,6 +57,11 @@ public:
         VectorSearchEngine search_engine = VectorSearchEngine::HnswCosine;
         QuantizedHnswMode quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
         size_t quantized_hnsw_rerank_factor = 2;
+        size_t simeon_pq_subquantizers = 32;
+        size_t simeon_pq_centroids = 256;
+        size_t simeon_pq_train_limit = 4096;
+        size_t simeon_pq_rerank_factor = 2;
+        uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
     };
 
     SqliteVecBackend();

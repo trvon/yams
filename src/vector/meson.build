@@ -98,7 +98,6 @@ srcs = [
   'dim_resolver.cpp',
   'tokenizer.cpp',
   'turboquant.cpp',
-  'compressed_ann.cpp',
 ] + sqlite_vec_cpp_src
 
 # ------------------------------------------------------------------
@@ -118,6 +117,7 @@ simeon_core_srcs = [
   join_paths(simeon_dir, 'src', 'hash_crc32c.cpp'),
   join_paths(simeon_dir, 'src', 'hash_tabulation.cpp'),
   join_paths(simeon_dir, 'src', 'projection.cpp'),
+  join_paths(simeon_dir, 'src', 'pq.cpp'),
   join_paths(simeon_dir, 'src', 'pmi.cpp'),
   join_paths(simeon_dir, 'src', 'bm25.cpp'),
   join_paths(simeon_dir, 'src', 'fusion.cpp'),

@@ -79,13 +79,6 @@ public:
         return semanticUpdateErrors_.load(std::memory_order_relaxed);
     }
 
-    /**
-     * @brief Set a callback invoked after each successful vector batch insert.
-     *
-     * Used to invalidate downstream indexes (e.g. CompressedANNIndex in SearchEngine)
-     * that depend on the VectorDatabase contents.
-     */
-    void setCompressedAnnInvalidator(std::function<void()> cb);
     void setTopologyRebuildRequester(std::function<void(const std::vector<std::string>&)> cb);
 
     // Wipes semantic_neighbor edges and rebuilds against every vdb doc in one
@@ -120,7 +113,6 @@ private:
     std::function<Result<std::string>(const std::string&,
                                       std::function<void(const ModelLoadEvent&)>)>
         ensureModelReady_;
-    std::function<void()> compressedAnnInvalidator_; // called after batch insert
     std::function<void(const std::vector<std::string>&)> topologyRebuildRequester_;
 
     std::atomic<bool> stop_{false};

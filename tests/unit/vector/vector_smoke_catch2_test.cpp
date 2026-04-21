@@ -120,8 +120,8 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with vec0 en
     CHECK(results[0].chunk_id == "vec0_hash_001");
 }
 
-TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with quantized HNSW engine",
-                 "[vector][smoke][qhnsw][catch2]") {
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with Simeon PQ engine",
+                 "[vector][smoke][spq][catch2]") {
     skipIfNeeded();
 
     VectorDatabaseConfig config;
@@ -129,19 +129,17 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with quantiz
     config.embedding_dim = 4;
     config.create_if_missing = true;
     config.use_in_memory = true;
-    config.search_engine = VectorSearchEngine::HnswQuantizedL2;
-    config.quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
-    config.quantized_hnsw_rerank_factor = 2;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
 
     VectorDatabase db(config);
     REQUIRE(db.initialize());
 
     std::vector<float> embedding = {1.0f, 0.0f, 0.0f, 0.0f};
     VectorRecord rec;
-    rec.chunk_id = "qhnsw_hash_001";
-    rec.document_hash = "qhnsw_doc_001";
+    rec.chunk_id = "spq_hash_001";
+    rec.document_hash = "spq_doc_001";
     rec.embedding = embedding;
-    rec.content = "Quantized HNSW test content";
+    rec.content = "Simeon PQ test content";
     rec.start_offset = 0;
     rec.end_offset = 27;
     REQUIRE(db.insertVector(rec));
@@ -151,7 +149,7 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with quantiz
     params.k = 1;
     auto results = db.search(embedding, params);
     REQUIRE(results.size() == 1);
-    CHECK(results[0].chunk_id == "qhnsw_hash_001");
+    CHECK(results[0].chunk_id == "spq_hash_001");
 }
 
 TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke get vector count", "[vector][smoke][catch2]") {

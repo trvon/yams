@@ -240,6 +240,14 @@ variant = "sab_smooth"
 subword_gamma = 5.0
 max_corpus_docs = 200000
 
+[embeddings.simeon.bm25.router]
+# Per-query dispatch between BM25 variants (Atire vs SabSmooth) via
+# simeon::QueryRouter. When enabled, the lexical backend builds both
+# indexes and picks per-query from pre-retrieval features.
+# Preset details: third_party/simeon/docs/router_design.md.
+enabled = true
+preset = "passE_scq0_clar3"
+
 [embeddings.selection]
 # Selection strategy: "ranked" (score-based) or "intro_headings" (intro + headings only)
 strategy = "ranked"

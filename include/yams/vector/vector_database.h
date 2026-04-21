@@ -20,6 +20,7 @@ enum class EmbeddingLevel { CHUNK, DOCUMENT };
 enum class VectorSearchEngine {
     HnswCosine,
     HnswQuantizedL2,
+    SimeonPqAdc,
     Vec0L2,
 };
 
@@ -35,6 +36,8 @@ inline const char* vectorSearchEngineName(VectorSearchEngine engine) {
             return "hnsw_cosine";
         case VectorSearchEngine::HnswQuantizedL2:
             return "hnsw_quantized_l2";
+        case VectorSearchEngine::SimeonPqAdc:
+            return "simeon_pq_adc";
         case VectorSearchEngine::Vec0L2:
             return "vec0_l2";
     }
@@ -45,8 +48,10 @@ inline std::optional<VectorSearchEngine> parseVectorSearchEngine(std::string_vie
     if (raw == "hnsw" || raw == "hnsw_cosine" || raw == "cosine") {
         return VectorSearchEngine::HnswCosine;
     }
-    if (raw == "hnsw_quantized_l2" || raw == "hnsw_quantized" || raw == "quantized") {
-        return VectorSearchEngine::HnswQuantizedL2;
+    if (raw == "simeon_pq_adc" || raw == "pq_adc" || raw == "simeon_pq" ||
+        raw == "compressed_primary" || raw == "hnsw_quantized_l2" || raw == "hnsw_quantized" ||
+        raw == "quantized") {
+        return VectorSearchEngine::SimeonPqAdc;
     }
     if (raw == "vec0" || raw == "vec0_l2" || raw == "l2") {
         return VectorSearchEngine::Vec0L2;
@@ -109,11 +114,22 @@ struct VectorDatabaseConfig {
     size_t max_batch_size = 1000;
     float default_similarity_threshold = 0.35f;
     bool use_in_memory = false; // For testing
-    VectorSearchEngine search_engine = VectorSearchEngine::HnswCosine;
+    VectorSearchEngine search_engine = VectorSearchEngine::SimeonPqAdc;
+    // DEPRECATED: legacy quantized HNSW wrapper retained temporarily for migration only.
     QuantizedHnswMode quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
     size_t quantized_hnsw_rerank_factor = 2;
 
-    // TurboQuant compression settings (arXiv:2504.19874 approximation)
+    // Simeon Product Quantization compressed serving path.
+    // This is the replacement direction for legacy quantized sidecar retrieval:
+    // a persisted PQ codebook + code store with bounded exact rerank from SQLite.
+    size_t simeon_pq_subquantizers = 32;
+    size_t simeon_pq_centroids = 256;
+    size_t simeon_pq_train_limit = 4096;
+    size_t simeon_pq_rerank_factor = 2;
+    uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
+
+    // DEPRECATED: legacy TurboQuant storage sidecar retained only for old data migration.
+    // for compressed serving.
     // Storage: V2.2 schema persists quantized sidecar; HNSW still uses decoded floats.
     // IP scoring: estimateInnerProduct() uses conservative sign-agreement blend (production-safe).
     // estimateInnerProductFull() uses full QJL correction (EXPERIMENTAL, research-only).
@@ -121,7 +137,7 @@ struct VectorDatabaseConfig {
     uint8_t turboquant_bits = 4;   // Bits per channel (1-4)
     uint64_t turboquant_seed = 42; // Random seed for reproducibility
 
-    // Quantized-primary storage mode: omit float embedding blobs and store only
+    // DEPRECATED: Quantized-primary storage mode: omit float embedding blobs and store only
     // TurboQuant sidecar. On retrieval, dequantize sidecar → float embedding.
     // HNSW still uses reconstructed floats (no compressed-space traversal yet).
     bool quantized_primary_storage = false;

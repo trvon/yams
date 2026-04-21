@@ -195,10 +195,6 @@ void EmbeddingService::setProviders(
     ensureModelReady_ = std::move(ensureModelReady);
 }
 
-void EmbeddingService::setCompressedAnnInvalidator(std::function<void()> cb) {
-    compressedAnnInvalidator_ = std::move(cb);
-}
-
 void EmbeddingService::setTopologyRebuildRequester(
     std::function<void(const std::vector<std::string>&)> cb) {
     topologyRebuildRequester_ = std::move(cb);
@@ -2314,12 +2310,6 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         mon.processedDocs = mon.totalDocs;
         mon.detail = "completed docs=" + std::to_string(successHashes.size());
     });
-
-    // Milestone 11: invalidate compressed ANN index after each document ingest
-    // so the next query rebuilds from the current database state.
-    if (compressedAnnInvalidator_) {
-        compressedAnnInvalidator_();
-    }
 
     if (topologyRebuildRequester_ && !successHashes.empty()) {
         topologyRebuildRequester_(successHashes);
