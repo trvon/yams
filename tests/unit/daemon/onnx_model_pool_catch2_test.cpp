@@ -338,7 +338,9 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: hot models evict expired 
     auto initResult = pool_->initialize();
     REQUIRE(initResult);
 
+    unsetenv("YAMS_TEST_MODE");
     auto loadResult = pool_->loadModel(modelName);
+    setenv("YAMS_TEST_MODE", "1", 1);
     if (!loadResult) {
         SKIP("hot-maintenance setup failed: " + loadResult.error().message);
     }

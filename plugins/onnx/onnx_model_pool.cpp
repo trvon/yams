@@ -3104,28 +3104,62 @@ void OnnxModelPool::performMaintenance() {
     auto now = std::chrono::steady_clock::now();
 
     for (auto& [name, entry] : models_) {
-        if (entry.pool && !entry.isHot) {
-            auto stats = entry.pool->getStats();
-            if (stats.inUseResources > 0) {
-                continue;
+        if (!entry.pool) {
+            continue;
+        }
+
+        auto stats = entry.pool->getStats();
+        if (stats.inUseResources > 0) {
+            continue;
+        }
+
+        if (entry.isHot) {
+            // Keep the model loaded, but still evict expired idle sessions from its pool.
+            entry.pool->evictExpired();
+            continue;
+        }
+
+        // Check if model has been idle too long
+        auto idleTime = now - entry.lastAccess;
+        if (idleTime > config_.modelIdleTimeout) {
+            spdlog::info("Unloading idle model: {}", name);
+            entry.pool->shutdown();
+            entry.pool.reset();
+            const size_t count = loadedModelCount_.load(std::memory_order_relaxed);
+            if (count > 0) {
+                loadedModelCount_.fetch_sub(1, std::memory_order_relaxed);
             }
-            // Check if model has been idle too long
-            auto idleTime = now - entry.lastAccess;
-            if (idleTime > config_.modelIdleTimeout) {
-                spdlog::info("Unloading idle model: {}", name);
-                entry.pool->shutdown();
-                entry.pool.reset();
-                const size_t count = loadedModelCount_.load(std::memory_order_relaxed);
-                if (count > 0) {
-                    loadedModelCount_.fetch_sub(1, std::memory_order_relaxed);
-                }
-            } else if (entry.pool) {
-                // Clean up expired resources in the pool
-                entry.pool->evictExpired();
-            }
+        } else if (entry.pool) {
+            // Clean up expired resources in the pool
+            entry.pool->evictExpired();
         }
     }
 }
+
+#ifdef YAMS_TESTING
+std::optional<OnnxModelPool::TestingModelPoolStats>
+OnnxModelPool::testingModelPoolStats(const std::string& modelName) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    auto it = models_.find(modelName);
+    if (it == models_.end()) {
+        return std::nullopt;
+    }
+
+    TestingModelPoolStats out;
+    out.loaded = (it->second.pool != nullptr);
+    out.isHot = it->second.isHot;
+
+    if (it->second.pool) {
+        auto stats = it->second.pool->getStats();
+        out.totalResources = stats.totalResources;
+        out.availableResources = stats.availableResources;
+        out.inUseResources = stats.inUseResources;
+    }
+
+    return out;
+}
+#endif
 
 std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const {
     auto is_hf_like = [](const std::string& s) {

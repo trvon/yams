@@ -19,7 +19,6 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_colbert_session.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
-#include <yams/daemon/resource/onnx_reranker_session.h>
 
 namespace {
 
@@ -293,7 +292,6 @@ struct ProviderCtx {
     void* progress_user = nullptr;
     std::unique_ptr<yams::daemon::OnnxModelPool> pool;
     std::unique_ptr<yams::daemon::OnnxColbertSession> colbert;   // ColBERT session
-    std::unique_ptr<yams::daemon::OnnxRerankerSession> reranker; // Cross-encoder reranker
     std::unordered_map<std::string, State> model_states;         // per-model FSM
     std::unordered_map<std::string, FailureInfo> model_failures; // failure tracking
     bool ready = false;
@@ -302,9 +300,7 @@ struct ProviderCtx {
     bool gpuEnabled = false; // Tracks whether GPU acceleration is configured
     std::string actualExecutionProvider{"cpu"};
     std::string last_error;
-    std::string rerankerModelPath; // Path to reranker model
-    std::string rerankerModelName; // Name of reranker model
-    std::string colbertModelPath;  // Path to ColBERT model
+    std::string colbertModelPath; // Path to ColBERT model
     std::size_t configuredMaxLoadedModels = 0;
     std::size_t configuredHotPoolSize = 0;
     yams::onnx_util::OrtRuntimeInfo runtimeInfo;
@@ -373,8 +369,6 @@ struct ProviderCtx {
         std::string dataDir;
         bool keepModelHot = true;
         std::string preferredModel;
-        std::string rerankerModel;
-        std::string rerankerModelPath;
         std::vector<std::string> preloadList;
 
         // Read embeddings settings from config.toml (preferred_model, model_path, keep_model_hot)
@@ -533,10 +527,6 @@ struct ProviderCtx {
                         apply_hot_pool_size(value);
                     if (section == "plugins.onnx" && key == "async_load")
                         apply_async_loading(value);
-                    if (section == "plugins.onnx" && key == "reranker_model")
-                        rerankerModel = std::move(value);
-                    if (section == "plugins.onnx" && key == "reranker_model_path")
-                        rerankerModelPath = std::move(value);
                     // New: explicit models table entries [plugins.onnx.models.NAME]
                     if (section.rfind("plugins.onnx.models.", 0) == 0 && key == "task") {
                         // Section name encodes model_id; mark for preload as hot
@@ -697,16 +687,6 @@ struct ProviderCtx {
                         cfg.modelsRoot = j["models_root"].get<std::string>();
                         spdlog::info("[ONNX-Plugin] JSON config: models_root='{}'", cfg.modelsRoot);
                     }
-                    if (j.contains("reranker_model") && j["reranker_model"].is_string()) {
-                        rerankerModel = j["reranker_model"].get<std::string>();
-                        spdlog::info("[ONNX-Plugin] JSON config: reranker_model='{}'",
-                                     rerankerModel);
-                    }
-                    if (j.contains("reranker_model_path") && j["reranker_model_path"].is_string()) {
-                        rerankerModelPath = j["reranker_model_path"].get<std::string>();
-                        spdlog::info("[ONNX-Plugin] JSON config: reranker_model_path='{}'",
-                                     rerankerModelPath);
-                    }
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("[ONNX-Plugin] Failed to parse JSON config: {}", e.what());
@@ -741,12 +721,6 @@ struct ProviderCtx {
         configuredMaxLoadedModels = cfg.maxLoadedModels;
         configuredHotPoolSize = cfg.hotPoolSize;
         gpuEnabled = cfg.enableGPU;
-        if (!rerankerModel.empty()) {
-            rerankerModelName = std::move(rerankerModel);
-        }
-        if (!rerankerModelPath.empty()) {
-            this->rerankerModelPath = std::move(rerankerModelPath);
-        }
         spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}, gpuEnabled={}, "
                      "async_load={}",
                      cfg.modelsRoot, gpuEnabled, cfg.asyncLoading);
@@ -1918,118 +1892,9 @@ struct ProviderSingleton {
                     return YAMS_OK;
                 }
 
-                // Lazy-init reranker session on first use
-                if (!c->reranker) {
-                    std::lock_guard<std::mutex> lk(c->mu);
-                    if (!c->reranker) {
-                        // Use the same models root as embedding models (from pool config)
-                        namespace fs = std::filesystem;
-                        std::string modelsRoot = c->pool ? c->pool->getModelsRoot() : "";
-
-                        auto tryInitReranker = [&](const fs::path& onnxPath,
-                                                   const std::string& modelName) {
-                            if (!fs::exists(onnxPath)) {
-                                return false;
-                            }
-                            spdlog::info("[ONNX Plugin] Found reranker model: {}",
-                                         onnxPath.string());
-                            yams::daemon::RerankerConfig cfg;
-                            cfg.model_path = onnxPath.string();
-                            cfg.model_name = modelName;
-                            cfg.num_threads = std::max(1u, std::thread::hardware_concurrency());
-                            // GPU usage is determined by runtime detection in the session
-                            try {
-                                c->reranker = std::make_unique<yams::daemon::OnnxRerankerSession>(
-                                    onnxPath.string(), modelName, cfg);
-                                c->rerankerModelPath = onnxPath.string();
-                                c->rerankerModelName = modelName;
-                                spdlog::info("[ONNX Plugin] Reranker session initialized: {}",
-                                             modelName);
-                                return true;
-                            } catch (const std::exception& e) {
-                                spdlog::warn("[ONNX Plugin] Failed to init reranker: {}", e.what());
-                                return false;
-                            }
-                        };
-
-                        bool initialized = false;
-
-                        if (!c->rerankerModelPath.empty()) {
-                            fs::path onnxPath = c->rerankerModelPath;
-                            std::string modelName = c->rerankerModelName;
-                            if (modelName.empty()) {
-                                modelName = onnxPath.parent_path().filename().string();
-                            }
-                            initialized = tryInitReranker(onnxPath, modelName);
-                        }
-
-                        if (!initialized && !c->rerankerModelName.empty()) {
-                            fs::path onnxPath;
-                            if (c->pool) {
-                                onnxPath = c->pool->resolveModelPath(c->rerankerModelName);
-                            } else {
-                                onnxPath =
-                                    fs::path(modelsRoot) / c->rerankerModelName / "model.onnx";
-                            }
-                            initialized = tryInitReranker(onnxPath, c->rerankerModelName);
-                        }
-
-                        if (!initialized && !modelsRoot.empty()) {
-                            // Look for common reranker models in the configured models directory
-                            const std::vector<std::string> rerankerModels = {
-                                "bge-reranker-v2-m3", "bge-reranker-base", "bge-reranker-large",
-                                "ms-marco-MiniLM-L-12-v2"};
-
-                            for (const auto& modelName : rerankerModels) {
-                                fs::path modelPath = fs::path(modelsRoot) / modelName;
-                                fs::path onnxPath = modelPath / "model.onnx";
-                                if (tryInitReranker(onnxPath, modelName)) {
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (!c->reranker) {
-                            if (modelsRoot.empty()) {
-                                spdlog::debug(
-                                    "[ONNX Plugin] Reranker unavailable: modelsRoot is empty and "
-                                    "no explicit reranker model path/name resolved");
-                            } else {
-                                spdlog::debug("[ONNX Plugin] No reranker model found in: {}",
-                                              modelsRoot);
-                            }
-                            return YAMS_ERR_UNSUPPORTED;
-                        }
-                    }
-                }
-
-                if (!c->reranker) {
-                    return YAMS_ERR_UNSUPPORTED;
-                }
-
-                // Build document vector
-                std::vector<std::string> docs;
-                docs.reserve(doc_count);
-                for (size_t i = 0; i < doc_count; ++i) {
-                    docs.emplace_back(documents[i] ? documents[i] : "");
-                }
-
-                // Score documents
-                auto result = c->reranker->scoreBatch(query, docs);
-                if (!result) {
-                    spdlog::warn("[ONNX Plugin] Reranker scoreBatch failed: {}",
-                                 result.error().message);
-                    return YAMS_ERR_INTERNAL;
-                }
-
-                const auto& scores = result.value();
-                float* buf = static_cast<float*>(std::malloc(sizeof(float) * scores.size()));
-                if (!buf)
-                    return YAMS_ERR_INTERNAL;
-                std::memcpy(buf, scores.data(), sizeof(float) * scores.size());
-                *out_scores = buf;
-                *out_count = scores.size();
-                return YAMS_OK;
+                spdlog::debug("[ONNX Plugin] Cross-encoder reranker removed; ColBERT is the only "
+                              "ONNX reranker path");
+                return YAMS_ERR_UNSUPPORTED;
 
             } catch (const std::exception& e) {
                 spdlog::error("[ONNX Plugin] score_documents exception: {}", e.what());

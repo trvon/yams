@@ -40,7 +40,6 @@ yams_onnx_plugin_srcs = [
   'onnx_text_processing.cpp',
   'ort_runtime_loader.cpp',
   'onnx_model_pool.cpp',
-  'onnx_reranker_session.cpp',
   'onnx_colbert_session.cpp',
   '../../src/vector/tokenizer.cpp',
 ]
