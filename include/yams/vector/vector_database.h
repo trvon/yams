@@ -325,6 +325,9 @@ public:
     bool optimizeIndex();
     void compactDatabase();
     bool rebuildIndex();
+    bool beginBulkLoad();
+    bool finalizeBulkLoad();
+    bool bulkLoadActive() const;
 
     /// Checkpoint vectors.db WAL to reclaim disk space.
     /// Called periodically by CheckpointManager.

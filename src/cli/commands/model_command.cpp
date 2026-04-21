@@ -342,7 +342,7 @@ public:
     std::string getName() const override { return "model"; }
 
     std::string getDescription() const override {
-        return "Download and manage ONNX embedding models";
+        return "Manage optional embedding, reranker, and plugin models";
     }
 
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
@@ -1112,6 +1112,9 @@ private:
             std::cout << "  Configure YAMS to use: " << model_file << "\n";
             std::cout << "  The ONNX provider auto-detects dim/seq/pooling from config.json if "
                          "present.\n";
+            std::cout << "\n  If you want to use this optional embedding model instead of the "
+                         "default Simeon path:\n";
+            std::cout << "    yams config embeddings backend daemon\n";
             std::cout << "\n  Set this as the preferred embedding model:\n";
             std::cout << "    yams config embeddings model " << model_name << "\n";
             if (props.dim > 0) {
@@ -1194,7 +1197,9 @@ private:
                 std::cout << "  - Architecture: BERT-based with ALiBi\n";
                 std::cout << "  - Optimized for code search across 30+ languages\n";
             }
-            std::cout << "\nHint: set this as your preferred embedding model with:\n";
+            std::cout << "\nHint: default retrieval embeddings already use Simeon.\n";
+            std::cout << "To switch to this optional model-backed path:\n";
+            std::cout << "  yams config embeddings backend daemon\n";
             std::cout << "  yams config embeddings model " << model.name << "\n";
         } else if (model.type == "reranker") {
             std::cout << "\nReranker Model Details:\n";
@@ -1274,20 +1279,21 @@ private:
                 std::cout << "\n";
             }
         }
-        std::cout << "\nUse 'yams model download <name>' or 'yams model download <name> --url "
-                     "<url>' to add models.\n";
+        std::cout << "\nDefault semantic search uses built-in Simeon embeddings.\n";
+        std::cout << "Use 'yams model download <name>' or 'yams model download <name> --url "
+                     "<url>' only for optional ONNX/plugin-backed models.\n";
         return Result<void>{};
     }
 
     void showHelp() {
         std::cout << R"(
-YAMS Embedding Model Management
+YAMS Model Management
 
 Commands:
-  yams model --list                    List available embedding models
-  yams model list                      List available embedding models (alias)
-  yams model --download <name>         Download an embedding model
-  yams model download <name>           Download an embedding model (alias)
+  yams model --list                    List available optional models
+  yams model list                      List available optional models (alias)
+  yams model --download <name>         Download an optional model
+  yams model download <name>           Download an optional model (alias)
   yams model --info <name>             Show model details
   yams model info <name>               Show model details (alias)
   yams model --download <name> --output <dir>  Download to specific directory
@@ -1306,7 +1312,7 @@ Examples:
   yams model check
 
 Available Models:
-  Embedding models:
+  Optional embedding models:
   - all-MiniLM-L6-v2: Fast 384-dim embeddings (90MB)
   - all-mpnet-base-v2: High-quality 768-dim embeddings (420MB)
   - nomic-embed-text-v1.5: Nomic embedding model (URL override supported)
@@ -1318,7 +1324,8 @@ Available Models:
 Default download location: <data-dir>/models/<model-name>/
   (typically ~/.local/share/yams/models/ or $XDG_DATA_HOME/yams/models/)
 
-Note: Models are stored in the unified YAMS data directory for consistency.
+Note: Default retrieval embeddings use built-in Simeon and do not require a model download.
+      Models are stored in the unified YAMS data directory for consistency.
 )";
     }
 

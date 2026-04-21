@@ -1873,7 +1873,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 : "warming";
     }
     relaxedVectorRetryEnabled = intent == QueryIntent::Prose && queryTokenCount >= 6 &&
-                                workingConfig.similarityThreshold > 0.40f;
+                                workingConfig.similarityThreshold > 0.20f;
 
     const auto queryVectorWithRelaxedRetry =
         [this, &workingConfig, relaxedVectorRetryEnabled, &relaxedVectorRetryApplied,
@@ -1896,7 +1896,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
 
         SearchEngineConfig relaxedConfig = workingConfig;
-        const float relaxedThreshold = std::min(workingConfig.similarityThreshold, 0.40f);
+        const float relaxedThreshold = std::min(workingConfig.similarityThreshold, 0.20f);
         if (!(relaxedThreshold + 1e-6f < workingConfig.similarityThreshold)) {
             return primary;
         }

@@ -989,6 +989,66 @@ public:
         }
     }
 
+    bool beginBulkLoad() {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            setError("Database not initialized");
+            return false;
+        }
+
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        if (!sqliteBackend) {
+            return true;
+        }
+
+        auto result = sqliteBackend->beginBulkLoad();
+        if (!result) {
+            setError("Bulk-load begin failed: " + result.error().message);
+            return false;
+        }
+        has_error_ = false;
+        return true;
+    }
+
+    bool finalizeBulkLoad() {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            setError("Database not initialized");
+            return false;
+        }
+
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        if (!sqliteBackend) {
+            return true;
+        }
+
+        auto result = sqliteBackend->finalizeBulkLoad();
+        if (!result) {
+            setError("Bulk-load finalize failed: " + result.error().message);
+            return false;
+        }
+        auto walResult = sqliteBackend->checkpointWal();
+        if (!walResult) {
+            setError("Bulk-load finalize checkpoint failed: " + walResult.error().message);
+            return false;
+        }
+        has_error_ = false;
+        return true;
+    }
+
+    bool bulkLoadActive() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return false;
+        }
+
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        return sqliteBackend && sqliteBackend->bulkLoadActive();
+    }
+
     Result<void> checkpointWal() {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
@@ -1299,6 +1359,18 @@ void VectorDatabase::compactDatabase() {
 
 bool VectorDatabase::rebuildIndex() {
     return pImpl->buildIndex();
+}
+
+bool VectorDatabase::beginBulkLoad() {
+    return pImpl->beginBulkLoad();
+}
+
+bool VectorDatabase::finalizeBulkLoad() {
+    return pImpl->finalizeBulkLoad();
+}
+
+bool VectorDatabase::bulkLoadActive() const {
+    return pImpl->bulkLoadActive();
 }
 
 Result<void> VectorDatabase::checkpointWal() {

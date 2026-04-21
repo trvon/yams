@@ -2335,6 +2335,12 @@ FROM vectors WHERE level = ?
         return checkpointWalUnlocked();
     }
 
+    Result<void> beginBulkLoad() { return beginBulkLoadUnlocked(); }
+
+    Result<void> finalizeBulkLoad() { return finalizeBulkLoadUnlocked(); }
+
+    bool bulkLoadActive() const { return bulkLoadActiveUnlocked(); }
+
 private:
     Result<void> checkpointWalUnlocked() {
         int walLog = 0, walCkpt = 0;
@@ -3727,11 +3733,69 @@ private:
     }
 
     bool shouldMaintainHnswOnWriteUnlocked() {
+        if (bulk_load_mode_) {
+            return false;
+        }
         return hnsw_loaded_ || hnsw_needs_rebuild_ || hasCatchUpSourceUnlocked();
     }
 
     bool shouldAttemptHnswLoadOnReadUnlocked() {
+        if (bulk_load_mode_) {
+            return false;
+        }
         return hnsw_loaded_ || hnsw_needs_rebuild_ || hasCatchUpSourceUnlocked();
+    }
+
+    Result<void> beginBulkLoadUnlocked() {
+        std::unique_lock lock(mutex_);
+        bulk_load_mode_ = true;
+        hnsw_indices_.clear();
+        hnsw_dirty_.clear();
+        hnsw_loaded_ = false;
+        hnsw_needs_rebuild_ = false;
+        pending_inserts_ = 0;
+        last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
+        last_hnsw_added_count_ = 0;
+        last_hnsw_removed_count_ = 0;
+        spdlog::info("[HNSW] bulk load mode enabled; deferring HNSW maintenance until finalize");
+        return Result<void>{};
+    }
+
+    Result<void> finalizeBulkLoadUnlocked() {
+        std::unique_lock lock(mutex_);
+        if (!bulk_load_mode_) {
+            return Result<void>{};
+        }
+
+        bulk_load_mode_ = false;
+        hnsw_indices_.clear();
+        hnsw_dirty_.clear();
+        hnsw_loaded_ = false;
+        hnsw_needs_rebuild_ = false;
+        pending_inserts_ = 0;
+
+        size_t totalVectors = 0;
+        if (stmt_count_) {
+            sqlite3_reset(stmt_count_);
+            StmtResetGuard guard(stmt_count_);
+            if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
+                totalVectors = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
+            }
+        }
+        if (totalVectors == 0) {
+            spdlog::info("[HNSW] bulk load finalize skipped rebuild (no vectors present)");
+            return Result<void>{};
+        }
+
+        spdlog::info("[HNSW] bulk load finalize rebuilding persisted search index (vectors={})",
+                     totalVectors);
+        rebuildHnswUnlocked();
+        return checkpointWalUnlocked();
+    }
+
+    bool bulkLoadActiveUnlocked() const {
+        std::shared_lock lock(mutex_);
+        return bulk_load_mode_;
     }
 
     struct BackgroundSeedSnapshot {
@@ -4820,6 +4884,7 @@ ORDER BY rowid
     std::unordered_set<size_t> quantized_hnsw_ready_dims_;
     std::unordered_set<size_t> quantized_hnsw_dirty_dims_;
     size_t pending_inserts_ = 0;
+    bool bulk_load_mode_ = false;
     std::unordered_map<size_t, size_t> query_dim_counts_;
     std::atomic<bool> background_seed_running_{false};
     std::atomic<bool> background_seed_scheduled_{false};
@@ -5051,6 +5116,18 @@ Result<void> SqliteVecBackend::optimize() {
 
 Result<void> SqliteVecBackend::checkpointWal() {
     return impl_->checkpointWal();
+}
+
+Result<void> SqliteVecBackend::beginBulkLoad() {
+    return impl_->beginBulkLoad();
+}
+
+Result<void> SqliteVecBackend::finalizeBulkLoad() {
+    return impl_->finalizeBulkLoad();
+}
+
+bool SqliteVecBackend::bulkLoadActive() const {
+    return impl_->bulkLoadActive();
 }
 
 Result<void> SqliteVecBackend::beginTransaction() {

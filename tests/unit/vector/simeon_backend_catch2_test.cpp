@@ -4,12 +4,14 @@
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <array>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <cmath>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
 using namespace yams::vector;
+using Catch::Matchers::StartsWith;
 
 namespace {
 
@@ -87,4 +89,48 @@ TEST_CASE("EmbeddingGenerator selects Simeon via env override", "[vector][simeon
     REQUIRE(v.size() == 384u);
 
     unsetenv("YAMS_EMBED_BACKEND");
+}
+
+TEST_CASE("EmbeddingGenerator selects Simeon when configured directly", "[vector][simeon]") {
+    EmbeddingConfig cfg;
+    cfg.backend = EmbeddingConfig::Backend::Simeon;
+    cfg.embedding_dim = 128;
+    cfg.normalize_embeddings = true;
+
+    EmbeddingGenerator gen(cfg);
+    REQUIRE(gen.initialize());
+    REQUIRE(gen.getBackendName() == "Simeon");
+    REQUIRE(gen.getEmbeddingDimension() == 128u);
+}
+
+TEST_CASE("EmbeddingGenerator selects Daemon via env override", "[vector][daemon]") {
+    setenv("YAMS_EMBED_BACKEND", "daemon", 1);
+
+    EmbeddingConfig cfg;
+    cfg.backend = EmbeddingConfig::Backend::Simeon;
+    EmbeddingGenerator gen(cfg);
+
+    REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
+
+    unsetenv("YAMS_EMBED_BACKEND");
+}
+
+TEST_CASE("EmbeddingGenerator maps legacy onnx env override to Daemon", "[vector][daemon]") {
+    setenv("YAMS_EMBED_BACKEND", "onnx", 1);
+
+    EmbeddingConfig cfg;
+    cfg.backend = EmbeddingConfig::Backend::Simeon;
+    EmbeddingGenerator gen(cfg);
+
+    REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
+
+    unsetenv("YAMS_EMBED_BACKEND");
+}
+
+TEST_CASE("EmbeddingGenerator selects Daemon when configured directly", "[vector][daemon]") {
+    EmbeddingConfig cfg;
+    cfg.backend = EmbeddingConfig::Backend::Daemon;
+
+    EmbeddingGenerator gen(cfg);
+    REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
 }

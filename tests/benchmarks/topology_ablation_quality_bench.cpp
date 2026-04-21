@@ -462,7 +462,61 @@ struct QualityMetrics {
     std::uint64_t routedSeedCountTotal = 0;
     std::uint64_t routedSeedCountQueries = 0;
     std::string tier1FingerprintJoined;
+    std::vector<std::string> routedSeedFingerprints;
+    std::string routedSeedManifestHash;
+
+    double ndcgAtKTextOnly = 0.0;
+    double ndcgAtKVectorOnly = 0.0;
+    int textComponentQueries = 0;
+    int vectorComponentQueries = 0;
+    std::vector<std::uint64_t> lexicalPoolSizes;
+    std::vector<std::uint64_t> vectorPoolSizes;
+    std::vector<std::uint64_t> fusionPoolSizes;
+    std::string fusionStrategyObserved;
+    std::uint64_t fusionStrategyMismatchCount = 0;
+    std::uint64_t rerankerFiredCount = 0;
+    std::uint64_t rerankerContributedCount = 0;
 };
+
+double computeNdcgFromRankedDocIds(const std::vector<std::string>& rankedDocIds,
+                                   const std::map<std::string, int>& relevanceGrades, int k) {
+    if (rankedDocIds.empty() || relevanceGrades.empty()) {
+        return 0.0;
+    }
+    std::vector<int> retrievedGrades;
+    std::unordered_set<std::string> seen;
+    const std::size_t bound = std::min(static_cast<std::size_t>(k), rankedDocIds.size());
+    for (std::size_t i = 0; i < bound; ++i) {
+        const auto& docId = rankedDocIds[i];
+        if (!seen.insert(docId).second) {
+            continue;
+        }
+        // Trace doc_ids strip `.txt`; bench fixtures use `{id}.txt` filenames.
+        const std::string fn = docId + ".txt";
+        auto it = relevanceGrades.find(fn);
+        retrievedGrades.push_back(it != relevanceGrades.end() ? it->second : 0);
+    }
+    std::vector<int> allGrades;
+    allGrades.reserve(relevanceGrades.size());
+    for (const auto& [_, g] : relevanceGrades) {
+        allGrades.push_back(g);
+    }
+    const double dcg = computeDCG(retrievedGrades, k);
+    const double idcg = computeIDCG(allGrades, k);
+    return idcg > 0.0 ? dcg / idcg : 0.0;
+}
+
+std::uint64_t medianOf(std::vector<std::uint64_t> v) {
+    if (v.empty()) {
+        return 0;
+    }
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    if (n % 2 == 1) {
+        return v[n / 2];
+    }
+    return (v[n / 2 - 1] + v[n / 2]) / 2;
+}
 
 fs::path benchFixtureDir() {
     if (const char* v = std::getenv("YAMS_BENCH_FIXTURE_DIR"); v && *v) {
@@ -809,6 +863,88 @@ double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
             }
             acc.tier1FingerprintJoined.append(it->second);
         }
+        if (auto it = stats.find("topology_routed_seed_fingerprint"); it != stats.end()) {
+            acc.routedSeedFingerprints.push_back(it->second);
+        } else {
+            acc.routedSeedFingerprints.push_back("none");
+        }
+
+        // Phase E1 — read per-component hits + stage summary from daemon trace.
+        if (auto it = stats.find("fusion_strategy"); it != stats.end()) {
+            if (acc.fusionStrategyObserved.empty()) {
+                acc.fusionStrategyObserved = it->second;
+            } else if (acc.fusionStrategyObserved != it->second) {
+                ++acc.fusionStrategyMismatchCount;
+            }
+        }
+        if (auto it = stats.find("trace_component_hits_json"); it != stats.end()) {
+            try {
+                auto componentJson = json::parse(it->second);
+                auto extractRanked = [&](const char* source) {
+                    std::vector<std::string> ids;
+                    if (!componentJson.contains(source)) {
+                        return ids;
+                    }
+                    const auto& src = componentJson[source];
+                    if (!src.contains("top_hits") || !src["top_hits"].is_array()) {
+                        return ids;
+                    }
+                    std::vector<std::pair<std::size_t, std::string>> ranked;
+                    for (const auto& hit : src["top_hits"]) {
+                        if (hit.contains("doc_id") && hit["doc_id"].is_string()) {
+                            const std::size_t rank = hit.value("rank", 0UL);
+                            ranked.emplace_back(rank, hit["doc_id"].get<std::string>());
+                        }
+                    }
+                    std::sort(ranked.begin(), ranked.end(),
+                              [](const auto& a, const auto& b) { return a.first < b.first; });
+                    ids.reserve(ranked.size());
+                    for (auto& [_, id] : ranked) {
+                        ids.push_back(std::move(id));
+                    }
+                    return ids;
+                };
+                auto textIds = extractRanked("text");
+                auto vectorIds = extractRanked("vector");
+                if (!textIds.empty() && !q.relevanceGrades.empty()) {
+                    acc.ndcgAtKTextOnly +=
+                        computeNdcgFromRankedDocIds(textIds, q.relevanceGrades, k);
+                    ++acc.textComponentQueries;
+                }
+                if (!vectorIds.empty() && !q.relevanceGrades.empty()) {
+                    acc.ndcgAtKVectorOnly +=
+                        computeNdcgFromRankedDocIds(vectorIds, q.relevanceGrades, k);
+                    ++acc.vectorComponentQueries;
+                }
+            } catch (const std::exception& e) {
+                spdlog::trace("bench: trace_component_hits_json parse failed: {}", e.what());
+            }
+        }
+        if (auto it = stats.find("trace_stage_summary_json"); it != stats.end()) {
+            try {
+                auto stageJson = json::parse(it->second);
+                auto poolSize = [&](const char* name) -> std::uint64_t {
+                    if (!stageJson.contains(name)) {
+                        return 0;
+                    }
+                    return stageJson[name].value("raw_hit_count", std::uint64_t{0});
+                };
+                acc.lexicalPoolSizes.push_back(poolSize("text"));
+                acc.vectorPoolSizes.push_back(poolSize("vector"));
+                if (stageJson.contains("reranker")) {
+                    const auto& rr = stageJson["reranker"];
+                    if (rr.value("attempted", false)) {
+                        ++acc.rerankerFiredCount;
+                    }
+                    if (rr.value("contributed", false)) {
+                        ++acc.rerankerContributedCount;
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::trace("bench: trace_stage_summary_json parse failed: {}", e.what());
+            }
+        }
+        acc.fusionPoolSizes.push_back(static_cast<std::uint64_t>(results.size()));
     }
 
     int firstRelevantRank = -1;
@@ -882,9 +1018,27 @@ QualityMetrics evaluate(DaemonClient& client, const Fixture& fx, const std::stri
     m.map /= m.numQueries;
     m.recallAtK /= m.numQueries;
     m.recallAt100 /= m.numQueries;
+    if (m.textComponentQueries > 0) {
+        m.ndcgAtKTextOnly /= m.textComponentQueries;
+    }
+    if (m.vectorComponentQueries > 0) {
+        m.ndcgAtKVectorOnly /= m.vectorComponentQueries;
+    }
     if (!m.tier1FingerprintJoined.empty()) {
         const auto& joined = m.tier1FingerprintJoined;
         m.tier1FingerprintJoined =
+            yams::crypto::SHA256Hasher::hash(
+                std::as_bytes(std::span<const char>(joined.data(), joined.size())))
+                .substr(0, 16);
+    }
+    if (!m.routedSeedFingerprints.empty()) {
+        std::string joined;
+        joined.reserve(m.routedSeedFingerprints.size() * 17);
+        for (const auto& fp : m.routedSeedFingerprints) {
+            joined.append(fp);
+            joined.push_back('|');
+        }
+        m.routedSeedManifestHash =
             yams::crypto::SHA256Hasher::hash(
                 std::as_bytes(std::span<const char>(joined.data(), joined.size())))
                 .substr(0, 16);
@@ -959,6 +1113,8 @@ struct CellOutcome {
     std::uint64_t routedSeedCountTotal = 0;
     std::uint64_t routedSeedCountQueries = 0;
     std::string tier1HashFingerprint;
+    std::string topologySeedSetManifestHash;
+    std::vector<std::string> topologySeedSetFingerprints;
 };
 
 std::string computeCellIdentityFromEnv() {
@@ -1200,6 +1356,11 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
                       static_cast<double>(outcome.metrics.routedSeedCountQueries)
                 : 0.0;
         outcome.tier1HashFingerprint = outcome.metrics.tier1FingerprintJoined;
+        outcome.topologySeedSetManifestHash = outcome.metrics.routedSeedManifestHash;
+        if (const char* raw = std::getenv("YAMS_BENCH_EMIT_SEED_FINGERPRINTS");
+            raw && *raw && std::string{raw} != "0") {
+            outcome.topologySeedSetFingerprints = outcome.metrics.routedSeedFingerprints;
+        }
 
         if (!fixtureLoaded) {
             harness.stop();
@@ -1237,6 +1398,10 @@ json toCellJson(const CellOutcome& outcome) {
     j["routed_seed_count_queries"] = outcome.routedSeedCountQueries;
     j["routed_seed_count_mean"] = outcome.routedSeedCountMean;
     j["tier1_hash_fingerprint"] = outcome.tier1HashFingerprint;
+    j["topology_seed_set_manifest_hash"] = outcome.topologySeedSetManifestHash;
+    if (!outcome.topologySeedSetFingerprints.empty()) {
+        j["topology_seed_set_fingerprints"] = outcome.topologySeedSetFingerprints;
+    }
     j["orphan_doc_count"] = outcome.orphanDocCount;
     j["topology_algorithm"] = outcome.algorithm;
     if (outcome.ok) {
@@ -1247,6 +1412,17 @@ json toCellJson(const CellOutcome& outcome) {
         j[std::string(irm::kIRRecallAt100)] = outcome.metrics.recallAt100;
         j["num_queries"] = outcome.metrics.numQueries;
         j["hybrid_eval_ms"] = outcome.hybridEvalMs;
+        j["ndcg_at_k_text_only"] = outcome.metrics.ndcgAtKTextOnly;
+        j["ndcg_at_k_vector_only"] = outcome.metrics.ndcgAtKVectorOnly;
+        j["text_component_queries"] = outcome.metrics.textComponentQueries;
+        j["vector_component_queries"] = outcome.metrics.vectorComponentQueries;
+        j["lexical_pool_median_size"] = medianOf(outcome.metrics.lexicalPoolSizes);
+        j["vector_pool_median_size"] = medianOf(outcome.metrics.vectorPoolSizes);
+        j["fusion_pool_median_size"] = medianOf(outcome.metrics.fusionPoolSizes);
+        j["fusion_strategy_observed"] = outcome.metrics.fusionStrategyObserved;
+        j["fusion_strategy_mismatch_count"] = outcome.metrics.fusionStrategyMismatchCount;
+        j["reranker_fired_count"] = outcome.metrics.rerankerFiredCount;
+        j["reranker_contributed_count"] = outcome.metrics.rerankerContributedCount;
     } else {
         j[std::string(irm::kIRNdcgAtK)] = -1.0;
         j[std::string(irm::kIRMrrAtK)] = -1.0;
@@ -1255,6 +1431,8 @@ json toCellJson(const CellOutcome& outcome) {
         j[std::string(irm::kIRRecallAt100)] = -1.0;
         j["num_queries"] = 0;
         j["hybrid_eval_ms"] = -1.0;
+        j["ndcg_at_k_text_only"] = -1.0;
+        j["ndcg_at_k_vector_only"] = -1.0;
     }
     return j;
 }

@@ -214,7 +214,7 @@ private:
 } // namespace
 
 std::unique_ptr<IModelProvider> makeSimeonModelProvider(std::size_t embeddingDim) {
-    return std::make_unique<SimeonModelProvider>(embeddingDim ? embeddingDim : 384);
+    return std::make_unique<SimeonModelProvider>(embeddingDim ? embeddingDim : 1024);
 }
 
 void forceLinkSimeonProvider() noexcept {}

@@ -19,7 +19,7 @@
 - Tree-sitter symbol extraction for 18 languages ([list](docs/user_guide/cli.md#symbol-extraction))
 - Snapshot management with Merkle tree diffs and rename detection
 - WAL-backed durability, high-throughput I/O, thread-safe
-- CLI, MCP server, and C-ABI plugins (ONNX embeddings, S3 storage, PDF via ZYP)
+- CLI, MCP server, and C-ABI plugins (ONNX/GLiNER/ColBERT, S3 storage, PDF via ZYP)
 - Interactive relevance tuning: [`yams tune`](docs/guides/interactive-tuning.md)
 
 ## Documentation
@@ -131,11 +131,11 @@ Plugin architecture, trust model, and bundled plugins (ONNX, S3, ZYP, GLiNER, sy
 
 Auto-detected at build. Override with `YAMS_ONNX_GPU=auto|cuda|coreml|directml|migraphx|none`. Details: [plugins/onnx/README.md](plugins/onnx/README.md).
 
-Recommended model: `all-MiniLM-L6-v2` (384-dim).
+Default retrieval backend: `simeon` (training-free, model-free, 1024-d on new installs).
 
-### Experimental: simeon embedding backend
+### Simeon embedding backend
 
-YAMS ships an alternative, training-free embedding backend called simeon (third_party submodule). It is **experimental** — API and defaults are not stable, and it is a research vehicle, not a drop-in replacement for learned embeddings like MiniLM. Best suited for first-stage retrieval or hybrid fusion with BM25.
+YAMS now uses the training-free `simeon` backend by default for retrieval embeddings. No embedding model download is required for the normal semantic-search path.
 
 Enable it via config:
 
@@ -143,23 +143,25 @@ Enable it via config:
 [embeddings]
 backend = "simeon"
 preferred_model = "simeon-default"
-embedding_dim = 384   # see dim options below
+embedding_dim = 1024  # existing vector DBs keep their stored dim
 ```
 
-Unlike learned embeddings (MiniLM is fixed at 384), simeon's output dimension is tunable — training-free, so higher dims have no training cost, only storage and compute cost:
+Simeon's output dimension is tunable — training-free, so higher dims have no training cost, only storage and compute cost:
 
 | `embedding_dim` | Use when                                              |
 |-----------------|-------------------------------------------------------|
-| 384             | Drop-in parity with MiniLM; smallest index, fastest.  |
+| 384             | Tight-budget fallback; smallest index, fastest.       |
 | 768             | More separability, fewer hash collisions; 2× storage. |
-| 1024            | Closer to `bge-large` capacity; 2.6× storage vs 384.  |
+| 1024            | Default for new installs; balanced quality / size.    |
 | 1536+           | Experimental headroom; diminishing returns past ~2k.  |
 
-Set via config (`embedding_dim`) or env (`YAMS_SIMEON_OUTPUT_DIM`). Internal ngram/sketch/projection knobs: [third_party/simeon/README.md](third_party/simeon/README.md).
+Set via config (`embedding_dim`). Internal ngram/sketch/projection knobs: [third_party/simeon/README.md](third_party/simeon/README.md).
 
-Requirements: no model file, no ONNX, no external runtime deps. When building from source, fetch the submodule: `git submodule update --init --recursive`.
+Requirements: no model file, no ONNX embedding runtime, no external runtime deps. When building from source, fetch the submodule: `git submodule update --init --recursive`.
 
-Benchmarks and A/B vs ONNX/MiniLM: [docs/benchmarks/simeon_vs_onnx_embedding_ab.md](docs/benchmarks/simeon_vs_onnx_embedding_ab.md).
+ONNX remains relevant for optional plugin paths such as GLiNER and ColBERT, not for the default retrieval embedding flow.
+
+Benchmarks and A/B vs legacy ONNX/MiniLM: [docs/benchmarks/simeon_vs_onnx_embedding_ab.md](docs/benchmarks/simeon_vs_onnx_embedding_ab.md).
 
 ## Troubleshooting
 

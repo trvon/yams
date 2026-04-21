@@ -65,6 +65,8 @@ struct RepairServiceContext {
     std::function<std::shared_ptr<PostIngestQueue>()> getPostIngestQueue;
     std::function<std::shared_ptr<integrity::RepairManager>()> getRepairManager;
     std::function<std::shared_ptr<IModelProvider>()> getModelProvider;
+    std::function<std::size_t()> getEmbeddingQueuedJobs;
+    std::function<std::size_t()> getEmbeddingInFlightJobs;
     std::function<const std::vector<std::shared_ptr<extraction::IContentExtractor>>&()>
         getContentExtractors;
     std::function<const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&()>
@@ -74,6 +76,7 @@ struct RepairServiceContext {
     std::function<Result<TopologyManager::RebuildStats>(const std::string&, bool,
                                                         const std::vector<std::string>&)>
         rebuildTopologyArtifacts;
+    std::function<Result<std::size_t>(const std::string&)> rebuildSemanticNeighborGraph;
 };
 
 /**
@@ -306,6 +309,7 @@ private:
     std::atomic<std::uint64_t> processed_{0};
 
     std::atomic<bool> dimMismatchRebuildDone_{false};
+    std::atomic<bool> bulkVectorRebuildActive_{false};
     std::shared_ptr<ShutdownState> shutdownState_;
 
     // On-demand repair serialization (only one RPC repair at a time)

@@ -631,7 +631,8 @@ public:
             if (s == "simeon") {
                 effective = EmbeddingConfig::Backend::Simeon;
                 config_.backend = effective;
-            } else if (s == "daemon") {
+            } else if (s == "daemon" || s == "hybrid" || s == "local" || s == "local_onnx" ||
+                       s == "onnx") {
                 effective = EmbeddingConfig::Backend::Daemon;
                 config_.backend = effective;
             }

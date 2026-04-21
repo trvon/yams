@@ -4894,16 +4894,22 @@ void DoctorCommand::runVectorsFix() {
                       << "\n\n";
             std::cout << "Options:\n";
             if (*dbDim == 384) {
-                std::cout
-                    << "  1. Download matching model: yams model --download all-MiniLM-L6-v2\n";
+                std::cout << "  1. Download optional matching ONNX model: yams model --download "
+                             "all-MiniLM-L6-v2\n";
+                std::cout << "  2. Recreate vectors with the default Simeon dimension (1024): "
+                             "yams doctor --recreate-vectors --dim 1024\n";
             } else if (*dbDim == 768) {
-                std::cout << "  1. Download matching model: yams model --download "
+                std::cout << "  1. Download optional matching ONNX model: yams model --download "
                              "nomic-embed-text-v1.5\n";
+                std::cout << "  2. Recreate vectors with the default Simeon dimension (1024): "
+                             "yams doctor --recreate-vectors --dim 1024\n";
             } else {
-                std::cout << "  1. Download a model that produces " << *dbDim
+                std::cout << "  1. Download an optional model that produces " << *dbDim
                           << "-dim embeddings\n";
+                std::cout << "  2. Recreate vectors with the default Simeon dimension (1024): "
+                             "yams doctor --recreate-vectors --dim 1024\n";
             }
-            std::cout << "  2. Recreate vectors with current model: yams doctor --recreate-vectors";
+            std::cout << "  3. Recreate vectors with current model: yams doctor --recreate-vectors";
             if (modelDim) {
                 std::cout << " --dim " << *modelDim;
             }

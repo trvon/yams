@@ -178,16 +178,16 @@ max_elements = 100000
 [embeddings]
 # Enable embedding generation
 enable = true
-# Embedding backend: "auto" | "daemon" (ONNX) | "simeon" (in-process, model-free)
+# Embedding backend: "daemon" or "simeon" (default, in-process, model-free)
 # Env override: YAMS_EMBED_BACKEND
 backend = "simeon"
 # Automatically generate for new documents
 auto_generate = false
 # Automatically trigger embeddings after AddDocument
 auto_on_add = false
-# Preferred embedding model (set to "simeon-default" when backend = "simeon")
-preferred_model = "all-MiniLM-L6-v2"
-# Root directory where name-based models are resolved (read by the ONNX plugin)
+# Preferred embedding model sentinel for the default simeon backend
+preferred_model = "simeon-default"
+# Root directory where optional ONNX plugin models are resolved
 model_path = "~/.yams/models"
 # Path to tokenizer
 tokenizer_path = "models/tokenizer.json"
@@ -211,7 +211,7 @@ track_content_hash = true
 model_version = "1.0.0"
 # Embedding schema version
 embedding_schema_version = 1
-# Keep the embedding model resident in memory (ONNX plugin reads this)
+# Keep the optional embedding model resident in memory (ONNX plugin reads this)
 keep_model_hot = true
 # Unload an idle embedding model after this many seconds (0 = never unload)
 model_idle_timeout = 300
@@ -455,12 +455,10 @@ final_top_k = 10
 fusion_strategy = "LINEAR_COMBINATION"
 # RRF constant (for RECIPROCAL_RANK)
 rrf_k = 60.0
-# Enable result reranking
+# Enable post-fusion rerank-style passes (TurboQuant / score replacement)
 enable_reranking = true
-# Number of results to rerank
+# Number of top fused results eligible for rerank-style passes
 rerank_top_k = 20
-# Minimum score for reranking
-rerank_threshold = 0.0
 # Enable query expansion
 enable_query_expansion = false
 # Number of expansion terms
@@ -625,7 +623,7 @@ max_loaded_models = 4
 # Number of models to keep always loaded (hot pool)
 hot_pool_size = 2
 # Models to preload on daemon startup
-preload_models = ["all-MiniLM-L6-v2", "bart-large-mnli"]
+preload_models = ["bart-large-mnli"]
 # Load models only when first requested
 lazy_loading = false
 # Unload models after being idle for N seconds

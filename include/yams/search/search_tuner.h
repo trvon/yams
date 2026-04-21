@@ -88,8 +88,12 @@ struct TunedParams {
         return ws;
     }();
 
-    // Similarity threshold for vector search
-    TuningSlot<float> similarityThreshold{0.65f};
+    // Similarity threshold for vector search.
+    // Calibrated for FWHT+1024+L2 (Simeon default post-B1): observed cosine-sim ceiling is
+    // 0.21-0.40 on scifact, where 0.65 filtered 100% of HNSW candidates. 0.30 restores the
+    // vector leg on ~50% of queries; the two-tier fallback at std::min(threshold, 0.20f)
+    // covers the tail.
+    TuningSlot<float> similarityThreshold{0.30f};
 
     // Vector boost factor for TEXT_ANCHOR fusion (multiplied with vectorWeight)
     // Higher values = stronger vector influence in text-anchored results
@@ -336,10 +340,11 @@ struct TunedParams {
             params.rrfK = 12; // Low k for better top-rank discrimination
             params.weights.setAll(0.60f, 0.35f, 0.00f, 0.00f, 0.00f, 0.00f, 0.05f,
                                   TuningLayer::Profile);
-            // Lower threshold vs default (0.65) to improve recall for claim-style prose
-            // queries where query-document cosine similarity is often in the 0.40-0.54
-            // range rather than the >0.55 range seen for code/technical queries.
-            params.similarityThreshold = TuningSlot<float>(0.40f, TuningLayer::Profile);
+            // Lower threshold to improve recall for claim-style prose queries where
+            // query-document cosine similarity is often in the 0.20-0.40 range on
+            // FWHT+1024+L2 encoders rather than the >0.55 range seen for code/technical
+            // queries on legacy encoders.
+            params.similarityThreshold = TuningSlot<float>(0.30f, TuningLayer::Profile);
             params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
             // Sub-phrase rescoring re-scores already-retrieved docs via AND-clause
             // sub-phrase queries. This is the only mechanism that helps when base FTS5

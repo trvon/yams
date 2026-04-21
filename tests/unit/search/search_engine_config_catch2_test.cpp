@@ -330,7 +330,7 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.corpusProfile == SearchEngineConfig::CorpusProfile::MIXED);
     CHECK(cfg.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto);
     CHECK(cfg.maxResults == 100);
-    CHECK(cfg.similarityThreshold == Approx(0.75f));
+    CHECK(cfg.similarityThreshold == Approx(0.30f));
     CHECK(cfg.enableParallelExecution == true);
     CHECK(cfg.enableTieredExecution == true);
     CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::COMB_MNZ);

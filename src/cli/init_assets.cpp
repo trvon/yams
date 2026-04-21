@@ -8,17 +8,17 @@ const std::vector<EmbeddingModel> kEmbeddingModels = {
     {"mxbai-edge-colbert-v0-17m",
      "https://huggingface.co/ryandono/mxbai-edge-colbert-v0-17m-onnx-int8/resolve/main/onnx/"
      "model_quantized.onnx",
-     "Lightweight ColBERT (token-level, MaxSim) optimized for edge use", 17, 48},
+     "Optional ColBERT model (token-level, MaxSim) optimized for edge use", 17, 48},
     {"all-MiniLM-L6-v2",
      "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
-     "Lightweight model for semantic search", 90, 384},
+     "Optional 384-d ONNX embedding model for legacy/specialized setups", 90, 384},
     {"multi-qa-MiniLM-L6-cos-v1",
      "https://huggingface.co/sentence-transformers/multi-qa-MiniLM-L6-cos-v1/resolve/main/onnx/"
      "model.onnx",
-     "Optimized for semantic search on QA pairs (215M training samples)", 90, 384},
+     "Optional ONNX embedding model optimized for QA-style semantic search", 90, 384},
     {"embeddinggemma-300m",
      "https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/onnx/model.onnx",
-     "Google EmbeddingGemma 768-dim, SentencePiece tokenizer (2048 max tokens)", 1200, 768}};
+     "Optional 768-d ONNX embedding model (SentencePiece, 2048 tokens)", 1200, 768}};
 
 const std::vector<GlinerModel> kGlinerModels = {
     {"gliner_small-v2.1-quantized", "onnx-community/gliner_small-v2.1", "model_quantized.onnx",

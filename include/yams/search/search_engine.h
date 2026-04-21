@@ -146,9 +146,9 @@ struct SearchEngineConfig {
     bool waitForConceptExtraction = true; // Wait for concept extraction before applying boosts
 
     // Search parameters
-    size_t maxResults = 100;             // Maximum results to return
-    float similarityThreshold = 0.75f;   // Higher threshold - only high-confidence vector matches
-    bool enableParallelExecution = true; // Parallel component queries
+    size_t maxResults = 100;                     // Maximum results to return
+    float similarityThreshold = 0.30f;           // Calibrated for FWHT+1024+L2 (Simeon default)
+    bool enableParallelExecution = true;         // Parallel component queries
     std::chrono::milliseconds componentTimeout = // Timeout per component (0 = no timeout)
         std::chrono::milliseconds(0);
 

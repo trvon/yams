@@ -2136,6 +2136,57 @@ private:
             overview.push_back(
                 {"Repair", paintStatus(repairSev, repairText.str()), repairExtra.str()});
 
+            // Maintenance / rebuild summary
+            const bool topologyRebuildRunning =
+                findCompactCount(
+                    std::string(yams::daemon::metrics::kTopologyRebuildRunning).c_str()) > 0;
+            const uint64_t topologyDirtyDocs = findCompactCount(
+                std::string(yams::daemon::metrics::kTopologyDirtyDocuments).c_str());
+            const uint64_t topologyRunAgeMs = findCompactCount(
+                std::string(yams::daemon::metrics::kTopologyRebuildRunningAgeMs).c_str());
+            const bool vectorIndexReady = [&]() {
+                auto it = s.readinessStates.find(std::string(readiness::kVectorIndex));
+                return it == s.readinessStates.end() ? true : it->second;
+            }();
+            const uint64_t vectorIndexProgress = [&]() -> uint64_t {
+                auto it = s.initProgress.find(std::string(readiness::kVectorIndex));
+                return it == s.initProgress.end() ? 0 : it->second;
+            }();
+
+            if (topologyRebuildRunning || !vectorIndexReady) {
+                std::vector<std::string> activity;
+                if (!vectorIndexReady) {
+                    std::ostringstream label;
+                    label << "HNSW rebuild";
+                    if (vectorIndexProgress > 0 && vectorIndexProgress < 100) {
+                        label << " " << vectorIndexProgress << "%";
+                    }
+                    activity.push_back(label.str());
+                }
+                if (topologyRebuildRunning) {
+                    activity.push_back("topology rebuild");
+                }
+
+                std::ostringstream maintText;
+                for (std::size_t i = 0; i < activity.size(); ++i) {
+                    if (i)
+                        maintText << " · ";
+                    maintText << activity[i];
+                }
+
+                std::ostringstream maintExtra;
+                if (topologyDirtyDocs > 0) {
+                    maintExtra << topologyDirtyDocs << " dirty";
+                }
+                if (topologyRebuildRunning && topologyRunAgeMs > 0) {
+                    if (maintExtra.tellp() > 0)
+                        maintExtra << " · ";
+                    maintExtra << format_duration(topologyRunAgeMs / 1000);
+                }
+                overview.push_back({"Maintenance", paintStatus(Severity::Warn, maintText.str()),
+                                    maintExtra.str()});
+            }
+
             render_rows(std::cout, overview);
 
             std::vector<std::string> dataDirWarnings;
@@ -2669,6 +2720,66 @@ private:
                 repairRows.push_back({"Stats", paintStatus(repairStatsSev, repairStats.str()), ""});
 
                 render_rows(std::cout, repairRows);
+
+                const bool topologyRebuildRunning =
+                    findPostIngestCount("topology_rebuild_running") > 0;
+                const uint64_t topologyDirtyDocs = findPostIngestCount("topology_dirty_documents");
+                const uint64_t topologyRunAgeMs =
+                    findPostIngestCount("topology_rebuild_running_age_ms");
+                const uint64_t topologyLastDurationMs =
+                    findPostIngestCount("topology_last_duration_ms");
+                const bool vectorIndexReady = [&]() {
+                    auto it = status.readinessStates.find(std::string(readiness::kVectorIndex));
+                    return it == status.readinessStates.end() ? true : it->second;
+                }();
+                const uint64_t vectorIndexProgress = [&]() -> uint64_t {
+                    auto it = status.initProgress.find(std::string(readiness::kVectorIndex));
+                    return it == status.initProgress.end() ? 0 : it->second;
+                }();
+
+                if (topologyRebuildRunning || !vectorIndexReady) {
+                    std::cout << "\n" << section_header("Maintenance") << "\n\n";
+                    std::vector<Row> maintenanceRows;
+
+                    std::ostringstream indexState;
+                    if (vectorIndexReady) {
+                        indexState << "ready";
+                    } else {
+                        indexState << "rebuilding";
+                        if (vectorIndexProgress > 0 && vectorIndexProgress < 100) {
+                            indexState << " · " << vectorIndexProgress << "%";
+                        }
+                    }
+                    maintenanceRows.push_back(
+                        {"Vector Index",
+                         paintStatus(vectorIndexReady ? Severity::Good : Severity::Warn,
+                                     indexState.str()),
+                         ""});
+
+                    if (topologyRebuildRunning) {
+                        std::ostringstream topoState;
+                        topoState << "running";
+                        std::ostringstream topoExtra;
+                        if (topologyDirtyDocs > 0) {
+                            topoExtra << topologyDirtyDocs << " dirty";
+                        }
+                        if (topologyRunAgeMs > 0) {
+                            if (topoExtra.tellp() > 0)
+                                topoExtra << " · ";
+                            topoExtra << "age " << format_duration(topologyRunAgeMs / 1000);
+                        }
+                        if (topologyLastDurationMs > 0) {
+                            if (topoExtra.tellp() > 0)
+                                topoExtra << " · ";
+                            topoExtra << "last " << format_duration(topologyLastDurationMs / 1000);
+                        }
+                        maintenanceRows.push_back({"Topology",
+                                                   paintStatus(Severity::Warn, topoState.str()),
+                                                   topoExtra.str()});
+                    }
+
+                    render_rows(std::cout, maintenanceRows);
+                }
 
                 std::cout << "\n" << section_header("Storage & Embeddings") << "\n\n";
                 std::vector<Row> storageRows;

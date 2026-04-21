@@ -225,6 +225,54 @@ TEST_CASE_METHOD(HnswPersistenceFixture,
 }
 
 TEST_CASE_METHOD(HnswPersistenceFixture,
+                 "SqliteVecBackend bulk load defers HNSW persistence until finalize",
+                 "[vector][hnsw][persistence][bulk-load][catch2]") {
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+
+    const std::string dbPath = createTempDbPath();
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(64).has_value());
+        REQUIRE(backend.beginBulkLoad().has_value());
+        CHECK(backend.bulkLoadActive());
+
+        std::vector<VectorRecord> records;
+        for (int i = 0; i < 128; ++i) {
+            records.push_back(
+                createRecord("bulk_" + std::to_string(i), createEmbedding(64, 150.0f + i)));
+        }
+        REQUIRE(backend.insertVectorsBatch(records).has_value());
+        CHECK(backend.hasReusablePersistedSearchIndex().value() == false);
+
+        REQUIRE(backend.finalizeBulkLoad().has_value());
+        CHECK_FALSE(backend.bulkLoadActive());
+        CHECK(backend.testingLastHnswMaintenanceMode() ==
+              SqliteVecBackend::HnswMaintenanceMode::FullRebuild);
+    }
+
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(dbPath.c_str(), &db) == SQLITE_OK);
+    CHECK(countRows(db, "SELECT COUNT(*) FROM vectors_64_hnsw_meta") > 0);
+    CHECK(countRows(db, "SELECT COUNT(*) FROM vectors_64_hnsw_nodes") > 0);
+    sqlite3_close(db);
+
+    {
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        CHECK(backend.hasReusablePersistedSearchIndex().value() == true);
+        REQUIRE(backend.prepareSearchIndex().has_value());
+
+        auto query = createEmbedding(64, 160.0f);
+        auto search = backend.searchSimilar(query, 10, -2.0f, std::nullopt, {});
+        REQUIRE(search.has_value());
+        REQUIRE_FALSE(search.value().empty());
+    }
+}
+
+TEST_CASE_METHOD(HnswPersistenceFixture,
                  "SqliteVecBackend reports reusable persisted HNSW only after save",
                  "[vector][hnsw][persistence][reusable][catch2]") {
     SqliteVecBackend::Config config;

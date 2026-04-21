@@ -668,11 +668,14 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
             if (s == "simeon") {
                 embConfig.backend = vector::EmbeddingConfig::Backend::Simeon;
-            } else if (s == "daemon" || s == "hybrid") {
+            } else if (s == "daemon" || s == "hybrid" || s == "local" || s == "local_onnx" ||
+                       s == "onnx") {
                 embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
-            } else if (s == "local") {
-                spdlog::warn("EmbeddingService: YAMS_EMBED_BACKEND=local is deprecated; using "
-                             "daemon backend");
+                if (s != "daemon") {
+                    spdlog::warn("EmbeddingService: YAMS_EMBED_BACKEND={} is deprecated; using "
+                                 "daemon backend",
+                                 s);
+                }
             } else {
                 spdlog::warn("EmbeddingService: unsupported YAMS_EMBED_BACKEND='{}'; using daemon",
                              s);

@@ -309,6 +309,53 @@ data_dir = "~/.yams/data"
     CHECK(ConfigResolver::resolveEmbeddingBackend("auto") == "auto");
 }
 
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver resolveEmbeddingBackend reads and normalizes configured backend",
+                 "[daemon][components][config][catch2]") {
+    EnvGuard backendGuard("YAMS_EMBED_BACKEND", "");
+
+    SECTION("reads daemon from config") {
+        auto configPath = writeToml("embedding_backend_daemon.toml", R"(
+[embeddings]
+backend = "daemon"
+)");
+        EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+    }
+
+    SECTION("normalizes uppercase simeon from config") {
+        auto configPath = writeToml("embedding_backend_simeon_upper.toml", R"(
+[embeddings]
+backend = "SIMEON"
+)");
+        EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "simeon");
+    }
+
+    SECTION("maps legacy onnx backend names to daemon") {
+        auto configPath = writeToml("embedding_backend_legacy_onnx.toml", R"(
+[embeddings]
+backend = "local_onnx"
+)");
+        EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver resolveEmbeddingBackend maps legacy env aliases to daemon",
+                 "[daemon][components][config][catch2]") {
+    SECTION("maps onnx env alias") {
+        EnvGuard backendGuard("YAMS_EMBED_BACKEND", "onnx");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+    }
+
+    SECTION("maps local_onnx env alias") {
+        EnvGuard backendGuard("YAMS_EMBED_BACKEND", "local_onnx");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+    }
+}
+
 TEST_CASE("ConfigResolver vector sentinel operations",
           "[daemon][components][config][catch2][sentinel]") {
     auto tempDir = std::filesystem::temp_directory_path() /

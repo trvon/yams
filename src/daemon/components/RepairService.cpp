@@ -275,6 +275,8 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
     ctx.getPostIngestQueue = [services] { return services->getPostIngestQueue(); };
     ctx.getRepairManager = [services] { return services->getRepairManager(); };
     ctx.getModelProvider = [services] { return services->getModelProvider(); };
+    ctx.getEmbeddingQueuedJobs = [services] { return services->getEmbeddingQueuedJobs(); };
+    ctx.getEmbeddingInFlightJobs = [services] { return services->getEmbeddingInFlightJobs(); };
     ctx.getContentExtractors =
         [services]() -> const std::vector<std::shared_ptr<extraction::IContentExtractor>>& {
         return services->getContentExtractors();
@@ -288,6 +290,9 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
     ctx.rebuildTopologyArtifacts = [services](const std::string& reason, bool dryRun,
                                               const std::vector<std::string>& hashes) {
         return services->rebuildTopologyArtifacts(reason, dryRun, hashes);
+    };
+    ctx.rebuildSemanticNeighborGraph = [services](const std::string& reason) {
+        return services->rebuildSemanticNeighborGraph(reason);
     };
     return ctx;
 }
@@ -615,6 +620,25 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         {
             std::lock_guard<std::mutex> lk(queueMutex_);
             queueEmpty = pendingDocuments_.empty();
+        }
+        if (queueEmpty && bulkVectorRebuildActive_.load(std::memory_order_relaxed)) {
+            const auto embedQueued =
+                ctx_.getEmbeddingQueuedJobs ? ctx_.getEmbeddingQueuedJobs() : 0;
+            const auto embedInFlight =
+                ctx_.getEmbeddingInFlightJobs ? ctx_.getEmbeddingInFlightJobs() : 0;
+            if (embedQueued == 0 && embedInFlight == 0) {
+                auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
+                if (vectorDb && vectorDb->bulkLoadActive()) {
+                    if (vectorDb->finalizeBulkLoad()) {
+                        bulkVectorRebuildActive_.store(false, std::memory_order_relaxed);
+                    } else {
+                        spdlog::warn("RepairService: deferred bulk vector finalize failed: {}",
+                                     vectorDb->getLastError());
+                    }
+                } else {
+                    bulkVectorRebuildActive_.store(false, std::memory_order_relaxed);
+                }
+            }
         }
         if (queueEmpty && !initialScanEnqueued) {
             if (deferTicks < minDeferTicks) {
@@ -1030,6 +1054,13 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
                                  modelDim, storedDim);
                     if (vectorDb) {
                         try {
+                            if (vectorDb->beginBulkLoad()) {
+                                bulkVectorRebuildActive_.store(true, std::memory_order_relaxed);
+                            } else {
+                                spdlog::warn(
+                                    "RepairService: failed to enter bulk vector rebuild mode: {}",
+                                    vectorDb->getLastError());
+                            }
                             const auto dbPath = vectorDb->getConfig().database_path;
                             yams::vector::SqliteVecBackend backend;
                             auto initRes = backend.initialize(dbPath);
@@ -3239,7 +3270,9 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
                                        modelName,
                                        std::vector<InternalEventBus::EmbedPreparedDoc>{},
                                        nullptr};
-        job.updateSemanticGraph = req.repairTopology;
+        // Batch semantic graph maintenance outside the per-job embedding hot path.
+        // Per-job corpus scans cause large transient heap spikes during repair.
+        job.updateSemanticGraph = false;
 
         const std::string jobLabel =
             "embed batch " + std::to_string(batchIndex) + "/" + std::to_string(totalBatches);
@@ -3287,6 +3320,19 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
 
     auto isCanceled = [&]() {
         return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
+    };
+    auto finalizeBulkVectorRebuild = [&]() {
+        auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
+        if (!vectorDb || !bulkVectorRebuildActive_.load(std::memory_order_relaxed) ||
+            !vectorDb->bulkLoadActive()) {
+            return;
+        }
+        if (!vectorDb->finalizeBulkLoad()) {
+            spdlog::warn("RepairService: bulk vector rebuild finalize failed: {}",
+                         vectorDb->getLastError());
+            return;
+        }
+        bulkVectorRebuildActive_.store(false, std::memory_order_relaxed);
     };
 
     auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
@@ -3450,7 +3496,9 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
                                        modelName,
                                        std::vector<InternalEventBus::EmbedPreparedDoc>{},
                                        std::move(monitor)};
-        job.updateSemanticGraph = req.repairTopology;
+        // Batch semantic graph maintenance outside the per-job embedding hot path.
+        // Per-job corpus scans cause large transient heap spikes during repair.
+        job.updateSemanticGraph = false;
 
         int retries = 0;
         bool pushed = false;
@@ -3566,6 +3614,27 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     }
 
     if (req.foreground) {
+        finalizeBulkVectorRebuild();
+        if (req.repairTopology && result.succeeded > 0 && ctx_.rebuildSemanticNeighborGraph) {
+            auto semanticResult =
+                ctx_.rebuildSemanticNeighborGraph("repair_service.embedding_batch");
+            if (!semanticResult) {
+                spdlog::warn("RepairService: deferred semantic neighbor rebuild failed: {}",
+                             semanticResult.error().message);
+            } else if (progress) {
+                RepairEvent ev;
+                ev.phase = "repairing";
+                ev.operation = "embeddings";
+                ev.processed = result.processed;
+                ev.total = totalDocs;
+                ev.succeeded = result.succeeded;
+                ev.failed = result.failed;
+                ev.skipped = result.skipped;
+                ev.message = "rebuilt semantic neighbor graph edges=" +
+                             std::to_string(semanticResult.value());
+                progress(ev);
+            }
+        }
         result.message = "Generated " + std::to_string(result.succeeded) + " embeddings";
         if (result.skipped > 0 || result.failed > 0) {
             result.message += ", skipped=" + std::to_string(result.skipped) +

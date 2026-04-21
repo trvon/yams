@@ -146,6 +146,14 @@ public:
     /// Checkpoint vectors.db WAL to reclaim disk space
     Result<void> checkpointWal();
 
+    /// Defer HNSW load/build/checkpoint work during bulk vector regeneration.
+    Result<void> beginBulkLoad();
+
+    /// Finish deferred HNSW work after bulk vector regeneration and persist the index.
+    Result<void> finalizeBulkLoad();
+
+    bool bulkLoadActive() const;
+
     /// No-op for V2 schema (unified table has no rowid sync issues)
     Result<void> ensureEmbeddingRowIdColumn();
 
