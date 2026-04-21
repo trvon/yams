@@ -19,6 +19,8 @@ namespace yams::vector {
 namespace {
 
 simeon::NGramMode parse_ngram_mode(const std::string& s) {
+    if (s == "char")
+        return simeon::NGramMode::CharOnly;
     if (s == "word")
         return simeon::NGramMode::WordOnly;
     if (s == "both" || s == "char_and_word")

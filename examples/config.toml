@@ -419,6 +419,8 @@ enable_cache = true
 cache_size = 1000
 # Cache TTL in minutes
 cache_ttl_minutes = 60
+# Reranker backend: "simeon" (default), "onnx", "colbert", or "auto"
+reranker_backend = "simeon"
 # Preferred reranker model (optional)
 reranker_model = ""
 

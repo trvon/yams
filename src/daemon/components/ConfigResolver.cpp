@@ -974,6 +974,39 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
     return policy;
 }
 
+ConfigResolver::RerankerBackendPolicy ConfigResolver::resolveRerankerBackendPolicy() {
+    return resolveRerankerBackendPolicy(DaemonConfig{});
+}
+
+ConfigResolver::RerankerBackendPolicy
+ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
+    RerankerBackendPolicy policy;
+
+    auto normalize = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    };
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath =
+            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("search.reranker_backend");
+                it != kv.end() && !it->second.empty()) {
+                policy.backend = normalize(it->second);
+                return policy;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for reranker backend: {}", e.what());
+    }
+
+    return policy;
+}
+
 ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
     PostIngestCaps caps;
 

@@ -780,3 +780,42 @@ max_corpus_docs = 50000
         CHECK(*policy.maxCorpusDocs == 123456u);
     }
 }
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveRerankerBackendPolicy reads [search]",
+                 "[daemon][components][config][reranker][catch2]") {
+    SECTION("returns unset when not configured") {
+        auto configPath = writeToml("reranker_default.toml", R"(
+[search]
+default_limit = 10
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+        auto policy = ConfigResolver::resolveRerankerBackendPolicy();
+        CHECK_FALSE(policy.backend.has_value());
+    }
+
+    SECTION("reads explicit reranker backend") {
+        auto configPath = writeToml("reranker_backend.toml", R"(
+[search]
+reranker_backend = "colbert"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+        auto policy = ConfigResolver::resolveRerankerBackendPolicy();
+        REQUIRE(policy.backend.has_value());
+        CHECK(*policy.backend == "colbert");
+    }
+
+    SECTION("normalizes reranker backend to lowercase") {
+        auto configPath = writeToml("reranker_backend_upper.toml", R"(
+[search]
+reranker_backend = "ONNX"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+        auto policy = ConfigResolver::resolveRerankerBackendPolicy();
+        REQUIRE(policy.backend.has_value());
+        CHECK(*policy.backend == "onnx");
+    }
+}

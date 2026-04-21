@@ -89,6 +89,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/migration.h>
@@ -201,6 +202,24 @@ std::uint64_t nowUnixMillis() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
                                           .count());
+}
+
+std::shared_ptr<yams::search::IReranker>
+buildConfiguredReranker(const std::string& backendSelection, std::size_t embeddingDim,
+                        yams::search::ModelProviderRerankerAdapter::ProviderGetter providerGetter) {
+    auto simeonProvider = std::shared_ptr<yams::daemon::IModelProvider>(
+        yams::daemon::makeSimeonModelProvider(embeddingDim ? embeddingDim : 1024).release());
+    auto simeonReranker = std::make_shared<yams::search::ModelProviderRerankerAdapter>(
+        [provider = std::move(simeonProvider)]() { return provider; });
+
+    if (backendSelection == "simeon") {
+        return simeonReranker;
+    }
+
+    auto primaryReranker =
+        std::make_shared<yams::search::ModelProviderRerankerAdapter>(std::move(providerGetter));
+    return std::make_shared<yams::search::FallbackRerankerAdapter>(std::move(primaryReranker),
+                                                                   std::move(simeonReranker));
 }
 
 } // namespace
@@ -2596,14 +2615,14 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
             spdlog::info("[ServiceManager] Synced model provider: model='{}', provider={}",
                          embeddingLifecycle_.modelName(), modelProvider ? "valid" : "null");
 
-            // Initialize reranker adapter using model provider's scoreDocuments capability
-            // This is a lazy-init adapter - it fetches the provider on each call
-            if (!embeddingLifecycle_.reranker()) {
-                embeddingLifecycle_.setReranker(
-                    std::make_shared<yams::search::ModelProviderRerankerAdapter>(
-                        [this]() { return this->loadModelProvider(); }));
-                spdlog::info("[Reranker] Initialized model provider reranker adapter");
-            }
+            // Select reranker from the configured backend, but fall back to Simeon
+            // when the preferred provider lacks a downloaded reranker model.
+            const auto rerankerPolicy = ConfigResolver::resolveRerankerBackendPolicy(config_);
+            const auto backend = rerankerPolicy.backend.value_or("simeon");
+            embeddingLifecycle_.setReranker(
+                buildConfiguredReranker(backend, embeddingLifecycle_.getEmbeddingDimension(),
+                                        [this]() { return this->loadModelProvider(); }));
+            spdlog::info("[Reranker] Initialized '{}' reranker path with Simeon fallback", backend);
         }
         return result;
     }

@@ -95,6 +95,10 @@ public:
         std::optional<std::size_t> maxCorpusDocs;
     };
 
+    struct RerankerBackendPolicy {
+        std::optional<std::string> backend;
+    };
+
     ConfigResolver() = delete; // Static-only class
 
     /**
@@ -345,6 +349,17 @@ public:
      * - embeddings.simeon.bm25.max_corpus_docs = int
      */
     static SimeonBm25Policy resolveSimeonBm25Policy();
+
+    /**
+     * @brief Resolve reranker backend selection from config.
+     *
+     * Canonical key:
+     * - search.reranker_backend = "simeon" | "onnx" | "colbert" | "auto"
+     *
+     * When unset, callers should default to "simeon".
+     */
+    static RerankerBackendPolicy resolveRerankerBackendPolicy();
+    static RerankerBackendPolicy resolveRerankerBackendPolicy(const DaemonConfig& config);
 
     /**
      * @brief Resolve post-ingest concurrency caps from config file.

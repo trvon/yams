@@ -1766,13 +1766,24 @@ private:
                 content.append("\n[search]\n");
             }
 
-            // Set reranker_model and reranker_model_path in [search]
+            // Set reranker_backend, reranker_model and reranker_model_path in [search]
             fs::path rerankerModelPath =
                 dataPath / "models" / "reranker" / selectedRerankerModel / "model.onnx";
             auto secPos = content.find("[search]");
             if (secPos != std::string::npos) {
                 auto nextSec = content.find("\n[", secPos + 1);
                 auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+
+                auto backendPos = content.find("reranker_backend =", secPos);
+                std::string backendLine = "reranker_backend = \"onnx\"";
+                if (backendPos == std::string::npos || backendPos > rangeEnd) {
+                    content.insert(rangeEnd, backendLine + "\n");
+                } else {
+                    auto lineEnd = content.find('\n', backendPos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.replace(backendPos, lineEnd - backendPos, backendLine);
+                }
 
                 // Add reranker_model
                 auto namePos = content.find("reranker_model =", secPos);
@@ -1837,6 +1848,17 @@ private:
             if (secPos != std::string::npos) {
                 auto nextSec = content.find("\n[", secPos + 1);
                 auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+
+                auto backendPos = content.find("reranker_backend =", secPos);
+                std::string backendLine = "reranker_backend = \"colbert\"";
+                if (backendPos == std::string::npos || backendPos > rangeEnd) {
+                    content.insert(rangeEnd, backendLine + "\n");
+                } else {
+                    auto lineEnd = content.find('\n', backendPos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.replace(backendPos, lineEnd - backendPos, backendLine);
+                }
 
                 auto enablePos = content.find("enable_reranking", secPos);
                 if (enablePos == std::string::npos || enablePos > rangeEnd) {

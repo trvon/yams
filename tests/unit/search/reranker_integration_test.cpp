@@ -294,6 +294,45 @@ TEST_CASE("IReranker: Basic interface contract", "[search][reranker][interface]"
     }
 }
 
+TEST_CASE("FallbackRerankerAdapter: falls back when primary backend is unavailable",
+          "[search][reranker][fallback]") {
+    auto primary = std::make_shared<MockReranker>();
+    auto fallback = std::make_shared<MockReranker>();
+    fallback->setScores({0.42f, 0.24f});
+
+    SECTION("uses fallback when primary is not ready") {
+        primary->setReady(false);
+        FallbackRerankerAdapter adapter(primary, fallback);
+
+        auto result = adapter.scoreDocuments("query", {"doc a", "doc b"});
+
+        REQUIRE(result);
+        CHECK(result.value().size() == 2);
+        CHECK(result.value()[0] == Catch::Approx(0.42f));
+        CHECK(primary->getCallCount() == 0);
+        CHECK(fallback->getCallCount() == 1);
+    }
+
+    SECTION("uses fallback when primary reports missing backend/model support") {
+        class MissingModelReranker : public MockReranker {
+        public:
+            Result<std::vector<float>> scoreDocuments(const std::string&,
+                                                      const std::vector<std::string>&) override {
+                return Error{ErrorCode::NotImplemented, "missing reranker model"};
+            }
+        };
+
+        auto missing = std::make_shared<MissingModelReranker>();
+        FallbackRerankerAdapter adapter(missing, fallback);
+
+        auto result = adapter.scoreDocuments("query", {"doc a", "doc b"});
+
+        REQUIRE(result);
+        CHECK(result.value()[0] == Catch::Approx(0.42f));
+        CHECK(fallback->getCallCount() == 1);
+    }
+}
+
 // =============================================================================
 // ModelProviderRerankerAdapter Tests
 // =============================================================================
