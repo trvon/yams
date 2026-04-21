@@ -206,15 +206,17 @@ public:
             std::string selectedModel;
             bool colbertSelected = false;
             if (autoInit_) {
-                // Use the default model (first in the list) for auto-init
-                selectedModel = init_assets::embeddingModels().front().name;
-                spdlog::info("Using default embedding model: {}", selectedModel);
+                selectedModel = "simeon-default";
+                spdlog::info("Using default embedding backend: simeon ({})", selectedModel);
                 colbertSelected = isColbertModelName(selectedModel);
             } else if (!nonInteractive_) {
                 enableVectorDB = prompt_yes_no("\nEnable semantic search? [Y/n]: ",
                                                YesNoOptions{.defaultYes = true});
                 if (enableVectorDB) {
-                    selectedModel = promptForModel(dataPath);
+                    selectedModel = "simeon-default";
+                    std::cout
+                        << "\nSemantic search uses the built-in Simeon embeddings by default.\n";
+                    std::cout << "No embedding model download is required.\n";
                     colbertSelected = isColbertModelName(selectedModel);
                 }
             }
@@ -671,6 +673,22 @@ private:
                                                                   selectedModel / "model.onnx")
                                                                      .string()) +
                                                 "\"");
+                        }
+                    }
+                }
+            }
+
+            // Update embeddings settings
+            if (enableVectorDB && !selectedModel.empty()) {
+                pos = content.find("[embeddings]");
+                if (pos != std::string::npos) {
+                    size_t preferredPos = content.find("preferred_model = ", pos);
+                    if (preferredPos != std::string::npos) {
+                        size_t endPos = content.find("\n", preferredPos);
+                        if (endPos != std::string::npos) {
+                            content.replace(preferredPos, endPos - preferredPos,
+                                            "preferred_model = \"" +
+                                                escapeTomlString(selectedModel) + "\"");
                         }
                     }
                 }

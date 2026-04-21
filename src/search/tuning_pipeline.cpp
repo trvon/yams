@@ -226,17 +226,14 @@ void applyZoomConfigExtras(SearchEngineConfig::NavigationZoomLevel zoom,
             config.graphVectorWeight = std::clamp(config.graphVectorWeight * 1.15f, 0.0f, 1.0f);
             config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{10});
             config.graphExpansionMaxSeeds = std::max(config.graphExpansionMaxSeeds, size_t{8});
-            config.rerankSnippetMaxChars = std::min(config.rerankSnippetMaxChars, size_t{192});
             break;
         case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
             config.graphTextWeight = std::clamp(config.graphTextWeight * 1.05f, 0.0f, 1.0f);
             config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{8});
-            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{256});
             break;
         case SearchEngineConfig::NavigationZoomLevel::Street:
             config.graphVectorWeight = std::clamp(config.graphVectorWeight * 0.85f, 0.0f, 1.0f);
             config.graphTextWeight = std::clamp(config.graphTextWeight * 0.95f, 0.0f, 1.0f);
-            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{384});
             if (config.graphExpansionMaxTerms > 0) {
                 config.graphExpansionMaxTerms = std::min(config.graphExpansionMaxTerms, size_t{6});
             }

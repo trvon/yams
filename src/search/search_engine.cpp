@@ -12,7 +12,6 @@
 #include <yams/search/query_expansion.h>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
-#include <yams/search/rerank_pipeline.h>
 #include <yams/search/search_execution_context.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
@@ -746,12 +745,6 @@ std::string_view::size_type ci_find(std::string_view haystack, std::string_view 
     return (pos == yams::app::services::kMemmemNpos) ? std::string_view::npos : pos;
 }
 
-constexpr auto kRerankerErrorCooldown = std::chrono::seconds(60);
-
-bool isRerankerCooldownError(ErrorCode code) {
-    return code == ErrorCode::NotImplemented || code == ErrorCode::InvalidState;
-}
-
 bool containsFast(std::string_view haystack, std::string_view needle) {
     if (needle.empty()) {
         return true;
@@ -760,75 +753,6 @@ bool containsFast(std::string_view haystack, std::string_view needle) {
         return false;
     }
     return yams::app::services::simdMemmem(haystack, needle) != yams::app::services::kMemmemNpos;
-}
-
-double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent,
-                              SearchEngineConfig::NavigationZoomLevel zoomLevel) {
-    const double text = result.keywordScore.value_or(0.0);
-    const double vector = result.vectorScore.value_or(0.0);
-    const double graphText = result.graphTextScore.value_or(0.0);
-    const double graphVector = result.graphVectorScore.value_or(0.0);
-    const double kg = result.kgScore.value_or(0.0);
-    const double path = result.pathScore.value_or(0.0);
-    const double symbol = result.symbolScore.value_or(0.0);
-    const double tag = result.tagScore.value_or(0.0);
-
-    const bool hasText = text > 0.0 || graphText > 0.0;
-    const bool hasVector = vector > 0.0 || graphVector > 0.0;
-    const bool hasPath = path > 0.0;
-    const bool hasSymbol = symbol > 0.0;
-    const bool hasKg = kg > 0.0;
-
-    double signal = result.score;
-    if (hasText && hasVector) {
-        signal += 0.12;
-    }
-    if (hasText && hasKg) {
-        signal += 0.05;
-    }
-    if (hasText && hasPath) {
-        signal += 0.03;
-    }
-    if (hasSymbol && hasVector) {
-        signal += 0.04;
-    }
-    if (tag > 0.0) {
-        signal += std::min(0.02, tag * 0.2);
-    }
-
-    switch (intent) {
-        case QueryIntent::Code:
-            signal += path * 0.10 + symbol * 0.10;
-            break;
-        case QueryIntent::Path:
-            signal += path * 0.15;
-            break;
-        case QueryIntent::Prose:
-            signal += text * 0.08 + vector * 0.04 + kg * 0.04;
-            break;
-        case QueryIntent::Mixed:
-            signal += text * 0.05 + vector * 0.05 + kg * 0.03 + path * 0.02;
-            break;
-    }
-
-    switch (zoomLevel) {
-        case SearchEngineConfig::NavigationZoomLevel::Auto:
-            break;
-        case SearchEngineConfig::NavigationZoomLevel::Map:
-            signal += kg * 0.08 + graphText * 0.06 + graphVector * 0.05;
-            break;
-        case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
-            signal += kg * 0.04 + graphText * 0.03 + path * 0.02;
-            break;
-        case SearchEngineConfig::NavigationZoomLevel::Street:
-            signal += text * 0.10 + path * 0.08 + symbol * 0.08;
-            if (!hasText && hasVector) {
-                signal -= 0.10;
-            }
-            break;
-    }
-
-    return signal;
 }
 
 } // namespace
@@ -1562,8 +1486,6 @@ public:
         conceptExtractor_ = std::move(extractor);
     }
 
-    void setReranker(std::shared_ptr<IReranker> reranker) { reranker_ = std::move(reranker); }
-
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner) { tuner_ = std::move(tuner); }
 
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
@@ -1650,7 +1572,6 @@ private:
     SearchEngineConfig config_;
     mutable SearchEngine::Statistics stats_;
     EntityExtractionFunc conceptExtractor_;               // GLiNER concept extractor (optional)
-    std::shared_ptr<IReranker> reranker_;                 // Cross-encoder reranker (optional)
     std::shared_ptr<IVectorReranker> turboQuantReranker_; // TurboQuant vector reranker (optional)
 
     // Compressed ANN index (built lazily from packed vectors when enabled)
@@ -1659,7 +1580,6 @@ private:
     bool compressedAnnIndexReady_ = false; // True once build() has been called
     std::shared_ptr<SearchTuner> tuner_;   // Adaptive runtime tuner (optional)
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
-    std::atomic<int64_t> rerankerCooldownUntilMicros_{0};
 };
 
 Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& query,
@@ -2128,8 +2048,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                        workingConfig.enableTopologyWeakQueryRouting);
     traceCollector.markStageConfigured("graph_rerank",
                                        workingConfig.enableGraphRerank && kgScorer_ != nullptr);
-    traceCollector.markStageConfigured("reranker",
-                                       workingConfig.enableReranking && reranker_ != nullptr);
+    traceCollector.markStageConfigured("reranker", false);
 
     auto hasVectorTierDimMismatch = [&]() {
         if (!queryEmbedding.has_value() || !vectorDb_) {
@@ -3760,15 +3679,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                 const auto& doc = topN[i].document;
                                 for (const auto& rc : ranked.candidates) {
                                     if (rc.chunk_id == doc.filePath) {
-                                        response.results[i].rerankerScore =
+                                        const double rerankScore =
                                             static_cast<double>(rc.rerank_score);
-                                        // Blend score into the result score if rerankReplaceScores
-                                        // is false
-                                        if (!workingConfig.rerankReplaceScores) {
+                                        if (workingConfig.rerankReplaceScores) {
+                                            response.results[i].score = rerankScore;
+                                        } else {
                                             const float w = workingConfig.turboQuantRerankWeight;
                                             response.results[i].score =
                                                 (1.0 - w) * response.results[i].score +
-                                                w * static_cast<double>(rc.rerank_score);
+                                                w * rerankScore;
                                         }
                                         break;
                                     }
@@ -4264,236 +4183,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     materializeConcepts(workingConfig.waitForConceptExtraction);
 
-    // Cross-encoder reranking: second-stage ranking for improved relevance
-    const bool rerankAvailable = reranker_ && reranker_->isReady();
-    if (!workingConfig.enableReranking && rerankAvailable && !response.results.empty()) {
+    if (workingConfig.enableReranking && !response.results.empty()) {
         skipped.push_back("reranker");
-        traceCollector.markStageSkipped("reranker", "disabled_in_config");
-    }
-    if (workingConfig.enableReranking && rerankAvailable && !response.results.empty()) {
-        YAMS_ZONE_SCOPED_N("reranking");
-        traceCollector.markStageAttempted("reranker");
-        const auto rerankStart = std::chrono::steady_clock::now();
-        const size_t rerankProbeWindow =
-            workingConfig.semanticRescueSlots > 0
-                ? std::max(workingConfig.rerankTopK,
-                           workingConfig.rerankTopK +
-                               std::max<size_t>(200, workingConfig.semanticRescueSlots * 100))
-                : workingConfig.rerankTopK;
-        const size_t rerankWindow = std::min(rerankProbeWindow, response.results.size());
-
-        if (workingConfig.useScoreBasedReranking && rerankWindow > 1) {
-            std::stable_sort(response.results.begin(),
-                             response.results.begin() + static_cast<ptrdiff_t>(rerankWindow),
-                             [&](const SearchResult& a, const SearchResult& b) {
-                                 return scoreBasedRerankSignal(a, intent, effectiveZoomLevel) >
-                                        scoreBasedRerankSignal(b, intent, effectiveZoomLevel);
-                             });
-            contributing.push_back("score_rerank");
-        }
-
-        const int64_t nowMicros = std::chrono::duration_cast<std::chrono::microseconds>(
-                                      std::chrono::steady_clock::now().time_since_epoch())
-                                      .count();
-        const int64_t cooldownUntilMicros =
-            rerankerCooldownUntilMicros_.load(std::memory_order_relaxed);
-        const bool rerankerCoolingDown = cooldownUntilMicros > nowMicros;
-
-        if (rerankerCoolingDown) {
-            skipped.push_back("reranker");
-            traceCollector.markStageSkipped("reranker", "cooldown_active");
-            const int64_t remainingMs = (cooldownUntilMicros - nowMicros) / 1000;
-            spdlog::debug("[reranker] Cooldown active; skipping rerank ({} ms remaining)",
-                          std::max<int64_t>(remainingMs, 0));
-        }
-
-        const auto preFusionSignalForResult =
-            [&preFusionSignals](const SearchResult& result) -> const PreFusionDocSignal* {
-            const std::string docId =
-                documentIdForTrace(result.document.filePath, result.document.sha256Hash);
-            if (docId.empty()) {
-                return nullptr;
-            }
-            auto it = preFusionSignals.find(docId);
-            return it != preFusionSignals.end() ? &it->second : nullptr;
-        };
-
-        bool skipRerank = false;
-        if (!rerankerCoolingDown && rerankWindow >= 2 &&
-            workingConfig.rerankScoreGapThreshold > 0.0f) {
-            double bestRemainingFusedScore = response.results[1].score;
-            bool hasCompetitiveAnchoredEvidence = false;
-            rerankGuardAnchoredDocIds.clear();
-            // Minimum score for a multi-source doc to count as "competitive".
-            // 0.0 means any multi-source doc counts (original behavior).
-            const double anchoredMinScore =
-                workingConfig.rerankAnchoredMinRelativeScore > 0.0f
-                    ? response.results[0].score *
-                          static_cast<double>(workingConfig.rerankAnchoredMinRelativeScore)
-                    : 0.0;
-            for (size_t i = 1; i < rerankWindow; ++i) {
-                bestRemainingFusedScore =
-                    std::max(bestRemainingFusedScore, response.results[i].score);
-                const auto* signal = preFusionSignalForResult(response.results[i]);
-                if (signal != nullptr && signal->hasAnchoring && signal->sources.size() > 1 &&
-                    response.results[i].score >= anchoredMinScore) {
-                    hasCompetitiveAnchoredEvidence = true;
-                    rerankGuardAnchoredDocIds.push_back(
-                        documentIdForTrace(response.results[i].document.filePath,
-                                           response.results[i].document.sha256Hash));
-                }
-            }
-            const double scoreGap = response.results[0].score - bestRemainingFusedScore;
-            rerankGuardScoreGap = scoreGap;
-            rerankGuardCompetitiveAnchoredEvidence = hasCompetitiveAnchoredEvidence;
-            if (scoreGap >= static_cast<double>(workingConfig.rerankScoreGapThreshold) &&
-                !hasCompetitiveAnchoredEvidence) {
-                spdlog::debug(
-                    "[reranker] Skipping rerank (top fused gap {:.4f} >= {:.4f}; window={})",
-                    scoreGap, workingConfig.rerankScoreGapThreshold, rerankWindow);
-                skipRerank = true;
-                traceCollector.markStageSkipped("reranker", "score_gap_guard");
-            }
-        }
-
-        if (!rerankerCoolingDown && !skipRerank) {
-            std::vector<SearchResult> preRerankSnapshot;
-            if (stageTraceEnabled) {
-                preRerankSnapshot.assign(response.results.begin(),
-                                         response.results.begin() +
-                                             static_cast<ptrdiff_t>(rerankWindow));
-            }
-
-            // Extract document snippets for reranking.
-            // Fallback order: fused snippet -> metadata content preview -> source file.
-            // Metadata preview is preferred because benchmark/warm-cache file paths may
-            // point at transient ingestion paths that no longer exist.
-            RerankInputCollector rerankInputCollector(metadataRepo_,
-                                                      workingConfig.rerankSnippetMaxChars);
-            auto rerankInputs = rerankInputCollector.collect(query, response.results, rerankWindow);
-
-            if (!rerankInputs.snippets.empty()) {
-                auto rerankResult = reranker_->scoreDocuments(query, rerankInputs.snippets);
-                if (rerankResult) {
-                    rerankerCooldownUntilMicros_.store(0, std::memory_order_relaxed);
-                    const auto& scores = rerankResult.value();
-                    spdlog::debug("[reranker] Reranked {} documents", scores.size());
-
-                    // Diagnostic: log score distribution for debugging reranker quality
-                    if (!scores.empty()) {
-                        float minScore = *std::min_element(scores.begin(), scores.end());
-                        float maxScore = *std::max_element(scores.begin(), scores.end());
-                        float sumScore = 0.0f;
-                        for (float s : scores)
-                            sumScore += s;
-                        spdlog::info("[reranker] Score distribution: n={} min={:.4f} max={:.4f} "
-                                     "mean={:.4f}",
-                                     scores.size(), minScore, maxScore,
-                                     sumScore / static_cast<float>(scores.size()));
-                    }
-
-                    RerankScoreApplier rerankScoreApplier(workingConfig);
-                    rerankScoreApplier.apply(response.results, rerankWindow, scores,
-                                             rerankInputs.passageDocIndices);
-
-                    if (stageTraceEnabled) {
-                        rerankWindowTrace = json::array();
-                        std::unordered_map<std::string, size_t> finalRanks;
-                        finalRanks.reserve(rerankWindow);
-                        for (size_t i = 0; i < rerankWindow; ++i) {
-                            finalRanks[documentIdForTrace(
-                                response.results[i].document.filePath,
-                                response.results[i].document.sha256Hash)] = i + 1;
-                        }
-
-                        for (size_t i = 0; i < preRerankSnapshot.size(); ++i) {
-                            const auto& before = preRerankSnapshot[i];
-                            const std::string docId = documentIdForTrace(
-                                before.document.filePath, before.document.sha256Hash);
-                            json entry = {
-                                {"doc_id", docId},
-                                {"pre_rank", i + 1},
-                                {"original_score", before.score},
-                                {"keyword_score", before.keywordScore.value_or(0.0)},
-                                {"vector_score", before.vectorScore.value_or(0.0)},
-                                {"kg_score", before.kgScore.value_or(0.0)},
-                                {"path_score", before.pathScore.value_or(0.0)},
-                                {"tag_score", before.tagScore.value_or(0.0)},
-                                {"symbol_score", before.symbolScore.value_or(0.0)},
-                            };
-                            bool found = false;
-                            for (size_t j = 0; j < rerankWindow; ++j) {
-                                const auto& after = response.results[j];
-                                if (documentIdForTrace(after.document.filePath,
-                                                       after.document.sha256Hash) == docId) {
-                                    entry["final_rank"] = j + 1;
-                                    entry["final_score"] = after.score;
-                                    entry["reranker_score"] = after.rerankerScore.value_or(0.0);
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (!found) {
-                                entry["final_rank"] = nullptr;
-                                entry["final_score"] = nullptr;
-                                entry["reranker_score"] = nullptr;
-                            }
-                            rerankWindowTrace.push_back(std::move(entry));
-                        }
-                    }
-
-                    crossRerankApplied = true;
-                    contributing.push_back("reranker");
-                    auto rerankEnd = std::chrono::steady_clock::now();
-                    const auto rerankDuration =
-                        std::chrono::duration_cast<std::chrono::microseconds>(rerankEnd -
-                                                                              rerankStart)
-                            .count();
-                    componentTiming["reranker"] = rerankDuration;
-                    traceCollector.markStageResult("reranker", {}, rerankDuration, true);
-                } else {
-                    if (isRerankerCooldownError(rerankResult.error().code)) {
-                        const int64_t nextCooldown =
-                            std::chrono::duration_cast<std::chrono::microseconds>(
-                                (std::chrono::steady_clock::now() + kRerankerErrorCooldown)
-                                    .time_since_epoch())
-                                .count();
-                        rerankerCooldownUntilMicros_.store(nextCooldown, std::memory_order_relaxed);
-                        spdlog::warn(
-                            "[reranker] Reranking unavailable (code={}): {}. Cooling down "
-                            "for {}s",
-                            static_cast<int>(rerankResult.error().code),
-                            rerankResult.error().message,
-                            std::chrono::duration_cast<std::chrono::seconds>(kRerankerErrorCooldown)
-                                .count());
-                    } else {
-                        spdlog::warn("[reranker] Reranking failed: {}",
-                                     rerankResult.error().message);
-                    }
-                    auto rerankEnd = std::chrono::steady_clock::now();
-                    traceCollector.markStageFailure(
-                        "reranker", std::chrono::duration_cast<std::chrono::microseconds>(
-                                        rerankEnd - rerankStart)
-                                        .count());
-                }
-            } else {
-                spdlog::debug("[reranker] Skipping rerank: no snippets available");
-                auto rerankEnd = std::chrono::steady_clock::now();
-                traceCollector.markStageSkipped("reranker", "no_snippets_available");
-                componentTiming["reranker"] =
-                    std::chrono::duration_cast<std::chrono::microseconds>(rerankEnd - rerankStart)
-                        .count();
-            }
-        }
-    } else if (workingConfig.enableReranking && !rerankAvailable) {
-        spdlog::debug("[reranker] Unavailable; falling back to fused scores");
-        traceCollector.markStageSkipped("reranker", "unavailable");
+        traceCollector.markStageSkipped("reranker", "retired");
     }
 
-    const size_t compactRerankWindow = std::min(
-        response.results.size(), (workingConfig.enableReranking && workingConfig.rerankTopK > 0)
-                                     ? workingConfig.rerankTopK
-                                     : size_t(0));
+    const size_t compactRerankWindow = 0;
     if (effectiveVectorMaxResults == 0) {
         effectiveVectorMaxResults = workingConfig.vectorMaxResults;
     }
@@ -4693,8 +4388,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         };
 
     const size_t buriedVectorRankThreshold =
-        (intent == QueryIntent::Prose && workingConfig.enableReranking &&
-         workingConfig.rerankTopK > 0)
+        (intent == QueryIntent::Prose && workingConfig.rerankTopK > 0)
             ? std::max<size_t>(150, workingConfig.rerankTopK * 3)
             : std::numeric_limits<size_t>::max();
     const size_t buriedScoreRankThreshold =
@@ -4711,8 +4405,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 return false;
             }
             const auto* signal = semanticRescueSignalForResult(result);
-            if (signal == nullptr || result.rerankerScore.value_or(0.0) < 9e-4 ||
-                signal->maxVectorRaw < 0.79) {
+            if (signal == nullptr || signal->maxVectorRaw < 0.79) {
                 return false;
             }
 
@@ -4728,18 +4421,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     const auto finalSemanticRescueBetter = [&semanticRescueSignalForResult, &docIdForResult](
                                                const SearchResult& a, const SearchResult& b) {
-        const bool rerankCoveredA = a.rerankerScore.has_value();
-        const bool rerankCoveredB = b.rerankerScore.has_value();
-        if (rerankCoveredA != rerankCoveredB) {
-            return rerankCoveredA;
-        }
-
-        const double rerankA = a.rerankerScore.value_or(-1.0);
-        const double rerankB = b.rerankerScore.value_or(-1.0);
-        if (rerankA != rerankB) {
-            return rerankA > rerankB;
-        }
-
         const auto* signalA = semanticRescueSignalForResult(a);
         const auto* signalB = semanticRescueSignalForResult(b);
         const double rawVectorA = signalA != nullptr ? signalA->maxVectorRaw : 0.0;
@@ -4757,32 +4438,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     const auto buriedSemanticRescueBetter = [&semanticRescueSignalForResult, &docIdForResult](
                                                 const SearchResult& a, const SearchResult& b) {
-        const bool rerankCoveredA = a.rerankerScore.has_value();
-        const bool rerankCoveredB = b.rerankerScore.has_value();
-        if (rerankCoveredA != rerankCoveredB) {
-            return rerankCoveredA;
-        }
-
-        constexpr double kBuriedRerankCap = 1e-3;
-        constexpr double kBuriedRerankTieEpsilon = 2e-4;
-        const double rerankA = std::min(a.rerankerScore.value_or(-1.0), kBuriedRerankCap);
-        const double rerankB = std::min(b.rerankerScore.value_or(-1.0), kBuriedRerankCap);
-        if (std::abs(rerankA - rerankB) > kBuriedRerankTieEpsilon) {
-            return rerankA > rerankB;
-        }
-
         const auto* signalA = semanticRescueSignalForResult(a);
         const auto* signalB = semanticRescueSignalForResult(b);
         const double rawVectorA = signalA != nullptr ? signalA->maxVectorRaw : 0.0;
         const double rawVectorB = signalB != nullptr ? signalB->maxVectorRaw : 0.0;
         if (rawVectorA != rawVectorB) {
             return rawVectorA > rawVectorB;
-        }
-
-        const double fullRerankA = a.rerankerScore.value_or(-1.0);
-        const double fullRerankB = b.rerankerScore.value_or(-1.0);
-        if (fullRerankA != fullRerankB) {
-            return fullRerankA > fullRerankB;
         }
 
         if (a.score != b.score) {
@@ -4800,8 +4461,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::max({lexical, vector, kg, result.pathScore.value_or(0.0),
                       result.symbolScore.value_or(0.0), result.tagScore.value_or(0.0)});
         const double componentBonus = (lexical > 0.0 && vector > 0.0) ? 0.01 : 0.0;
-        const double rerankSignal = result.rerankerScore.value_or(0.0);
-        return std::max(bestSignal + componentBonus, rerankSignal);
+        return bestSignal + componentBonus;
     };
 
     const double finalEvidenceRescueMinScore =
@@ -4826,21 +4486,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     const auto finalLexicalAwareLess = [&lexicalAnchorScore, &docIdForResult, &workingConfig](
                                            const SearchResult& a, const SearchResult& b) {
-        if (workingConfig.rerankReplaceScores) {
-            const bool rerankCoveredA = a.rerankerScore.has_value();
-            const bool rerankCoveredB = b.rerankerScore.has_value();
-            if (rerankCoveredA != rerankCoveredB) {
-                return rerankCoveredA;
-            }
-            if (rerankCoveredA && rerankCoveredB) {
-                const double rerankA = a.rerankerScore.value_or(0.0);
-                const double rerankB = b.rerankerScore.value_or(0.0);
-                if (rerankA != rerankB) {
-                    return rerankA > rerankB;
-                }
-            }
-        }
-
         const double scoreDiff = static_cast<double>(a.score) - static_cast<double>(b.score);
         const double tieEpsilon =
             std::max(0.0, static_cast<double>(workingConfig.lexicalTieBreakEpsilon));
@@ -5028,9 +4673,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 size_t victimIndex = finalWindow;
                 double victimEvidence = std::numeric_limits<double>::max();
                 for (size_t i = 0; i < finalWindow; ++i) {
-                    if (response.results[i].rerankerScore.has_value()) {
-                        continue;
-                    }
                     const double evidence = evidenceRescueScore(response.results[i]);
                     if (evidence < victimEvidence) {
                         victimEvidence = evidence;
@@ -6999,10 +6641,6 @@ void SearchEngine::setExecutor(std::optional<boost::asio::any_io_executor> execu
 
 void SearchEngine::setConceptExtractor(EntityExtractionFunc extractor) {
     pImpl_->setConceptExtractor(std::move(extractor));
-}
-
-void SearchEngine::setReranker(std::shared_ptr<IReranker> reranker) {
-    pImpl_->setReranker(std::move(reranker));
 }
 
 void SearchEngine::setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {

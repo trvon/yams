@@ -10,9 +10,6 @@
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
-namespace yams::search {
-class IReranker;
-}
 namespace yams::daemon {
 
 class EmbeddingService;
@@ -54,13 +51,6 @@ public:
     [[nodiscard]] bool preloadOnStartup() const { return preloadOnStartup_; }
     void setPreloadOnStartup(bool val) { preloadOnStartup_ = val; }
 
-    [[nodiscard]] std::shared_ptr<yams::search::IReranker> reranker() const {
-        return rerankerAdapter_;
-    }
-    void setReranker(std::shared_ptr<yams::search::IReranker> reranker) {
-        rerankerAdapter_ = std::move(reranker);
-    }
-
     [[nodiscard]] std::size_t inFlightJobs() const;
     [[nodiscard]] std::size_t queuedJobs() const;
     [[nodiscard]] std::size_t activeInferSubBatches() const;
@@ -75,7 +65,6 @@ public:
     [[nodiscard]] std::uint64_t semanticUpdateErrors() const;
 
     void resetWarmupState();
-    void resetReranker() { rerankerAdapter_.reset(); }
 
 private:
     Dependencies deps_;
@@ -92,8 +81,6 @@ private:
     std::string adoptedPluginName_;
     bool preloadOnStartup_{false};
     bool autoOnAdd_{false};
-
-    std::shared_ptr<yams::search::IReranker> rerankerAdapter_;
 };
 
 } // namespace yams::daemon

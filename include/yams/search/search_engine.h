@@ -56,33 +56,6 @@ struct SearchParams {
 };
 
 /**
- * @brief Interface for cross-encoder document reranking
- *
- * Rerankers use cross-encoder models to score query-document pairs,
- * providing more accurate relevance scores than bi-encoder (embedding) similarity.
- * This is typically used as a second-stage ranker after initial retrieval.
- */
-class IReranker {
-public:
-    virtual ~IReranker() = default;
-
-    /**
-     * @brief Score documents against a query using cross-encoder
-     *
-     * @param query The search query
-     * @param documents The document texts/snippets to score
-     * @return Vector of relevance scores [0,1] for each document, or error
-     */
-    virtual Result<std::vector<float>>
-    scoreDocuments(const std::string& query, const std::vector<std::string>& documents) = 0;
-
-    /**
-     * @brief Check if the reranker is ready to accept requests
-     */
-    virtual bool isReady() const = 0;
-};
-
-/**
  * @brief Configuration for SearchEngine
  *
  * Search engine configuration with tunable weights for each component.
@@ -390,19 +363,14 @@ struct SearchEngineConfig {
     bool includeDebugInfo = false;       // Include per-component scores in results
     bool includeComponentTiming = false; // Include per-component execution time in response
 
-    // Reranking configuration
-    bool enableReranking = true;           // Enable reranking (score-based by default)
-    size_t rerankTopK = 5;                 // Number of top results to rerank
-    size_t rerankSnippetMaxChars = 256;    // Max snippet chars sent to reranker
-    float rerankScoreGapThreshold = 0.05f; // Skip rerank if top1-top2 gap exceeds this
+    // Reranking / post-fusion adjustment configuration
+    bool enableReranking = true; // Enable post-fusion rerank windowing / score replacement
+    size_t rerankTopK = 5;       // Number of top fused results eligible for rerank-style passes
     // Minimum score ratio for a multi-source doc to count as "competitive anchored evidence"
     // and override the score-gap guard. 0.0 = any multi-source doc counts (prior behavior).
     // E.g. 0.70 means the competitor must score >= 70% of rank-1's score.
     float rerankAnchoredMinRelativeScore = 0.0f;
-    float rerankWeight = 0.60f;        // Blend weight for model reranking
-    bool rerankReplaceScores = true;   // If true, replace scores entirely; if false, blend
-    bool rerankAdaptiveBlend = false;  // Scale blend weight by reranker confidence
-    float rerankAdaptiveFloor = 0.10f; // Minimum effective blend weight when adaptive
+    bool rerankReplaceScores = true; // If true, replace scores entirely; if false, blend
 
     // Fusion candidate limit: how many fused results to keep before reranking
     // 0 = auto: max(userLimit, max(rerankTopK, graphRerankTopN))
@@ -448,15 +416,8 @@ struct SearchEngineConfig {
     float graphPathSignalWeight = 0.10F;
     float graphCorroborationFloor = 0.35F;
 
-    // Model-based reranking (cross-encoder) - opt-in, requires ONNX model
-    bool enableModelReranking = false; // Use cross-encoder model (slow, opt-in)
-
-    // Score-based reranking (default) - uses component scores, no model needed
-    // Boosts documents that score well in BOTH text AND vector components
-    bool useScoreBasedReranking = true; // Use score-based reranking (fast, default)
-
     // TurboQuant packed-code reranking: stable default for packed-code corpora.
-    // Runs after first-stage fusion and before optional cross-encoder reranking.
+    // Runs after first-stage fusion.
     // Candidates without packed codes fall through unchanged when
     // turboQuantRerankOnlyWhenPackedAvailable is true.
     bool enableTurboQuantRerank = true;   // Enable TurboQuant vector reranking
@@ -1516,16 +1477,6 @@ public:
      * @param extractor Function to extract concepts from query text
      */
     void setConceptExtractor(EntityExtractionFunc extractor);
-
-    /**
-     * @brief Set the reranker for cross-encoder second-stage ranking
-     *
-     * When a reranker is set and config.enableReranking is true, search results
-     * are passed through the cross-encoder for improved relevance scoring.
-     *
-     * @param reranker The reranker implementation (or nullptr to disable)
-     */
-    void setReranker(std::shared_ptr<IReranker> reranker);
 
     /**
      * @brief Install a runtime SearchTuner for adaptive per-query tuning.

@@ -170,6 +170,24 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
     _putenv_s("YAMS_IN_DAEMON", "1");
 #endif
 
+    if (!config_.dataDir.empty()) {
+#ifndef _WIN32
+        ::setenv("YAMS_STORAGE", config_.dataDir.c_str(), 1);
+#else
+        _putenv_s("YAMS_STORAGE", config_.dataDir.string().c_str());
+#endif
+        spdlog::debug("Seeded YAMS_STORAGE='{}'", config_.dataDir.string());
+    }
+
+    if (!config_.configFilePath.empty()) {
+#ifndef _WIN32
+        ::setenv("YAMS_CONFIG", config_.configFilePath.c_str(), 1);
+#else
+        _putenv_s("YAMS_CONFIG", config_.configFilePath.string().c_str());
+#endif
+        spdlog::debug("Seeded YAMS_CONFIG='{}'", config_.configFilePath.string());
+    }
+
     if (!config_.socketPath.empty()) {
 #ifndef _WIN32
         ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(), 1);

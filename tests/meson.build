@@ -584,24 +584,6 @@ if catch2_dep.found()
   )
 
   if onnx_dep.found()
-#Reranker session test(uses mock mode by default, real model optional)
-#Compile the reranker session source directly into the test to avoid plugin linking issues
-    reranker_test_deps = [catch2_dep, catch2_main_dep] + test_deps + onnx_dep
-
-    catch2_daemon_reranker_exe = executable('catch2_daemon_reranker',
-      files(
-        'unit/daemon/onnx_reranker_session_test.cpp',
-        '../plugins/onnx/onnx_text_processing.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
-        '../plugins/onnx/onnx_reranker_session.cpp',
-        '../src/vector/tokenizer.cpp',
-      ),
-      include_directories: incs,
-      dependencies: reranker_test_deps,
-      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-      build_rpath: ':'.join(_test_rpaths),
-      install: false,
-    )
     onnx_provider_test_deps = [catch2_dep, catch2_main_dep] + test_deps + onnx_dep
     catch2_daemon_onnx_provider_exe = executable('catch2_daemon_onnx_provider',
       files(
@@ -610,7 +592,6 @@ if catch2_dep.found()
         '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
-        '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
       ),
@@ -640,7 +621,6 @@ if catch2_dep.found()
         '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
-        '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
       ),
@@ -1011,7 +991,6 @@ if catch2_dep.found()
         '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
-        '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
       ),
@@ -2073,19 +2052,6 @@ if catch2_dep.found()
     install: false,
   )
 
-#Reranker Integration Tests(Catch2)
-#Tests IReranker interface, ModelProviderRerankerAdapter, and reranker config
-  reranker_integration_exe = executable('reranker_integration',
-    files('unit/search/reranker_integration_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
-      dependency('yams_daemon'),
-    ],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
 #Ghidra plugin integration test(PBI - 075)
 #Tests plugin spawning and JSON - RPC communication without requiring Ghidra installed
   if host_machine.system() != 'windows'
@@ -2439,12 +2405,6 @@ if catch2_dep.found()
     timeout: 180
   )
 
-  test('reranker_integration', reranker_integration_exe,
-    suite: ['catch2', 'unit', 'search', 'reranker'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
 #Plugin integration tests
   if host_machine.system() != 'windows'
     test('ghidra_plugin_communication', ghidra_plugin_exe,
@@ -2610,19 +2570,6 @@ if catch2_dep.found()
     timeout: 60,
     is_parallel: false
   )
-
-  if onnx_dep.found()
-#Reranker session test - uses mock mode by default, enabling quick CI runs
-    test('daemon_reranker_session', catch2_daemon_reranker_exe,
-      suite: ['catch2', 'unit', 'daemon', 'reranker'],
-      env: {
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-        'YAMS_TEST_MODE': '1',  # Enable mock mode for CI
-      },
-      timeout: 60,
-      is_parallel: true
-    )
-  endif
 
   if onnx_dep.found()
     test('daemon_onnx_provider_config', catch2_daemon_onnx_provider_exe,

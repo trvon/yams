@@ -8,16 +8,6 @@ yams_metadata = dependency('yams_metadata', required: false)
 tl_expected_dep = dependency('tl-expected', required: true)
 fs = import('fs')
 
-onnx_opt = get_option('enable-onnx')
-
-onnx_dep = onnxruntime_resolved_dep
-
-onnx_feature_requested = not onnx_opt.disabled()
-onnx_runtime_link = false
-if onnx_feature_requested and onnx_dep.found()
-  onnx_runtime_link = true
-endif
-
 # Optional include dirs for third-party headers
 # Note: HNSW implementation now uses sqlite-vec-cpp, hnswlib no longer needed
 

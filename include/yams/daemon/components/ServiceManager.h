@@ -80,7 +80,6 @@ class RepairManager;
 namespace yams::search {
 class SearchEngine;
 class SearchEngineBuilder;
-class IReranker;
 } // namespace yams::search
 namespace yams::vector {
 class EmbeddingGenerator;
@@ -95,7 +94,6 @@ class RetrievalSessionManager;
 class WorkerPool;
 class TuningManager;
 class CheckpointManager;
-class OnnxRerankerSession;
 } // namespace yams::daemon
 
 namespace yams::daemon {

@@ -124,88 +124,8 @@ struct GenerationStats {
     }
 };
 
-/**
- * Text preprocessing utilities
- */
-class TextPreprocessor {
-public:
-    explicit TextPreprocessor(const EmbeddingConfig& config);
-    ~TextPreprocessor();
-
-    // Text normalization
-    std::string normalizeText(const std::string& text);
-
-    // Tokenization (basic implementation - can be extended with proper tokenizers)
-    std::vector<int32_t> tokenize(const std::string& text);
-    std::vector<std::vector<int32_t>> tokenizeBatch(const std::vector<std::string>& texts);
-
-    // Token processing
-    std::vector<int32_t> truncateTokens(const std::vector<int32_t>& tokens, size_t max_length);
-    std::vector<int32_t> padTokens(const std::vector<int32_t>& tokens, size_t target_length);
-
-    // Attention mask generation
-    std::vector<int32_t> generateAttentionMask(const std::vector<int32_t>& tokens);
-
-    // Utility functions
-    size_t getVocabSize() const;
-    bool isValidToken(int32_t token_id) const;
-    std::string decodeToken(int32_t token_id) const;
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> pImpl;
-};
-
-/**
- * ONNX model management for embeddings
- */
-class ModelManager {
-public:
-    ModelManager();
-    explicit ModelManager(bool deterministic);
-    ~ModelManager();
-
-    // Non-copyable but movable
-    ModelManager(const ModelManager&) = delete;
-    ModelManager& operator=(const ModelManager&) = delete;
-    ModelManager(ModelManager&&) noexcept;
-    ModelManager& operator=(ModelManager&&) noexcept;
-
-    // Model loading and management
-    bool loadModel(const std::string& model_name, const std::string& model_path);
-    bool isModelLoaded(const std::string& model_name) const;
-    void unloadModel(const std::string& model_name);
-    void clearCache();
-
-    // Model inference
-    std::vector<std::vector<float>>
-    runInference(const std::string& model_name,
-                 const std::vector<std::vector<int32_t>>& input_tokens,
-                 const std::vector<std::vector<int32_t>>& attention_masks = {});
-
-    // Model information
-    size_t getModelEmbeddingDim(const std::string& model_name) const;
-    size_t getModelMaxLength(const std::string& model_name) const;
-
-    // Performance and monitoring
-    struct ModelStats {
-        size_t inference_count = 0;
-        std::chrono::milliseconds total_inference_time{0};
-        size_t model_size_bytes = 0;
-        size_t memory_usage_bytes = 0;
-    };
-
-    ModelStats getModelStats(const std::string& model_name) const;
-    std::vector<std::string> getLoadedModels() const;
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> pImpl;
-};
-
 // Forward declarations for backend implementations
 class IEmbeddingBackend;
-class LocalOnnxBackend;
 class DaemonBackend;
 class HybridBackend;
 

@@ -457,7 +457,6 @@ struct SearchResult {
     std::optional<double> pathScore;        ///< Contribution from path matching
     std::optional<double> tagScore;         ///< Contribution from tag matching
     std::optional<double> symbolScore;      ///< Contribution from symbol search
-    std::optional<double> rerankerScore;    ///< Cross-encoder reranker score (if enabled)
 };
 
 /**

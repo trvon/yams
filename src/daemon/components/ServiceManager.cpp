@@ -89,13 +89,11 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
-#include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/migration.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 #include <yams/repair/embedding_repair_util.h>
-#include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -202,24 +200,6 @@ std::uint64_t nowUnixMillis() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
                                           .count());
-}
-
-std::shared_ptr<yams::search::IReranker>
-buildConfiguredReranker(const std::string& backendSelection, std::size_t embeddingDim,
-                        yams::search::ModelProviderRerankerAdapter::ProviderGetter providerGetter) {
-    auto simeonProvider = std::shared_ptr<yams::daemon::IModelProvider>(
-        yams::daemon::makeSimeonModelProvider(embeddingDim ? embeddingDim : 1024).release());
-    auto simeonReranker = std::make_shared<yams::search::ModelProviderRerankerAdapter>(
-        [provider = std::move(simeonProvider)]() { return provider; });
-
-    if (backendSelection == "simeon") {
-        return simeonReranker;
-    }
-
-    auto primaryReranker =
-        std::make_shared<yams::search::ModelProviderRerankerAdapter>(std::move(providerGetter));
-    return std::make_shared<yams::search::FallbackRerankerAdapter>(std::move(primaryReranker),
-                                                                   std::move(simeonReranker));
 }
 
 } // namespace
@@ -1223,7 +1203,6 @@ void ServiceManager::shutdown() {
     }
     storeGraphComponent(std::shared_ptr<GraphComponent>{});
     graphQueryServiceOverride_.reset();
-    embeddingLifecycle_.resetReranker();
     repairManager_.reset();
     contentExtractors_.clear();
     symbolExtractors_.clear();
@@ -1260,7 +1239,6 @@ void ServiceManager::shutdown() {
     searchComponent_.reset();
     spdlog::info("[ServiceManager] Phase 8.4.1: Search component reset");
     graphQueryServiceOverride_.reset();
-    embeddingLifecycle_.resetReranker();
     repairManager_.reset();
     contentExtractors_.clear();
     symbolExtractors_.clear();
@@ -2614,15 +2592,6 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
             state_.readiness.modelProviderReady = (modelProvider != nullptr);
             spdlog::info("[ServiceManager] Synced model provider: model='{}', provider={}",
                          embeddingLifecycle_.modelName(), modelProvider ? "valid" : "null");
-
-            // Select reranker from the configured backend, but fall back to Simeon
-            // when the preferred provider lacks a downloaded reranker model.
-            const auto rerankerPolicy = ConfigResolver::resolveRerankerBackendPolicy(config_);
-            const auto backend = rerankerPolicy.backend.value_or("simeon");
-            embeddingLifecycle_.setReranker(
-                buildConfiguredReranker(backend, embeddingLifecycle_.getEmbeddingDimension(),
-                                        [this]() { return this->loadModelProvider(); }));
-            spdlog::info("[Reranker] Initialized '{}' reranker path with Simeon fallback", backend);
         }
         return result;
     }
@@ -2738,12 +2707,6 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
         spdlog::info("[{}] GLiNER concept extractor wired to search engine", contextLabel);
     } else {
         spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
-    }
-
-    auto reranker = embeddingLifecycle_.reranker();
-    if (reranker && reranker->isReady()) {
-        engine->setReranker(std::move(reranker));
-        spdlog::debug("[{}] Cross-encoder reranker wired to search engine", contextLabel);
     }
 
     // Milestone 11: wire compressed ANN index invalidation so the search engine

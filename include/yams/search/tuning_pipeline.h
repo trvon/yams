@@ -37,7 +37,7 @@ struct QueryPolicyResolution {
 void applyZoomLayer(SearchEngineConfig::NavigationZoomLevel zoom, TunedParams& params);
 
 /// Zoom-specific adjustments for SearchEngineConfig-only fields
-/// (graphExpansionMaxTerms, rerankSnippetMaxChars, etc.).
+/// (graphExpansionMaxTerms, graphRerankTopN, etc.).
 /// Call AFTER applyTo() since these fields don't exist in TunedParams.
 void applyZoomConfigExtras(SearchEngineConfig::NavigationZoomLevel zoom,
                            SearchEngineConfig& config);

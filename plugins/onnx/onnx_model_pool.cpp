@@ -474,6 +474,9 @@ public:
                                          : runtimeInfo.errorMessage);
         }
 
+        memoryInfo_ = std::make_unique<Ort::MemoryInfo>(
+            Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
+
         // Initialize ONNX Runtime environment
         // Use a single global Ort::Env per process (best practice)
         // The global env is protected by g_onnx_init_mutex during initialization.
@@ -1347,7 +1350,7 @@ private:
                 ioBinding_->BindInput(inputNames_[i].c_str(), inputs[i]);
             }
             for (const auto& name : resolveOutputNames()) {
-                ioBinding_->BindOutput(name, memoryInfo_);
+                ioBinding_->BindOutput(name, *memoryInfo_);
             }
             session_->Run(Ort::RunOptions{nullptr}, *ioBinding_);
             return ioBinding_->GetOutputValues();
@@ -1415,13 +1418,14 @@ private:
 
         std::vector<Ort::Value> input_tensors;
         input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-            memoryInfo_, bufs.tokens.data(), input_tensor_size, input_shape.data(), 2));
+            *memoryInfo_, bufs.tokens.data(), input_tensor_size, input_shape.data(), 2));
         input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-            memoryInfo_, bufs.masks.data(), input_tensor_size, input_shape.data(), 2));
+            *memoryInfo_, bufs.masks.data(), input_tensor_size, input_shape.data(), 2));
         if (inputNames_.size() >= 3) {
             bufs.token_type_ids.assign(effective_seq_len, 0);
-            input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-                memoryInfo_, bufs.token_type_ids.data(), input_tensor_size, input_shape.data(), 2));
+            input_tensors.push_back(
+                Ort::Value::CreateTensor<int64_t>(*memoryInfo_, bufs.token_type_ids.data(),
+                                                  input_tensor_size, input_shape.data(), 2));
         }
 
         auto outputs = runSession(input_tensors);
@@ -1631,14 +1635,14 @@ private:
         }
 
         std::vector<Ort::Value> inputs;
-        inputs.push_back(Ort::Value::CreateTensor<int64_t>(memoryInfo_, bufs.tokens.data(),
+        inputs.push_back(Ort::Value::CreateTensor<int64_t>(*memoryInfo_, bufs.tokens.data(),
                                                            tensor_size, input_shape.data(), 2));
-        inputs.push_back(Ort::Value::CreateTensor<int64_t>(memoryInfo_, bufs.masks.data(),
+        inputs.push_back(Ort::Value::CreateTensor<int64_t>(*memoryInfo_, bufs.masks.data(),
                                                            tensor_size, input_shape.data(), 2));
         if (inputNames_.size() >= 3) {
             bufs.token_type_ids.assign(tensor_size, 0);
             inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-                memoryInfo_, bufs.token_type_ids.data(), tensor_size, input_shape.data(), 2));
+                *memoryInfo_, bufs.token_type_ids.data(), tensor_size, input_shape.data(), 2));
         }
 
         // Wrap ONNX Run in try/catch to prevent exceptions from bubbling through ABI boundary
@@ -1981,7 +1985,7 @@ private:
     bool normalize_ = true;
 
     // Cached MemoryInfo to avoid re-creating per inference call.
-    Ort::MemoryInfo memoryInfo_{Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)};
+    std::unique_ptr<Ort::MemoryInfo> memoryInfo_;
 
     // I/O Binding for optimized inference dispatch (pre-resolved name lookups,
     // better GPU memory placement). Falls back to Session::Run() if unavailable.
