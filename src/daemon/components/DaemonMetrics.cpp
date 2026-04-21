@@ -944,8 +944,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
 
     // Readiness flags and progress
     try {
-        // Align boolean readiness with lifecycle readiness (authoritative)
-        // rather than deprecated DaemonReadiness::fullyReady().
+        // Align boolean readiness with lifecycle readiness rather than bootstrap-only summaries.
         if (lifecycle_) {
             try {
                 auto lsnap = lifecycle_->snapshot();
@@ -1686,8 +1685,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             if (prov > 0)
                 out.memoryBreakdownBytes["provider_bytes"] = prov;
 
-            // Vector index memory stats removed - VectorIndexManager no longer used
-            // Memory is tracked by VectorDatabase (sqlite-vec) instead
+            // Vector memory is reported by VectorDatabase (sqlite-vec).
         }
     } catch (...) {
     }

@@ -170,7 +170,7 @@ public:
      * @param defaultValue Value returned when neither env nor TOML is set.
      * @return Lower-cased backend name.
      */
-    static std::string resolveEmbeddingBackend(const std::string& defaultValue = "auto");
+    static std::string resolveEmbeddingBackend(const std::string& defaultValue = "simeon");
 
     /**
      * @brief Write vector sentinel file with dimension and schema info.

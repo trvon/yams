@@ -29,7 +29,7 @@ struct EmbeddingConfig {
     // Model configuration (used by daemon and fallback/mock providers)
     std::string model_name = "all-MiniLM-L6-v2";
     size_t max_sequence_length = 512;
-    size_t embedding_dim = 384;
+    size_t embedding_dim = 1024;
     size_t batch_size = 32;
     bool normalize_embeddings = true;
     float padding_token_id = 0.0f;

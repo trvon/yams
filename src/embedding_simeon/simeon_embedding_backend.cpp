@@ -23,7 +23,7 @@ simeon::NGramMode parse_ngram_mode(const std::string& s) {
         return simeon::NGramMode::WordOnly;
     if (s == "both" || s == "char_and_word")
         return simeon::NGramMode::CharAndWord;
-    return simeon::NGramMode::CharOnly;
+    return simeon::NGramMode::CharAndWord;
 }
 
 simeon::ProjectionMode parse_projection_mode(const std::string& s) {
@@ -39,7 +39,7 @@ simeon::ProjectionMode parse_projection_mode(const std::string& s) {
         return simeon::ProjectionMode::VerySparse;
     if (s == "achlioptas_sparse" || s == "achlioptas")
         return simeon::ProjectionMode::AchlioptasSparse;
-    return simeon::ProjectionMode::AchlioptasSparse;
+    return simeon::ProjectionMode::Fwht;
 }
 
 const char* projection_mode_label(simeon::ProjectionMode m) noexcept {
@@ -90,7 +90,7 @@ std::string compute_simeon_recipe_label() {
     const auto policy = daemon::ConfigResolver::resolveSimeonEncoderPolicy();
     const auto proj = parse_projection_mode(policy.projection.value_or(std::string{}));
     const auto sketch = policy.sketchDim.value_or(4096);
-    const auto out = policy.outputDim.value_or(384);
+    const auto out = policy.outputDim.value_or(1024);
     const auto pq = policy.pqBytes.value_or(0);
     std::string s = projection_mode_label(proj);
     s += '_';

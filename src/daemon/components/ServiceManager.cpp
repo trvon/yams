@@ -1332,10 +1332,10 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
         yams::common::ensureDirectories(dir);
         fs::path path = dir / "yams-daemon.status.json";
         nlohmann::json j;
-        j["ready"] = state.readiness.fullyReady();
+        j["ready"] = state.readiness.bootstrapReady();
         // Normalize overall to lowercase for consistency with IPC lifecycle strings
         {
-            std::string ov = state.readiness.overallStatus();
+            std::string ov = state.readiness.bootstrapStatus();
             for (auto& c : ov)
                 c = static_cast<char>(std::tolower(c));
             j["overall"] = ov;

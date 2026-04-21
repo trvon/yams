@@ -2868,7 +2868,7 @@ private:
         if (!fs::exists(base, ec) || !fs::is_directory(base, ec))
             return;
 
-        std::vector<std::string> warnings; // legacy textual list (kept for existing output)
+        std::vector<std::string> warnings; // Text warnings collected for the current output path.
         struct ModelRec {
             std::string name;
             int dim; // 384/768 or -1 for unknown

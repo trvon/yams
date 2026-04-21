@@ -638,7 +638,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             }
         } catch (...) {
             // Fallback: preserve lowercase normalization
-            res.overallStatus = state_->readiness.overallStatus();
+            res.overallStatus = state_->readiness.bootstrapStatus();
             for (auto& c : res.overallStatus)
                 c = static_cast<char>(std::tolower(c));
             res.lifecycleState = res.overallStatus;

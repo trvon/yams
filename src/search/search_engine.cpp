@@ -8,12 +8,14 @@
 #include <yams/search/graph_expansion.h>
 #include <yams/search/kg_scorer.h>
 #include <yams/search/kg_scorer_simple.h>
+#include <yams/search/lexical_scoring.h>
 #include <yams/search/query_expansion.h>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
+#include <yams/search/simeon_lexical_backend.h>
 #include <yams/search/tuning_features.h>
 #include <yams/search/tuning_pipeline.h>
 #include <yams/search/turboquant_packed_reranker.h>
@@ -970,64 +972,6 @@ bool containsFast(std::string_view haystack, std::string_view needle) {
     return yams::app::services::simdMemmem(haystack, needle) != yams::app::services::kMemmemNpos;
 }
 
-float normalizedBm25Score(double rawScore, float divisor, double minScore, double maxScore) {
-    if (maxScore > minScore) {
-        const double norm = (rawScore - minScore) / (maxScore - minScore);
-        return std::clamp(static_cast<float>(1.0 - norm), 0.0f, 1.0f);
-    }
-    return std::clamp(static_cast<float>(-rawScore) / divisor, 0.0f, 1.0f);
-}
-
-float filenamePathBoost(const std::string& query, const std::string& filePath,
-                        const std::string& fileName) {
-    const auto queryTokens = tokenizeLower(query);
-    if (queryTokens.empty()) {
-        return 1.0f;
-    }
-
-    const auto nameTokens = tokenizeLower(fileName);
-    const auto pathTokens = tokenizeLower(filePath);
-    if (nameTokens.empty() && pathTokens.empty()) {
-        return 1.0f;
-    }
-
-    std::unordered_set<std::string> nameSet(nameTokens.begin(), nameTokens.end());
-    std::unordered_set<std::string> pathSet(pathTokens.begin(), pathTokens.end());
-
-    std::size_t nameMatches = 0;
-    std::size_t pathMatches = 0;
-    for (const auto& tok : queryTokens) {
-        if (nameSet.count(tok)) {
-            nameMatches++;
-        } else if (pathSet.count(tok)) {
-            pathMatches++;
-        } else {
-            for (const auto& nameTok : nameTokens) {
-                if (nameTok.rfind(tok, 0) == 0) {
-                    nameMatches++;
-                    break;
-                }
-            }
-            if (nameMatches == 0) {
-                for (const auto& pathTok : pathTokens) {
-                    if (pathTok.rfind(tok, 0) == 0) {
-                        pathMatches++;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    if (nameMatches > 0) {
-        return 1.0f + std::min(2.0f, 0.5f + static_cast<float>(nameMatches) * 0.5f);
-    }
-    if (pathMatches > 0) {
-        return 1.0f + std::min(1.0f, 0.25f + static_cast<float>(pathMatches) * 0.25f);
-    }
-    return 1.0f;
-}
-
 double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent,
                               SearchEngineConfig::NavigationZoomLevel zoomLevel) {
     const double text = result.keywordScore.value_or(0.0);
@@ -1832,6 +1776,16 @@ public:
 
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner) { tuner_ = std::move(tuner); }
 
+    void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
+        simeonLexical_ = std::move(backend);
+        if (simeonLexical_ && metadataRepo_) {
+            auto build = simeonLexical_->buildAsync(metadataRepo_);
+            if (!build) {
+                spdlog::warn("[simeon-lexical] buildAsync failed: {}", build.error().message);
+            }
+        }
+    }
+
     std::shared_ptr<SearchTuner> getSearchTuner() const { return tuner_; }
 
     void invalidateCompressedANNIndex() {
@@ -1850,6 +1804,28 @@ private:
                   const SearchEngineConfig& config, size_t limit,
                   QueryExpansionStats* expansionStats = nullptr,
                   const std::vector<GraphExpansionTerm>* graphExpansionTerms = nullptr);
+
+    struct Fts5CandidatePoolStats {
+        size_t baseFtsHitCount = 0;
+        bool baseFtsSucceeded = false;
+    };
+
+    void appendLexicalBatch(const std::string& query, QueryIntent queryIntent,
+                            const SearchEngineConfig& config,
+                            const yams::metadata::SearchResults& searchResults, float scorePenalty,
+                            bool dedupe, std::unordered_set<std::string>* seenHashes,
+                            ComponentResult::Source source, std::vector<ComponentResult>& results,
+                            QueryExpansionStats* expansionStats);
+
+    Fts5CandidatePoolStats fetchFts5CandidatePool(const std::string& query, QueryIntent queryIntent,
+                                                  const SearchEngineConfig& config, size_t limit,
+                                                  QueryExpansionStats* expansionStats,
+                                                  std::vector<ComponentResult>& results,
+                                                  std::unordered_set<std::string>& seenHashes);
+
+    void applySimeonLexicalRescoring(const std::string& query,
+                                     yams::metadata::SearchResults& searchResults);
+
     Result<std::vector<ComponentResult>> queryPathTree(const std::string& query, size_t limit);
     Result<std::vector<ComponentResult>>
     queryKnowledgeGraph(const std::string& query, size_t limit,
@@ -1892,6 +1868,7 @@ private:
     std::vector<std::string> compressedAnnDocumentHashes_;
     bool compressedAnnIndexReady_ = false; // True once build() has been called
     std::shared_ptr<SearchTuner> tuner_;   // Adaptive runtime tuner (optional)
+    std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
     std::atomic<int64_t> rerankerCooldownUntilMicros_{0};
 };
 
@@ -3457,49 +3434,37 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 if (!searchResults) {
                     continue;
                 }
-                graphDocExpansionFtsHitCount += searchResults.value().results.size();
+                const auto& rows = searchResults.value().results;
+                graphDocExpansionFtsHitCount += rows.size();
 
-                double minBm25 = 0.0;
-                double maxBm25 = 0.0;
-                bool rangeInitialized = false;
-                for (const auto& sr : searchResults.value().results) {
-                    if (!rangeInitialized) {
-                        minBm25 = maxBm25 = sr.score;
-                        rangeInitialized = true;
-                    } else {
-                        minBm25 = std::min(minBm25, sr.score);
-                        maxBm25 = std::max(maxBm25, sr.score);
-                    }
-                }
+                detail::LexicalScoringInputs inputs;
+                inputs.candidates =
+                    std::span<const yams::metadata::SearchResult>(rows.data(), rows.size());
+                inputs.applyFilenameBoost = false;
+                inputs.applyIntentAdaptiveWeighting = false;
+                inputs.bm25NormDivisor = workingConfig.bm25NormDivisor;
+                inputs.penalty =
+                    workingConfig.graphExpansionFtsPenalty * std::clamp(term.score, 0.2f, 1.0f);
+                inputs.sourceTag = ComponentResult::Source::GraphText;
+                inputs.startRank = allComponentResults.size();
+                inputs.admissionMinScore = workingConfig.graphTextMinAdmissionScore;
 
-                const size_t startRank = allComponentResults.size();
-                for (size_t rank = 0; rank < searchResults.value().results.size(); ++rank) {
-                    const auto& sr = searchResults.value().results[rank];
+                auto scored = detail::scoreLexicalBatch(inputs);
+
+                for (size_t rank = 0; rank < rows.size(); ++rank) {
+                    const auto& sr = rows[rank];
                     const auto docId =
                         documentIdForTrace(sr.document.filePath, sr.document.sha256Hash);
                     if (!docId.empty() && existingDocIds.contains(docId)) {
                         continue;
                     }
-
-                    ComponentResult cr;
-                    cr.documentHash = sr.document.sha256Hash;
-                    cr.filePath = sr.document.filePath;
-                    cr.score =
-                        std::clamp(workingConfig.graphExpansionFtsPenalty *
-                                       std::clamp(term.score, 0.2f, 1.0f) *
-                                       normalizedBm25Score(sr.score, workingConfig.bm25NormDivisor,
-                                                           minBm25, maxBm25),
-                                   0.0f, 1.0f);
-                    if (cr.score < workingConfig.graphTextMinAdmissionScore) {
+                    auto& opt = scored.results[rank];
+                    if (!opt) {
                         ++textExpansionStats.graphTextBlockedLowScoreCount;
                         continue;
                     }
-                    cr.source = ComponentResult::Source::GraphText;
-                    cr.rank = startRank + rank;
-                    cr.snippet =
-                        sr.snippet.empty() ? std::nullopt : std::optional<std::string>(sr.snippet);
-                    cr.debugInfo["graph_doc_expansion_term"] = term.text;
-                    allComponentResults.push_back(std::move(cr));
+                    opt->debugInfo["graph_doc_expansion_term"] = term.text;
+                    allComponentResults.push_back(std::move(*opt));
                     if (!docId.empty()) {
                         existingDocIds.insert(docId);
                     }
@@ -6039,6 +6004,213 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
     return results;
 }
 
+void SearchEngine::Impl::appendLexicalBatch(
+    const std::string& query, QueryIntent queryIntent, const SearchEngineConfig& config,
+    const yams::metadata::SearchResults& searchResults, float scorePenalty, bool dedupe,
+    std::unordered_set<std::string>* seenHashes, ComponentResult::Source source,
+    std::vector<ComponentResult>& results, QueryExpansionStats* expansionStats) {
+    detail::LexicalScoringInputs inputs;
+    inputs.candidates = std::span<const yams::metadata::SearchResult>(searchResults.results.data(),
+                                                                      searchResults.results.size());
+    inputs.query = query;
+    inputs.intent = queryIntent;
+    inputs.applyIntentAdaptiveWeighting = config.enableIntentAdaptiveWeighting;
+    inputs.applyFilenameBoost = true;
+    inputs.bm25NormDivisor = config.bm25NormDivisor;
+    inputs.penalty = scorePenalty;
+    inputs.sourceTag = source;
+    inputs.startRank = results.size();
+    if (source == ComponentResult::Source::GraphText) {
+        inputs.admissionMinScore = config.graphTextMinAdmissionScore;
+    }
+
+    auto scored = detail::scoreLexicalBatch(inputs);
+    if (expansionStats != nullptr && scored.admissionDroppedCount > 0) {
+        expansionStats->graphTextBlockedLowScoreCount += scored.admissionDroppedCount;
+    }
+
+    for (auto& opt : scored.results) {
+        if (!opt) {
+            continue;
+        }
+        if (dedupe && seenHashes != nullptr && seenHashes->contains(opt->documentHash)) {
+            continue;
+        }
+        if (seenHashes != nullptr) {
+            seenHashes->insert(opt->documentHash);
+        }
+        results.push_back(std::move(*opt));
+    }
+}
+
+void SearchEngine::Impl::applySimeonLexicalRescoring(const std::string& query,
+                                                     yams::metadata::SearchResults& searchResults) {
+    if (!simeonLexical_ || !simeonLexical_->ready() || searchResults.results.empty()) {
+        return;
+    }
+
+    std::vector<std::int64_t> ids;
+    ids.reserve(searchResults.results.size());
+    for (const auto& r : searchResults.results) {
+        ids.push_back(r.document.id);
+    }
+
+    auto scored = simeonLexical_->score(query, ids);
+    if (!scored) {
+        spdlog::debug("[simeon-lexical] score failed, keeping FTS5 scores: {}",
+                      scored.error().message);
+        return;
+    }
+
+    const auto& values = scored.value();
+    if (values.size() != searchResults.results.size()) {
+        spdlog::warn("[simeon-lexical] score size mismatch ({} vs {}); keeping FTS5 scores",
+                     values.size(), searchResults.results.size());
+        return;
+    }
+    for (size_t i = 0; i < values.size(); ++i) {
+        searchResults.results[i].score = static_cast<double>(values[i]);
+    }
+    std::sort(searchResults.results.begin(), searchResults.results.end(),
+              [](const yams::metadata::SearchResult& a, const yams::metadata::SearchResult& b) {
+                  return a.score > b.score;
+              });
+}
+
+SearchEngine::Impl::Fts5CandidatePoolStats SearchEngine::Impl::fetchFts5CandidatePool(
+    const std::string& query, QueryIntent queryIntent, const SearchEngineConfig& config,
+    size_t limit, QueryExpansionStats* expansionStats, std::vector<ComponentResult>& results,
+    std::unordered_set<std::string>& seenHashes) {
+    Fts5CandidatePoolStats stats;
+
+    auto fts5Results = metadataRepo_->search(query, static_cast<int>(limit), 0);
+    stats.baseFtsSucceeded = static_cast<bool>(fts5Results);
+    if (!stats.baseFtsSucceeded) {
+        spdlog::debug("FTS5 search failed, continuing with fallback expansion: {}",
+                      fts5Results.error().message);
+    }
+
+    if (stats.baseFtsSucceeded) {
+        stats.baseFtsHitCount = fts5Results.value().results.size();
+        applySimeonLexicalRescoring(query, fts5Results.value());
+        appendLexicalBatch(query, queryIntent, config, fts5Results.value(), 1.0f, true, &seenHashes,
+                           ComponentResult::Source::Text, results, expansionStats);
+    }
+
+    if (config.enableLexicalExpansion && stats.baseFtsHitCount < config.lexicalExpansionMinHits) {
+        std::vector<std::string> tokens = tokenizeLower(query);
+        std::vector<std::string> expansionTerms;
+        expansionTerms.reserve(tokens.size());
+        std::unordered_set<std::string> uniqueTokens;
+        uniqueTokens.reserve(tokens.size());
+
+        for (const auto& token : tokens) {
+            if (token.size() < 3) {
+                continue;
+            }
+            if (uniqueTokens.insert(token).second) {
+                expansionTerms.push_back(token);
+            }
+            if (expansionTerms.size() >= 6) {
+                break;
+            }
+        }
+
+        if (expansionTerms.size() >= 2) {
+            std::string expandedQuery;
+            expandedQuery.reserve(expansionTerms.size() * 8);
+            for (size_t i = 0; i < expansionTerms.size(); ++i) {
+                if (i > 0) {
+                    expandedQuery += " OR ";
+                }
+                expandedQuery += expansionTerms[i];
+            }
+
+            auto expandedResults = metadataRepo_->search(expandedQuery, static_cast<int>(limit), 0);
+            if (expandedResults) {
+                const float penalty = std::clamp(config.lexicalExpansionScorePenalty, 0.1f, 1.0f);
+                applySimeonLexicalRescoring(query, expandedResults.value());
+                appendLexicalBatch(query, queryIntent, config, expandedResults.value(), penalty,
+                                   true, &seenHashes, ComponentResult::Source::Text, results,
+                                   expansionStats);
+                spdlog::debug("queryFullText lexical expansion: base_hits={} expanded_hits={} "
+                              "query='{}' expanded='{}'",
+                              stats.baseFtsHitCount, results.size(), query, expandedQuery);
+            }
+        }
+    }
+
+    if (config.enableSubPhraseExpansion &&
+        stats.baseFtsHitCount < config.subPhraseExpansionMinHits) {
+        const size_t maxSubPhrases = std::max<size_t>(config.multiVectorMaxPhrases, 3);
+        auto subPhrases = generateQuerySubPhrases(query, maxSubPhrases);
+        if (expansionStats != nullptr) {
+            expansionStats->generatedSubPhrases = subPhrases.size();
+        }
+
+        std::vector<std::string> clauses;
+        clauses.reserve(subPhrases.size());
+        std::unordered_set<std::string> seenClauses;
+        seenClauses.reserve(subPhrases.size());
+
+        for (const auto& phrase : subPhrases) {
+            auto tokens = tokenizeQueryTokens(phrase);
+            if (tokens.size() < 2) {
+                continue;
+            }
+
+            std::string clause = "(";
+            for (size_t i = 0; i < tokens.size(); ++i) {
+                if (i > 0) {
+                    clause += " AND ";
+                }
+                clause += tokens[i].normalized;
+            }
+            clause += ")";
+
+            if (seenClauses.insert(clause).second) {
+                clauses.push_back(std::move(clause));
+            }
+        }
+
+        if (expansionStats != nullptr) {
+            expansionStats->subPhraseClauseCount = clauses.size();
+        }
+
+        if (!clauses.empty()) {
+            std::string expandedQuery;
+            for (size_t i = 0; i < clauses.size(); ++i) {
+                if (i > 0) {
+                    expandedQuery += " OR ";
+                }
+                expandedQuery += clauses[i];
+            }
+
+            auto expandedResults = metadataRepo_->search(expandedQuery, static_cast<int>(limit), 0);
+            if (expandedResults) {
+                if (expansionStats != nullptr) {
+                    expansionStats->subPhraseFtsHitCount = expandedResults.value().results.size();
+                }
+                const float penalty = std::clamp(config.subPhraseExpansionPenalty, 0.1f, 1.0f);
+                const size_t beforeAppend = results.size();
+                applySimeonLexicalRescoring(query, expandedResults.value());
+                appendLexicalBatch(query, queryIntent, config, expandedResults.value(), penalty,
+                                   true, &seenHashes, ComponentResult::Source::Text, results,
+                                   expansionStats);
+                if (expansionStats != nullptr) {
+                    expansionStats->subPhraseFtsAddedCount =
+                        results.size() > beforeAppend ? (results.size() - beforeAppend) : 0;
+                }
+                spdlog::debug("queryFullText sub-phrase expansion: base_hits={} "
+                              "expanded_hits={} query='{}' expanded='{}'",
+                              stats.baseFtsHitCount, results.size(), query, expandedQuery);
+            }
+        }
+    }
+
+    return stats;
+}
+
 Result<std::vector<ComponentResult>>
 SearchEngine::Impl::queryFullText(const std::string& query, QueryIntent queryIntent,
                                   const SearchEngineConfig& config, size_t limit,
@@ -6052,212 +6224,13 @@ SearchEngine::Impl::queryFullText(const std::string& query, QueryIntent queryInt
     }
 
     try {
-        float nonCodeFileMultiplier = 1.0f;
-        if (config.enableIntentAdaptiveWeighting) {
-            switch (queryIntent) {
-                case QueryIntent::Code:
-                    nonCodeFileMultiplier = 0.5f;
-                    break;
-                case QueryIntent::Path:
-                    nonCodeFileMultiplier = 0.65f;
-                    break;
-                case QueryIntent::Prose:
-                    nonCodeFileMultiplier = 1.0f;
-                    break;
-                case QueryIntent::Mixed:
-                    nonCodeFileMultiplier = 0.80f;
-                    break;
-            }
-        }
-
-        auto appendResults = [&](const yams::metadata::SearchResults& searchResults,
-                                 float scorePenalty, bool dedupe,
-                                 std::unordered_set<std::string>* seenHashes,
-                                 ComponentResult::Source source = ComponentResult::Source::Text) {
-            double minBm25 = 0.0;
-            double maxBm25 = 0.0;
-            bool bm25RangeInitialized = false;
-            for (const auto& sr : searchResults.results) {
-                double score = sr.score;
-                if (!bm25RangeInitialized) {
-                    minBm25 = score;
-                    maxBm25 = score;
-                    bm25RangeInitialized = true;
-                } else {
-                    minBm25 = std::min(minBm25, score);
-                    maxBm25 = std::max(maxBm25, score);
-                }
-            }
-
-            const size_t startRank = results.size();
-            for (size_t rank = 0; rank < searchResults.results.size(); ++rank) {
-                const auto& searchResult = searchResults.results[rank];
-                if (dedupe && seenHashes != nullptr &&
-                    seenHashes->contains(searchResult.document.sha256Hash)) {
-                    continue;
-                }
-
-                const auto& filePath = searchResult.document.filePath;
-                const auto& fileName = searchResult.document.fileName;
-
-                auto pruneCategory = magic::getPruneCategory(filePath);
-                bool isCodeFile = pruneCategory == magic::PruneCategory::BuildObject ||
-                                  pruneCategory == magic::PruneCategory::None;
-
-                float scoreMultiplier = isCodeFile ? 1.0f : nonCodeFileMultiplier;
-                scoreMultiplier *= filenamePathBoost(query, filePath, fileName);
-                scoreMultiplier *= scorePenalty;
-
-                ComponentResult result;
-                result.documentHash = searchResult.document.sha256Hash;
-                result.filePath = filePath;
-                float rawScore = static_cast<float>(searchResult.score);
-                float normalizedScore =
-                    normalizedBm25Score(rawScore, config.bm25NormDivisor, minBm25, maxBm25);
-                result.score = std::clamp(scoreMultiplier * normalizedScore, 0.0f, 1.0f);
-                if (source == ComponentResult::Source::GraphText &&
-                    result.score < config.graphTextMinAdmissionScore) {
-                    if (expansionStats != nullptr) {
-                        ++expansionStats->graphTextBlockedLowScoreCount;
-                    }
-                    continue;
-                }
-                result.source = source;
-                result.rank = startRank + rank;
-                result.snippet = searchResult.snippet.empty()
-                                     ? std::nullopt
-                                     : std::optional<std::string>(searchResult.snippet);
-                result.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
-
-                if (seenHashes != nullptr) {
-                    seenHashes->insert(result.documentHash);
-                }
-                results.push_back(std::move(result));
-            }
-        };
-
-        auto fts5Results = metadataRepo_->search(query, static_cast<int>(limit), 0);
-        size_t baseFtsHitCount = 0;
-        const bool baseFtsSucceeded = static_cast<bool>(fts5Results);
-        if (!baseFtsSucceeded) {
-            spdlog::debug("FTS5 search failed, continuing with fallback expansion: {}",
-                          fts5Results.error().message);
-        }
-
         std::unordered_set<std::string> seenHashes;
         seenHashes.reserve(limit * 2);
-        if (baseFtsSucceeded) {
-            baseFtsHitCount = fts5Results.value().results.size();
-            appendResults(fts5Results.value(), 1.0f, true, &seenHashes);
-        }
 
-        if (config.enableLexicalExpansion && baseFtsHitCount < config.lexicalExpansionMinHits) {
-            std::vector<std::string> tokens = tokenizeLower(query);
-            std::vector<std::string> expansionTerms;
-            expansionTerms.reserve(tokens.size());
-            std::unordered_set<std::string> uniqueTokens;
-            uniqueTokens.reserve(tokens.size());
-
-            for (const auto& token : tokens) {
-                if (token.size() < 3) {
-                    continue;
-                }
-                if (uniqueTokens.insert(token).second) {
-                    expansionTerms.push_back(token);
-                }
-                if (expansionTerms.size() >= 6) {
-                    break;
-                }
-            }
-
-            if (expansionTerms.size() >= 2) {
-                std::string expandedQuery;
-                expandedQuery.reserve(expansionTerms.size() * 8);
-                for (size_t i = 0; i < expansionTerms.size(); ++i) {
-                    if (i > 0) {
-                        expandedQuery += " OR ";
-                    }
-                    expandedQuery += expansionTerms[i];
-                }
-
-                auto expandedResults =
-                    metadataRepo_->search(expandedQuery, static_cast<int>(limit), 0);
-                if (expandedResults) {
-                    const float penalty =
-                        std::clamp(config.lexicalExpansionScorePenalty, 0.1f, 1.0f);
-                    appendResults(expandedResults.value(), penalty, true, &seenHashes);
-                    spdlog::debug("queryFullText lexical expansion: base_hits={} expanded_hits={} "
-                                  "query='{}' expanded='{}'",
-                                  baseFtsHitCount, results.size(), query, expandedQuery);
-                }
-            }
-        }
-
-        if (config.enableSubPhraseExpansion && baseFtsHitCount < config.subPhraseExpansionMinHits) {
-            const size_t maxSubPhrases = std::max<size_t>(config.multiVectorMaxPhrases, 3);
-            auto subPhrases = generateQuerySubPhrases(query, maxSubPhrases);
-            if (expansionStats != nullptr) {
-                expansionStats->generatedSubPhrases = subPhrases.size();
-            }
-
-            std::vector<std::string> clauses;
-            clauses.reserve(subPhrases.size());
-            std::unordered_set<std::string> seenClauses;
-            seenClauses.reserve(subPhrases.size());
-
-            for (const auto& phrase : subPhrases) {
-                auto tokens = tokenizeQueryTokens(phrase);
-                if (tokens.size() < 2) {
-                    continue;
-                }
-
-                std::string clause = "(";
-                for (size_t i = 0; i < tokens.size(); ++i) {
-                    if (i > 0) {
-                        clause += " AND ";
-                    }
-                    clause += tokens[i].normalized;
-                }
-                clause += ")";
-
-                if (seenClauses.insert(clause).second) {
-                    clauses.push_back(std::move(clause));
-                }
-            }
-
-            if (expansionStats != nullptr) {
-                expansionStats->subPhraseClauseCount = clauses.size();
-            }
-
-            if (!clauses.empty()) {
-                std::string expandedQuery;
-                for (size_t i = 0; i < clauses.size(); ++i) {
-                    if (i > 0) {
-                        expandedQuery += " OR ";
-                    }
-                    expandedQuery += clauses[i];
-                }
-
-                auto expandedResults =
-                    metadataRepo_->search(expandedQuery, static_cast<int>(limit), 0);
-                if (expandedResults) {
-                    if (expansionStats != nullptr) {
-                        expansionStats->subPhraseFtsHitCount =
-                            expandedResults.value().results.size();
-                    }
-                    const float penalty = std::clamp(config.subPhraseExpansionPenalty, 0.1f, 1.0f);
-                    const size_t beforeAppend = results.size();
-                    appendResults(expandedResults.value(), penalty, true, &seenHashes);
-                    if (expansionStats != nullptr) {
-                        expansionStats->subPhraseFtsAddedCount =
-                            results.size() > beforeAppend ? (results.size() - beforeAppend) : 0;
-                    }
-                    spdlog::debug("queryFullText sub-phrase expansion: base_hits={} "
-                                  "expanded_hits={} query='{}' expanded='{}'",
-                                  baseFtsHitCount, results.size(), query, expandedQuery);
-                }
-            }
-        }
+        const auto poolStats = fetchFts5CandidatePool(query, queryIntent, config, limit,
+                                                      expansionStats, results, seenHashes);
+        const size_t baseFtsHitCount = poolStats.baseFtsHitCount;
+        const bool baseFtsSucceeded = poolStats.baseFtsSucceeded;
 
         // Sub-phrase rescoring: unconditionally re-score already-retrieved documents
         // via AND-clause sub-phrase queries. Unlike expansion (which adds new docs),
@@ -6305,8 +6278,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, QueryIntent queryInt
                     if (it == rescoreIndex.end()) {
                         continue;
                     }
-                    float phraseNorm = normalizedBm25Score(static_cast<float>(pr.score),
-                                                           config.bm25NormDivisor, phMin, phMax);
+                    float phraseNorm = detail::normalizedBm25Score(
+                        static_cast<float>(pr.score), config.bm25NormDivisor, phMin, phMax);
                     float boost = std::clamp(phraseNorm * rescorePenalty, 0.0f, 1.0f);
                     results[it->second].score = std::max(results[it->second].score, boost);
                 }
@@ -6331,7 +6304,9 @@ SearchEngine::Impl::queryFullText(const std::string& query, QueryIntent queryInt
                     continue;
                 }
                 totalAggressiveHits += clauseResults.value().results.size();
-                appendResults(clauseResults.value(), clause.penalty, true, &seenHashes);
+                appendLexicalBatch(query, queryIntent, config, clauseResults.value(),
+                                   clause.penalty, true, &seenHashes, ComponentResult::Source::Text,
+                                   results, expansionStats);
             }
 
             if (expansionStats != nullptr) {
@@ -6379,8 +6354,9 @@ SearchEngine::Impl::queryFullText(const std::string& query, QueryIntent queryInt
                 const float penalty =
                     std::clamp(config.graphExpansionFtsPenalty * std::clamp(term.score, 0.2f, 1.0f),
                                0.1f, 1.0f);
-                appendResults(graphResults.value(), penalty, true, &seenHashes,
-                              ComponentResult::Source::GraphText);
+                appendLexicalBatch(query, queryIntent, config, graphResults.value(), penalty, true,
+                                   &seenHashes, ComponentResult::Source::GraphText, results,
+                                   expansionStats);
             }
 
             if (expansionStats != nullptr) {
@@ -7382,6 +7358,10 @@ void SearchEngine::setConceptExtractor(EntityExtractionFunc extractor) {
 
 void SearchEngine::setReranker(std::shared_ptr<IReranker> reranker) {
     pImpl_->setReranker(std::move(reranker));
+}
+
+void SearchEngine::setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
+    pImpl_->setSimeonLexicalBackend(std::move(backend));
 }
 
 void SearchEngine::setSearchTuner(std::shared_ptr<SearchTuner> tuner) {

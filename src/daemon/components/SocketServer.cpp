@@ -21,7 +21,6 @@ bool stream_trace_enabled() {
     return false;
 }
 
-// Diagnostic thread removed - simplified architecture with fixed worker pool
 } // namespace
 
 #include <spdlog/spdlog.h>

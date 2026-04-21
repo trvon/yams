@@ -40,7 +40,7 @@ public:
 
     /// Configuration for backend
     struct Config {
-        size_t embedding_dim = 384;        ///< Embedding dimensions
+        size_t embedding_dim = 1024;       ///< Embedding dimensions
         size_t hnsw_m = 16;                ///< HNSW connections per node
         size_t hnsw_ef_construction = 128; ///< HNSW build exploration factor
         size_t hnsw_ef_search = 100;       ///< HNSW search exploration factor

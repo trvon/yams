@@ -163,7 +163,7 @@ public:
     std::atomic<bool> stopRequested_{false};
     std::atomic<bool> reloadRequested_{false};
     std::atomic<bool> runLoopStarted_{false};
-    // Note: daemonThread_ removed - main loop runs on calling thread via runLoop()
+    // Main loop runs on the calling thread via runLoop().
     std::mutex stop_mutex_;
     std::condition_variable stop_cv_;
     bool stopCompleted_{true};

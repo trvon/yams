@@ -149,8 +149,8 @@ enable = true
 database_path = "vectors.db"
 # Table name for embeddings
 table_name = "document_embeddings"
-# Embedding dimension (must match the embedding model: 384 for all-MiniLM-L6-v2 / simeon-default)
-embedding_dim = 384
+# Embedding dimension (new installs default to simeon-default / 1024; existing DBs keep their stored dim)
+embedding_dim = 1024
 # Index type: "FLAT", "IVF_PQ", "HNSW"
 index_type = "IVF_PQ"
 # Number of partitions for IVF index
@@ -180,7 +180,7 @@ max_elements = 100000
 enable = true
 # Embedding backend: "auto" | "daemon" (ONNX) | "simeon" (in-process, model-free)
 # Env override: YAMS_EMBED_BACKEND
-backend = "auto"
+backend = "simeon"
 # Automatically generate for new documents
 auto_generate = false
 # Automatically trigger embeddings after AddDocument
@@ -193,8 +193,8 @@ model_path = "~/.yams/models"
 tokenizer_path = "models/tokenizer.json"
 # Maximum sequence length
 max_sequence_length = 512
-# Embedding dimension (must match model: 384 for all-MiniLM-L6-v2 / simeon-default)
-embedding_dim = 384
+# Embedding dimension (new installs default to simeon-default / 1024; existing DBs keep their stored dim)
+embedding_dim = 1024
 # Batch size for generation
 batch_size = 32
 # Normalize embedding vectors
@@ -219,6 +219,26 @@ model_idle_timeout = 300
 preload_on_startup = false
 # Maximum memory for model cache (MB)
 max_model_memory_mb = 1024
+
+[embeddings.simeon]
+# Simeon encoder presets:
+# - fast:    output_dim=384  projection="achlioptas_sparse"  lower memory / fastest encode
+# - default: output_dim=1024 projection="fwht"               promoted first-class default
+# - quality: output_dim=1024 projection="fwht"               pair with [search.simeon_query_router]
+#            and [search.simeon_prf] enabled=true once those levers land
+ngram_mode = "char_and_word"
+ngram_min = 3
+ngram_max = 5
+sketch_dim = 4096
+output_dim = 1024
+projection = "fwht"
+l2_normalize = true
+
+[embeddings.simeon.bm25]
+enabled = true
+variant = "sab_smooth"
+subword_gamma = 5.0
+max_corpus_docs = 200000
 
 [embeddings.selection]
 # Selection strategy: "ranked" (score-based) or "intro_headings" (intro + headings only)

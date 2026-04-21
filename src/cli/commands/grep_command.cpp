@@ -23,6 +23,7 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/metadata_repository.h>
@@ -76,6 +77,27 @@ std::string sanitizeForDisplay(std::string_view input) {
     }
 
     return sanitized;
+}
+
+void applySimeonLexicalDefaults(yams::search::SearchEngineBuilder::BuildOptions& opts) {
+    const auto backend = yams::daemon::ConfigResolver::resolveEmbeddingBackend();
+    const auto bm25Policy = yams::daemon::ConfigResolver::resolveSimeonBm25Policy();
+    if (backend != "simeon" || !bm25Policy.enabled.value_or(true)) {
+        opts.simeonLexicalConfig.reset();
+        return;
+    }
+
+    yams::search::SimeonLexicalBackend::Config lexicalCfg;
+    if (bm25Policy.variant && *bm25Policy.variant == "atire") {
+        lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
+    }
+    if (bm25Policy.subwordGamma) {
+        lexicalCfg.subword_gamma = *bm25Policy.subwordGamma;
+    }
+    if (bm25Policy.maxCorpusDocs) {
+        lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
+    }
+    opts.simeonLexicalConfig = lexicalCfg;
 }
 
 } // namespace
@@ -1264,6 +1286,7 @@ private:
                 }
 
                 auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                applySimeonLexicalDefaults(opts);
                 // Prefer fast, exact FTS5 keyword results over vector similarity for grep-like use
                 opts.config.maxResults = semanticLimit_ * 3; // Get more results to filter
                 opts.config.vectorWeight = 0.40f;

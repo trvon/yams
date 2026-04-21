@@ -33,15 +33,15 @@ struct DaemonReadiness {
     // Track doc count at last search engine build for re-tuning decisions
     std::atomic<uint64_t> searchEngineDocCount{0};
 
-    // DEPRECATED: not an authoritative lifecycle signal. Use DaemonLifecycleFsm state instead.
-    bool fullyReady() const {
+    // Bootstrap-only readiness summary used before lifecycle-backed status is available.
+    bool bootstrapReady() const {
         return ipcServerReady && contentStoreReady && databaseReady && metadataRepoReady &&
                searchEngineReady && modelProviderReady && vectorIndexReady && pluginsReady;
     }
 
-    // DEPRECATED: for legacy display only; not a lifecycle source of truth.
-    std::string overallStatus() const {
-        if (fullyReady())
+    // Bootstrap-only display state used for early status files and fallback paths.
+    std::string bootstrapStatus() const {
+        if (bootstrapReady())
             return "Ready";
         if (ipcServerReady)
             return "Initializing";

@@ -7,6 +7,7 @@
 #include <sstream>
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/command_catalog.h>
+#include <yams/cli/env_utils.h>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/plugin_util.h>
 #include <yams/cli/yams_cli.h>
@@ -15,6 +16,7 @@
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
@@ -116,6 +118,27 @@ bool cli_perf_trace_enabled() {
     return value == "1" || value == "true" || value == "on" || value == "yes";
 }
 
+void applySimeonLexicalDefaults(yams::search::SearchEngineBuilder::BuildOptions& opts) {
+    const auto backend = yams::daemon::ConfigResolver::resolveEmbeddingBackend();
+    const auto bm25Policy = yams::daemon::ConfigResolver::resolveSimeonBm25Policy();
+    if (backend != "simeon" || !bm25Policy.enabled.value_or(true)) {
+        opts.simeonLexicalConfig.reset();
+        return;
+    }
+
+    yams::search::SimeonLexicalBackend::Config lexicalCfg;
+    if (bm25Policy.variant && *bm25Policy.variant == "atire") {
+        lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
+    }
+    if (bm25Policy.subwordGamma) {
+        lexicalCfg.subword_gamma = *bm25Policy.subwordGamma;
+    }
+    if (bm25Policy.maxCorpusDocs) {
+        lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
+    }
+    opts.simeonLexicalConfig = lexicalCfg;
+}
+
 void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
                     std::string_view note = {}) {
     if (!cli_perf_trace_enabled()) {
@@ -132,16 +155,6 @@ void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
                      note.data());
     }
     std::fflush(stderr);
-}
-
-bool env_truthy(const char* raw) {
-    if (raw == nullptr || *raw == '\0') {
-        return false;
-    }
-    std::string value(raw);
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value == "1" || value == "true" || value == "on" || value == "yes";
 }
 
 } // namespace
@@ -289,7 +302,7 @@ bool YamsCLI::hasExplicitDataDir() const {
 void YamsCLI::registerCommandsForRun(std::string_view subcmd) {
     const auto t0 = std::chrono::steady_clock::now();
     bool fastPathRegistered = false;
-    if (env_truthy(std::getenv("YAMS_CLI_ONE_SHOT")) && !subcmd.empty()) {
+    if (envValueTruthy(std::getenv("YAMS_CLI_ONE_SHOT")) && !subcmd.empty()) {
         fastPathRegistered = registerBuiltinCommandsFor(subcmd);
     }
     if (!fastPathRegistered) {
@@ -883,6 +896,7 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
                 }
 
                 auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                applySimeonLexicalDefaults(opts);
                 auto engRes = builder.buildEmbedded(opts);
                 if (engRes) {
                     appContext_->searchEngine = engRes.value();
@@ -1579,7 +1593,7 @@ void YamsCLI::checkConfigMigration() {
         if (needsResult.value()) {
             // In non-interactive mode (tests, CI), auto-accept migration
             bool autoMigrate = false;
-            if (const char* env = std::getenv("YAMS_NON_INTERACTIVE"); env && *env) {
+            if (envValueTruthy(std::getenv("YAMS_NON_INTERACTIVE"))) {
                 autoMigrate = true;
             }
 

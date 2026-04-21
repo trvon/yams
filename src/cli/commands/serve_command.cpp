@@ -225,8 +225,8 @@ private:
     YamsCLI* cli_ = nullptr;
 
     // Flags / options
-    bool quietFlag_ = true; // kept for backward compatibility (default quiet)
-    bool verbose_ = false;  // new flag: enables banner & info logging
+    bool quietFlag_ = true;
+    bool verbose_ = false; // Enables banner and info logging.
 
     // Derived effective quiet state after env + flags
     bool effectiveQuiet_ = true;

@@ -31,6 +31,7 @@ class KnowledgeGraphStore;
 namespace yams::search {
 
 class SearchTuner;
+class SimeonLexicalBackend;
 
 // Import SearchResult from metadata namespace
 using yams::metadata::SearchResult;
@@ -1530,6 +1531,8 @@ public:
      * @brief Install a runtime SearchTuner for adaptive per-query tuning.
      */
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner);
+
+    void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend);
 
     /**
      * @brief Access the installed runtime SearchTuner, if any.

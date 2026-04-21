@@ -453,15 +453,6 @@ private:
         }
     }
 
-    static bool envTruthy(const char* val) {
-        if (!val || !*val)
-            return false;
-        std::string v(val);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return v == "1" || v == "true" || v == "yes" || v == "on";
-    }
-
     static fs::path findGitRoot(const fs::path& start) {
         std::error_code ec;
         fs::path cur = fs::absolute(start, ec);
@@ -560,8 +551,6 @@ private:
                                                   .retryOnInvalid = true});
         return fs::path(selected);
     }
-
-    // Removed legacy promptYesNo (replaced by prompt_yes_no in prompt_util.h)
 
     static Result<void> updateV2Config(
         const fs::path& configPath, const fs::path& dataDir, const fs::path& privateKeyPath,

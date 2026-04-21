@@ -3012,10 +3012,7 @@ Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() 
         return cached.value();
     }
 
-    // Avoid cold-start full scans on hot paths (e.g. orphan scan) by default.
-    // This cache is maintained incrementally by index/remove operations after startup.
-    // Set YAMS_FTS5_BACKFILL_INDEX_CACHE=1 to force one-time full backfill scan.
-    bool allowBackfill = false;
+    bool allowBackfill = true;
     if (const char* env = std::getenv("YAMS_FTS5_BACKFILL_INDEX_CACHE"); env && *env) {
         std::string_view value(env);
         allowBackfill = (value != "0" && value != "false" && value != "off" && value != "no");

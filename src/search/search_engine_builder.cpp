@@ -963,6 +963,10 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     if (!engine) {
         return Error{ErrorCode::InvalidState, "Failed to create SearchEngine"};
     }
+    if (options.simeonLexicalConfig) {
+        engine->setSimeonLexicalBackend(
+            std::make_unique<SimeonLexicalBackend>(*options.simeonLexicalConfig));
+    }
     if (runtimeTuner) {
         engine->setSearchTuner(runtimeTuner);
     }

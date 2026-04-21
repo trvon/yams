@@ -21,8 +21,8 @@ std::optional<std::size_t> read_dim_from_sentinel(const std::filesystem::path& d
 // Resolve dimension with precedence: sentinel -> generatorDim -> defaultDim.
 // NOTE: Prefer using dim_from_model_name() or dim_from_model_config() with explicit
 // error handling rather than relying on defaultDim fallback.
-// The default of 384 matches all-MiniLM-L6-v2, the most common model.
+// The default of 1024 matches the promoted simeon-default path for new installs.
 std::size_t resolve_dim(const std::filesystem::path& dataDir, std::size_t generatorDim,
-                        std::size_t defaultDim = 384);
+                        std::size_t defaultDim = 1024);
 
 } // namespace yams::vector::dimres

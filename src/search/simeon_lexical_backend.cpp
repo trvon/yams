@@ -1,6 +1,5 @@
 #include <yams/search/simeon_lexical_backend.h>
 
-#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/metadata/metadata_repository.h>
 
 #include <simeon/bm25.hpp>
@@ -39,25 +38,7 @@ const char* variantLabel(SimeonLexicalBackend::Variant v) noexcept {
     return "?";
 }
 
-SimeonLexicalBackend::Variant parseVariant(const std::string& s) noexcept {
-    if (s == "atire" || s == "Atire")
-        return SimeonLexicalBackend::Variant::Atire;
-    return SimeonLexicalBackend::Variant::SabSmooth;
-}
-
 } // namespace
-
-SimeonLexicalBackend::Config SimeonLexicalBackend::resolveConfig() {
-    const auto policy = daemon::ConfigResolver::resolveSimeonBm25Policy();
-    Config cfg;
-    if (policy.variant && !policy.variant->empty())
-        cfg.variant = parseVariant(*policy.variant);
-    if (policy.subwordGamma)
-        cfg.subword_gamma = *policy.subwordGamma;
-    if (policy.maxCorpusDocs)
-        cfg.max_corpus_docs = *policy.maxCorpusDocs;
-    return cfg;
-}
 
 SimeonLexicalBackend::SimeonLexicalBackend(Config cfg) : cfg_(cfg) {}
 SimeonLexicalBackend::~SimeonLexicalBackend() = default;

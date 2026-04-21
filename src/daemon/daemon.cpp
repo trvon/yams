@@ -102,8 +102,6 @@ void updateRepairHysteresis(bool isBusy, std::chrono::steady_clock::time_point n
     inactiveSince = {};
 }
 } // namespace
-// IPC server implementation removed in PBI-007; client uses Boost.Asio path.
-
 namespace yams::daemon {
 
 YamsDaemon::YamsDaemon(const DaemonConfig& config)
@@ -1153,8 +1151,6 @@ bool YamsDaemon::waitForStopCompletion(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(stop_mutex_);
     return stop_cv_.wait_for(lock, timeout, [&] { return stopCompleted_; });
 }
-
-// run() method removed; loop is inlined in start()
 
 void YamsDaemon::onDocumentAdded(const std::string& hash, const std::string& path) {
     if (auto rs = serviceManager_->getRepairServiceShared()) {

@@ -63,7 +63,6 @@ inline HotColdMode getRetrievalMode() {
     return HotColdMode::Auto;
 }
 
-// Helper to get boolean "force hot" from mode (for backward compatibility)
 inline bool isForceHot(HotColdMode mode) {
     return mode == HotColdMode::HotOnly;
 }

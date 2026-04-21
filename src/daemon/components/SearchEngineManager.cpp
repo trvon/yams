@@ -3,6 +3,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
+#include <yams/search/simeon_lexical_backend.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
@@ -210,6 +211,23 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     opts.config.enableAdaptiveVectorFallback = true;
     opts.config.enableWeakQueryFanoutBoost = false;
     opts.config.adaptiveVectorSkipMinTier1Hits = 0;
+    {
+        const auto backend = ConfigResolver::resolveEmbeddingBackend();
+        const auto bm25Policy = ConfigResolver::resolveSimeonBm25Policy();
+        if (backend == "simeon" && bm25Policy.enabled.value_or(true)) {
+            yams::search::SimeonLexicalBackend::Config lexicalCfg;
+            if (bm25Policy.variant && *bm25Policy.variant == "atire") {
+                lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
+            }
+            if (bm25Policy.subwordGamma) {
+                lexicalCfg.subword_gamma = *bm25Policy.subwordGamma;
+            }
+            if (bm25Policy.maxCorpusDocs) {
+                lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
+            }
+            opts.simeonLexicalConfig = lexicalCfg;
+        }
+    }
 
     // Apply topology routing policy from config file. Env vars
     // (YAMS_SEARCH_TOPOLOGY_*) still override inside SearchEngineBuilder.
