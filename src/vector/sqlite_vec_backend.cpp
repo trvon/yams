@@ -1,5 +1,6 @@
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/turboquant.h>
+#include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 #include <yams/vector/vector_schema_migration.h>
 
@@ -232,60 +233,6 @@ inline std::vector<float> loadTurboQuantPerCoordScales(sqlite3* db, size_t dim, 
     }
     sqlite3_finalize(stmt);
     return scales;
-}
-
-// Load the full fitted model (scales + optional per-coord centroids) from the DB.
-// Returns a blob that can be passed to TurboQuantMSE::loadFittedModel().
-inline std::vector<uint8_t> loadTurboQuantFittedModelBlob(sqlite3* db, size_t dim, uint8_t bits,
-                                                          uint64_t seed) {
-    // Query: scales, centroids, fit_version (optional column)
-    std::vector<uint8_t> blob;
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db,
-                                "SELECT per_coord_scales, per_coord_centroids, fit_version "
-                                "FROM turboquant_quantizer_meta "
-                                "WHERE dim = ? AND bits = ? AND seed = ?",
-                                -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return blob;
-    }
-    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
-    sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
-    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        // Column 0: scales blob
-        const void* scales_blob = sqlite3_column_blob(stmt, 0);
-        int scales_bytes = sqlite3_column_bytes(stmt, 0);
-        // Column 1: centroids blob (may be null)
-        const void* centroids_blob = sqlite3_column_blob(stmt, 1);
-        int centroids_bytes = sqlite3_column_blob(stmt, 1) ? sqlite3_column_bytes(stmt, 1) : 0;
-        // Column 2: fit_version (may be 0 for old rows without the column)
-        int fit_version = sqlite3_column_int(stmt, 2);
-
-        if (!scales_blob || scales_bytes == 0) {
-            sqlite3_finalize(stmt);
-            return blob;
-        }
-
-        // Build blob: version(4) | bits(1) | [padding(3)] | scales | centroids
-        size_t total = 8 + scales_bytes + centroids_bytes;
-        blob.resize(total);
-        size_t offset = 0;
-
-        uint32_t version = (fit_version > 0) ? static_cast<uint32_t>(fit_version) : 1;
-        std::memcpy(&blob[offset], &version, 4);
-        offset += 4;
-        blob[offset] = bits;
-        offset += 1;
-        offset += 3; // padding
-        std::memcpy(&blob[offset], scales_blob, scales_bytes);
-        offset += scales_bytes;
-        if (centroids_blob && centroids_bytes > 0) {
-            std::memcpy(&blob[offset], centroids_blob, centroids_bytes);
-        }
-    }
-    sqlite3_finalize(stmt);
-    return blob;
 }
 
 inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
@@ -2154,14 +2101,14 @@ FROM vectors WHERE level = ?
         return size_t{0};
     }
 
-    Result<VectorDatabase::DatabaseStats> getStats() {
+    Result<VectorDatabaseStats> getStats() {
         std::shared_lock lock(mutex_);
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        VectorDatabase::DatabaseStats stats;
+        VectorDatabaseStats stats;
 
         // Get vector count
         if (stmt_count_) {
@@ -5208,7 +5155,7 @@ Result<size_t> SqliteVecBackend::getVectorCount() {
     return impl_->getVectorCount();
 }
 
-Result<VectorDatabase::DatabaseStats> SqliteVecBackend::getStats() {
+Result<VectorDatabaseStats> SqliteVecBackend::getStats() {
     return impl_->getStats();
 }
 

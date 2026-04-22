@@ -13,11 +13,11 @@
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/vector/vector_database.h>
 
 namespace yams::vector {
 class EmbeddingGenerator;
-}
+class VectorDatabase;
+} // namespace yams::vector
 
 namespace yams::daemon {
 class IModelProvider;

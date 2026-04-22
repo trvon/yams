@@ -18,6 +18,7 @@
 #include <yams/search/simeon_lexical_backend.h>
 #include <yams/search/tuning_features.h>
 #include <yams/search/tuning_pipeline.h>
+#include <yams/vector/vector_database.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_metadata_store.h>
 #include <yams/vector/simeon_embedding_backend.h>
@@ -1522,17 +1523,6 @@ private:
     void applySimeonLexicalRescoring(const std::string& query,
                                      yams::metadata::SearchResults& searchResults);
 
-    // R1: after lex + sem legs assemble the candidate pool, re-score each leg
-    // over the *union* so every pool doc has a real (non-imputed) score for
-    // both legs. This restores Simeon's α=0.75 fusion semantics under yams'
-    // coverage-asymmetric retrieval (lex-only and sem-only candidates otherwise
-    // get the missing leg imputed to z=0, systematically down-weighting the
-    // under-covered leg).
-    void augmentCoverageForZScoreFusion(const std::string& query, QueryIntent queryIntent,
-                                        const SearchEngineConfig& config,
-                                        const std::optional<std::vector<float>>& queryEmbedding,
-                                        std::vector<ComponentResult>& allComponentResults);
-
     Result<std::vector<ComponentResult>> queryPathTree(const std::string& query, size_t limit);
     Result<std::vector<ComponentResult>>
     queryKnowledgeGraph(const std::string& query, size_t limit,
@@ -1927,7 +1917,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::string embeddingStatus = needsEmbedding ? "not_started" : "not_needed";
     const size_t vectorDbEmbeddingDim = vectorDb_ ? vectorDb_->getConfig().embedding_dim : 0;
     size_t queryEmbeddingDim = 0;
-    bool semanticTierSkipped = false;
     std::string semanticTierSkipReason;
     std::string vectorTierSkipReason;
     auto launchEmbeddingIfNeeded = [&]() {
@@ -2819,7 +2808,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             const bool strongBudgetLexical =
                 deferSemanticStages && (budgetLexicalHits >= 5 || budgetTopTextScore >= 0.20f);
             if (deferSemanticStages && strongBudgetLexical) {
-                semanticTierSkipped = true;
                 semanticTierSkipReason = "budget_guard_strong_lexical";
                 response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
                 skipped.push_back("kg");
@@ -2938,7 +2926,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         const bool strongBudgetLexical =
             semanticBudgetActive && (budgetLexicalHits >= 5 || budgetTopTextScore >= 0.20f);
         if (semanticBudgetActive && strongBudgetLexical) {
-            semanticTierSkipped = true;
             semanticTierSkipReason = "budget_guard_strong_lexical";
             response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
             skipped.push_back("kg");
@@ -3377,9 +3364,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             spdlog::warn("[search_diag] timing: {}", timingStr);
         }
     }
-
-    augmentCoverageForZScoreFusion(query, intent, workingConfig, queryEmbedding,
-                                   allComponentResults);
 
     preFusionDocIds = collectUniqueComponentDocIds(allComponentResults);
     if (stageTraceEnabled || workingConfig.semanticRescueSlots > 0) {
@@ -5102,112 +5086,6 @@ void SearchEngine::Impl::applySimeonLexicalRescoring(const std::string& query,
               [](const yams::metadata::SearchResult& a, const yams::metadata::SearchResult& b) {
                   return a.score < b.score;
               });
-}
-
-void SearchEngine::Impl::augmentCoverageForZScoreFusion(
-    const std::string& query, QueryIntent queryIntent, const SearchEngineConfig& config,
-    const std::optional<std::vector<float>>& queryEmbedding,
-    std::vector<ComponentResult>& allComponentResults) {
-    if (config.fusionStrategy != SearchEngineConfig::FusionStrategy::WEIGHTED_LINEAR_ZSCORE) {
-        return;
-    }
-    if (!config.weightedLinearZScoreCoverageAugment) {
-        return;
-    }
-    if (allComponentResults.empty()) {
-        return;
-    }
-
-    auto isLex = [](ComponentResult::Source s) {
-        return s == ComponentResult::Source::Text || s == ComponentResult::Source::GraphText;
-    };
-    auto isSem = [](ComponentResult::Source s) {
-        return s == ComponentResult::Source::Vector || s == ComponentResult::Source::GraphVector ||
-               s == ComponentResult::Source::EntityVector;
-    };
-
-    std::unordered_set<std::string> lexHashes;
-    std::unordered_set<std::string> semHashes;
-    lexHashes.reserve(allComponentResults.size());
-    semHashes.reserve(allComponentResults.size());
-    for (const auto& cr : allComponentResults) {
-        if (cr.documentHash.empty())
-            continue;
-        if (isLex(cr.source))
-            lexHashes.insert(cr.documentHash);
-        else if (isSem(cr.source))
-            semHashes.insert(cr.documentHash);
-    }
-
-    std::unordered_set<std::string> lexOnly;
-    std::unordered_set<std::string> semOnly;
-    lexOnly.reserve(lexHashes.size());
-    semOnly.reserve(semHashes.size());
-    for (const auto& h : lexHashes) {
-        if (!semHashes.contains(h))
-            lexOnly.insert(h);
-    }
-    for (const auto& h : semHashes) {
-        if (!lexHashes.contains(h))
-            semOnly.insert(h);
-    }
-
-    size_t lexOnlyBefore = lexOnly.size();
-    size_t semOnlyBefore = semOnly.size();
-    size_t addedSemForLexOnly = 0;
-    size_t addedLexForSemOnly = 0;
-
-    // Branch A: lex-only docs get a real vector score via narrowed vector index.
-    if (!lexOnly.empty() && queryEmbedding.has_value() && vectorDb_) {
-        auto narrowed = queryVectorIndex(*queryEmbedding, config, lexOnly.size(), lexOnly);
-        if (narrowed) {
-            for (auto& cr : narrowed.value()) {
-                if (cr.documentHash.empty())
-                    continue;
-                if (!lexOnly.contains(cr.documentHash))
-                    continue;
-                allComponentResults.push_back(std::move(cr));
-                ++addedSemForLexOnly;
-            }
-        } else {
-            spdlog::debug("[r1-augment] narrowed vector search failed: {}",
-                          narrowed.error().message);
-        }
-    }
-
-    // Branch B: sem-only docs get a real Simeon lexical score over the full corpus.
-    if (!semOnly.empty() && simeonLexical_ && simeonLexical_->ready() && metadataRepo_) {
-        std::vector<std::string> hashVec(semOnly.begin(), semOnly.end());
-        auto docMap = metadataRepo_->batchGetDocumentsByHash(hashVec);
-        if (docMap) {
-            yams::metadata::SearchResults synth;
-            synth.query = query;
-            synth.results.reserve(docMap.value().size());
-            for (const auto& [hash, info] : docMap.value()) {
-                yams::metadata::SearchResult sr;
-                sr.document = info;
-                sr.score = 0.0; // overwritten by rescoring
-                synth.results.push_back(std::move(sr));
-            }
-            if (!synth.results.empty()) {
-                applySimeonLexicalRescoring(query, synth);
-                std::unordered_set<std::string> synthSeen;
-                synthSeen.reserve(synth.results.size());
-                size_t before = allComponentResults.size();
-                appendLexicalBatch(query, queryIntent, config, synth, 1.0f, /*dedupe=*/false,
-                                   &synthSeen, ComponentResult::Source::Text, allComponentResults,
-                                   /*expansionStats=*/nullptr);
-                addedLexForSemOnly = allComponentResults.size() - before;
-            }
-        } else {
-            spdlog::debug("[r1-augment] batchGetDocumentsByHash failed: {}",
-                          docMap.error().message);
-        }
-    }
-
-    spdlog::info("[r1-augment] lexOnly={} semOnly={} addedSem={} addedLex={} final_pool={}",
-                 lexOnlyBefore, semOnlyBefore, addedSemForLexOnly, addedLexForSemOnly,
-                 allComponentResults.size());
 }
 
 SearchEngine::Impl::Fts5CandidatePoolStats SearchEngine::Impl::fetchFts5CandidatePool(

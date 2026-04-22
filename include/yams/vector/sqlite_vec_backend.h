@@ -7,7 +7,6 @@
 #include <vector>
 #include <yams/core/types.h>
 #include <yams/vector/vector_backend.h>
-#include <yams/vector/vector_database.h>
 
 // Forward declarations for sqlite-vec-cpp types
 struct sqlite3;
@@ -112,7 +111,7 @@ public:
     Result<bool> hasEmbedding(const std::string& document_hash) override;
     Result<std::unordered_set<std::string>> getEmbeddedDocumentHashes() override;
     Result<size_t> getVectorCount() override;
-    Result<VectorDatabase::DatabaseStats> getStats() override;
+    Result<VectorDatabaseStats> getStats() override;
 
     Result<void> buildIndex() override;
     Result<void> prepareSearchIndex() override;

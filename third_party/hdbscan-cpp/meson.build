@@ -1,6 +1,5 @@
 hdbscan_sources = files(
   'HDBSCAN-CPP/Distance/EuclideanDistance.cpp',
-  'HDBSCAN-CPP/Distance/IDistanceCalculator.cpp',
   'HDBSCAN-CPP/Distance/ManhattanDistance.cpp',
   'HDBSCAN-CPP/Hdbscan/hdbscan.cpp',
   'HDBSCAN-CPP/HdbscanStar/cluster.cpp',
@@ -8,7 +7,6 @@ hdbscan_sources = files(
   'HDBSCAN-CPP/HdbscanStar/hdbscanConstraint.cpp',
   'HDBSCAN-CPP/HdbscanStar/outlierScore.cpp',
   'HDBSCAN-CPP/HdbscanStar/undirectedGraph.cpp',
-  'HDBSCAN-CPP/Runner/hdbscanParameters.cpp',
   'HDBSCAN-CPP/Runner/hdbscanResult.cpp',
   'HDBSCAN-CPP/Runner/hdbscanRunner.cpp',
   'HDBSCAN-CPP/Utils/bitSet.cpp',

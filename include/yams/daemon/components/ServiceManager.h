@@ -63,6 +63,7 @@
 #include <yams/extraction/content_extractor.h>
 #include <yams/profiling.h>
 #include <yams/search/search_execution_context.h>
+#include <yams/vector/vector_database.h>
 #include <yams/wal/wal_manager.h>
 
 // Forward declarations for services

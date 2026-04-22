@@ -100,7 +100,7 @@ struct TunedParams {
     float vectorBoostFactor = 1.0f;
 
     SearchEngineConfig::FusionStrategy fusionStrategy =
-        SearchEngineConfig::FusionStrategy::WEIGHTED_LINEAR_ZSCORE;
+        SearchEngineConfig::FusionStrategy::COMB_MNZ;
 
     // Hybrid precision guardrails (default to SearchEngineConfig defaults)
     float vectorOnlyThreshold = 0.90f;

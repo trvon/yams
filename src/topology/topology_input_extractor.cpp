@@ -1,4 +1,5 @@
 #include <yams/topology/topology_input_extractor.h>
+#include <yams/vector/vector_database.h>
 
 #include <algorithm>
 #include <string>

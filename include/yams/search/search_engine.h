@@ -1,13 +1,8 @@
 #pragma once
 
 #include <yams/core/types.h>
-#include <yams/metadata/connection_pool.h>
-#include <yams/metadata/metadata_repository.h>
 #include <yams/search/query_concept_extractor.h>
 #include <yams/search/search_results.h>
-#include <yams/topology/topology_artifacts.h>
-#include <yams/vector/embedding_generator.h>
-#include <yams/vector/vector_database.h>
 
 #include <algorithm>
 #include <atomic>
@@ -25,8 +20,14 @@
 
 // Forward declarations
 namespace yams::metadata {
+class MetadataRepository;
 class KnowledgeGraphStore;
-}
+} // namespace yams::metadata
+
+namespace yams::vector {
+class EmbeddingGenerator;
+class VectorDatabase;
+} // namespace yams::vector
 
 namespace yams::search {
 
@@ -231,19 +232,13 @@ struct SearchEngineConfig {
                                // linear combination of lexical+vector components
                                // (training-free recipe; defaults match the simeon
                                // bench's headline cascade row)
-    } fusionStrategy = FusionStrategy::WEIGHTED_LINEAR_ZSCORE;
+    } fusionStrategy = FusionStrategy::COMB_MNZ;
 
     // WEIGHTED_LINEAR_ZSCORE knobs. Defaults reproduce simeon's
     // bm25_pool500_linear_alpha075 bench row on BEIR scifact.
     size_t weightedLinearZScorePoolSize = 500; // BM25 (lexical) pool depth
     float weightedLinearZScoreAlpha = 0.75f;   // Weight on the lexical leg in [0,1]
     bool weightedLinearZScoreUseZScore = true; // Off => raw scores (still alpha-mixed)
-    // R1: when true, pre-fusion pass re-scores both legs over the union of
-    // lex + sem candidates so every pool doc has real (non-imputed) scores on
-    // both legs. Preserves Simeon's α=0.75 semantics under yams' coverage-
-    // asymmetric retrieval (lex-only and sem-only candidates each get the
-    // missing-leg score computed directly instead of imputed to z=0).
-    bool weightedLinearZScoreCoverageAugment = true;
 
     // P7: When true, SearchEngine overrides fusionStrategy to CONVEX once the
     // SearchTuner reports convergence. Default off preserves existing behavior.

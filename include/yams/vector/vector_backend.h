@@ -7,7 +7,7 @@
 #include <unordered_set>
 #include <vector>
 #include <yams/core/types.h>
-#include <yams/vector/vector_database.h>
+#include <yams/vector/vector_types.h>
 
 namespace yams::vector {
 
@@ -152,7 +152,7 @@ public:
     /**
      * @brief Get storage statistics
      */
-    virtual Result<VectorDatabase::DatabaseStats> getStats() = 0;
+    virtual Result<VectorDatabaseStats> getStats() = 0;
 
     /**
      * @brief Build or rebuild search index

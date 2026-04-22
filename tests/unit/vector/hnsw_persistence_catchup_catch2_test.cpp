@@ -66,18 +66,6 @@ size_t countRows(sqlite3* db, const char* sql) {
     return value;
 }
 
-bool tableExists(sqlite3* db, const std::string& tableName) {
-    sqlite3_stmt* stmt = nullptr;
-    REQUIRE(sqlite3_prepare_v2(db,
-                               "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-                               -1, &stmt, nullptr) == SQLITE_OK);
-    sqlite3_bind_text(stmt, 1, tableName.c_str(), -1, SQLITE_TRANSIENT);
-    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
-    bool exists = sqlite3_column_int64(stmt, 0) > 0;
-    sqlite3_finalize(stmt);
-    return exists;
-}
-
 } // namespace
 
 TEST_CASE_METHOD(HnswPersistenceFixture,

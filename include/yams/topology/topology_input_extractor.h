@@ -3,9 +3,12 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/topology/topology_artifacts.h>
-#include <yams/vector/vector_database.h>
 
 #include <memory>
+
+namespace yams::vector {
+class VectorDatabase;
+}
 
 namespace yams::topology {
 

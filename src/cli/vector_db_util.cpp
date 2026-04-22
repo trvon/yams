@@ -3,6 +3,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/vector/dim_resolver.h>
+#include <yams/vector/embedding_generator.h>
 
 #include <array>
 #include <cstdlib>

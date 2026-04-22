@@ -5,7 +5,6 @@
 #include <yams/extraction/content_extractor.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/embedding_generator.h>
-#include <yams/vector/vector_database.h>
 
 #include <atomic>
 #include <filesystem>
