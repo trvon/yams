@@ -9,6 +9,11 @@
 #include "simeon_pq_persistence.h"
 
 #include <sqlite3.h>
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -2829,15 +2834,24 @@ private:
         };
 
         auto state = std::make_unique<SimeonPqIndexState>(pqConfig);
-        std::vector<float> training;
-        training.reserve(std::min(rows.size(), config_.simeon_pq_train_limit) * dim);
+        const std::size_t trainCap = std::min(rows.size(), config_.simeon_pq_train_limit);
+        state->rowids.reserve(rows.size());
 
+        // Pass 1: normalize in place, collect rowids, copy a bounded prefix
+        // into the training buffer. Normalized embeddings stay in `rows` so
+        // pass 2 can encode without re-reading SQLite.
+        std::vector<float> training;
+        training.reserve(trainCap * dim);
+        std::size_t trainSamples = 0;
         for (auto& [rowid, embedding] : rows) {
             if (!normalizeEmbeddingInPlace(embedding)) {
+                embedding.clear();
+                embedding.shrink_to_fit();
                 continue;
             }
-            if (training.size() / dim < std::min(rows.size(), config_.simeon_pq_train_limit)) {
+            if (trainSamples < trainCap) {
                 training.insert(training.end(), embedding.begin(), embedding.end());
+                ++trainSamples;
             }
             state->rowids.push_back(rowid);
         }
@@ -2849,25 +2863,34 @@ private:
         }
 
         try {
-            if (training.size() / dim >= k) {
-                state->pq.train(training.data(), static_cast<std::uint32_t>(training.size() / dim));
+            if (trainSamples >= k) {
+                state->pq.train(training.data(), static_cast<std::uint32_t>(trainSamples));
             } else {
                 state->pq.init_random_gaussian();
             }
         } catch (const std::exception&) {
             state->pq.init_random_gaussian();
         }
+        // Training buffer is no longer needed; release before encoding so
+        // peak footprint during encode == size(rows) rather than size(rows)
+        // + size(training).
+        std::vector<float>().swap(training);
 
         state->codes.resize(state->rowids.size() * state->pq.m());
         std::size_t codeOffset = 0;
+        // Pass 2: encode and progressively release each embedding so the
+        // ~dim*4 bytes per row are returned to the allocator as we go.
+        // Skips entries whose embedding was zeroed above (normalize failed).
         for (auto& [rowid, embedding] : rows) {
             (void)rowid;
-            if (!normalizeEmbeddingInPlace(embedding)) {
+            if (embedding.empty()) {
                 continue;
             }
             state->pq.encode(embedding.data(), state->codes.data() + codeOffset);
             codeOffset += state->pq.m();
+            std::vector<float>().swap(embedding);
         }
+        std::vector<std::pair<size_t, std::vector<float>>>().swap(rows);
         state->rerank_factor = std::max<std::size_t>(1, config_.simeon_pq_rerank_factor);
         simeon_pq_indices_[dim] = std::move(state);
         simeon_pq_dirty_dims_.erase(dim);
@@ -2875,6 +2898,15 @@ private:
         spdlog::info(
             "[SPQ] Built persisted PQ index for dim={} with {} vectors m={} k={} rerank={}", dim,
             simeon_pq_indices_[dim]->rowids.size(), m, k, config_.simeon_pq_rerank_factor);
+        // Return the bulk training/encode scratch pages to the OS.
+        // The SPQ rebuild churns up to ~1 GB of transient float buffers
+        // (per-row vectors + codebook training set) which macOS's
+        // DefaultMallocZone otherwise keeps parked in MALLOC_LARGE regions.
+#if defined(__APPLE__)
+        ::malloc_zone_pressure_relief(nullptr, 0);
+#elif defined(__GLIBC__)
+        ::malloc_trim(0);
+#endif
         return Result<void>{};
     }
 

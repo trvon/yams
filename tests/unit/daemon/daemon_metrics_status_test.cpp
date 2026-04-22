@@ -4170,6 +4170,8 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     ScopedEnvVar preferredModelGuard("YAMS_PREFERRED_MODEL", std::nullopt);
     ScopedEnvVar embedBackendGuard("YAMS_EMBED_BACKEND", std::nullopt);
     ScopedEnvVar configPathGuard("YAMS_CONFIG", cfg.configFilePath.string());
+    ScopedEnvVar xdgConfigHomeGuard("XDG_CONFIG_HOME", cfg.dataDir.string());
+    ScopedEnvVar homeGuard("HOME", cfg.dataDir.string());
 
     StubLifecycle lifecycle;
     StateComponent state;

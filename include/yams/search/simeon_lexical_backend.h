@@ -42,6 +42,13 @@ namespace yams::search {
 // the Atire variant and exposes scoreRouted(), which picks between Atire
 // and SabSmooth per-query via simeon::QueryRouter using the passE preset
 // by default (see third_party/simeon/docs/router_design.md).
+//
+// Default is router_enabled=false. Rationale: simeon's own three-corpus
+// evaluation (docs/research/benchmarks.md, training_free_saturation.md)
+// shows SAB-smooth γ=5 alone is within ~1.8 nDCG@10 points of the
+// dual-build router on scifact, ties it on NFCorpus, and trails by 0.006
+// on FiQA — for roughly 2× the BM25 steady-state memory. The dual-build
+// is kept as an opt-in for callers who want the marginal lift.
 class SimeonLexicalBackend {
 public:
     enum class Variant : std::uint8_t {

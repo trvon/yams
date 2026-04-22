@@ -6,6 +6,12 @@
 #include <simeon/query_router.hpp>
 #include <spdlog/spdlog.h>
 
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -189,6 +195,15 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         spdlog::info("[simeon-lexical] ready: variant={} router={} docs={} missing={} build_ms={}",
                      variantLabel(cfg_.variant), cfg_.router_enabled ? "on" : "off", dense, missing,
                      buildMs);
+        // Release the transient tf / posting scratch pages back to the OS.
+        // BM25 index construction churns hundreds of MB of short-lived
+        // allocations (per-doc tf maps, rehashes in FlatHashMapU64); macOS
+        // otherwise keeps them parked in the DefaultMallocZone.
+#if defined(__APPLE__)
+        ::malloc_zone_pressure_relief(nullptr, 0);
+#elif defined(__GLIBC__)
+        ::malloc_trim(0);
+#endif
     });
 
     return Result<void>{};

@@ -124,21 +124,31 @@ simeon_core_srcs = [
   join_paths(simeon_dir, 'src', 'arch', 'scalar.cpp'),
 ]
 
+# SIMD tier defines — must be visible to every TU that includes
+# <simeon/simd.hpp>, since the dispatcher (l2_normalize / dot / …) is
+# header-inline and guards the NEON/AVX2 call paths with
+# SIMEON_HAS_NEON / SIMEON_HAS_AVX2. Without these, active_simd_tier()
+# always returns Scalar even though arch/neon.cpp or arch/avx2.cpp is
+# compiled in.
+simeon_simd_defines = []
 simeon_extra_libs = []
 if host_cpu == 'aarch64' or host_cpu == 'arm'
+  simeon_simd_defines += '-DSIMEON_HAS_NEON=1'
   simeon_neon_lib = static_library('yams_simeon_neon',
     [join_paths(simeon_dir, 'src', 'arch', 'neon.cpp')],
     include_directories: simeon_inc,
+    cpp_args: simeon_simd_defines,
     install: false,
   )
   simeon_extra_libs += simeon_neon_lib
 elif host_cpu == 'x86_64' or host_cpu == 'x86'
   if cpp_comp.has_argument('-mavx2') and cpp_comp.has_argument('-mfma')
+    simeon_simd_defines += '-DSIMEON_HAS_AVX2=1'
     simeon_avx_args = ['-mavx2', '-mfma']
     simeon_avx_lib = static_library('yams_simeon_avx2',
       [join_paths(simeon_dir, 'src', 'arch', 'avx2.cpp')],
       include_directories: simeon_inc,
-      cpp_args: simeon_avx_args,
+      cpp_args: simeon_avx_args + simeon_simd_defines,
       install: false,
     )
     simeon_extra_libs += simeon_avx_lib
@@ -149,8 +159,16 @@ simeon_lib = static_library('yams_simeon',
   simeon_core_srcs + ['../embedding_simeon/simeon_embedding_backend.cpp'],
   include_directories: [simeon_inc, include_directories('../../include')],
   dependencies: [spdlog_dep, tl_expected_dep, yams_core],
+  cpp_args: simeon_simd_defines,
   link_with: simeon_extra_libs,
   install: false,
+)
+
+# Propagate the SIMD defines to any consumer that includes simeon headers.
+simeon_dep = declare_dependency(
+  link_with: simeon_lib,
+  include_directories: simeon_inc,
+  compile_args: simeon_simd_defines,
 )
 
 # Define SQLITE_VEC_STATIC based on whether we have sqlite-vec-cpp sources
@@ -175,7 +193,7 @@ yams_vector = static_library('yams_vector',
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
   dependencies: deps_vec + vector_platform_deps,
   link_with: [simeon_lib],
-  cpp_args: vector_cppargs,
+  cpp_args: vector_cppargs + simeon_simd_defines,
   install: true,
 )
 
@@ -190,5 +208,6 @@ yams_vector_dep = declare_dependency(
   link_with: [yams_vector, simeon_lib],
   include_directories: [include_directories('../../include'), simeon_inc],
   dependencies: vector_platform_deps,
+  compile_args: simeon_simd_defines,
 )
 meson.override_dependency('yams_vector', yams_vector_dep)

@@ -222,12 +222,15 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             if (bm25Policy.maxCorpusDocs) {
                 lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
             }
-            // Router: default enabled unless preset="off" or explicit
-            // routerEnabled=false. Only preset currently understood is
-            // "passE_scq0_clar3" (the header's default RouterPreset); any
-            // unknown preset string falls back to that.
+            // Router: default DISABLED. Simeon's own three-corpus BEIR
+            // eval (docs/research/benchmarks.md) shows SAB-smooth alone is
+            // within ≤1.8 nDCG@10 points of the dual-build router while
+            // using ~half the steady-state BM25 memory. Explicit
+            // routerEnabled=true still opts in; the only preset understood
+            // is "passE_scq0_clar3" (header's default RouterPreset) and
+            // "off" remains a hard disable.
             const bool presetOff = bm25Policy.routerPreset && *bm25Policy.routerPreset == "off";
-            lexicalCfg.router_enabled = bm25Policy.routerEnabled.value_or(true) && !presetOff;
+            lexicalCfg.router_enabled = bm25Policy.routerEnabled.value_or(false) && !presetOff;
             opts.simeonLexicalConfig = lexicalCfg;
         }
     }

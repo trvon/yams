@@ -421,6 +421,11 @@ YamsCLI::buildRunParsePlan(int argc, char* argv[],
         plan.argc = static_cast<int>(plan.argv.size() - 1);
         plan.perfLabel = "search_query_rewrite";
     } else {
+        plan.argv.reserve(argc + 1);
+        for (int i = 0; i < argc; ++i)
+            plan.argv.push_back(argv[i]);
+        plan.argv.push_back(nullptr);
+        plan.argc = argc;
         plan.perfLabel.clear();
     }
 

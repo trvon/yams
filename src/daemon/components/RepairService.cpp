@@ -3471,7 +3471,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
                                        !req.force,
                                        modelName,
                                        std::vector<InternalEventBus::EmbedPreparedDoc>{},
-                                       std::move(monitor)};
+                                       monitor};
         // Batch semantic graph maintenance outside the per-job embedding hot path.
         // Per-job corpus scans cause large transient heap spikes during repair.
         job.updateSemanticGraph = false;
