@@ -28,7 +28,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine_builder.h>
-#include <yams/vector/vector_index_manager.h>
 // Daemon client API for daemon-first search
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>

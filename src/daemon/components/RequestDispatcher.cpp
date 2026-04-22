@@ -68,7 +68,6 @@
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
 
 namespace yams::daemon {

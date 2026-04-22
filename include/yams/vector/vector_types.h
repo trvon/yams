@@ -14,16 +14,29 @@ namespace yams::vector {
 
 enum class EmbeddingLevel { CHUNK, DOCUMENT };
 
+// Lightweight search result shared by vector backends and downstream aggregators
+// (previously defined in the removed vector_index_manager.h).
+struct SearchResult {
+    std::string id;
+    float distance = 0.0f;
+    float similarity = 0.0f;
+    std::map<std::string, std::string> metadata;
+
+    SearchResult() = default;
+    SearchResult(std::string id_, float dist, float sim)
+        : id(std::move(id_)), distance(dist), similarity(sim) {}
+
+    bool operator<(const SearchResult& other) const { return distance < other.distance; }
+    bool operator>(const SearchResult& other) const { return distance > other.distance; }
+};
+
 enum class VectorSearchEngine {
-    HnswCosine,
     SimeonPqAdc,
     Vec0L2,
 };
 
 [[nodiscard]] inline const char* vectorSearchEngineName(VectorSearchEngine engine) {
     switch (engine) {
-        case VectorSearchEngine::HnswCosine:
-            return "hnsw_cosine";
         case VectorSearchEngine::SimeonPqAdc:
             return "simeon_pq_adc";
         case VectorSearchEngine::Vec0L2:
@@ -34,8 +47,9 @@ enum class VectorSearchEngine {
 
 [[nodiscard]] inline std::optional<VectorSearchEngine>
 parseVectorSearchEngine(std::string_view raw) {
+    // Legacy aliases for removed HNSW engine map to SimeonPqAdc.
     if (raw == "hnsw" || raw == "hnsw_cosine" || raw == "cosine") {
-        return VectorSearchEngine::HnswCosine;
+        return VectorSearchEngine::SimeonPqAdc;
     }
     if (raw == "simeon_pq_adc" || raw == "pq_adc" || raw == "simeon_pq" ||
         raw == "compressed_primary") {

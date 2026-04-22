@@ -24,7 +24,6 @@ using nlohmann::json;
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include "tests/common/test_helpers_catch2.h"
 

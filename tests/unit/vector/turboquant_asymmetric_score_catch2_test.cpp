@@ -12,7 +12,6 @@
 #include <vector>
 
 #include <yams/vector/turboquant.h>
-#include <yams/vector/vector_index_manager.h>
 
 using namespace yams::vector;
 using namespace yams::vector::vector_utils;

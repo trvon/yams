@@ -13,7 +13,6 @@
 #include <yams/profiling.h>
 #include <yams/search/query_router.h>
 #include <yams/search/search_engine_builder.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <spdlog/spdlog.h>
 #include <algorithm>

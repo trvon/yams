@@ -8,7 +8,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/hotzone_manager.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>

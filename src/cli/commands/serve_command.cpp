@@ -26,7 +26,6 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/mcp/mcp_server.h>
 #include <yams/search/search_engine_builder.h>
-#include <yams/vector/vector_index_manager.h>
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/stat.h>

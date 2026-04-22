@@ -23,11 +23,11 @@
 
 #include "benchmark_base.h"
 #include <yams/vector/turboquant.h>
+#include <yams/vector/vector_utils.h>
 #include <yams/vector/compressed_ann.h>
 #include <yams/vector/sqlite_vec_backend.h>
 
 #include <filesystem>
-#include <yams/vector/vector_index_manager.h>
 
 using namespace yams;
 using namespace yams::vector;

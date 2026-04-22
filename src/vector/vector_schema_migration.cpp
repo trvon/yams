@@ -155,9 +155,10 @@ VectorSchemaMigration::SchemaVersion VectorSchemaMigration::detectVersion(sqlite
         return SchemaVersion::Unknown;
     }
 
-    // Check for V2 schema (unified vectors table)
-    if (tableExists(db, "vectors") && tableExists(db, "vectors_hnsw_meta")) {
-        // Check for V2.1 (has embedding_dim column)
+    // Check for V2+ schema (unified vectors table). The legacy `vectors_hnsw_meta`
+    // shadow table no longer exists on fresh databases (HNSW was removed), so
+    // detection now depends only on the vectors table plus its column markers.
+    if (tableExists(db, "vectors")) {
         if (columnExists(db, "vectors", "quantized_packed_codes")) {
             return SchemaVersion::V2_2;
         }

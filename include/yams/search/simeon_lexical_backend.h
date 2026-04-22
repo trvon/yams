@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 
 #include <atomic>
+#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -114,6 +115,11 @@ private:
     Config cfg_;
     std::atomic<bool> ready_{false};
     std::atomic<bool> building_{false};
+
+    // Owning handle for the background build. jthread's destructor requests
+    // stop and joins, guaranteeing the thread never outlives this instance
+    // (which would be a use-after-free on the captured `this` pointer).
+    std::jthread build_thread_;
 
     // Populated by the background build thread; published once ready_ is
     // stored with release order.

@@ -2,12 +2,12 @@
 #include <spdlog/spdlog.h>
 #include <fstream>
 #include <yams/core/atomic_utils.h>
+#include <yams/vector/vector_utils.h>
 #include <yams/profiling.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_backend.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <algorithm>
 #include <cmath>
@@ -29,7 +29,7 @@ namespace yams::vector {
 class VectorDatabase::Impl {
 public:
     explicit Impl(const VectorDatabaseConfig& config)
-        : config_(config), initialized_(false), has_error_(false) {
+        : config_(config), initialized_{false}, has_error_(false) {
         // Create backend based on configuration
         // For now, always use sqlite-vec for persistence
         // Mirror TurboQuant settings from VectorDatabaseConfig into SqliteVecBackend config
@@ -230,7 +230,7 @@ public:
                 }
             }
 
-            initialized_ = true;
+            initialized_.store(true, std::memory_order_release);
             has_error_ = false;
             return true;
 
@@ -240,9 +240,11 @@ public:
         }
     }
 
-    bool isInitialized() const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-        return initialized_;
+    bool isInitialized() const noexcept {
+        // Lock-free: readiness flag is published with release after init, read with
+        // acquire. Keeps status/health paths from blocking behind long-held rebuild
+        // writer locks on mutex_.
+        return initialized_.load(std::memory_order_acquire);
     }
 
     void close() {
@@ -250,7 +252,7 @@ public:
         if (backend_) {
             backend_->close();
         }
-        initialized_ = false;
+        initialized_.store(false, std::memory_order_release);
         has_error_ = false;
         last_error_.clear();
     }
@@ -1145,7 +1147,7 @@ private:
 
     VectorDatabaseConfig config_;
     std::unique_ptr<IVectorBackend> backend_;
-    bool initialized_;
+    std::atomic<bool> initialized_;
     mutable bool has_error_;
     mutable std::string last_error_;
     mutable std::shared_mutex mutex_;

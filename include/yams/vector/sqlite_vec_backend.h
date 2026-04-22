@@ -16,17 +16,14 @@ namespace yams::vector {
 /**
  * @brief SQLite-vec backend implementation using sqlite-vec-cpp
  *
- * Features:
- * - Unified schema (single table for embeddings + metadata)
- * - HNSW persistence (loads from disk, not rebuilt on startup)
- * - No in-memory ID maps (uses SQLite rowid as HNSW node ID)
- * - Proper read/write locking (std::shared_mutex)
- * - nlohmann::json for metadata serialization
+ * Search engines: SimeonPqAdc (default, Product-Quantized ADC) or Vec0L2
+ * (sqlite-vec native vec0 virtual table with L2 distance). HNSW has been
+ * removed from the daemon data plane.
  *
  * Schema:
  *   vectors: rowid, chunk_id, document_hash, embedding, content, metadata, ...
- *   vectors_hnsw_meta: HNSW configuration and entry point
- *   vectors_hnsw_nodes: HNSW graph structure (node + edges)
+ *   vectors_simeon_pq_*: PQ codebook/codes for SimeonPqAdc.
+ *   vectors_vec0_*: sqlite-vec virtual-table shadow tables for Vec0L2.
  */
 class SqliteVecBackend : public IVectorBackend {
 public:
@@ -40,10 +37,6 @@ public:
     /// Configuration for backend
     struct Config {
         size_t embedding_dim = 1024;       ///< Embedding dimensions
-        size_t hnsw_m = 16;                ///< HNSW connections per node
-        size_t hnsw_ef_construction = 128; ///< HNSW build exploration factor
-        size_t hnsw_ef_search = 100;       ///< HNSW search exploration factor
-        size_t checkpoint_threshold = 100; ///< Inserts before HNSW checkpoint
         float compaction_threshold = 0.2f; ///< Compact when >20% deleted
         size_t filter_candidate_chunks_per_doc =
             10; ///< Estimated chunks per document for filtering
@@ -53,7 +46,7 @@ public:
             false; ///< Store quantized sidecar only; reconstruct floats on read
         uint8_t turboquant_bits = 4;
         uint64_t turboquant_seed = 42;
-        VectorSearchEngine search_engine = VectorSearchEngine::HnswCosine;
+        VectorSearchEngine search_engine = VectorSearchEngine::SimeonPqAdc;
         size_t simeon_pq_subquantizers = 32;
         size_t simeon_pq_centroids = 256;
         size_t simeon_pq_train_limit = 4096;
@@ -149,10 +142,10 @@ public:
     /// Checkpoint vectors.db WAL to reclaim disk space
     Result<void> checkpointWal();
 
-    /// Defer HNSW load/build/checkpoint work during bulk vector regeneration.
+    /// Defer index load/build/checkpoint work during bulk vector regeneration.
     Result<void> beginBulkLoad();
 
-    /// Finish deferred HNSW work after bulk vector regeneration and persist the index.
+    /// Finish deferred work after bulk vector regeneration and persist the index.
     Result<void> finalizeBulkLoad();
 
     /// No-op for V2 schema (unified table has no rowid sync issues)
@@ -163,18 +156,6 @@ public:
 
     /// Explicitly ensure sqlite-vec module is loaded (for doctor command)
     Result<void> ensureVecLoaded();
-
-    enum class HnswMaintenanceMode {
-        None,
-        LoadPersisted,
-        CatchUp,
-        FullRebuild,
-        BruteForceFallback,
-    };
-
-    HnswMaintenanceMode testingLastHnswMaintenanceMode() const;
-    std::size_t testingLastHnswAddedCount() const;
-    std::size_t testingLastHnswRemovedCount() const;
 
     Result<void> persistTurboQuantPerCoordScales(size_t dim, uint8_t bits, uint64_t seed,
                                                  const std::vector<float>& scales) override;

@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <utility>
@@ -53,7 +54,15 @@ simeon::RouterConfig toRouterConfig(const SimeonLexicalBackend::RouterPreset& p)
 } // namespace
 
 SimeonLexicalBackend::SimeonLexicalBackend(Config cfg) : cfg_(cfg) {}
-SimeonLexicalBackend::~SimeonLexicalBackend() = default;
+SimeonLexicalBackend::~SimeonLexicalBackend() {
+    // Ensure the detached build thread cannot outlive this instance. jthread's
+    // destructor requests stop and joins; the build thread is expected to honor
+    // stop_token at its cancellation checkpoints and return without publishing.
+    if (build_thread_.joinable()) {
+        build_thread_.request_stop();
+        build_thread_.join();
+    }
+}
 
 Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::MetadataRepository> repo) {
     if (!repo) {
@@ -64,7 +73,13 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         return Result<void>{};
     }
 
-    std::thread([this, repo = std::move(repo)]() mutable {
+    // If a previous build thread finished and was never reaped, join it now to
+    // keep jthread's invariants clean before we start a new one.
+    if (build_thread_.joinable()) {
+        build_thread_.join();
+    }
+
+    build_thread_ = std::jthread([this, repo = std::move(repo)](std::stop_token stop) mutable {
         const auto t0 = std::chrono::steady_clock::now();
 
         auto idsResult = repo->getAllFts5IndexedDocumentIds();
@@ -78,6 +93,10 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         if (ids.size() > cfg_.max_corpus_docs) {
             spdlog::info("[simeon-lexical] corpus {} docs > cap {} — staying on FTS5 only",
                          ids.size(), cfg_.max_corpus_docs);
+            building_.store(false, std::memory_order_release);
+            return;
+        }
+        if (stop.stop_requested()) {
             building_.store(false, std::memory_order_release);
             return;
         }
@@ -112,6 +131,11 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         std::uint32_t dense = 0;
         std::size_t missing = 0;
         for (auto docId : ids) {
+            // Check stop every ~1k docs so shutdown doesn't wait the full build.
+            if ((dense & 0x3ffu) == 0u && stop.stop_requested()) {
+                building_.store(false, std::memory_order_release);
+                return;
+            }
             auto contentResult = repo->getContent(docId);
             if (!contentResult || !contentResult.value()) {
                 ++missing;
@@ -123,6 +147,12 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 atire->add_doc(content.contentText);
             }
             mapping.emplace(docId, dense++);
+        }
+        if (stop.stop_requested()) {
+            // Owner is going away — drop locally owned indexes; do not publish
+            // into member state (would be UAF on a destructed `this`).
+            building_.store(false, std::memory_order_release);
+            return;
         }
         primary->finalize();
         if (atire) {
@@ -140,6 +170,11 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 std::make_unique<simeon::QueryRouter>(rindex, toRouterConfig(cfg_.router_preset));
         }
 
+        if (stop.stop_requested()) {
+            building_.store(false, std::memory_order_release);
+            return;
+        }
+
         const auto t1 = std::chrono::steady_clock::now();
         const auto buildMs = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
@@ -154,7 +189,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         spdlog::info("[simeon-lexical] ready: variant={} router={} docs={} missing={} build_ms={}",
                      variantLabel(cfg_.variant), cfg_.router_enabled ? "on" : "off", dense, missing,
                      buildMs);
-    }).detach();
+    });
 
     return Result<void>{};
 }

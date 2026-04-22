@@ -4168,6 +4168,8 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     cfg.dataDir = makeTempDir("yams_embedding_dispatcher_");
     cfg.configFilePath = cfg.dataDir / "missing-config.toml";
     ScopedEnvVar preferredModelGuard("YAMS_PREFERRED_MODEL", std::nullopt);
+    ScopedEnvVar embedBackendGuard("YAMS_EMBED_BACKEND", std::nullopt);
+    ScopedEnvVar configPathGuard("YAMS_CONFIG", cfg.configFilePath.string());
 
     StubLifecycle lifecycle;
     StateComponent state;
@@ -4559,6 +4561,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
             out << "preferred_model = \"config-repair-model\"\n";
         }
         cfg.configFilePath = configPath;
+        ScopedEnvVar sectionConfigPathGuard("YAMS_CONFIG", configPath.string());
 
         DaemonLifecycleFsm configLifecycleFsm;
         ServiceManager configSvc(cfg, state, configLifecycleFsm);

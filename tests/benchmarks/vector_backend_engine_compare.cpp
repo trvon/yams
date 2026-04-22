@@ -154,16 +154,9 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
     }
 
     const auto build_start = std::chrono::steady_clock::now();
-    if (engine == VectorSearchEngine::HnswCosine) {
-        auto build = backend.buildIndex();
-        if (!build) {
-            throw std::runtime_error(build.error().message);
-        }
-    } else {
-        auto prep = backend.prepareSearchIndex();
-        if (!prep) {
-            throw std::runtime_error(prep.error().message);
-        }
+    auto prep = backend.prepareSearchIndex();
+    if (!prep) {
+        throw std::runtime_error(prep.error().message);
     }
     const auto build_end = std::chrono::steady_clock::now();
 
@@ -193,9 +186,6 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
     const double total_us = std::accumulate(latencies_us.begin(), latencies_us.end(), 0.0);
     EngineResult out;
     switch (engine) {
-        case VectorSearchEngine::HnswCosine:
-            out.name = "hnsw-cosine";
-            break;
         case VectorSearchEngine::SimeonPqAdc:
             out.name = "simeon-pq";
             break;
@@ -244,13 +234,10 @@ int main(int argc, char* argv[]) {
         std::printf("note: corpus/query vectors are normalized, so cosine and L2 rankings are "
                     "comparable\n\n");
 
-        const auto hnsw =
-            runEngine(VectorSearchEngine::HnswCosine, cfg, corpus, queries, ground_truth);
         const auto spq =
             runEngine(VectorSearchEngine::SimeonPqAdc, cfg, corpus, queries, ground_truth);
         const auto vec0 = runEngine(VectorSearchEngine::Vec0L2, cfg, corpus, queries, ground_truth);
 
-        printResult(hnsw, cfg.k);
         printResult(spq, cfg.k);
         printResult(vec0, cfg.k);
         return 0;

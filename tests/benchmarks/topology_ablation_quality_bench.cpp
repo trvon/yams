@@ -476,6 +476,21 @@ struct QualityMetrics {
     std::uint64_t fusionStrategyMismatchCount = 0;
     std::uint64_t rerankerFiredCount = 0;
     std::uint64_t rerankerContributedCount = 0;
+
+    // Phase F1 — per-surface counters from stage["vector"]["counters"].
+    std::uint64_t vecBudgetGuardSkipCount = 0;
+    std::uint64_t vecShouldNarrowCount = 0;
+    std::uint64_t vecWeakFanoutCount = 0;
+    std::uint64_t vecRelaxedRetryEnabledCount = 0;
+    std::uint64_t vecRelaxedRetryAttemptedCount = 0;
+    std::uint64_t vecRelaxedRetryAppliedCount = 0;
+    std::uint64_t vecCounterSampleCount = 0;
+    std::vector<std::uint64_t> vecEffectiveMaxResults;
+    std::vector<std::uint64_t> vecTier2CandidatesSize;
+    std::vector<std::uint64_t> vecTier1TextHits;
+    std::vector<std::uint64_t> vecTier1TopTextScoreMilli;
+    std::vector<std::uint64_t> vecRelaxedPrimaryHitCount;
+    std::vector<std::uint64_t> vecRelaxedRetryThresholdMilli;
 };
 
 double computeNdcgFromRankedDocIds(const std::vector<std::string>& rankedDocIds,
@@ -938,6 +953,50 @@ double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
                     }
                     if (rr.value("contributed", false)) {
                         ++acc.rerankerContributedCount;
+                    }
+                }
+                if (stageJson.contains("vector") && stageJson["vector"].contains("counters") &&
+                    stageJson["vector"]["counters"].is_object()) {
+                    const auto& counters = stageJson["vector"]["counters"];
+                    ++acc.vecCounterSampleCount;
+                    auto flag = [&](const char* key) -> std::uint64_t {
+                        if (!counters.contains(key)) {
+                            return 0;
+                        }
+                        return counters.value(key, std::int64_t{0}) != 0 ? 1U : 0U;
+                    };
+                    auto value = [&](const char* key) -> std::uint64_t {
+                        if (!counters.contains(key)) {
+                            return 0;
+                        }
+                        const auto v = counters.value(key, std::int64_t{0});
+                        return v > 0 ? static_cast<std::uint64_t>(v) : 0U;
+                    };
+                    acc.vecBudgetGuardSkipCount += flag("budget_guard_skip");
+                    acc.vecShouldNarrowCount += flag("should_narrow_applied");
+                    acc.vecWeakFanoutCount += flag("weak_query_fanout_boost_applied");
+                    acc.vecRelaxedRetryEnabledCount += flag("relaxed_retry_enabled");
+                    acc.vecRelaxedRetryAttemptedCount += flag("relaxed_retry_attempted");
+                    acc.vecRelaxedRetryAppliedCount += flag("relaxed_retry_applied");
+                    if (counters.contains("effective_max_results")) {
+                        acc.vecEffectiveMaxResults.push_back(value("effective_max_results"));
+                    }
+                    if (counters.contains("tier2_candidates_size")) {
+                        acc.vecTier2CandidatesSize.push_back(value("tier2_candidates_size"));
+                    }
+                    if (counters.contains("tier1_text_hits")) {
+                        acc.vecTier1TextHits.push_back(value("tier1_text_hits"));
+                    }
+                    if (counters.contains("tier1_top_text_score_milli")) {
+                        acc.vecTier1TopTextScoreMilli.push_back(
+                            value("tier1_top_text_score_milli"));
+                    }
+                    if (counters.contains("relaxed_primary_hit_count")) {
+                        acc.vecRelaxedPrimaryHitCount.push_back(value("relaxed_primary_hit_count"));
+                    }
+                    if (counters.contains("relaxed_retry_threshold_milli")) {
+                        acc.vecRelaxedRetryThresholdMilli.push_back(
+                            value("relaxed_retry_threshold_milli"));
                     }
                 }
             } catch (const std::exception& e) {
@@ -1423,6 +1482,30 @@ json toCellJson(const CellOutcome& outcome) {
         j["fusion_strategy_mismatch_count"] = outcome.metrics.fusionStrategyMismatchCount;
         j["reranker_fired_count"] = outcome.metrics.rerankerFiredCount;
         j["reranker_contributed_count"] = outcome.metrics.rerankerContributedCount;
+        const auto samples = outcome.metrics.vecCounterSampleCount;
+        auto fraction = [&](std::uint64_t numerator) -> double {
+            return samples == 0 ? 0.0
+                                : static_cast<double>(numerator) / static_cast<double>(samples);
+        };
+        j["vector_counter_sample_count"] = samples;
+        j["vector_budget_guard_skip_fraction"] = fraction(outcome.metrics.vecBudgetGuardSkipCount);
+        j["vector_should_narrow_fraction"] = fraction(outcome.metrics.vecShouldNarrowCount);
+        j["vector_weak_fanout_fraction"] = fraction(outcome.metrics.vecWeakFanoutCount);
+        j["vector_relaxed_retry_enabled_fraction"] =
+            fraction(outcome.metrics.vecRelaxedRetryEnabledCount);
+        j["vector_relaxed_retry_attempted_fraction"] =
+            fraction(outcome.metrics.vecRelaxedRetryAttemptedCount);
+        j["vector_relaxed_retry_applied_fraction"] =
+            fraction(outcome.metrics.vecRelaxedRetryAppliedCount);
+        j["vector_effective_max_results_median"] = medianOf(outcome.metrics.vecEffectiveMaxResults);
+        j["vector_tier2_candidates_size_median"] = medianOf(outcome.metrics.vecTier2CandidatesSize);
+        j["vector_tier1_text_hits_median"] = medianOf(outcome.metrics.vecTier1TextHits);
+        j["vector_tier1_top_text_score_milli_median"] =
+            medianOf(outcome.metrics.vecTier1TopTextScoreMilli);
+        j["vector_relaxed_primary_hit_count_median"] =
+            medianOf(outcome.metrics.vecRelaxedPrimaryHitCount);
+        j["vector_relaxed_retry_threshold_milli_median"] =
+            medianOf(outcome.metrics.vecRelaxedRetryThresholdMilli);
     } else {
         j[std::string(irm::kIRNdcgAtK)] = -1.0;
         j[std::string(irm::kIRMrrAtK)] = -1.0;

@@ -2,6 +2,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/vector/vector_utils.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/doctor_checks.h>
@@ -33,7 +34,6 @@
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include "yams/cli/prompt_util.h"
 #include <sqlite3.h>

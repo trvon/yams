@@ -6,7 +6,6 @@
 #include <yams/search/simeon_lexical_backend.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <spdlog/spdlog.h>
 #include <boost/asio/as_tuple.hpp>

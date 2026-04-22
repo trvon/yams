@@ -1914,7 +1914,7 @@ struct OptimizationRunResult {
     double hybridEvalMs = 0.0;
     double keywordEvalMs = 0.0;
     std::string searchEngine =
-        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
+        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc);
     std::uintmax_t vectorsDbBytes = 0;
     std::uintmax_t vectorsWalBytes = 0;
     std::uintmax_t persistedHnswNodes = 0;
@@ -1936,7 +1936,7 @@ struct BenchCacheMetadata {
     bool requireKgReady = false;
     bool graphRerankRequested = false;
     std::string searchEngine =
-        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
+        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc);
     int expectedDocs = 0;
     int expectedQueries = 0;
     std::uintmax_t corpusFingerprint = 0;
@@ -1970,7 +1970,7 @@ struct PersistedHnswState {
 };
 
 static std::string g_benchmark_search_engine =
-    yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
+    yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc);
 static PersistedHnswState g_final_vector_index_state;
 
 static bool envTruthy(const char* value) {
@@ -1995,9 +1995,9 @@ static yams::vector::VectorSearchEngine benchmarkVectorSearchEngine() {
         }
         spdlog::warn(
             "[Bench] Invalid YAMS_VECTOR_SEARCH_ENGINE='{}'; using default {}", raw,
-            yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine));
+            yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc));
     }
-    return yams::vector::VectorSearchEngine::HnswCosine;
+    return yams::vector::VectorSearchEngine::SimeonPqAdc;
 }
 
 static std::string benchmarkEngineCacheLabel() {
@@ -2225,7 +2225,7 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
     metadata.graphRerankRequested = j.value("graph_rerank_requested", false);
     metadata.searchEngine =
         j.value("search_engine", std::string(yams::vector::vectorSearchEngineName(
-                                     yams::vector::VectorSearchEngine::HnswCosine)));
+                                     yams::vector::VectorSearchEngine::SimeonPqAdc)));
     metadata.expectedDocs = j.value("expected_docs", 0);
     metadata.expectedQueries = j.value("expected_queries", 0);
     metadata.corpusFingerprint = j.value("corpus_fingerprint", std::uintmax_t{0});

@@ -223,7 +223,6 @@ heavy_tests = [
 #Temporary skips to stabilize shards(Option A) : vector DB / WAL heavy
   'VectorDatabaseTest.*',
   'VectorDatabasePersistenceTest.*',
-  'VectorIndexManagerTest.*',
   'OnnxRuntimeTest.*',
   'EmbeddingGeneratorTest.*',
   'ModelManagementTest.*',
@@ -1303,9 +1302,6 @@ if catch2_dep.found()
         'unit/vector/document_chunker_catch2_test.cpp',
         'unit/vector/dim_resolver_catch2_test.cpp',
         'unit/vector/embedding_service_synthetic_catch2_test.cpp',
-        'unit/vector/hnsw_index_catch2_test.cpp',
-        'unit/vector/hnsw_persistence_catchup_catch2_test.cpp',
-        'unit/vector/multi_dimension_hnsw_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp',
         'unit/vector/sqlite_vec_c_api_smoke_catch2_test.cpp',
         'unit/vector/vector_schema_migration_vec0_catch2_test.cpp',
