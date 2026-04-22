@@ -46,14 +46,21 @@ vector_cppargs = [
   '-DSQLITE_ENABLE_LOAD_EXTENSION=1',
 ]
 
+# SIMD codegen flags for sqlite-vec-cpp only. These are applied per-TU to
+# the sqlite_vec_cpp sources so the rest of yams_vector (tokenizer,
+# chunker, etc.) is not locked into requiring AVX2 / dotprod at runtime.
+vec_simd_cppargs = []
+
 # Enable SIMD for sqlite-vec-cpp when supported
 cpp_comp = meson.get_compiler('cpp')
 host_cpu = host_machine.cpu_family()
 if host_cpu == 'x86_64' or host_cpu == 'x86'
   if cpp_comp.has_argument('-mavx') and cpp_comp.has_argument('-mfma')
-    vector_cppargs += ['-DSQLITE_VEC_ENABLE_AVX', '-mavx', '-mfma']
+    vector_cppargs += ['-DSQLITE_VEC_ENABLE_AVX']
+    vec_simd_cppargs += ['-mavx', '-mfma']
     if cpp_comp.has_argument('-mavx2')
-      vector_cppargs += ['-DSQLITE_VEC_ENABLE_AVX2', '-mavx2']
+      vector_cppargs += ['-DSQLITE_VEC_ENABLE_AVX2']
+      vec_simd_cppargs += ['-mavx2']
     endif
   endif
 elif host_cpu == 'aarch64' or host_cpu == 'arm'
@@ -71,7 +78,7 @@ elif host_cpu == 'aarch64' or host_cpu == 'arm'
   }
   '''
   if cpp_comp.compiles(dotprod_test, args: ['-march=armv8.2-a+dotprod'], name: 'ARM DotProd (vdotq_s32)')
-    vector_cppargs += ['-march=armv8.2-a+dotprod']
+    vec_simd_cppargs += ['-march=armv8.2-a+dotprod']
     message('ARM DotProd: enabled for sqlite-vec-cpp (int8 cosine/IP ~33x faster)')
   endif
 endif
@@ -97,7 +104,22 @@ srcs = [
   'dim_resolver.cpp',
   'tokenizer.cpp',
   'turboquant.cpp',
-] + sqlite_vec_cpp_src
+]
+
+# Isolate SIMD-heavy sqlite-vec-cpp sources into their own static library so
+# -mavx / -mavx2 / -mfma / -march=armv8.2-a+dotprod do not leak into the rest
+# of yams_vector. This keeps generic TUs buildable on older CPUs while still
+# enabling the fast int8 kernels inside sqlite-vec-cpp.
+sqlite_vec_cpp_lib = []
+if sqlite_vec_cpp_src.length() > 0
+  sqlite_vec_cpp_lib = static_library('yams_sqlite_vec_cpp',
+    sqlite_vec_cpp_src,
+    include_directories: [sqlite_vec_cpp_inc, include_directories('../../include'), include_directories('.')],
+    dependencies: [sqlite_dep, spdlog_dep],
+    cpp_args: vector_cppargs + vec_simd_cppargs,
+    install: false,
+  )
+endif
 
 # ------------------------------------------------------------------
 # Vendored simeon (model-free SIMD embedding) — third_party/simeon
@@ -156,7 +178,7 @@ elif host_cpu == 'x86_64' or host_cpu == 'x86'
 endif
 
 simeon_lib = static_library('yams_simeon',
-  simeon_core_srcs + ['../embedding_simeon/simeon_embedding_backend.cpp'],
+  simeon_core_srcs + yams_embedding_simeon_srcs,
   include_directories: [simeon_inc, include_directories('../../include')],
   dependencies: [spdlog_dep, tl_expected_dep, yams_core],
   cpp_args: simeon_simd_defines,
@@ -164,12 +186,8 @@ simeon_lib = static_library('yams_simeon',
   install: false,
 )
 
-# Propagate the SIMD defines to any consumer that includes simeon headers.
-simeon_dep = declare_dependency(
-  link_with: simeon_lib,
-  include_directories: simeon_inc,
-  compile_args: simeon_simd_defines,
-)
+# NOTE: no separate simeon_dep export is declared — yams_vector_dep below
+# already propagates simeon linkage and include paths to consumers.
 
 # Define SQLITE_VEC_STATIC based on whether we have sqlite-vec-cpp sources
 if sqlite_vec_cpp_src.length() > 0
@@ -192,7 +210,7 @@ yams_vector = static_library('yams_vector',
   srcs,
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
   dependencies: deps_vec + vector_platform_deps,
-  link_with: [simeon_lib],
+  link_with: [simeon_lib] + sqlite_vec_cpp_lib,
   cpp_args: vector_cppargs + simeon_simd_defines,
   install: true,
 )
@@ -205,7 +223,7 @@ pkg.generate(yams_vector,
 )
 
 yams_vector_dep = declare_dependency(
-  link_with: [yams_vector, simeon_lib],
+  link_with: yams_vector,
   include_directories: [include_directories('../../include'), simeon_inc],
   dependencies: vector_platform_deps,
   compile_args: simeon_simd_defines,

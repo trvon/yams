@@ -1893,9 +1893,14 @@ private:
             }
             yams::daemon::ClientConfig cfg;
             cfg.socketPath = effectiveSocket;
+            // Outer deadline must exceed one full attempt budget (connect + read
+            // each use the 5s request timeout) plus DaemonClient::status() retry
+            // backoffs (25+50+100ms). At 5s the outer timer frequently fires
+            // before a transient-recover retry can finish, surfacing a spurious
+            // "IPC error" even when the daemon is healthy.
             auto sres = runDaemonClient(
                 cfg, [](yams::daemon::DaemonClient& client) { return client.status(); },
-                std::chrono::seconds(5));
+                std::chrono::seconds(15));
             if (spinner) {
                 spinner->stop();
             }

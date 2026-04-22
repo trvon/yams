@@ -1,8 +1,8 @@
 nlohmann_json_dep = dependency('nlohmann_json', required: true)
 spdlog_dep = dependency('spdlog', required: true)
-yams_core = dependency('yams_core', required: false)
-yams_metadata = dependency('yams_metadata', required: false)
-yams_vector = dependency('yams_vector', required: false)
+yams_core = dependency('yams_core', required: true)
+yams_metadata = dependency('yams_metadata', required: true)
+yams_vector = dependency('yams_vector', required: true)
 yams_hdbscan_dep = dependency('yams_hdbscan_cpp', required: true)
 
 yams_topology = static_library('yams_topology',

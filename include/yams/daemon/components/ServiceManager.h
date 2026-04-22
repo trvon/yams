@@ -27,31 +27,31 @@
 #include <yams/app/services/services.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/AsyncInitOrchestrator.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/EmbeddingLifecycleManager.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/EmbeddingService.h>
+#include <yams/daemon/components/IngestMetricsPublisher.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/RepairServiceHost.h>
+#include <yams/daemon/components/RequestExecutor.h>
+#include <yams/daemon/components/SearchAdmissionController.h>
 #include <yams/daemon/components/SearchComponent.h>
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
-#include <yams/daemon/components/EmbeddingLifecycleManager.h>
-#include <yams/daemon/components/IngestMetricsPublisher.h>
-#include <yams/daemon/components/AsyncInitOrchestrator.h>
-#include <yams/daemon/components/RepairServiceHost.h>
-#include <yams/daemon/components/RequestExecutor.h>
-#include <yams/daemon/components/SearchAdmissionController.h>
-#include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
@@ -628,9 +628,6 @@ private:
     boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
                                                  int timeout_ms, yams::compat::stop_token token);
     boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
-    boost::asio::awaitable<std::shared_ptr<yams::search::SearchEngine>>
-    co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& token,
-                   bool includeEmbeddingGenerator = true);
     bool detectEmbeddingPreloadFlag() const { return embeddingLifecycle_.detectPreloadFlag(); }
 
     const DaemonConfig& config_;
@@ -657,6 +654,9 @@ private:
     boost::asio::cancellation_signal shutdownSignal_;
 
     std::unique_ptr<WorkCoordinator> workCoordinator_;
+    /// Dedicated thread pool for blocking I/O (database open, migrations).
+    /// Kept separate from the event-loop pool so long-running SQLite ops never stall async work.
+    std::unique_ptr<boost::asio::thread_pool> blockingPool_;
     std::unique_ptr<IngestService> ingestService_;
     std::unique_ptr<RequestExecutor> requestExecutor_;
 

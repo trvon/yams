@@ -194,7 +194,7 @@ TEST_CASE("InitCommand - non-interactive print initializes temp storage", "[cli]
     CHECK(rc == 0);
     CHECK(output.find("# YAMS v3.0.0 Configuration") != std::string::npos);
     CHECK(output.find("[core]") != std::string::npos);
-    CHECK(output.find("preferred_model = \"all-MiniLM-L6-v2\"") != std::string::npos);
+    CHECK(output.find("preferred_model = \"simeon-default\"") != std::string::npos);
     CHECK(fs::exists(helper.dataDir / "yams.db"));
     CHECK(fs::exists(helper.dataDir / "storage"));
 }

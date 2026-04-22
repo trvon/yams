@@ -111,21 +111,26 @@ void applySGCSmoothing(std::vector<TopologyDocumentInput>& documents,
         invSqrtDeg[i] = degree[i] > 0.0 ? 1.0 / std::sqrt(degree[i]) : 0.0;
     }
 
-    std::vector<std::vector<float>> features(n, std::vector<float>(dim, 0.0F));
+    // Flat ping-pong buffers: 2 contiguous allocations of n*dim floats instead
+    // of 2n nested vectors. For 54k docs x 1024 dim this saves ~108k heap
+    // allocations and keeps both buffers cache-contiguous per row.
+    std::vector<float> features(n * dim, 0.0F);
     for (std::size_t i = 0; i < n; ++i) {
-        if (documents[i].embedding.size() == dim) {
-            features[i] = documents[i].embedding;
+        const auto& emb = documents[i].embedding;
+        if (emb.size() == dim) {
+            std::copy(emb.begin(), emb.end(),
+                      features.begin() + static_cast<std::ptrdiff_t>(i * dim));
         }
     }
 
-    std::vector<std::vector<float>> next(n, std::vector<float>(dim, 0.0F));
+    std::vector<float> next(n * dim, 0.0F);
     for (std::size_t hop = 0; hop < hops; ++hop) {
         for (std::size_t i = 0; i < n; ++i) {
-            std::vector<float>& row = next[i];
-            std::fill(row.begin(), row.end(), 0.0F);
+            float* row = next.data() + i * dim;
+            const float* self = features.data() + i * dim;
             const double selfScale = invSqrtDeg[i] * invSqrtDeg[i];
             for (std::size_t d = 0; d < dim; ++d) {
-                row[d] = static_cast<float>(selfScale * static_cast<double>(features[i][d]));
+                row[d] = static_cast<float>(selfScale * static_cast<double>(self[d]));
             }
             for (const auto& e : symmetric[i]) {
                 const double scale =
@@ -133,7 +138,7 @@ void applySGCSmoothing(std::vector<TopologyDocumentInput>& documents,
                 if (scale == 0.0) {
                     continue;
                 }
-                const auto& src = features[e.to];
+                const float* src = features.data() + e.to * dim;
                 for (std::size_t d = 0; d < dim; ++d) {
                     row[d] += static_cast<float>(scale * static_cast<double>(src[d]));
                 }
@@ -144,7 +149,8 @@ void applySGCSmoothing(std::vector<TopologyDocumentInput>& documents,
 
     for (std::size_t i = 0; i < n; ++i) {
         if (documents[i].embedding.size() == dim) {
-            documents[i].embedding = std::move(features[i]);
+            const float* row = features.data() + i * dim;
+            std::copy(row, row + dim, documents[i].embedding.begin());
         }
     }
 }

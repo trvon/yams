@@ -13,7 +13,6 @@
 #include <cstdint>
 #include <cstddef>
 #include <limits>
-#include <map>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -26,6 +25,20 @@ namespace yams::topology {
 namespace {
 
 using PairKey = std::pair<std::size_t, std::size_t>;
+
+struct PairKeyHash {
+    std::size_t operator()(const PairKey& k) const noexcept {
+        const std::uint64_t a = static_cast<std::uint64_t>(k.first);
+        const std::uint64_t b = static_cast<std::uint64_t>(k.second);
+        std::uint64_t x = a * 0x9E3779B97F4A7C15ULL + b;
+        x ^= x >> 33;
+        x *= 0xFF51AFD7ED558CCDULL;
+        x ^= x >> 33;
+        return static_cast<std::size_t>(x);
+    }
+};
+
+using PairWeightMap = std::unordered_map<PairKey, float, PairKeyHash>;
 
 std::string makeSnapshotId(std::uint64_t unixMillis) {
     return "topology-" + std::to_string(unixMillis);
@@ -50,11 +63,10 @@ TimeStamps nowStamps() {
     return ts;
 }
 
-std::map<PairKey, float>
-buildPairWeights(std::span<const TopologyDocumentInput> documents,
-                 const std::unordered_map<std::string, std::size_t>& indexByHash,
-                 const TopologyBuildConfig& config) {
-    std::map<PairKey, float> pairWeights;
+PairWeightMap buildPairWeights(std::span<const TopologyDocumentInput> documents,
+                               const std::unordered_map<std::string, std::size_t>& indexByHash,
+                               const TopologyBuildConfig& config) {
+    PairWeightMap pairWeights;
     for (std::size_t i = 0; i < documents.size(); ++i) {
         for (const auto& neighbor : documents[i].neighbors) {
             if (neighbor.documentHash.empty()) {
@@ -87,7 +99,7 @@ buildPairWeights(std::span<const TopologyDocumentInput> documents,
 }
 
 std::vector<std::vector<std::pair<std::size_t, float>>>
-makeAdjacency(std::size_t n, const std::map<PairKey, float>& pairWeights) {
+makeAdjacency(std::size_t n, const PairWeightMap& pairWeights) {
     std::vector<std::vector<std::pair<std::size_t, float>>> adjacency(n);
     for (const auto& [key, weight] : pairWeights) {
         adjacency[key.first].emplace_back(key.second, weight);
@@ -104,7 +116,7 @@ makeAdjacency(std::size_t n, const std::map<PairKey, float>& pairWeights) {
 // populate. `algorithm` is stamped into the batch.
 TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentInput> documents,
                                                const std::vector<std::int64_t>& assignment,
-                                               const std::map<PairKey, float>& pairWeights,
+                                               const PairWeightMap& pairWeights,
                                                std::string algorithm, const TimeStamps& ts) {
     TopologyArtifactBatch batch;
     batch.snapshotId = makeSnapshotId(ts.unixMillis);
@@ -157,18 +169,17 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                 }
                 weightedDegree[idx] += weight;
                 ++degree;
+                // Undirected edge stored twice in adjacency; accumulate
+                // cohesion/persistence only on the ordered half.
+                if (idx < neighborIdx) {
+                    cohesion += weight;
+                    persistence =
+                        internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
+                    ++internalEdgeCount;
+                }
             }
             if (members.size() > 2 && degree >= 2) {
                 ++bridgeCount;
-            }
-        }
-
-        for (const auto& [key, weight] : pairWeights) {
-            if (memberSet.contains(key.first) && memberSet.contains(key.second)) {
-                cohesion += weight;
-                persistence =
-                    internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
-                ++internalEdgeCount;
             }
         }
 

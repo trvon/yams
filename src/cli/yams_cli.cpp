@@ -434,11 +434,24 @@ YamsCLI::buildRunParsePlan(int argc, char* argv[],
 
 void YamsCLI::parseRunPlan(const RunParsePlan& plan) {
     const auto t0 = std::chrono::steady_clock::now();
-    app_->parse(plan.argc, const_cast<char**>(plan.argv.data()));
+    std::vector<std::string> ownedArgs;
+    ownedArgs.reserve(static_cast<std::size_t>(plan.argc));
+    for (int i = 0; i < plan.argc; ++i) {
+        ownedArgs.emplace_back(plan.argv[i] ? plan.argv[i] : "");
+    }
+
+    std::vector<char*> mutableArgv;
+    mutableArgv.reserve(ownedArgs.size() + 1);
+    for (auto& arg : ownedArgs) {
+        mutableArgv.push_back(arg.data());
+    }
+    mutableArgv.push_back(nullptr);
+
+    app_->parse(plan.argc, mutableArgv.data());
     cli_perf_trace("cli.parse",
                    std::chrono::duration_cast<std::chrono::microseconds>(
                        std::chrono::steady_clock::now() - t0),
-                   plan.perfLabel.empty() ? nullptr : plan.perfLabel.c_str());
+                   plan.perfLabel.empty() ? std::string_view{} : std::string_view{plan.perfLabel});
 }
 
 void YamsCLI::applyParsedLogLevel() {

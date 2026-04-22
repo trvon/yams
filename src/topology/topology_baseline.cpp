@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <map>
 #include <queue>
 #include <string>
 #include <unordered_map>
@@ -16,6 +15,19 @@ namespace yams::topology {
 namespace {
 
 using PairKey = std::pair<std::size_t, std::size_t>;
+
+struct PairKeyHash {
+    std::size_t operator()(const PairKey& k) const noexcept {
+        // Mix via splitmix-style combine; both halves fit in 64 bits on 64-bit.
+        const std::uint64_t a = static_cast<std::uint64_t>(k.first);
+        const std::uint64_t b = static_cast<std::uint64_t>(k.second);
+        std::uint64_t x = a * 0x9E3779B97F4A7C15ULL + b;
+        x ^= x >> 33;
+        x *= 0xFF51AFD7ED558CCDULL;
+        x ^= x >> 33;
+        return static_cast<std::size_t>(x);
+    }
+};
 
 std::string makeSnapshotId(std::uint64_t unixSeconds) {
     return "topology-" + std::to_string(unixSeconds);
@@ -52,7 +64,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         }
     }
 
-    std::map<PairKey, float> pairWeights;
+    std::unordered_map<PairKey, float, PairKeyHash> pairWeights;
     for (std::size_t i = 0; i < documents.size(); ++i) {
         for (const auto& neighbor : documents[i].neighbors) {
             if (neighbor.documentHash.empty()) {
@@ -135,18 +147,18 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
                 }
                 weightedDegree[idx] += weight;
                 ++degree;
+                // Each undirected edge is stored twice in adjacency (u->v and
+                // v->u). Count it once for cohesion/persistence by only
+                // accumulating on the ordered half.
+                if (idx < neighborIdx) {
+                    cohesion += weight;
+                    persistence =
+                        internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
+                    ++internalEdgeCount;
+                }
             }
             if (component.size() > 2 && degree >= 2) {
                 ++bridgeCount;
-            }
-        }
-
-        for (const auto& [key, weight] : pairWeights) {
-            if (componentSet.contains(key.first) && componentSet.contains(key.second)) {
-                cohesion += weight;
-                persistence =
-                    internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
-                ++internalEdgeCount;
             }
         }
 

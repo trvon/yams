@@ -59,7 +59,6 @@
 #include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
-#include <yams/topology/topology_factory.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
@@ -76,11 +75,12 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
+#include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/topology/topology_factory.h>
 
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
@@ -377,6 +377,16 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         requestExecutor_->start();
     } catch (const std::exception& e) {
         spdlog::error("Failed to initialize RequestExecutor: {}", e.what());
+        throw;
+    }
+
+    // Dedicated blocking pool for synchronous SQLite I/O (open, migrations).
+    // Kept separate from the event-loop pool so heavy disk ops never stall async work.
+    try {
+        blockingPool_ = std::make_unique<boost::asio::thread_pool>(1);
+        spdlog::debug("[ServiceManager] Blocking thread pool created (1 worker)");
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to initialize blocking thread pool: {}", e.what());
         throw;
     }
 
@@ -1024,6 +1034,21 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 3.8: No ingest service to quiesce");
     }
 
+    // Phase 3.9: Stop the dedicated blocking I/O pool before tearing down shared state.
+    // SQLite open/migrate run here; we must join so no worker touches database_ after
+    // DatabaseManager is destroyed.
+    spdlog::info("[ServiceManager] Phase 3.9: Stopping blocking I/O pool");
+    if (blockingPool_) {
+        try {
+            blockingPool_->stop();
+            blockingPool_->join();
+            spdlog::info("[ServiceManager] Phase 3.9: Blocking I/O pool stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.9: Blocking pool stop failed: {}", e.what());
+        }
+        blockingPool_.reset();
+    }
+
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
@@ -1624,7 +1649,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Phase: Open metadata DB with timeout (awaitable helper)
     auto dbPath = dataDir / "yams.db";
     database_ = std::make_shared<metadata::Database>();
-    int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 5000, 250);
+    // Hard-cap on the blocking SQLite open. 0 = no cap (await real completion).
+    // A non-zero value is an escape hatch for CI/operators; in normal operation the
+    // coroutine awaits the actual open event and a watchdog emits progress logs.
+    int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 0, 0);
 
     // Re-check shutdown before transitioning the database FSM.
     if (token.stop_requested())
@@ -1657,7 +1685,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // Phase: Migrations (if DB ok)
     if (db_ok) {
-        int mig_timeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 7000, 250);
+        int mig_timeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 0, 0);
         try {
             serviceFsm_.dispatch(MigrationStartedEvent{});
         } catch (...) {
@@ -2451,94 +2479,89 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
 }
 
 boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesystem::path& dbPath,
-                                                             int timeout_ms,
+                                                             int /*timeout_ms*/,
                                                              yams::compat::stop_token token) {
     auto ex = co_await boost::asio::this_coro::executor;
 
-    try {
-        // Use async_initiate pattern with timeout racing (no experimental APIs)
-        co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
-                                                       void(std::exception_ptr, bool)>(
-            [this, dbPath, ex, timeout_ms](auto handler) mutable {
-                // Shared state for race coordination
-                auto completed = std::make_shared<std::atomic<bool>>(false);
-                auto timer = std::make_shared<boost::asio::steady_timer>(ex);
-                timer->expires_after(std::chrono::milliseconds(timeout_ms));
-
-                // Capture handler in shared_ptr for safe sharing between timer and work
-                using HandlerT = std::decay_t<decltype(handler)>;
-                auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
-                auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
-
-                // Set up timeout
-                timer->async_wait([completed, handlerPtr, completion_exec,
-                                   timeout_ms](const boost::system::error_code& ec) mutable {
-                    if (ec)
-                        return; // Timer cancelled
-                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                        // Timeout won
-                        spdlog::warn(
-                            "Database open timed out after {} ms — continuing in degraded mode",
-                            timeout_ms);
-                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                            std::move(h)(std::exception_ptr{}, false);
-                        });
-                    }
-                });
-
-                // Post blocking work to executor
-                boost::asio::post(ex, [this, dbPath, timer, completed, handlerPtr,
-                                       completion_exec]() mutable {
-                    bool success = false;
-                    std::exception_ptr ep;
-                    try {
-                        auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
-                        success = static_cast<bool>(r);
-                        if (!success) {
-                            spdlog::warn("Database open failed: {} — continuing in degraded mode",
-                                         r.error().message);
-                        } else {
-                            state_.readiness.databaseReady = true;
-                            spdlog::info("Database opened successfully");
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::warn(
-                            "Database open threw exception: {} — continuing in degraded mode",
-                            e.what());
-                        ep = std::current_exception();
-                    } catch (...) {
-                        spdlog::warn("Database open failed (unknown exception) — continuing in "
-                                     "degraded mode");
-                        ep = std::current_exception();
-                    }
-
-                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                        // Work won
-                        timer->cancel();
-                        boost::asio::post(completion_exec,
-                                          [h = std::move(*handlerPtr), ep, success]() mutable {
-                                              std::move(h)(ep, success);
-                                          });
-                    }
-                });
-            },
-            boost::asio::use_awaitable);
-
-    } catch (const std::exception& e) {
-        spdlog::warn("Database open failed (exception): {} — continuing in degraded mode",
-                     e.what());
+    if (token.stop_requested())
         co_return false;
-    } catch (...) {
-        spdlog::warn("Database open failed (unknown exception) — continuing in degraded mode");
+    if (!blockingPool_) {
+        spdlog::error("[ServiceManager] blockingPool_ not available; cannot open database");
         co_return false;
     }
+
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+    const auto startedAt = std::chrono::steady_clock::now();
+
+    // Liveness watchdog: emits periodic progress logs so a slow cold-open on external
+    // volumes doesn't look like a hang. Terminates as soon as `completed` flips.
+    boost::asio::co_spawn(
+        ex,
+        [completed, dbPath, startedAt, ex]() -> boost::asio::awaitable<void> {
+            using namespace std::chrono_literals;
+            boost::asio::steady_timer timer(ex);
+            while (!completed->load(std::memory_order_acquire)) {
+                timer.expires_after(5s);
+                boost::system::error_code ec;
+                co_await timer.async_wait(
+                    boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+                if (completed->load(std::memory_order_acquire))
+                    break;
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                   std::chrono::steady_clock::now() - startedAt)
+                                   .count();
+                spdlog::info("[ServiceManager] still opening database '{}' ({}s elapsed)",
+                             dbPath.string(), elapsed);
+            }
+            co_return;
+        },
+        boost::asio::detached);
+
+    // Package the blocking SQLite open and run it off the event loop.
+    auto task = std::make_shared<std::packaged_task<bool()>>([this, dbPath]() {
+        bool ok = false;
+        try {
+            auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
+            ok = static_cast<bool>(r);
+            if (!ok) {
+                spdlog::warn("Database open failed: {}", r.error().message);
+            } else {
+                state_.readiness.databaseReady = true;
+                spdlog::info("Database opened successfully");
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Database open threw exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("Database open failed (unknown exception)");
+        }
+        return ok;
+    });
+    auto future = task->get_future();
+    boost::asio::post(blockingPool_->get_executor(), [task]() { (*task)(); });
+
+    // Suspend the coroutine until the real work finishes — no race, no fabricated events.
+    bool ok = co_await init::co_await_future(future, ex);
+    completed->store(true, std::memory_order_release);
+
+    if (token.stop_requested()) {
+        spdlog::warn("[ServiceManager] Database open completed but shutdown was requested; "
+                     "treating as failure");
+        co_return false;
+    }
+    co_return ok;
 }
 
-boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
+boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int /*timeout_ms*/,
                                                                 yams::compat::stop_token token) {
     auto ex = co_await boost::asio::this_coro::executor;
 
-    // Create migration manager on heap so it survives async operations
+    if (token.stop_requested())
+        co_return false;
+    if (!blockingPool_) {
+        spdlog::error("[ServiceManager] blockingPool_ not available; cannot migrate database");
+        co_return false;
+    }
+
     auto mm = std::make_shared<metadata::MigrationManager>(*database_);
     auto initResult = mm->initialize();
     if (!initResult) {
@@ -2548,75 +2571,61 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     }
     mm->registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
 
-    try {
-        // Use async_initiate pattern with timeout racing (no experimental APIs)
-        co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
-                                                       void(std::exception_ptr, bool)>(
-            [mm, ex, timeout_ms](auto handler) mutable {
-                // Shared state for race coordination
-                auto completed = std::make_shared<std::atomic<bool>>(false);
-                auto timer = std::make_shared<boost::asio::steady_timer>(ex);
-                timer->expires_after(std::chrono::milliseconds(timeout_ms));
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+    const auto startedAt = std::chrono::steady_clock::now();
 
-                // Capture handler in shared_ptr for safe sharing between timer and work
-                using HandlerT = std::decay_t<decltype(handler)>;
-                auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
-                auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
+    // Progress watchdog
+    boost::asio::co_spawn(
+        ex,
+        [completed, startedAt, ex]() -> boost::asio::awaitable<void> {
+            using namespace std::chrono_literals;
+            boost::asio::steady_timer timer(ex);
+            while (!completed->load(std::memory_order_acquire)) {
+                timer.expires_after(5s);
+                boost::system::error_code ec;
+                co_await timer.async_wait(
+                    boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+                if (completed->load(std::memory_order_acquire))
+                    break;
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                   std::chrono::steady_clock::now() - startedAt)
+                                   .count();
+                spdlog::info("[ServiceManager] still migrating database ({}s elapsed)", elapsed);
+            }
+            co_return;
+        },
+        boost::asio::detached);
 
-                // Set up timeout
-                timer->async_wait([completed, handlerPtr, completion_exec,
-                                   timeout_ms](const boost::system::error_code& ec) mutable {
-                    if (ec)
-                        return; // Timer cancelled
-                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                        // Timeout won
-                        spdlog::warn("Database migration timed out after {} ms", timeout_ms);
-                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                            std::move(h)(std::exception_ptr{}, false);
-                        });
-                    }
-                });
+    // Package the blocking migration and run it off the event loop.
+    auto task = std::make_shared<std::packaged_task<bool()>>([mm]() {
+        bool ok = false;
+        try {
+            auto r = mm->migrate();
+            ok = static_cast<bool>(r);
+            if (!ok) {
+                spdlog::warn("Database migration failed: {}", r.error().message);
+            } else {
+                spdlog::info("Database migrations completed");
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Database migration threw exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("Database migration failed (unknown exception)");
+        }
+        return ok;
+    });
+    auto future = task->get_future();
+    boost::asio::post(blockingPool_->get_executor(), [task]() { (*task)(); });
 
-                // Post blocking work to executor
-                boost::asio::post(
-                    ex, [mm, timer, completed, handlerPtr, completion_exec]() mutable {
-                        bool success = false;
-                        std::exception_ptr ep;
-                        try {
-                            auto r = mm->migrate();
-                            success = static_cast<bool>(r);
-                            if (!success) {
-                                spdlog::warn("Database migration failed: {}", r.error().message);
-                            } else {
-                                spdlog::info("Database migrations completed");
-                            }
-                        } catch (const std::exception& e) {
-                            spdlog::warn("Database migration threw exception: {}", e.what());
-                            ep = std::current_exception();
-                        } catch (...) {
-                            spdlog::warn("Database migration failed (unknown exception)");
-                            ep = std::current_exception();
-                        }
+    bool ok = co_await init::co_await_future(future, ex);
+    completed->store(true, std::memory_order_release);
 
-                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                            // Work won
-                            timer->cancel();
-                            boost::asio::post(completion_exec,
-                                              [h = std::move(*handlerPtr), ep, success]() mutable {
-                                                  std::move(h)(ep, success);
-                                              });
-                        }
-                    });
-            },
-            boost::asio::use_awaitable);
-
-    } catch (const std::exception& e) {
-        spdlog::warn("Database migration failed (exception): {}", e.what());
-        co_return false;
-    } catch (...) {
-        spdlog::warn("Database migration failed (unknown exception)");
+    if (token.stop_requested()) {
+        spdlog::warn("[ServiceManager] Database migration completed but shutdown was requested; "
+                     "treating as failure");
         co_return false;
     }
+    co_return ok;
 }
 
 /// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
@@ -3135,29 +3144,6 @@ bool ServiceManager::startEmbeddingWarmupIfConfigured() {
         },
         boost::asio::detached);
     return true;
-}
-
-boost::asio::awaitable<std::shared_ptr<yams::search::SearchEngine>>
-ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& /*token*/,
-                               bool includeEmbeddingGenerator) {
-    auto exec = getWorkerExecutor();
-    std::shared_ptr<vector::EmbeddingGenerator> gen;
-    auto modelProvider = loadModelProvider();
-    if (includeEmbeddingGenerator && modelProvider && modelProvider->isAvailable()) {
-        try {
-            gen = embeddingLifecycle_.modelName().empty()
-                      ? modelProvider->getEmbeddingGenerator()
-                      : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
-        } catch (...) {
-        }
-    }
-    auto res = co_await searchEngineManager_.buildEngine(getMetadataRepo(), getKgStore(),
-                                                         getVectorDatabase(), std::move(gen),
-                                                         "co_buildEngine", timeout_ms, exec);
-    if (res.has_value()) {
-        co_return res.value();
-    }
-    co_return std::shared_ptr<yams::search::SearchEngine>{};
 }
 
 } // namespace yams::daemon
