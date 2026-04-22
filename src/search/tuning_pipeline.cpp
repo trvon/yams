@@ -94,11 +94,8 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     params.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
     params.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
     params.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
-    params.enableAdaptiveVectorFallback = config.enableAdaptiveVectorFallback;
-    params.adaptiveVectorSkipMinTier1Hits = config.adaptiveVectorSkipMinTier1Hits;
-    params.adaptiveVectorSkipRequireTextSignal = config.adaptiveVectorSkipRequireTextSignal;
-    params.adaptiveVectorSkipMinTextHits = config.adaptiveVectorSkipMinTextHits;
-    params.adaptiveVectorSkipMinTopTextScore = config.adaptiveVectorSkipMinTopTextScore;
+    params.weakQueryMinTextHits = config.weakQueryMinTextHits;
+    params.weakQueryMinTopTextScore = config.weakQueryMinTopTextScore;
     params.enableSubPhraseRescoring = config.enableSubPhraseRescoring;
     params.subPhraseScoringPenalty = config.subPhraseScoringPenalty;
     params.rerankTopK = config.rerankTopK;
@@ -340,8 +337,6 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
     params.enableSubPhraseRescoring =
         params.enableSubPhraseRescoring || target.enableSubPhraseRescoring;
     params.enableLexicalTieBreak = params.enableLexicalTieBreak || target.enableLexicalTieBreak;
-    params.enableAdaptiveVectorFallback =
-        params.enableAdaptiveVectorFallback || target.enableAdaptiveVectorFallback;
 
     // Enums/strategy: adopt target profile's strategy
     params.rrfK = target.rrfK;
@@ -356,7 +351,7 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
 
 void applySemanticOnlyLayer(TunedParams& params) {
     params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
-    params.similarityThreshold.forceSet(std::min(params.similarityThreshold.value, 0.30f),
+    params.similarityThreshold.forceSet(std::min(params.similarityThreshold.value, 0.0f),
                                         TuningLayer::Mode);
     params.weights.text.forceSet(std::min(params.weights.text.value, 0.20f), TuningLayer::Mode);
     params.weights.kg.forceSet(0.0f, TuningLayer::Mode);

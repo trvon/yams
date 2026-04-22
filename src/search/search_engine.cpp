@@ -2065,12 +2065,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         return std::pair<size_t, float>{lexicalHits, topTextScore};
     };
 
-    auto budgetGuardStrongLexical = [&](const std::vector<ComponentResult>& componentResults) {
-        const auto [lexicalHits, topTextScore] = computeLexicalEvidence(componentResults);
-        response.debugStats["semantic_budget_lexical_hits"] = std::to_string(lexicalHits);
-        response.debugStats["semantic_budget_top_text_score"] = fmt::format("{:.4f}", topTextScore);
-        return lexicalHits >= 5 || topTextScore >= 0.20f;
-    };
+    auto recordSemanticBudgetLexicalEvidence =
+        [&](const std::vector<ComponentResult>& componentResults) {
+            const auto [lexicalHits, topTextScore] = computeLexicalEvidence(componentResults);
+            response.debugStats["semantic_budget_lexical_hits"] = std::to_string(lexicalHits);
+            response.debugStats["semantic_budget_top_text_score"] =
+                fmt::format("{:.4f}", topTextScore);
+            return std::pair<size_t, float>{lexicalHits, topTextScore};
+        };
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
         if (conceptsMaterialized || !conceptFuture.valid()) {
@@ -2409,9 +2411,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
 
-            // Extract Tier 1 candidate hashes only when needed (narrowing or adaptive fallback).
-            const bool needTier1Candidates = workingConfig.tieredNarrowVectorSearch ||
-                                             workingConfig.enableAdaptiveVectorFallback;
+            // Extract Tier 1 candidate hashes only when needed (narrowing).
+            const bool needTier1Candidates = workingConfig.tieredNarrowVectorSearch;
             std::unordered_set<std::string> tier1Candidates;
             if (needTier1Candidates) {
                 tier1Candidates.reserve(allComponentResults.size());
@@ -2465,15 +2466,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 }
             }
 
-            // --- TIER 2: Vector search NARROWED to Tier 1 candidates ---
-            // Always run vector search (never skip), but filter to Tier 1 candidates when
-            // appropriate
+            // --- TIER 2: Vector search is a peer retriever; always run when the embedding
+            // leg is available. Narrowing to Tier 1 candidates is still an opt-in knob.
             YAMS_ZONE_SCOPED_N("search_engine::tier2_semantic");
-
-            const size_t adaptiveSkipMinHits =
-                (workingConfig.adaptiveVectorSkipMinTier1Hits > 0)
-                    ? workingConfig.adaptiveVectorSkipMinTier1Hits
-                    : std::max<size_t>(workingConfig.maxResults * 2, static_cast<size_t>(50));
 
             size_t tier1TextHits = 0;
             float tier1TopTextScore = 0.0f;
@@ -2484,12 +2479,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 }
             }
 
-            bool hasStrongTextSignal = true;
-            if (workingConfig.adaptiveVectorSkipRequireTextSignal) {
-                hasStrongTextSignal =
-                    tier1TextHits >= workingConfig.adaptiveVectorSkipMinTextHits &&
-                    tier1TopTextScore >= workingConfig.adaptiveVectorSkipMinTopTextScore;
-            }
+            const bool hasStrongTextSignal =
+                tier1TextHits >= workingConfig.weakQueryMinTextHits &&
+                tier1TopTextScore >= workingConfig.weakQueryMinTopTextScore;
 
             effectiveVectorMaxResults = workingConfig.vectorMaxResults;
             effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
@@ -2644,34 +2636,26 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                                         : "strong_tier1_query");
             }
 
-            const bool strongBudgetLexical =
-                semanticBudgetActive && (tier1TextHits >= 5 || tier1TopTextScore >= 0.20f);
-            const bool shouldSkipSemantic =
-                (workingConfig.enableAdaptiveVectorFallback &&
-                 (tier1CandidateCount >= adaptiveSkipMinHits) && hasStrongTextSignal) ||
-                strongBudgetLexical;
-
-            if (shouldSkipSemantic) {
-                semanticTierSkipped = true;
-                semanticTierSkipReason =
-                    strongBudgetLexical ? "budget_guard_strong_lexical" : "adaptive_vector_skip";
-                skipped.push_back("vector");
-                skipped.push_back("entity_vector");
-                traceCollector.markStageSkipped("vector", semanticTierSkipReason);
-                traceCollector.markStageSkipped("entity_vector", semanticTierSkipReason);
-                response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
-                spdlog::debug("Tiered search: skipping embedding/vector tier (reason={}, tier1 "
-                              "candidates={}, threshold={}, text_hits={}, top_text_score={:.3f})",
-                              semanticTierSkipReason, tier1CandidateCount, adaptiveSkipMinHits,
+            // F3a: G1 "adaptive vector skip" removed. Vector is a peer retriever — it
+            // always runs when the embedding leg is available. Budget guards remain
+            // (short-query / memory pressure) because they are a resource concern, not
+            // a quality gate.
+            const bool semanticBudgetCapApplied = semanticBudgetActive;
+            if (semanticBudgetCapApplied) {
+                effectiveVectorMaxResults = std::min(
+                    effectiveVectorMaxResults,
+                    std::max<std::size_t>(1, workingConfig.semanticBudgetVectorMaxResults));
+                effectiveEntityVectorMaxResults = std::min(
+                    effectiveEntityVectorMaxResults,
+                    std::max<std::size_t>(1, workingConfig.semanticBudgetEntityVectorMaxResults));
+                response.debugStats["semantic_budget_vector_cap"] =
+                    std::to_string(effectiveVectorMaxResults);
+                response.debugStats["semantic_budget_entity_vector_cap"] =
+                    std::to_string(effectiveEntityVectorMaxResults);
+                spdlog::debug("Tiered search: semantic budget cap applied (vector_max={}, "
+                              "entity_vector_max={}, text_hits={}, top_text_score={:.3f})",
+                              effectiveVectorMaxResults, effectiveEntityVectorMaxResults,
                               tier1TextHits, tier1TopTextScore);
-            } else if (workingConfig.enableAdaptiveVectorFallback &&
-                       tier1CandidateCount >= adaptiveSkipMinHits && !hasStrongTextSignal) {
-                spdlog::debug("Tiered search: retaining semantic tier due to weak text signal "
-                              "(tier1 candidates={}, text_hits={}, top_text_score={:.3f}, "
-                              "min_text_hits={}, min_top_text_score={:.3f})",
-                              tier1CandidateCount, tier1TextHits, tier1TopTextScore,
-                              workingConfig.adaptiveVectorSkipMinTextHits,
-                              workingConfig.adaptiveVectorSkipMinTopTextScore);
             }
 
             // Always materialize the query embedding when semantic search is configured so later
@@ -2699,8 +2683,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             response.debugStats["tier1_hash_fingerprint"] = tier1HashFingerprint;
             response.debugStats["topology_routed_seed_fingerprint"] = topologyRoutedSeedFingerprint;
 
-            if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_ &&
-                !hasVectorTierDimMismatch()) {
+            traceCollector.recordStageCounter("vector", "budget_guard_skip", 0);
+            traceCollector.recordStageCounter("vector", "budget_guard_cap_applied",
+                                              semanticBudgetCapApplied ? 1 : 0);
+            traceCollector.recordStageCounter("vector", "should_narrow_applied",
+                                              shouldNarrow ? 1 : 0);
+            traceCollector.recordStageCounter("vector", "effective_max_results",
+                                              static_cast<std::int64_t>(effectiveVectorMaxResults));
+            traceCollector.recordStageCounter("vector", "weak_query_fanout_boost_applied",
+                                              weakQueryFanoutBoostApplied ? 1 : 0);
+            traceCollector.recordStageCounter("vector", "tier2_candidates_size",
+                                              static_cast<std::int64_t>(tier2Candidates.size()));
+            traceCollector.recordStageCounter("vector", "tier1_text_hits",
+                                              static_cast<std::int64_t>(tier1TextHits));
+            traceCollector.recordStageCounter(
+                "vector", "tier1_top_text_score_milli",
+                static_cast<std::int64_t>(
+                    std::llround(static_cast<double>(tier1TopTextScore) * 1000.0)));
+
+            if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
                 vectorFuture =
                     schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
                              stats_.avgVectorTimeMicros,
@@ -2725,7 +2726,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         return queryEntityVectors(queryEmbedding.value(), workingConfig,
                                                   effectiveEntityVectorMaxResults);
                     });
-            } else if (!shouldSkipSemantic && hasVectorTierDimMismatch()) {
+            } else if (hasVectorTierDimMismatch()) {
                 markVectorTierDimMismatch();
             }
 
@@ -2801,20 +2802,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
 
+            const auto [budgetLexicalHits, budgetTopTextScore] =
+                deferSemanticStages ? recordSemanticBudgetLexicalEvidence(allComponentResults)
+                                    : std::pair<size_t, float>{0, 0.0f};
             const bool strongBudgetLexical =
-                deferSemanticStages && budgetGuardStrongLexical(allComponentResults);
+                deferSemanticStages && (budgetLexicalHits >= 5 || budgetTopTextScore >= 0.20f);
             if (deferSemanticStages && strongBudgetLexical) {
                 semanticTierSkipped = true;
                 semanticTierSkipReason = "budget_guard_strong_lexical";
                 response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
                 skipped.push_back("kg");
-                skipped.push_back("vector");
-                skipped.push_back("entity_vector");
                 traceCollector.markStageSkipped("kg", semanticTierSkipReason);
-                traceCollector.markStageSkipped("vector", semanticTierSkipReason);
-                traceCollector.markStageSkipped("entity_vector", semanticTierSkipReason);
-            } else {
-                if (kgStore_) {
+            }
+            {
+                if (kgStore_ && !(deferSemanticStages && strongBudgetLexical)) {
                     if (workingConfig.graphUseQueryConcepts &&
                         workingConfig.waitForConceptExtraction) {
                         materializeConcepts(true);
@@ -2920,20 +2921,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                       "metadata", workingConfig.metadataWeight, stats_.metadataQueries,
                       stats_.avgMetadataTimeMicros);
 
+        const auto [budgetLexicalHits, budgetTopTextScore] =
+            semanticBudgetActive ? recordSemanticBudgetLexicalEvidence(allComponentResults)
+                                 : std::pair<size_t, float>{0, 0.0f};
         const bool strongBudgetLexical =
-            semanticBudgetActive && budgetGuardStrongLexical(allComponentResults);
+            semanticBudgetActive && (budgetLexicalHits >= 5 || budgetTopTextScore >= 0.20f);
         if (semanticBudgetActive && strongBudgetLexical) {
             semanticTierSkipped = true;
             semanticTierSkipReason = "budget_guard_strong_lexical";
             response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
             skipped.push_back("kg");
-            skipped.push_back("vector");
-            skipped.push_back("entity_vector");
             traceCollector.markStageSkipped("kg", semanticTierSkipReason);
-            traceCollector.markStageSkipped("vector", semanticTierSkipReason);
-            traceCollector.markStageSkipped("entity_vector", semanticTierSkipReason);
-        } else {
-            if (kgStore_) {
+        }
+        {
+            if (kgStore_ && !(semanticBudgetActive && strongBudgetLexical)) {
                 if (workingConfig.graphUseQueryConcepts && workingConfig.waitForConceptExtraction) {
                     materializeConcepts(true);
                 }
@@ -2949,10 +2950,23 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
                 effectiveVectorMaxResults = workingConfig.vectorMaxResults;
                 effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
+                if (semanticBudgetActive) {
+                    effectiveVectorMaxResults = std::min(
+                        effectiveVectorMaxResults,
+                        std::max<std::size_t>(1, workingConfig.semanticBudgetVectorMaxResults));
+                    effectiveEntityVectorMaxResults =
+                        std::min(effectiveEntityVectorMaxResults,
+                                 std::max<std::size_t>(
+                                     1, workingConfig.semanticBudgetEntityVectorMaxResults));
+                    response.debugStats["semantic_budget_vector_cap"] =
+                        std::to_string(effectiveVectorMaxResults);
+                    response.debugStats["semantic_budget_entity_vector_cap"] =
+                        std::to_string(effectiveEntityVectorMaxResults);
+                }
                 runSequential(
                     [&]() {
                         return queryVectorWithRelaxedRetry(queryEmbedding.value(),
-                                                           workingConfig.vectorMaxResults);
+                                                           effectiveVectorMaxResults);
                     },
                     "vector", workingConfig.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros);
@@ -2960,7 +2974,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 runSequential(
                     [&]() {
                         return queryEntityVectors(queryEmbedding.value(), workingConfig,
-                                                  workingConfig.entityVectorMaxResults);
+                                                  effectiveEntityVectorMaxResults);
                     },
                     "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
                     stats_.avgEntityVectorTimeMicros);
@@ -4516,16 +4530,28 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["strong_vector_only_penalty"] =
         fmt::format("{:.3f}", workingConfig.strongVectorOnlyPenalty);
     response.debugStats["relaxed_vector_retry_enabled"] = relaxedVectorRetryEnabled ? "1" : "0";
-    response.debugStats["relaxed_vector_retry_attempted"] =
-        relaxedVectorRetryAttempted.load(std::memory_order_relaxed) ? "1" : "0";
-    response.debugStats["relaxed_vector_retry_applied"] =
-        relaxedVectorRetryApplied.load(std::memory_order_relaxed) ? "1" : "0";
+    const bool relaxedRetryAttemptedFinal =
+        relaxedVectorRetryAttempted.load(std::memory_order_relaxed);
+    const bool relaxedRetryAppliedFinal = relaxedVectorRetryApplied.load(std::memory_order_relaxed);
+    const int relaxedPrimaryHitFinal = relaxedVectorPrimaryHitCount.load(std::memory_order_relaxed);
+    const int relaxedRetryThresholdMilliFinal =
+        relaxedVectorRetryThresholdMilli.load(std::memory_order_relaxed);
+    response.debugStats["relaxed_vector_retry_attempted"] = relaxedRetryAttemptedFinal ? "1" : "0";
+    response.debugStats["relaxed_vector_retry_applied"] = relaxedRetryAppliedFinal ? "1" : "0";
     response.debugStats["relaxed_vector_primary_hit_count"] =
-        std::to_string(relaxedVectorPrimaryHitCount.load(std::memory_order_relaxed));
-    response.debugStats["relaxed_vector_retry_threshold"] = fmt::format(
-        "{:.3f}",
-        static_cast<double>(relaxedVectorRetryThresholdMilli.load(std::memory_order_relaxed)) /
-            1000.0);
+        std::to_string(relaxedPrimaryHitFinal);
+    response.debugStats["relaxed_vector_retry_threshold"] =
+        fmt::format("{:.3f}", static_cast<double>(relaxedRetryThresholdMilliFinal) / 1000.0);
+    traceCollector.recordStageCounter("vector", "relaxed_retry_enabled",
+                                      relaxedVectorRetryEnabled ? 1 : 0);
+    traceCollector.recordStageCounter("vector", "relaxed_retry_attempted",
+                                      relaxedRetryAttemptedFinal ? 1 : 0);
+    traceCollector.recordStageCounter("vector", "relaxed_retry_applied",
+                                      relaxedRetryAppliedFinal ? 1 : 0);
+    traceCollector.recordStageCounter("vector", "relaxed_primary_hit_count",
+                                      static_cast<std::int64_t>(relaxedPrimaryHitFinal));
+    traceCollector.recordStageCounter("vector", "relaxed_retry_threshold_milli",
+                                      static_cast<std::int64_t>(relaxedRetryThresholdMilliFinal));
     response.debugStats["graph_query_concept_count"] = std::to_string(graphQueryConceptCount);
     response.debugStats["graph_query_neighbor_seed_docs"] =
         std::to_string(graphQueryNeighborSeedDocCount);
@@ -4742,13 +4768,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             {"semantic_rescue_target", semanticRescueTarget},
             {"semantic_rescue_final_count", semanticRescueFinalCount},
             {"semantic_rescue_rate", semanticRescueRate},
-            {"adaptive_vector_fallback", workingConfig.enableAdaptiveVectorFallback},
-            {"adaptive_vector_skip_min_tier1_hits", workingConfig.adaptiveVectorSkipMinTier1Hits},
-            {"adaptive_vector_skip_require_text_signal",
-             workingConfig.adaptiveVectorSkipRequireTextSignal},
-            {"adaptive_vector_skip_min_text_hits", workingConfig.adaptiveVectorSkipMinTextHits},
-            {"adaptive_vector_skip_min_top_text_score",
-             workingConfig.adaptiveVectorSkipMinTopTextScore},
+            {"weak_query_min_text_hits", workingConfig.weakQueryMinTextHits},
+            {"weak_query_min_top_text_score", workingConfig.weakQueryMinTopTextScore},
             {"vector_only_below_top_doc_ids", vectorOnlyBelowTop},
             {"vector_only_above_top_doc_ids", vectorOnlyAboveTop},
         };
@@ -5695,13 +5716,29 @@ aggregateChunkVectorScores(const std::vector<vector::VectorRecord>& vectorRecord
                 for (float s : scores)
                     sum += s;
                 record.relevance_score = static_cast<float>(std::min(sum, 1.0));
-            } else if (aggStrategy == Agg::TOP_K_AVG) {
+            } else if (aggStrategy == Agg::TOP_K_AVG || aggStrategy == Agg::WEIGHTED_TOP_K_AVG) {
                 std::sort(scores.begin(), scores.end(), std::greater<>());
                 size_t k = std::min(scores.size(), config.chunkAggregationTopK);
                 double sum = 0.0;
-                for (size_t i = 0; i < k; ++i)
-                    sum += scores[i];
-                record.relevance_score = static_cast<float>(sum / static_cast<double>(k));
+                if (aggStrategy == Agg::TOP_K_AVG) {
+                    for (size_t i = 0; i < k; ++i) {
+                        sum += scores[i];
+                    }
+                    record.relevance_score = static_cast<float>(sum / static_cast<double>(k));
+                } else {
+                    const double decay = std::clamp(
+                        static_cast<double>(config.chunkAggregationWeightDecay), 0.0, 1.0);
+                    double weightedSum = 0.0;
+                    double weightTotal = 0.0;
+                    double weight = 1.0;
+                    for (size_t i = 0; i < k; ++i) {
+                        weightedSum += scores[i] * weight;
+                        weightTotal += weight;
+                        weight *= decay;
+                    }
+                    record.relevance_score = static_cast<float>(
+                        weightTotal > 0.0 ? (weightedSum / weightTotal) : scores.front());
+                }
             }
         }
         deduped.push_back(std::move(record));

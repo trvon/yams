@@ -146,8 +146,13 @@ struct SearchEngineConfig {
     bool waitForConceptExtraction = true; // Wait for concept extraction before applying boosts
 
     // Search parameters
-    size_t maxResults = 100;                     // Maximum results to return
-    float similarityThreshold = 0.30f;           // Initial; adapted at runtime by SearchTuner
+    size_t maxResults = 100; // Maximum results to return
+    // F3b: default is top-k unfiltered. On L2-normalized FWHT+1024 encoders the observed
+    // cosine similarity mass sits in the 0.13-0.40 range, so any non-zero magnitude filter
+    // collapses the vector pool. HNSW/PQ-ADC relative top-k ranking is the primary signal;
+    // SearchTuner can still raise this at runtime when the distribution supports it, and
+    // operators who want magnitude-gated retrieval set a non-zero value explicitly.
+    float similarityThreshold = 0.0f;
     bool enableParallelExecution = true;         // Parallel component queries
     std::chrono::milliseconds componentTimeout = // Timeout per component (0 = no timeout)
         std::chrono::milliseconds(0);
@@ -160,16 +165,10 @@ struct SearchEngineConfig {
         false; // DISABLED: Narrowing prevents vector from finding docs FTS5 missed
     size_t tieredMinCandidates =
         10; // Min candidates from Tier 1 before narrowing (fallback to full)
-    bool enableAdaptiveVectorFallback =
-        false; // Skip embedding/vector tier when Tier 1 already has strong coverage
-    size_t adaptiveVectorSkipMinTier1Hits =
-        0; // 0=auto (max(maxResults*2,50)); explicit value overrides auto threshold
-    bool adaptiveVectorSkipRequireTextSignal =
-        true; // Require strong text signal before skipping semantic tier
-    size_t adaptiveVectorSkipMinTextHits =
-        3; // Minimum text hits required to allow semantic skip when text-signal gating enabled
-    float adaptiveVectorSkipMinTopTextScore =
-        0.30f; // Minimum top text score required to allow semantic skip
+    size_t weakQueryMinTextHits =
+        3; // Threshold below which Tier 1 is considered weak (drives fanout boost)
+    float weakQueryMinTopTextScore =
+        0.30f; // Threshold below which Tier 1 top score is considered weak (drives fanout boost)
     bool enableWeakQueryFanoutBoost =
         true; // Expand vector/entity candidate fanout when Tier 1 lexical signal is weak
     float weakQueryVectorFanoutMultiplier =
@@ -247,11 +246,14 @@ struct SearchEngineConfig {
     // Chunk-to-document aggregation strategy for vector search results.
     // Controls how multiple chunk-level vector hits from the same document are combined.
     enum class ChunkAggregation {
-        MAX,      // Keep only the highest-scoring chunk per document (default)
-        SUM,      // Sum chunk scores per document (capped at 1.0)
-        TOP_K_AVG // Average of top-K chunk scores per document (K=3)
-    } chunkAggregation = ChunkAggregation::MAX;
-    size_t chunkAggregationTopK = 3; // K for TOP_K_AVG strategy
+        MAX,               // Keep only the highest-scoring chunk per document
+        SUM,               // Sum chunk scores per document (capped at 1.0)
+        TOP_K_AVG,         // Average of top-K chunk scores per document (K=3)
+        WEIGHTED_TOP_K_AVG // Weighted average of top-K chunks with geometric decay
+    } chunkAggregation = ChunkAggregation::WEIGHTED_TOP_K_AVG;
+    size_t chunkAggregationTopK = 3; // K for TOP_K_AVG / WEIGHTED_TOP_K_AVG strategies
+    float chunkAggregationWeightDecay =
+        0.6f; // Geometric decay for WEIGHTED_TOP_K_AVG (1.0, decay, decay^2, ...)
 
     // Hybrid behavior flags for experimentation and tuning
     bool enableIntentAdaptiveWeighting = true; // Apply query-intent scaling at runtime
@@ -351,6 +353,10 @@ struct SearchEngineConfig {
     size_t entityVectorMaxResults = 100;
     size_t tagMaxResults = 250;
     size_t metadataMaxResults = 200;
+    // Cost-aware semantic budget caps: keep dense retrieval active under pressure,
+    // but start from a smaller fanout instead of abandoning the leg entirely.
+    size_t semanticBudgetVectorMaxResults = 32;
+    size_t semanticBudgetEntityVectorMaxResults = 16;
 
     // Performance tuning
     bool useConnectionPriority = true;   // Use High priority for search queries

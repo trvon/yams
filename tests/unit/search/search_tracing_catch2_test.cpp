@@ -1,9 +1,12 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/search/search_engine.h>
 #include <yams/search/search_tracing.h>
 
 using yams::search::ComponentResult;
+using yams::search::SearchEngineConfig;
+using yams::search::SearchTraceCollector;
 
 namespace {
 
@@ -60,4 +63,56 @@ TEST_CASE("buildComponentHitSummaryJson preserves ranked top hit details",
     REQUIRE(textHits.size() == 1);
     CHECK(textHits.at(0).at("doc_id").get<std::string>() == "22222222");
     CHECK(textHits.at(0).at("rank").get<size_t>() == 13);
+}
+
+TEST_CASE("SearchTraceCollector records per-surface counters under stage[\"counters\"]",
+          "[search][tracing][catch2]") {
+    SearchEngineConfig config;
+    SearchTraceCollector collector(config);
+
+    collector.markStageConfigured("vector", true);
+    collector.markStageAttempted("vector");
+    collector.recordStageCounter("vector", "backend_raw_return", 300);
+    collector.recordStageCounter("vector", "post_threshold", 86);
+    collector.recordStageCounter("vector", "should_narrow_applied", 1);
+    collector.recordStageCounter("vector", "post_threshold", 92);
+
+    const auto summary = collector.buildStageSummaryJson();
+    REQUIRE(summary.contains("vector"));
+    const auto& vectorStage = summary.at("vector");
+    REQUIRE(vectorStage.contains("counters"));
+    const auto& counters = vectorStage.at("counters");
+    REQUIRE(counters.is_object());
+    CHECK(counters.at("backend_raw_return").get<std::int64_t>() == 300);
+    CHECK(counters.at("post_threshold").get<std::int64_t>() == 92);
+    CHECK(counters.at("should_narrow_applied").get<std::int64_t>() == 1);
+
+    REQUIRE(summary.contains("vector"));
+    CHECK(summary.at("vector").at("attempted").get<bool>() == true);
+}
+
+TEST_CASE("SearchTraceCollector counters are per-stage isolated", "[search][tracing][catch2]") {
+    SearchEngineConfig config;
+    SearchTraceCollector collector(config);
+
+    collector.recordStageCounter("vector", "shouldSkipSemantic", 0);
+    collector.recordStageCounter("text", "shouldSkipSemantic", 1);
+
+    const auto summary = collector.buildStageSummaryJson();
+    REQUIRE(summary.at("vector").at("counters").at("shouldSkipSemantic").get<std::int64_t>() == 0);
+    REQUIRE(summary.at("text").at("counters").at("shouldSkipSemantic").get<std::int64_t>() == 1);
+}
+
+TEST_CASE("SearchTraceCollector emits empty counters object when none recorded",
+          "[search][tracing][catch2]") {
+    SearchEngineConfig config;
+    SearchTraceCollector collector(config);
+
+    collector.markStageConfigured("embedding", true);
+    collector.markStageAttempted("embedding");
+
+    const auto summary = collector.buildStageSummaryJson();
+    REQUIRE(summary.at("embedding").contains("counters"));
+    CHECK(summary.at("embedding").at("counters").is_object());
+    CHECK(summary.at("embedding").at("counters").empty());
 }

@@ -287,11 +287,8 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
     params_.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
     params_.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
-    params_.enableAdaptiveVectorFallback = config.enableAdaptiveVectorFallback;
-    params_.adaptiveVectorSkipMinTier1Hits = config.adaptiveVectorSkipMinTier1Hits;
-    params_.adaptiveVectorSkipRequireTextSignal = config.adaptiveVectorSkipRequireTextSignal;
-    params_.adaptiveVectorSkipMinTextHits = config.adaptiveVectorSkipMinTextHits;
-    params_.adaptiveVectorSkipMinTopTextScore = config.adaptiveVectorSkipMinTopTextScore;
+    params_.weakQueryMinTextHits = config.weakQueryMinTextHits;
+    params_.weakQueryMinTopTextScore = config.weakQueryMinTopTextScore;
     params_.enableGraphRerank = config.enableGraphRerank;
     params_.graphRerankTopN = config.graphRerankTopN;
     params_.graphRerankWeight = config.graphRerankWeight;

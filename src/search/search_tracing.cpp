@@ -268,9 +268,18 @@ void SearchTraceCollector::markStageSkipped(const std::string& name, std::string
     stage.skipReason = std::move(reason);
 }
 
+void SearchTraceCollector::recordStageCounter(const std::string& name, const std::string& key,
+                                              std::int64_t value) {
+    stages_[name].extraCounters[key] = value;
+}
+
 nlohmann::json SearchTraceCollector::buildStageSummaryJson() const {
     nlohmann::json out = nlohmann::json::object();
     for (const auto& [name, stage] : stages_) {
+        nlohmann::json counters = nlohmann::json::object();
+        for (const auto& [key, value] : stage.extraCounters) {
+            counters[key] = value;
+        }
         out[name] = {
             {"enabled", stage.enabled},
             {"attempted", stage.attempted},
@@ -286,6 +295,7 @@ nlohmann::json SearchTraceCollector::buildStageSummaryJson() const {
             {"score_stats_valid", stage.scoreStatsValid},
             {"min_score", stage.minScore},
             {"max_score", stage.maxScore},
+            {"counters", std::move(counters)},
         };
     }
     return out;

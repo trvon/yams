@@ -346,6 +346,9 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                 cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
             } else if (*aggEnv == "TOP_K_AVG" || *aggEnv == "top_k_avg") {
                 cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::TOP_K_AVG;
+            } else if (*aggEnv == "WEIGHTED_TOP_K_AVG" || *aggEnv == "weighted_top_k_avg" ||
+                       *aggEnv == "WEIGHTED" || *aggEnv == "weighted") {
+                cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::WEIGHTED_TOP_K_AVG;
             } else {
                 spdlog::warn("Unknown YAMS_SEARCH_CHUNK_AGGREGATION value '{}', ignoring", *aggEnv);
             }
@@ -581,11 +584,6 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.tieredMinCandidates);
         }
 
-        if (auto adaptiveFallback = getEnvBool("YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK")) {
-            cfg.enableAdaptiveVectorFallback = *adaptiveFallback;
-            spdlog::info("SearchEngine enableAdaptiveVectorFallback overridden to {} via env",
-                         cfg.enableAdaptiveVectorFallback);
-        }
         if (auto weakFanout = getEnvBool("YAMS_SEARCH_ENABLE_WEAK_QUERY_FANOUT_BOOST")) {
             cfg.enableWeakQueryFanoutBoost = *weakFanout;
             spdlog::info("SearchEngine enableWeakQueryFanoutBoost overridden to {} via env",
@@ -760,31 +758,16 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.graphExpansionVectorPenalty);
         }
 
-        if (auto adaptiveMinHits = getEnvInt("YAMS_SEARCH_ADAPTIVE_MIN_TIER1_HITS")) {
-            cfg.adaptiveVectorSkipMinTier1Hits = static_cast<size_t>(std::max(0, *adaptiveMinHits));
-            spdlog::info("SearchEngine adaptiveVectorSkipMinTier1Hits overridden to {} via env",
-                         cfg.adaptiveVectorSkipMinTier1Hits);
+        if (auto weakMinTextHits = getEnvInt("YAMS_SEARCH_WEAK_QUERY_MIN_TEXT_HITS")) {
+            cfg.weakQueryMinTextHits = static_cast<size_t>(std::max(0, *weakMinTextHits));
+            spdlog::info("SearchEngine weakQueryMinTextHits overridden to {} via env",
+                         cfg.weakQueryMinTextHits);
         }
 
-        if (auto adaptiveRequireText = getEnvBool("YAMS_SEARCH_ADAPTIVE_REQUIRE_TEXT_SIGNAL")) {
-            cfg.adaptiveVectorSkipRequireTextSignal = *adaptiveRequireText;
-            spdlog::info(
-                "SearchEngine adaptiveVectorSkipRequireTextSignal overridden to {} via env",
-                cfg.adaptiveVectorSkipRequireTextSignal);
-        }
-
-        if (auto adaptiveMinTextHits = getEnvInt("YAMS_SEARCH_ADAPTIVE_MIN_TEXT_HITS")) {
-            cfg.adaptiveVectorSkipMinTextHits =
-                static_cast<size_t>(std::max(0, *adaptiveMinTextHits));
-            spdlog::info("SearchEngine adaptiveVectorSkipMinTextHits overridden to {} via env",
-                         cfg.adaptiveVectorSkipMinTextHits);
-        }
-
-        if (auto adaptiveMinTopText = getEnvFloat("YAMS_SEARCH_ADAPTIVE_MIN_TOP_TEXT_SCORE")) {
-            cfg.adaptiveVectorSkipMinTopTextScore = std::clamp(*adaptiveMinTopText, 0.0f, 1.0f);
-            spdlog::info(
-                "SearchEngine adaptiveVectorSkipMinTopTextScore overridden to {:.3f} via env",
-                cfg.adaptiveVectorSkipMinTopTextScore);
+        if (auto weakMinTopText = getEnvFloat("YAMS_SEARCH_WEAK_QUERY_MIN_TOP_TEXT_SCORE")) {
+            cfg.weakQueryMinTopTextScore = std::clamp(*weakMinTopText, 0.0f, 1.0f);
+            spdlog::info("SearchEngine weakQueryMinTopTextScore overridden to {:.3f} via env",
+                         cfg.weakQueryMinTopTextScore);
         }
 
         // Multi-vector sub-phrase search overrides

@@ -204,13 +204,11 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     if (!tunerStatePath_.empty()) {
         opts.tunerStatePath = tunerStatePath_;
     }
-    // Default daemon policy: lexical-first with adaptive semantic fallback.
-    // Keep weak-query vector fanout disabled here so hybrid search stays precision-biased
-    // instead of broadening semantic candidates whenever lexical evidence is sparse.
-    // SearchEngine::Impl computes auto-threshold as max(maxResults*2, 50) when this is 0.
-    opts.config.enableAdaptiveVectorFallback = true;
+    // Default daemon policy: vector is a peer retriever (always runs when the embedding
+    // leg is available). Keep weak-query vector fanout disabled here so hybrid search
+    // stays precision-biased instead of broadening semantic candidates whenever lexical
+    // evidence is sparse.
     opts.config.enableWeakQueryFanoutBoost = false;
-    opts.config.adaptiveVectorSkipMinTier1Hits = 0;
     {
         const auto backend = ConfigResolver::resolveEmbeddingBackend();
         const auto bm25Policy = ConfigResolver::resolveSimeonBm25Policy();

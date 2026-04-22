@@ -18,6 +18,11 @@ if get_option('plugin-symbols')
   else
     plugin_ext = '.so'
   endif
+  plugin_test_ld_library_path = ':'.join([
+    join_paths(plugin_build_dir, 'src/daemon/resource'),
+    plugin_build_dir,
+    '/opt/yams/usr/local/lib',
+  ])
   plugin_path = join_paths(plugin_build_dir, 'plugins/symbol_extractor_treesitter/yams_symbol_extractor' + plugin_ext)
 
   plugin_runtime_deps = get_variable('symbol_extractor_plugin_target', [])
@@ -30,7 +35,11 @@ if get_option('plugin-symbols')
   )
 
   test('plugins', plugin_exe,
-    env: {'YAMS_AUTO_DOWNLOAD_GRAMMARS':'1','YAMS_SKIP_MODEL_LOADING':'1'},
+    env: {
+      'YAMS_AUTO_DOWNLOAD_GRAMMARS': '1',
+      'YAMS_SKIP_MODEL_LOADING': '1',
+      'LD_LIBRARY_PATH': plugin_test_ld_library_path,
+    },
     depends: plugin_runtime_deps,
   )
 endif
@@ -49,6 +58,7 @@ if get_option('build-plugins') and get_option('plugin-s3')
     env: {
       'YAMS_SKIP_MODEL_LOADING': '1',
       'YAMS_PLUGIN_DIR': s3_plugin_dir,
+      'LD_LIBRARY_PATH': plugin_test_ld_library_path,
     },
     depends: [yams_object_storage_s3],
     timeout: 180,
@@ -68,7 +78,10 @@ if get_option('plugin-zyp')
   )
 
   test('zyp_plugin', zyp_test_exe,
-    env: {'YAMS_SKIP_MODEL_LOADING': '1'},
+    env: {
+      'YAMS_SKIP_MODEL_LOADING': '1',
+      'LD_LIBRARY_PATH': plugin_test_ld_library_path,
+    },
     timeout: 60,
   )
 endif
@@ -86,7 +99,10 @@ if get_option('plugin-glint')
   )
 
   test('glint_plugin', glint_test_exe,
-    env: {'YAMS_SKIP_MODEL_LOADING': '1'},
+    env: {
+      'YAMS_SKIP_MODEL_LOADING': '1',
+      'LD_LIBRARY_PATH': plugin_test_ld_library_path,
+    },
     timeout: 60,
   )
 endif

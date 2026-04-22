@@ -210,7 +210,7 @@ TEST_CASE("TunedParams: applyTo SearchEngineConfig", "[unit][search_tuner][param
     CHECK(config.kgWeight == Approx(0.00f));
     CHECK(config.tagWeight == Approx(0.05f));
     CHECK(config.metadataWeight == Approx(0.05f));
-    CHECK(config.similarityThreshold == Approx(0.30f));
+    CHECK(config.similarityThreshold == Approx(0.0f));
 }
 
 // =============================================================================
@@ -789,11 +789,8 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     config.semanticRescueMinVectorScore = 0.73f;
     config.fusionEvidenceRescueSlots = 2;
     config.fusionEvidenceRescueMinScore = 0.021f;
-    config.enableAdaptiveVectorFallback = true;
-    config.adaptiveVectorSkipMinTier1Hits = 7;
-    config.adaptiveVectorSkipRequireTextSignal = false;
-    config.adaptiveVectorSkipMinTextHits = 5;
-    config.adaptiveVectorSkipMinTopTextScore = 0.42f;
+    config.weakQueryMinTextHits = 5;
+    config.weakQueryMinTopTextScore = 0.42f;
     config.enableSubPhraseRescoring = true;
     config.subPhraseScoringPenalty = 0.61f;
     config.rerankTopK = 11;
@@ -929,8 +926,8 @@ TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
     // rerankAnchoredMinRelativeScore: lerp(0.0, 0.70, 0.60) = 0.42
     CHECK(params.rerankAnchoredMinRelativeScore == Approx(0.42f).epsilon(0.01));
 
-    // similarityThreshold: lerp(0.30, 0.30, 0.60) = 0.30 (FWHT+1024+L2 default)
-    CHECK(params.similarityThreshold.value == Approx(0.30f).epsilon(0.01));
+    // similarityThreshold: lerp(0.0, 0.0, 0.60) = 0.0 (F3b top-k unfiltered default)
+    CHECK(params.similarityThreshold.value == Approx(0.0f).epsilon(0.01));
 }
 
 TEST_CASE("applyCommunityLayer: no-op when already in target state",

@@ -2148,6 +2148,7 @@ private:
                 auto it = s.readinessStates.find(std::string(readiness::kVectorIndex));
                 return it == s.readinessStates.end() ? true : it->second;
             }();
+            const std::string& vectorIndexEngine = s.vectorIndexEngine;
             const uint64_t vectorIndexProgress = [&]() -> uint64_t {
                 auto it = s.initProgress.find(std::string(readiness::kVectorIndex));
                 return it == s.initProgress.end() ? 0 : it->second;
@@ -2157,7 +2158,15 @@ private:
                 std::vector<std::string> activity;
                 if (!vectorIndexReady) {
                     std::ostringstream label;
-                    label << "HNSW rebuild";
+                    if (vectorIndexEngine == "simeon_pq_adc") {
+                        label << "PQ rebuild";
+                    } else if (vectorIndexEngine == "vec0_l2") {
+                        label << "vec0 rebuild";
+                    } else if (vectorIndexEngine == "hnsw_cosine") {
+                        label << "HNSW rebuild";
+                    } else {
+                        label << "vector index rebuild";
+                    }
                     if (vectorIndexProgress > 0 && vectorIndexProgress < 100) {
                         label << " " << vectorIndexProgress << "%";
                     }
@@ -2732,6 +2741,7 @@ private:
                     auto it = status.readinessStates.find(std::string(readiness::kVectorIndex));
                     return it == status.readinessStates.end() ? true : it->second;
                 }();
+                const std::string& vectorIndexEngine = status.vectorIndexEngine;
                 const uint64_t vectorIndexProgress = [&]() -> uint64_t {
                     auto it = status.initProgress.find(std::string(readiness::kVectorIndex));
                     return it == status.initProgress.end() ? 0 : it->second;
@@ -2742,6 +2752,14 @@ private:
                     std::vector<Row> maintenanceRows;
 
                     std::ostringstream indexState;
+                    std::string indexLabel = "Vector Index";
+                    if (vectorIndexEngine == "simeon_pq_adc") {
+                        indexLabel = "PQ Index";
+                    } else if (vectorIndexEngine == "vec0_l2") {
+                        indexLabel = "vec0 Index";
+                    } else if (vectorIndexEngine == "hnsw_cosine") {
+                        indexLabel = "HNSW Index";
+                    }
                     if (vectorIndexReady) {
                         indexState << "ready";
                     } else {
@@ -2751,7 +2769,7 @@ private:
                         }
                     }
                     maintenanceRows.push_back(
-                        {"Vector Index",
+                        {indexLabel,
                          paintStatus(vectorIndexReady ? Severity::Good : Severity::Warn,
                                      indexState.str()),
                          ""});

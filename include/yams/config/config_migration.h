@@ -246,8 +246,6 @@ struct ConfigLatest {
         std::string table_name = "document_embeddings";
         size_t embedding_dim = 384;
         std::string search_engine = "hnsw_cosine";
-        std::string quantized_hnsw_mode = "lvq8";
-        size_t quantized_hnsw_rerank_factor = 2;
         std::string index_type = "IVF_PQ";
         size_t num_partitions = 256;
         size_t num_sub_quantizers = 96;

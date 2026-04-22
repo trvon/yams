@@ -54,6 +54,11 @@ struct TraceStageSummary {
     bool scoreStatsValid = false;
     double minScore = 0.0;
     double maxScore = 0.0;
+    // Per-surface diagnostic counters populated via recordStageCounter.
+    // Used by Phase F1 pool-pipeline attribution (vector_backend_hits, vector_shouldNarrow_applied,
+    // vector_shouldSkipSemantic, vector_relaxed_retry_*, etc.) and surfaced under
+    // stage["counters"] in buildStageSummaryJson.
+    std::map<std::string, std::int64_t> extraCounters;
 };
 
 class SearchTraceCollector {
@@ -67,6 +72,7 @@ public:
     void markStageTimeout(const std::string& name, std::int64_t durationMicros = 0);
     void markStageFailure(const std::string& name, std::int64_t durationMicros = 0);
     void markStageSkipped(const std::string& name, std::string reason);
+    void recordStageCounter(const std::string& name, const std::string& key, std::int64_t value);
 
     nlohmann::json buildStageSummaryJson() const;
     nlohmann::json

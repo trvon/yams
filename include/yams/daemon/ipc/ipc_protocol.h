@@ -3978,6 +3978,7 @@ struct StatusResponse {
     bool vectorDbInitAttempted{false};
     bool vectorDbReady{false};
     uint32_t vectorDbDim{0};
+    std::string vectorIndexEngine;
     // FSM metrics (transport state machine), exposed in daemon status
     uint64_t fsmTransitions = 0;
     uint64_t fsmHeaderReads = 0;
@@ -4258,7 +4259,8 @@ struct StatusResponse {
             << static_cast<uint32_t>(retryAfterMs);
 
         // Vector DB metrics
-        ser << vectorDbInitAttempted << vectorDbReady << static_cast<uint32_t>(vectorDbDim);
+        ser << vectorDbInitAttempted << vectorDbReady << static_cast<uint32_t>(vectorDbDim)
+            << vectorIndexEngine;
 
         // Serialize request counts map
         ser << static_cast<uint32_t>(requestCounts.size());
@@ -4459,6 +4461,10 @@ struct StatusResponse {
         if (!vDim)
             return vDim.error();
         res.vectorDbDim = vDim.value();
+        auto vectorIndexEngineResult = deser.readString();
+        if (!vectorIndexEngineResult)
+            return vectorIndexEngineResult.error();
+        res.vectorIndexEngine = std::move(vectorIndexEngineResult.value());
 
         // Deserialize request counts
         auto countsCountResult = deser.template read<uint32_t>();

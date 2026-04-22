@@ -40,8 +40,6 @@ public:
         backend_config.turboquant_bits = config_.turboquant_bits;
         backend_config.turboquant_seed = config_.turboquant_seed;
         backend_config.search_engine = config_.search_engine;
-        backend_config.quantized_hnsw_mode = config_.quantized_hnsw_mode;
-        backend_config.quantized_hnsw_rerank_factor = config_.quantized_hnsw_rerank_factor;
         backend_config.simeon_pq_subquantizers = config_.simeon_pq_subquantizers;
         backend_config.simeon_pq_centroids = config_.simeon_pq_centroids;
         backend_config.simeon_pq_train_limit = config_.simeon_pq_train_limit;

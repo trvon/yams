@@ -196,9 +196,6 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
         case VectorSearchEngine::HnswCosine:
             out.name = "hnsw-cosine";
             break;
-        case VectorSearchEngine::HnswQuantizedL2:
-            out.name = "hnsw-q-l2-legacy";
-            break;
         case VectorSearchEngine::SimeonPqAdc:
             out.name = "simeon-pq";
             break;

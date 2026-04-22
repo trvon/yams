@@ -19,23 +19,14 @@ enum class EmbeddingLevel { CHUNK, DOCUMENT };
 
 enum class VectorSearchEngine {
     HnswCosine,
-    HnswQuantizedL2,
     SimeonPqAdc,
     Vec0L2,
-};
-
-enum class QuantizedHnswMode {
-    LVQ8,
-    LVQ4,
-    RaBitQ,
 };
 
 inline const char* vectorSearchEngineName(VectorSearchEngine engine) {
     switch (engine) {
         case VectorSearchEngine::HnswCosine:
             return "hnsw_cosine";
-        case VectorSearchEngine::HnswQuantizedL2:
-            return "hnsw_quantized_l2";
         case VectorSearchEngine::SimeonPqAdc:
             return "simeon_pq_adc";
         case VectorSearchEngine::Vec0L2:
@@ -49,37 +40,11 @@ inline std::optional<VectorSearchEngine> parseVectorSearchEngine(std::string_vie
         return VectorSearchEngine::HnswCosine;
     }
     if (raw == "simeon_pq_adc" || raw == "pq_adc" || raw == "simeon_pq" ||
-        raw == "compressed_primary" || raw == "hnsw_quantized_l2" || raw == "hnsw_quantized" ||
-        raw == "quantized") {
+        raw == "compressed_primary") {
         return VectorSearchEngine::SimeonPqAdc;
     }
     if (raw == "vec0" || raw == "vec0_l2" || raw == "l2") {
         return VectorSearchEngine::Vec0L2;
-    }
-    return std::nullopt;
-}
-
-inline const char* quantizedHnswModeName(QuantizedHnswMode mode) {
-    switch (mode) {
-        case QuantizedHnswMode::LVQ8:
-            return "lvq8";
-        case QuantizedHnswMode::LVQ4:
-            return "lvq4";
-        case QuantizedHnswMode::RaBitQ:
-            return "rabitq";
-    }
-    return "unknown";
-}
-
-inline std::optional<QuantizedHnswMode> parseQuantizedHnswMode(std::string_view raw) {
-    if (raw == "lvq8" || raw == "8bit") {
-        return QuantizedHnswMode::LVQ8;
-    }
-    if (raw == "lvq4" || raw == "4bit") {
-        return QuantizedHnswMode::LVQ4;
-    }
-    if (raw == "rabitq" || raw == "binary") {
-        return QuantizedHnswMode::RaBitQ;
     }
     return std::nullopt;
 }
@@ -115,10 +80,6 @@ struct VectorDatabaseConfig {
     float default_similarity_threshold = 0.35f;
     bool use_in_memory = false; // For testing
     VectorSearchEngine search_engine = VectorSearchEngine::SimeonPqAdc;
-    // DEPRECATED: legacy quantized HNSW wrapper retained temporarily for migration only.
-    QuantizedHnswMode quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
-    size_t quantized_hnsw_rerank_factor = 2;
-
     // Simeon Product Quantization compressed serving path.
     // This is the replacement direction for legacy quantized sidecar retrieval:
     // a persisted PQ codebook + code store with bounded exact rerank from SQLite.

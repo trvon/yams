@@ -55,8 +55,6 @@ public:
         uint8_t turboquant_bits = 4;
         uint64_t turboquant_seed = 42;
         VectorSearchEngine search_engine = VectorSearchEngine::HnswCosine;
-        QuantizedHnswMode quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
-        size_t quantized_hnsw_rerank_factor = 2;
         size_t simeon_pq_subquantizers = 32;
         size_t simeon_pq_centroids = 256;
         size_t simeon_pq_train_limit = 4096;

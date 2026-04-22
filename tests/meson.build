@@ -252,6 +252,11 @@ endif
 #deployed runtime libraries(e.g.ONNX, TBB) even when the Conan cache is absent.
 _test_rpaths = [meson.project_build_root()]
 _test_ld_library_path = [meson.project_build_root()]
+if host_machine.system() == 'linux'
+  # Docker test stages install Conan-provided runtimes under /opt/yams/usr/local/lib
+  # before invoking meson test, so include that path in the test environment.
+  _test_ld_library_path += ['/opt/yams/usr/local/lib']
+endif
 foreach d : [onnx_dep, tbb_dep]
   if d.found()
     libdir = d.get_variable(pkgconfig: 'libdir', default_value: '')

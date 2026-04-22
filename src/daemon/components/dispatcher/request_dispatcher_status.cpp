@@ -542,13 +542,14 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         vdb && vdb->isInitialized()) {
                         const auto dim = vdb->getConfig().embedding_dim;
                         const auto rows = vdb->getVectorCount();
+                        res.vectorIndexEngine =
+                            vector::vectorSearchEngineName(vdb->getConfig().search_engine);
 
                         res.vectorDbReady = (rows > 0);
                         res.vectorDbInitAttempted = true;
                         if (dim > 0) {
                             res.vectorDbDim = static_cast<uint32_t>(dim);
                         }
-
                         const bool providerReady =
                             state_ &&
                             state_->readiness.modelProviderReady.load(std::memory_order_relaxed);
@@ -1002,7 +1003,6 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 response.vectorIndexSize = snap->vectorDbSizeBytes;
                 if (snap->vectorRowsExact > 0)
                     response.additionalStats["vector_rows"] = std::to_string(snap->vectorRowsExact);
-
                 response.additionalStats[std::string(metrics::kDbWritePoolAvailable)] =
                     std::to_string(static_cast<size_t>(snap->dbWritePoolAvailable ? 1 : 0));
                 response.additionalStats[std::string(metrics::kDbWritePoolTotalConnections)] =

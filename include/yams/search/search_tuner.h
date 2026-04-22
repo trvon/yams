@@ -88,12 +88,11 @@ struct TunedParams {
         return ws;
     }();
 
-    // Similarity threshold for vector search. Initial default suits FWHT+1024+L2 (observed
-    // cosine-sim ceiling 0.21-0.40 on scifact). SearchTuner adapts this at runtime based on
-    // the HNSW similarity distribution and vector-pool occupancy telemetry — when most
-    // queries produce empty vector pools while max-similarity sits well above the threshold,
-    // the tuner lowers it; when most candidates pass, it drifts back up to preserve precision.
-    TuningSlot<float> similarityThreshold{0.30f};
+    // Similarity threshold for vector search. F3b: top-k unfiltered is the default contract
+    // (HNSW/PQ-ADC relative ranking is the primary signal). SearchTuner can still raise this
+    // at runtime when the HNSW similarity distribution and vector-pool occupancy telemetry
+    // indicate magnitude gating would preserve precision.
+    TuningSlot<float> similarityThreshold{0.0f};
 
     // Vector boost factor for TEXT_ANCHOR fusion (multiplied with vectorWeight)
     // Higher values = stronger vector influence in text-anchored results
@@ -119,12 +118,9 @@ struct TunedParams {
     size_t fusionEvidenceRescueSlots = 0;
     float fusionEvidenceRescueMinScore = 0.0f;
 
-    // Adaptive semantic skip behavior
-    bool enableAdaptiveVectorFallback = false;
-    size_t adaptiveVectorSkipMinTier1Hits = 0;
-    bool adaptiveVectorSkipRequireTextSignal = true;
-    size_t adaptiveVectorSkipMinTextHits = 3;
-    float adaptiveVectorSkipMinTopTextScore = 0.30f;
+    // Weak-query signal thresholds (drive weak-query vector/entity fanout boost)
+    size_t weakQueryMinTextHits = 3;
+    float weakQueryMinTopTextScore = 0.30f;
 
     // Sub-phrase rescoring (always-on score-update pass for prose queries)
     bool enableSubPhraseRescoring = false;
@@ -204,11 +200,8 @@ struct TunedParams {
         config.semanticRescueMinVectorScore = semanticRescueMinVectorScore;
         config.fusionEvidenceRescueSlots = fusionEvidenceRescueSlots;
         config.fusionEvidenceRescueMinScore = fusionEvidenceRescueMinScore;
-        config.enableAdaptiveVectorFallback = enableAdaptiveVectorFallback;
-        config.adaptiveVectorSkipMinTier1Hits = adaptiveVectorSkipMinTier1Hits;
-        config.adaptiveVectorSkipRequireTextSignal = adaptiveVectorSkipRequireTextSignal;
-        config.adaptiveVectorSkipMinTextHits = adaptiveVectorSkipMinTextHits;
-        config.adaptiveVectorSkipMinTopTextScore = adaptiveVectorSkipMinTopTextScore;
+        config.weakQueryMinTextHits = weakQueryMinTextHits;
+        config.weakQueryMinTopTextScore = weakQueryMinTopTextScore;
         config.enableSubPhraseRescoring = enableSubPhraseRescoring;
         config.subPhraseScoringPenalty = subPhraseScoringPenalty;
         config.rerankTopK = rerankTopK;
@@ -270,11 +263,8 @@ struct TunedParams {
             {"semantic_rescue_min_vector_score", semanticRescueMinVectorScore},
             {"fusion_evidence_rescue_slots", fusionEvidenceRescueSlots},
             {"fusion_evidence_rescue_min_score", fusionEvidenceRescueMinScore},
-            {"enable_adaptive_vector_fallback", enableAdaptiveVectorFallback},
-            {"adaptive_vector_skip_min_tier1_hits", adaptiveVectorSkipMinTier1Hits},
-            {"adaptive_vector_skip_require_text_signal", adaptiveVectorSkipRequireTextSignal},
-            {"adaptive_vector_skip_min_text_hits", adaptiveVectorSkipMinTextHits},
-            {"adaptive_vector_skip_min_top_text_score", adaptiveVectorSkipMinTopTextScore},
+            {"weak_query_min_text_hits", weakQueryMinTextHits},
+            {"weak_query_min_top_text_score", weakQueryMinTopTextScore},
             {"enable_sub_phrase_rescoring", enableSubPhraseRescoring},
             {"sub_phrase_scoring_penalty", subPhraseScoringPenalty},
             {"rerank_top_k", rerankTopK},
@@ -339,11 +329,10 @@ struct TunedParams {
             params.rrfK = 12; // Low k for better top-rank discrimination
             params.weights.setAll(0.60f, 0.35f, 0.00f, 0.00f, 0.00f, 0.00f, 0.05f,
                                   TuningLayer::Profile);
-            // Lower threshold to improve recall for claim-style prose queries where
-            // query-document cosine similarity is often in the 0.20-0.40 range on
-            // FWHT+1024+L2 encoders rather than the >0.55 range seen for code/technical
-            // queries on legacy encoders.
-            params.similarityThreshold = TuningSlot<float>(0.30f, TuningLayer::Profile);
+            // F3b: top-k unfiltered matches the FWHT+1024+L2 cosine-sim distribution where
+            // claim-style prose queries cluster in the 0.20-0.40 range; the absolute
+            // threshold becomes lossy and the relative HNSW ranking is the real signal.
+            params.similarityThreshold = TuningSlot<float>(0.0f, TuningLayer::Profile);
             params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
             // Sub-phrase rescoring re-scores already-retrieved docs via AND-clause
             // sub-phrase queries. This is the only mechanism that helps when base FTS5
@@ -395,11 +384,8 @@ struct TunedParams {
             params.semanticRescueMinVectorScore = 0.0f;
             params.fusionEvidenceRescueSlots = 1;
             params.fusionEvidenceRescueMinScore = 0.012f;
-            params.enableAdaptiveVectorFallback = true;
-            params.adaptiveVectorSkipMinTier1Hits = 80;
-            params.adaptiveVectorSkipRequireTextSignal = true;
-            params.adaptiveVectorSkipMinTextHits = 5;
-            params.adaptiveVectorSkipMinTopTextScore = 0.45f;
+            params.weakQueryMinTextHits = 5;
+            params.weakQueryMinTopTextScore = 0.45f;
             break;
 
         case TuningState::MINIMAL:

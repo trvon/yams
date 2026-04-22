@@ -1915,9 +1915,6 @@ struct OptimizationRunResult {
     double keywordEvalMs = 0.0;
     std::string searchEngine =
         yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
-    std::string quantizedHnswMode =
-        yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8);
-    std::size_t quantizedHnswRerankFactor = 2;
     std::uintmax_t vectorsDbBytes = 0;
     std::uintmax_t vectorsWalBytes = 0;
     std::uintmax_t persistedHnswNodes = 0;
@@ -1940,9 +1937,6 @@ struct BenchCacheMetadata {
     bool graphRerankRequested = false;
     std::string searchEngine =
         yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
-    std::string quantizedHnswMode =
-        yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8);
-    std::size_t quantizedHnswRerankFactor = 2;
     int expectedDocs = 0;
     int expectedQueries = 0;
     std::uintmax_t corpusFingerprint = 0;
@@ -1970,9 +1964,6 @@ struct PersistedHnswState {
     bool reusable(yams::vector::VectorSearchEngine engine) const {
         if (engine == yams::vector::VectorSearchEngine::Vec0L2) {
             return vec0Tables > 0 && vec0Rows > 0;
-        }
-        if (engine == yams::vector::VectorSearchEngine::HnswQuantizedL2) {
-            return false;
         }
         return nodeRows > 0 && metaRows > 0;
     }
@@ -2009,39 +2000,9 @@ static yams::vector::VectorSearchEngine benchmarkVectorSearchEngine() {
     return yams::vector::VectorSearchEngine::HnswCosine;
 }
 
-static yams::vector::QuantizedHnswMode benchmarkQuantizedHnswMode() {
-    if (const char* raw = std::getenv("YAMS_VECTOR_QUANTIZED_MODE"); raw && *raw) {
-        std::string normalized(raw);
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
-            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        });
-        if (auto parsed = yams::vector::parseQuantizedHnswMode(normalized)) {
-            return *parsed;
-        }
-        spdlog::warn("[Bench] Invalid YAMS_VECTOR_QUANTIZED_MODE='{}'; using default {}", raw,
-                     yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8));
-    }
-    return yams::vector::QuantizedHnswMode::LVQ8;
-}
-
-static std::size_t benchmarkQuantizedHnswRerankFactor() {
-    if (const char* raw = std::getenv("YAMS_VECTOR_QUANTIZED_RERANK_FACTOR"); raw && *raw) {
-        try {
-            return std::max<std::size_t>(1, static_cast<std::size_t>(std::stoull(raw)));
-        } catch (...) {
-        }
-    }
-    return 2;
-}
-
 static std::string benchmarkEngineCacheLabel() {
     const auto engine = benchmarkVectorSearchEngine();
     std::string label = yams::vector::vectorSearchEngineName(engine);
-    if (engine == yams::vector::VectorSearchEngine::HnswQuantizedL2) {
-        label += std::string("_") +
-                 yams::vector::quantizedHnswModeName(benchmarkQuantizedHnswMode()) + "_r" +
-                 std::to_string(benchmarkQuantizedHnswRerankFactor());
-    }
     return label;
 }
 
@@ -2231,8 +2192,6 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
         {"require_kg_ready", metadata.requireKgReady},
         {"graph_rerank_requested", metadata.graphRerankRequested},
         {"search_engine", metadata.searchEngine},
-        {"quantized_hnsw_mode", metadata.quantizedHnswMode},
-        {"quantized_hnsw_rerank_factor", std::to_string(metadata.quantizedHnswRerankFactor)},
         {"expected_docs", metadata.expectedDocs},
         {"expected_queries", metadata.expectedQueries},
         {"corpus_fingerprint", std::to_string(metadata.corpusFingerprint)},
@@ -2267,247 +2226,25 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
     metadata.searchEngine =
         j.value("search_engine", std::string(yams::vector::vectorSearchEngineName(
                                      yams::vector::VectorSearchEngine::HnswCosine)));
-    metadata.quantizedHnswMode = j.value(
-        "quantized_hnsw_mode",
-        std::string(yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8)));
-    if (j.contains("quantized_hnsw_rerank_factor")) {
-        try {
-            if (j["quantized_hnsw_rerank_factor"].is_number_unsigned() ||
-                j["quantized_hnsw_rerank_factor"].is_number_integer()) {
-                metadata.quantizedHnswRerankFactor =
-                    static_cast<std::size_t>(j["quantized_hnsw_rerank_factor"].get<int>());
-            } else if (j["quantized_hnsw_rerank_factor"].is_string()) {
-                metadata.quantizedHnswRerankFactor = static_cast<std::size_t>(
-                    std::stoull(j["quantized_hnsw_rerank_factor"].get<std::string>()));
-            }
-        } catch (...) {
-            metadata.quantizedHnswRerankFactor = 2;
-        }
-    }
     metadata.expectedDocs = j.value("expected_docs", 0);
     metadata.expectedQueries = j.value("expected_queries", 0);
+    metadata.corpusFingerprint = j.value("corpus_fingerprint", std::uintmax_t{0});
     metadata.status = j.value("status", std::string("priming"));
     metadata.embeddedDocs = j.value("embedded_docs", 0);
+    metadata.vectorCount = j.value("vector_count", std::uintmax_t{0});
     metadata.vectorIndexReady = j.value("vector_index_ready", false);
-
-    const auto fingerprintString = j.value("corpus_fingerprint", std::string("0"));
-    try {
-        metadata.corpusFingerprint = static_cast<std::uintmax_t>(std::stoull(fingerprintString));
-    } catch (...) {
-        metadata.corpusFingerprint = 0;
-    }
-
-    const auto vectorCountString = j.value("vector_count", std::string("0"));
-    try {
-        metadata.vectorCount = static_cast<std::uintmax_t>(std::stoull(vectorCountString));
-    } catch (...) {
-        metadata.vectorCount = 0;
-    }
-
-    const auto persistedNodesString = j.value("persisted_hnsw_nodes", std::string("0"));
-    try {
-        metadata.persistedHnswNodes =
-            static_cast<std::uintmax_t>(std::stoull(persistedNodesString));
-    } catch (...) {
-        metadata.persistedHnswNodes = 0;
-    }
-
-    const auto persistedMetaString = j.value("persisted_hnsw_meta_rows", std::string("0"));
-    try {
-        metadata.persistedHnswMetaRows =
-            static_cast<std::uintmax_t>(std::stoull(persistedMetaString));
-    } catch (...) {
-        metadata.persistedHnswMetaRows = 0;
-    }
-
-    const auto vec0TablesString = j.value("persisted_vec0_tables", std::string("0"));
-    try {
-        metadata.persistedVec0Tables = static_cast<std::uintmax_t>(std::stoull(vec0TablesString));
-    } catch (...) {
-        metadata.persistedVec0Tables = 0;
-    }
-
-    const auto vec0RowsString = j.value("persisted_vec0_rows", std::string("0"));
-    try {
-        metadata.persistedVec0Rows = static_cast<std::uintmax_t>(std::stoull(vec0RowsString));
-    } catch (...) {
-        metadata.persistedVec0Rows = 0;
-    }
-
-    const auto dbBytesString = j.value("vectors_db_bytes", std::string("0"));
-    try {
-        metadata.vectorsDbBytes = static_cast<std::uintmax_t>(std::stoull(dbBytesString));
-    } catch (...) {
-        metadata.vectorsDbBytes = 0;
-    }
-
-    const auto walBytesString = j.value("vectors_wal_bytes", std::string("0"));
-    try {
-        metadata.vectorsWalBytes = static_cast<std::uintmax_t>(std::stoull(walBytesString));
-    } catch (...) {
-        metadata.vectorsWalBytes = 0;
-    }
-
+    metadata.vectorsDbBytes = j.value("vectors_db_bytes", std::uintmax_t{0});
+    metadata.vectorsWalBytes = j.value("vectors_wal_bytes", std::uintmax_t{0});
+    metadata.persistedHnswNodes = j.value("persisted_hnsw_nodes", std::uintmax_t{0});
+    metadata.persistedHnswMetaRows = j.value("persisted_hnsw_meta_rows", std::uintmax_t{0});
+    metadata.persistedVec0Tables = j.value("persisted_vec0_tables", std::uintmax_t{0});
+    metadata.persistedVec0Rows = j.value("persisted_vec0_rows", std::uintmax_t{0});
     return metadata;
-}
-
-static Result<void> writeBenchCacheMetadata(const fs::path& warmDataDir,
-                                            const BenchCacheMetadata& metadata) {
-    std::error_code ec;
-    yams::common::ensureDirectories(warmDataDir);
-    if (ec) {
-        return Error{ErrorCode::IOError, "Failed to create warm data dir '" + warmDataDir.string() +
-                                             "': " + ec.message()};
-    }
-
-    const fs::path metadataPath = warmDataDir / "retrieval_bench_cache.json";
-    std::ofstream out(metadataPath, std::ios::out | std::ios::trunc);
-    if (!out.is_open()) {
-        return Error{ErrorCode::IOError,
-                     "Failed to write warm cache metadata: " + metadataPath.string()};
-    }
-    out << benchCacheMetadataToJson(metadata).dump(2) << "\n";
-    return {};
-}
-
-static Result<BenchCacheMetadata> readBenchCacheMetadata(const fs::path& warmDataDir) {
-    const fs::path metadataPath = warmDataDir / "retrieval_bench_cache.json";
-    if (!fs::exists(metadataPath)) {
-        return Error{ErrorCode::NotFound, "Warm cache metadata missing: " + metadataPath.string()};
-    }
-
-    std::ifstream in(metadataPath);
-    if (!in.is_open()) {
-        return Error{ErrorCode::IOError,
-                     "Failed to read warm cache metadata: " + metadataPath.string()};
-    }
-
-    try {
-        json j;
-        in >> j;
-        auto parsed = parseBenchCacheMetadata(j);
-        if (!parsed.has_value()) {
-            return Error{ErrorCode::InvalidData,
-                         "Warm cache metadata is not a valid object: " + metadataPath.string()};
-        }
-        return *parsed;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InvalidData, "Failed to parse warm cache metadata '" +
-                                                 metadataPath.string() + "': " + e.what()};
-    }
-}
-
-static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCacheMetadata& actual,
-                              std::string* mismatchReason) {
-    auto mismatch = [&](const std::string& reason) {
-        if (mismatchReason) {
-            *mismatchReason = reason;
-        }
-        return false;
-    };
-
-    const auto datasetPathMatches = [&]() {
-        if (expected.datasetPath.empty() || actual.datasetPath.empty()) {
-            return true;
-        }
-        return expected.datasetPath == actual.datasetPath;
-    };
-
-    if (expected.dataset != actual.dataset) {
-        return mismatch("dataset mismatch");
-    }
-    if (!datasetPathMatches()) {
-        return mismatch("dataset_path mismatch");
-    }
-    if (expected.corpusSize != actual.corpusSize) {
-        return mismatch("corpus_size mismatch");
-    }
-    if (expected.useBEIR != actual.useBEIR) {
-        return mismatch("use_beir mismatch");
-    }
-    if (expected.vectorsDisabled != actual.vectorsDisabled) {
-        return mismatch("vectors_disabled mismatch");
-    }
-    if (expected.searchEngine != actual.searchEngine) {
-        return mismatch("search_engine mismatch");
-    }
-    if (expected.quantizedHnswMode != actual.quantizedHnswMode) {
-        return mismatch("quantized_hnsw_mode mismatch");
-    }
-    if (expected.quantizedHnswRerankFactor != actual.quantizedHnswRerankFactor) {
-        return mismatch("quantized_hnsw_rerank_factor mismatch");
-    }
-    if (expected.expectedDocs != actual.expectedDocs) {
-        return mismatch("expected_docs mismatch");
-    }
-    if (expected.corpusFingerprint != 0 && actual.corpusFingerprint != 0 &&
-        expected.corpusFingerprint != actual.corpusFingerprint) {
-        return mismatch("corpus_fingerprint mismatch");
-    }
-
-    if (!(actual.status == "primed" || actual.status == "partial")) {
-        return mismatch("cache status not reusable");
-    }
-
-    const auto expectedEngine = yams::vector::parseVectorSearchEngine(expected.searchEngine)
-                                    .value_or(yams::vector::VectorSearchEngine::HnswCosine);
-    const bool reusableIndex = expectedEngine == yams::vector::VectorSearchEngine::Vec0L2
-                                   ? (actual.vectorIndexReady && actual.persistedVec0Tables > 0 &&
-                                      actual.persistedVec0Rows > 0)
-                               : expectedEngine == yams::vector::VectorSearchEngine::HnswQuantizedL2
-                                   ? true
-                                   : (actual.vectorIndexReady && actual.persistedHnswNodes > 0 &&
-                                      actual.persistedHnswMetaRows > 0);
-    if (!expected.vectorsDisabled && actual.status == "primed" && !reusableIndex) {
-        return mismatch("vector index not reusable");
-    }
-
-    return true;
-}
-
-static int benchCacheStatusRank(std::string_view status) {
-    if (status == "primed") {
-        return 2;
-    }
-    if (status == "partial") {
-        return 1;
-    }
-    return 0;
-}
-
-static BenchCacheMetadata
-preferStrongerBenchCacheMetadata(const BenchCacheMetadata& candidate,
-                                 const std::optional<BenchCacheMetadata>& prior) {
-    if (!prior.has_value()) {
-        return candidate;
-    }
-
-    std::string mismatchReason;
-    if (!benchCacheMatches(candidate, *prior, &mismatchReason)) {
-        return candidate;
-    }
-
-    const int candidateRank = benchCacheStatusRank(candidate.status);
-    const int priorRank = benchCacheStatusRank(prior->status);
-    if (priorRank > candidateRank) {
-        return *prior;
-    }
-    if (priorRank == candidateRank) {
-        if (prior->embeddedDocs > candidate.embeddedDocs) {
-            return *prior;
-        }
-        if (prior->embeddedDocs == candidate.embeddedDocs &&
-            prior->vectorCount > candidate.vectorCount) {
-            return *prior;
-        }
-    }
-
-    return candidate;
 }
 
 static std::string canonicalPathOrEmpty(const fs::path& path) {
     if (path.empty()) {
-        return "";
+        return {};
     }
     std::error_code ec;
     const auto canonical = fs::weakly_canonical(path, ec);
@@ -2517,25 +2254,132 @@ static std::string canonicalPathOrEmpty(const fs::path& path) {
     return path.lexically_normal().string();
 }
 
-static BenchCacheMetadata currentBenchCacheMetadata(const BenchCacheMetadata& base,
+static fs::path benchCacheMetadataPath(const fs::path& cacheDir) {
+    return cacheDir / "retrieval_bench_cache.json";
+}
+
+static Result<BenchCacheMetadata> readBenchCacheMetadata(const fs::path& cacheDir) {
+    const auto metadataPath = benchCacheMetadataPath(cacheDir);
+    std::error_code ec;
+    if (!fs::exists(metadataPath, ec)) {
+        return Error{ErrorCode::NotFound, "Cache metadata not found: " + metadataPath.string()};
+    }
+    std::ifstream in(metadataPath);
+    if (!in) {
+        return Error{ErrorCode::IOError, "Failed to open cache metadata: " + metadataPath.string()};
+    }
+    json j;
+    try {
+        in >> j;
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Failed to parse cache metadata: " + std::string(e.what())};
+    }
+    auto parsed = parseBenchCacheMetadata(j);
+    if (!parsed) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Cache metadata schema invalid: " + metadataPath.string()};
+    }
+    return *parsed;
+}
+
+static Result<void> writeBenchCacheMetadata(const fs::path& cacheDir,
+                                            const BenchCacheMetadata& metadata) {
+    std::error_code ec;
+    fs::create_directories(cacheDir, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError,
+                     "Failed to create cache dir: " + cacheDir.string() + ": " + ec.message()};
+    }
+    const auto metadataPath = benchCacheMetadataPath(cacheDir);
+    std::ofstream out(metadataPath);
+    if (!out) {
+        return Error{ErrorCode::IOError,
+                     "Failed to write cache metadata: " + metadataPath.string()};
+    }
+    out << benchCacheMetadataToJson(metadata).dump(2) << "\n";
+    return Result<void>{};
+}
+
+static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCacheMetadata& actual,
+                              std::string* mismatchReason = nullptr) {
+    auto mismatch = [&](std::string reason) {
+        if (mismatchReason) {
+            *mismatchReason = std::move(reason);
+        }
+        return false;
+    };
+    if (expected.dataset != actual.dataset)
+        return mismatch("dataset mismatch");
+    if (expected.datasetPath != actual.datasetPath)
+        return mismatch("dataset path mismatch");
+    if (expected.corpusSize != actual.corpusSize)
+        return mismatch("corpus size mismatch");
+    if (expected.numQueries != actual.numQueries)
+        return mismatch("query count mismatch");
+    if (expected.topK != actual.topK)
+        return mismatch("top-k mismatch");
+    if (expected.useBEIR != actual.useBEIR)
+        return mismatch("beir flag mismatch");
+    if (expected.vectorsDisabled != actual.vectorsDisabled)
+        return mismatch("vectors disabled mismatch");
+    if (expected.requireKgReady != actual.requireKgReady)
+        return mismatch("kg requirement mismatch");
+    if (expected.graphRerankRequested != actual.graphRerankRequested)
+        return mismatch("graph rerank mismatch");
+    if (expected.searchEngine != actual.searchEngine)
+        return mismatch("search engine mismatch");
+    if (expected.expectedDocs != actual.expectedDocs)
+        return mismatch("expected docs mismatch");
+    if (expected.expectedQueries != actual.expectedQueries)
+        return mismatch("expected queries mismatch");
+    if (expected.corpusFingerprint != 0 && actual.corpusFingerprint != 0 &&
+        expected.corpusFingerprint != actual.corpusFingerprint) {
+        return mismatch("corpus fingerprint mismatch");
+    }
+    if (actual.status != "primed") {
+        return mismatch("cache status not reusable");
+    }
+    return true;
+}
+
+static BenchCacheMetadata
+preferStrongerBenchCacheMetadata(BenchCacheMetadata preferred,
+                                 const std::optional<BenchCacheMetadata>& candidate) {
+    if (!candidate) {
+        return preferred;
+    }
+    const auto& c = *candidate;
+    if (preferred.datasetPath.empty())
+        preferred.datasetPath = c.datasetPath;
+    preferred.corpusFingerprint = std::max(preferred.corpusFingerprint, c.corpusFingerprint);
+    preferred.expectedDocs = std::max(preferred.expectedDocs, c.expectedDocs);
+    preferred.expectedQueries = std::max(preferred.expectedQueries, c.expectedQueries);
+    preferred.embeddedDocs = std::max(preferred.embeddedDocs, c.embeddedDocs);
+    preferred.vectorCount = std::max(preferred.vectorCount, c.vectorCount);
+    preferred.vectorIndexReady = preferred.vectorIndexReady || c.vectorIndexReady;
+    preferred.vectorsDbBytes = std::max(preferred.vectorsDbBytes, c.vectorsDbBytes);
+    preferred.vectorsWalBytes = std::max(preferred.vectorsWalBytes, c.vectorsWalBytes);
+    preferred.persistedHnswNodes = std::max(preferred.persistedHnswNodes, c.persistedHnswNodes);
+    preferred.persistedHnswMetaRows =
+        std::max(preferred.persistedHnswMetaRows, c.persistedHnswMetaRows);
+    preferred.persistedVec0Tables = std::max(preferred.persistedVec0Tables, c.persistedVec0Tables);
+    preferred.persistedVec0Rows = std::max(preferred.persistedVec0Rows, c.persistedVec0Rows);
+    if (preferred.status != "primed" && c.status == "primed") {
+        preferred.status = c.status;
+    }
+    return preferred;
+}
+
+static BenchCacheMetadata currentBenchCacheMetadata(BenchCacheMetadata metadata,
                                                     const yams::daemon::StatusResponse& status,
                                                     const fs::path& dataDir) {
-    BenchCacheMetadata metadata = base;
-    const auto getCount = [&status](const std::string& key) -> uint64_t {
-        auto it = status.requestCounts.find(key);
-        return (it == status.requestCounts.end()) ? 0ULL : it->second;
+    metadata.datasetPath =
+        metadata.datasetPath.empty() ? canonicalPathOrEmpty(dataDir) : metadata.datasetPath;
+    auto getCount = [&](std::string_view key) -> std::uintmax_t {
+        auto it = status.requestCounts.find(std::string(key));
+        return it == status.requestCounts.end() ? 0 : it->second;
     };
-
-    metadata.embeddedDocs =
-        std::max(metadata.embeddedDocs, static_cast<int>(getCount("documents_embedded")));
-    metadata.vectorCount =
-        std::max(metadata.vectorCount, static_cast<std::uintmax_t>(getCount("vector_count")));
-    metadata.searchEngine =
-        std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
-    metadata.quantizedHnswMode =
-        std::string(yams::vector::quantizedHnswModeName(benchmarkQuantizedHnswMode()));
-    metadata.quantizedHnswRerankFactor = benchmarkQuantizedHnswRerankFactor();
-
     const auto persistedHnsw = inspectPersistedHnswState(dataDir);
     metadata.vectorIndexReady = persistedHnsw.reusable(benchmarkVectorSearchEngine());
     metadata.vectorsDbBytes = persistedHnsw.vectorsDbBytes;
@@ -2544,7 +2388,8 @@ static BenchCacheMetadata currentBenchCacheMetadata(const BenchCacheMetadata& ba
     metadata.persistedHnswMetaRows = persistedHnsw.metaRows;
     metadata.persistedVec0Tables = persistedHnsw.vec0Tables;
     metadata.persistedVec0Rows = persistedHnsw.vec0Rows;
-
+    metadata.embeddedDocs = static_cast<int>(getCount("documents_embedded"));
+    metadata.vectorCount = getCount("vector_count");
     const bool queueDrained = getCount("embed_svc_queued") == 0 && getCount("embed_in_flight") == 0;
     const bool fullCoverage =
         metadata.embeddedDocs >= metadata.expectedDocs && metadata.expectedDocs > 0;
@@ -4037,8 +3882,6 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     } else {
         j["embedding_backend"] = "daemon";
     }
-    j["quantized_hnsw_mode"] = result.quantizedHnswMode;
-    j["quantized_hnsw_rerank_factor"] = result.quantizedHnswRerankFactor;
     j["vectors_db_bytes"] = result.vectorsDbBytes;
     j["vectors_wal_bytes"] = result.vectorsWalBytes;
     j["persisted_hnsw_nodes"] = result.persistedHnswNodes;
@@ -5240,22 +5083,20 @@ struct BenchFixture {
             if (fs::exists(cacheDir)) {
                 auto metadataResult = readBenchCacheMetadata(cacheDir);
                 if (metadataResult) {
+                    const auto& cachedMetadata = metadataResult.value();
                     std::string mismatchReason;
-                    if (benchCacheMatches(expectedCacheMetadata, metadataResult.value(),
-                                          &mismatchReason)) {
+                    if (benchCacheMatches(expectedCacheMetadata, cachedMetadata, &mismatchReason)) {
                         harnessOptions.dataDir = cacheDir;
                         warmDataDir = true;
-                        warmCacheMetadata = metadataResult.value();
+                        warmCacheMetadata = cachedMetadata;
                         spdlog::info(
                             "[Bench] Reusing warm cache dir: {} (status={}, embedded_docs={}, "
                             "vectors={})",
-                            cacheDir.string(), metadataResult.value().status,
-                            metadataResult.value().embeddedDocs,
-                            metadataResult.value().vectorCount);
+                            cacheDir.string(), cachedMetadata.status, cachedMetadata.embeddedDocs,
+                            cachedMetadata.vectorCount);
                     } else {
                         std::error_code removeEc;
-                        const bool canResumePartial = metadataResult &&
-                                                      metadataResult.value().status == "partial" &&
+                        const bool canResumePartial = cachedMetadata.status == "partial" &&
                                                       mismatchReason == "cache status not reusable";
                         if (!canResumePartial) {
                             fs::remove_all(cacheDir, removeEc);
@@ -7332,9 +7173,6 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
         }
         result.searchEngine =
             std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
-        result.quantizedHnswMode =
-            std::string(yams::vector::quantizedHnswModeName(benchmarkQuantizedHnswMode()));
-        result.quantizedHnswRerankFactor = benchmarkQuantizedHnswRerankFactor();
         if (g_fixture && g_fixture->harness) {
             const auto persisted = inspectPersistedHnswState(g_fixture->harness->dataDir());
             result.vectorsDbBytes = persisted.vectorsDbBytes;
