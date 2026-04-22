@@ -77,6 +77,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorSystemManager.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/metric_keys.h>
@@ -563,6 +564,13 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             vectorDeps.getEmbeddingDimension = [this]() { return this->getEmbeddingDimension(); };
             vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
             spdlog::debug("[ServiceManager] VectorSystemManager created");
+
+            // Create VectorIndexCoordinator (owns all vector-index mutations)
+            vectorIndexCoordinator_ = std::make_shared<VectorIndexCoordinator>(
+                workCoordinator_->getExecutor(),
+                nullptr, // VectorDatabase wired below after DB init
+                &state_);
+            spdlog::debug("[ServiceManager] VectorIndexCoordinator created");
 
             // Create DatabaseManager
             DatabaseManager::Dependencies dbDeps;
@@ -2039,6 +2047,23 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[ServiceManager] Vector DB init failed: {}", vdbRes.error().message);
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
+            // Wire the VDB into the coordinator now that it's ready.
+            if (vectorIndexCoordinator_) {
+                if (auto vdb = getVectorDatabase()) {
+                    vectorIndexCoordinator_->setVectorDatabase(vdb);
+                }
+                // Async: load or build the initial index (sets vectorIndexReady).
+                boost::asio::co_spawn(
+                    workCoordinator_->getExecutor(),
+                    [coord = vectorIndexCoordinator_]() -> boost::asio::awaitable<void> {
+                        auto res = co_await coord->initialBuildIfNeeded();
+                        if (!res) {
+                            spdlog::warn("[ServiceManager] initialBuildIfNeeded failed: {}",
+                                         res.error().message);
+                        }
+                    },
+                    boost::asio::detached);
+            }
             // Log vector count from database
             if (auto vectorDatabase = getVectorDatabase()) {
                 auto dbVectorCount = vectorDatabase->getVectorCount();

@@ -14,7 +14,7 @@
 
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
-#include <yams/search/search_engine.h>
+#include <yams/search/search_models.h>
 
 namespace yams::search {
 

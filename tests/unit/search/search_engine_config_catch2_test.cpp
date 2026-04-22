@@ -1,7 +1,7 @@
 /**
  * @file search_engine_config_catch2_test.cpp
  * @brief Tests for SearchEngineConfig, CorpusProfile, ComponentResult helpers,
- *        and accumulateComponentScore (search_engine.h)
+ *        and accumulateComponentScore (search_result_fusion.h)
  *
  * These are header-only or inline functions at 0% coverage. Tests here
  * exercise forProfile(), detectProfile(), fusionStrategyToString(),
@@ -12,7 +12,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/search/search_engine.h>
+#include <yams/search/search_result_fusion.h>
 
 #include <string>
 #include <unordered_map>
@@ -333,7 +333,7 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.similarityThreshold == Approx(0.0f));
     CHECK(cfg.enableParallelExecution == true);
     CHECK(cfg.enableTieredExecution == true);
-    CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::COMB_MNZ);
+    CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
     CHECK(cfg.symbolRank == true);

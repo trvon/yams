@@ -4,7 +4,7 @@
 #pragma once
 
 #include <yams/search/query_router.h>
-#include <yams/search/search_engine.h>
+#include <yams/search/search_engine_config.h>
 #include <yams/search/search_tuner.h>
 
 #include <optional>

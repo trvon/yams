@@ -5,7 +5,7 @@
 
 #include <yams/metadata/document_metadata.h>
 #include <yams/search/query_router.h>
-#include <yams/search/search_engine.h>
+#include <yams/search/search_models.h>
 
 #include <cstddef>
 #include <optional>

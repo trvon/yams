@@ -12,6 +12,7 @@
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
@@ -538,14 +539,30 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             bool vectorBackendUsable = false;
             if (serviceManager_) {
                 try {
+                    // Use coordinator snapshot for index-readiness to avoid blocking behind
+                    // the rebuild mutex on the hot status path.
+                    if (auto coord = serviceManager_->getVectorIndexCoordinator()) {
+                        const auto tel = coord->snapshot();
+                        res.readinessStates[std::string(readiness::kVectorIndex)] = tel.ready;
+                        if (state_) {
+                            state_->readiness.vectorIndexReady.store(tel.ready,
+                                                                     std::memory_order_relaxed);
+                            state_->readiness.vectorIndexProgress.store(
+                                static_cast<int>(tel.progressPct), std::memory_order_relaxed);
+                        }
+                    }
+                    // Read VDB config (non-blocking metadata); skip getVectorCount().
                     if (auto vdb = serviceManager_->getVectorDatabase();
                         vdb && vdb->isInitialized()) {
                         const auto dim = vdb->getConfig().embedding_dim;
-                        const auto rows = vdb->getVectorCount();
                         res.vectorIndexEngine =
                             vector::vectorSearchEngineName(vdb->getConfig().search_engine);
 
-                        res.vectorDbReady = (rows > 0);
+                        // Use state_ atomic (coordinator keeps it current) instead of
+                        // the potentially-blocking getVectorCount().
+                        res.vectorDbReady =
+                            state_ ? state_->readiness.vectorDbReady.load(std::memory_order_relaxed)
+                                   : false;
                         res.vectorDbInitAttempted = true;
                         if (dim > 0) {
                             res.vectorDbDim = static_cast<uint32_t>(dim);

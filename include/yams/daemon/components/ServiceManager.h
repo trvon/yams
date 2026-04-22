@@ -95,6 +95,7 @@ class RetrievalSessionManager;
 class WorkerPool;
 class TuningManager;
 class CheckpointManager;
+class VectorIndexCoordinator;
 } // namespace yams::daemon
 
 namespace yams::daemon {
@@ -362,6 +363,10 @@ public:
     }
     void startRepairService(std::function<size_t()> activeConnFn);
     void stopRepairService();
+
+    std::shared_ptr<VectorIndexCoordinator> getVectorIndexCoordinator() const {
+        return vectorIndexCoordinator_;
+    }
 
     using TopologyRebuildStats = TopologyManager::RebuildStats;
     using TopologyTelemetrySnapshot = TopologyManager::TelemetrySnapshot;
@@ -680,6 +685,7 @@ private:
 
     std::unique_ptr<PluginManager> pluginManager_;
     std::unique_ptr<VectorSystemManager> vectorSystemManager_;
+    std::shared_ptr<VectorIndexCoordinator> vectorIndexCoordinator_;
     std::unique_ptr<DatabaseManager> databaseManager_;
 
     // Cached GLiNER query concept extraction function.

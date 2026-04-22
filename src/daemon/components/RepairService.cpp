@@ -9,6 +9,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/content_extractor.h>
@@ -294,6 +295,7 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
     ctx.rebuildSemanticNeighborGraph = [services](const std::string& reason) {
         return services->rebuildSemanticNeighborGraph(reason);
     };
+    ctx.vectorIndexCoordinator = services->getVectorIndexCoordinator().get();
     return ctx;
 }
 
@@ -305,7 +307,9 @@ RepairService::RepairService(ServiceManager* services, StateComponent* state,
 RepairService::RepairService(RepairServiceContext ctx, StateComponent* state,
                              std::function<size_t()> activeConnFn, Config cfg)
     : ctx_(std::move(ctx)), state_(state), activeConnFn_(std::move(activeConnFn)),
-      cfg_(std::move(cfg)), shutdownState_(std::make_shared<ShutdownState>()) {}
+      cfg_(std::move(cfg)), shutdownState_(std::make_shared<ShutdownState>()) {
+    coordinator_ = ctx_.vectorIndexCoordinator;
+}
 
 RepairService::~RepairService() {
     stop();
@@ -620,25 +624,6 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         {
             std::lock_guard<std::mutex> lk(queueMutex_);
             queueEmpty = pendingDocuments_.empty();
-        }
-        if (queueEmpty && bulkVectorRebuildActive_.load(std::memory_order_relaxed)) {
-            const auto embedQueued =
-                ctx_.getEmbeddingQueuedJobs ? ctx_.getEmbeddingQueuedJobs() : 0;
-            const auto embedInFlight =
-                ctx_.getEmbeddingInFlightJobs ? ctx_.getEmbeddingInFlightJobs() : 0;
-            if (embedQueued == 0 && embedInFlight == 0) {
-                auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
-                if (vectorDb) {
-                    if (vectorDb->finalizeBulkLoad()) {
-                        bulkVectorRebuildActive_.store(false, std::memory_order_relaxed);
-                    } else {
-                        spdlog::warn("RepairService: deferred bulk vector finalize failed: {}",
-                                     vectorDb->getLastError());
-                    }
-                } else {
-                    bulkVectorRebuildActive_.store(false, std::memory_order_relaxed);
-                }
-            }
         }
         if (queueEmpty && !initialScanEnqueued) {
             if (deferTicks < minDeferTicks) {
@@ -1049,18 +1034,22 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
                 storedDim = vectorDb->getConfig().embedding_dim;
 
             if (modelDim > 0 && storedDim > 0 && modelDim != storedDim) {
-                if (cfg_.autoRebuildOnDimMismatch && !dimMismatchRebuildDone_.exchange(true)) {
-                    spdlog::warn("RepairService: rebuilding vectors (model dim {} != db dim {})",
-                                 modelDim, storedDim);
+                if (cfg_.autoRebuildOnDimMismatch) {
+                    static std::atomic<bool> dimMismatchLogged{false};
+                    if (!dimMismatchLogged.exchange(true)) {
+                        spdlog::warn("RepairService: dim mismatch (model={} db={}); "
+                                     "requesting VectorIndexCoordinator rebuild",
+                                     modelDim, storedDim);
+                    }
+                    if (coordinator_) {
+                        // Coalescing rebuild — the coordinator handles beginBulkLoad / finalize.
+                        // Fire-and-forget; the background loop picks up missing embeddings on
+                        // the next tick after the rebuild completes.
+                        coordinator_->postRebuild(yams::daemon::RebuildReason::DimensionMismatch);
+                    }
+                    // Also recreate the tables with the new dimension so embeddings can be stored.
                     if (vectorDb) {
                         try {
-                            if (vectorDb->beginBulkLoad()) {
-                                bulkVectorRebuildActive_.store(true, std::memory_order_relaxed);
-                            } else {
-                                spdlog::warn(
-                                    "RepairService: failed to enter bulk vector rebuild mode: {}",
-                                    vectorDb->getLastError());
-                            }
                             const auto dbPath = vectorDb->getConfig().database_path;
                             yams::vector::SqliteVecBackend backend;
                             auto initRes = backend.initialize(dbPath);
@@ -3321,18 +3310,6 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     auto isCanceled = [&]() {
         return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
     };
-    auto finalizeBulkVectorRebuild = [&]() {
-        auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
-        if (!vectorDb || !bulkVectorRebuildActive_.load(std::memory_order_relaxed)) {
-            return;
-        }
-        if (!vectorDb->finalizeBulkLoad()) {
-            spdlog::warn("RepairService: bulk vector rebuild finalize failed: {}",
-                         vectorDb->getLastError());
-            return;
-        }
-        bulkVectorRebuildActive_.store(false, std::memory_order_relaxed);
-    };
 
     auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
@@ -3613,7 +3590,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     }
 
     if (req.foreground) {
-        finalizeBulkVectorRebuild();
+        // No explicit finalize needed — the coordinator manages the bulk window.
         if (req.repairTopology && result.succeeded > 0 && ctx_.rebuildSemanticNeighborGraph) {
             auto semanticResult =
                 ctx_.rebuildSemanticNeighborGraph("repair_service.embedding_batch");

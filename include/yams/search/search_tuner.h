@@ -2,7 +2,7 @@
 
 #include <yams/core/types.h>
 #include <yams/search/relevance_label_store.h>
-#include <yams/search/search_engine.h>
+#include <yams/search/search_engine_config.h>
 #include <yams/search/tuning_slot.h>
 #include <yams/storage/corpus_stats.h>
 
@@ -88,10 +88,9 @@ struct TunedParams {
         return ws;
     }();
 
-    // Similarity threshold for vector search. F3b: top-k unfiltered is the default contract
-    // (HNSW/PQ-ADC relative ranking is the primary signal). SearchTuner can still raise this
-    // at runtime when the HNSW similarity distribution and vector-pool occupancy telemetry
-    // indicate magnitude gating would preserve precision.
+    // Similarity threshold for vector search. F3b+R2 pair: top-k unfiltered (0.0) matches
+    // Simeon's native retriever contract, paired with RRF fusion that is coverage-robust.
+    // Backend filter path is preserved for users who explicitly set threshold > 0.
     TuningSlot<float> similarityThreshold{0.0f};
 
     // Vector boost factor for TEXT_ANCHOR fusion (multiplied with vectorWeight)
@@ -329,10 +328,9 @@ struct TunedParams {
             params.rrfK = 12; // Low k for better top-rank discrimination
             params.weights.setAll(0.60f, 0.35f, 0.00f, 0.00f, 0.00f, 0.00f, 0.05f,
                                   TuningLayer::Profile);
-            // F3b: top-k unfiltered matches the FWHT+1024+L2 cosine-sim distribution where
-            // claim-style prose queries cluster in the 0.20-0.40 range; the absolute
-            // threshold becomes lossy and the relative HNSW ranking is the real signal.
-            params.similarityThreshold = TuningSlot<float>(0.0f, TuningLayer::Profile);
+            // F3b's top-k unfiltered (0.0) regressed on scifact under COMB_MNZ; reverted to
+            // 0.30 (E7 baseline) until a coverage-robust fusion (RRF) is wired.
+            params.similarityThreshold = TuningSlot<float>(0.30f, TuningLayer::Profile);
             params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
             // Sub-phrase rescoring re-scores already-retrieved docs via AND-clause
             // sub-phrase queries. This is the only mechanism that helps when base FTS5

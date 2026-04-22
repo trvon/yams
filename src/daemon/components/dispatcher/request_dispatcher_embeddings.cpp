@@ -5,6 +5,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/daemon_lifecycle.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/batch_metrics.h>
@@ -251,7 +252,8 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
                 }
                 auto stats = yams::repair::repairMissingEmbeddings(
                     contentStore, metadataRepo, modelProvider, modelName, repairConfig,
-                    req.documentHashes, nullptr, contentExtractors);
+                    req.documentHashes, nullptr, contentExtractors,
+                    serviceManager_->getVectorIndexCoordinator().get());
                 result = std::move(stats);
             }
         }

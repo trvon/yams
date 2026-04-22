@@ -6,8 +6,8 @@ yams_metadata = dependency('yams_metadata', required: false)
 yams_topology = dependency('yams_topology', required: false)
 yams_vector = dependency('yams_vector', required: false)
 
-# SymSpell dependency (defined in third_party/symspell/meson.build)
-# Note: symspell_dep must be declared before this file is processed
+#SymSpell dependency(defined in third_party / symspell / meson.build)
+#Note : symspell_dep must be declared before this file is processed
 
 yams_search = static_library('yams_search',
   [
@@ -26,7 +26,10 @@ yams_search = static_library('yams_search',
     'parallel_post_processor.cpp',
     'search_execution_context.cpp',
     'lexical_scoring.cpp',
+    'search_lexical_pipeline.cpp',
     'search_engine.cpp',
+    'search_result_fusion.cpp',
+    'search_vector_pipeline.cpp',
     'search_tuner.cpp',
     'tuning_pipeline.cpp',
     'tuning_features.cpp',
@@ -59,8 +62,8 @@ pkg.generate(yams_search,
 )
 
 yams_search_dep = declare_dependency(
-  # yams_search owns simeon_lexical_backend.cpp, so consumers also need the
-  # vendored simeon archive that provides QueryRouter/recipe_name.
+#yams_search owns simeon_lexical_backend.cpp, so consumers also need the
+#vendored simeon archive that provides QueryRouter / recipe_name.
   link_with: [yams_search, simeon_lib],
   include_directories: [
     include_directories('../../include'),

@@ -397,33 +397,21 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 }
 
                 bool vectorDbReady = false;
-                bool vectorIndexReady = false;
                 try {
                     const auto rows = vdb->getVectorCount();
                     vectorDbReady = (rows > 0);
-                    if (vectorDbReady) {
-                        if (vdb->hasReusablePersistedSearchIndex()) {
-                            vectorIndexReady = vdb->prepareSearchIndex();
-                            if (!vectorIndexReady) {
-                                spdlog::warn("[VectorInit] prepareSearchIndex failed: {}",
-                                             vdb->getLastError());
-                            }
-                        } else {
-                            spdlog::info("[VectorInit] persisted HNSW absent; deferring index "
-                                         "build until checkpoint/query path");
-                        }
+                    if (!vectorDbReady) {
+                        spdlog::info("[VectorInit] Empty vector DB; index will be built on first "
+                                     "embedding batch (coordinator owns index readiness)");
                     }
                 } catch (...) {
                 }
 
-                // Update state
+                // Update state (DB readiness only; index readiness is managed by coordinator)
                 if (deps_.state) {
                     try {
                         deps_.state->readiness.vectorDbInitAttempted = true;
                         deps_.state->readiness.vectorDbReady = vectorDbReady;
-                        deps_.state->readiness.vectorIndexReady = vectorIndexReady;
-                        deps_.state->readiness.vectorIndexProgress =
-                            (vectorIndexReady ? 100 : (vectorDbReady ? 50 : 0));
                         deps_.state->readiness.vectorDbDim =
                             static_cast<uint32_t>(cfg.embedding_dim);
                     } catch (...) {

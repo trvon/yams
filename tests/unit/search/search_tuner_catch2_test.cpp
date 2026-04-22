@@ -210,7 +210,7 @@ TEST_CASE("TunedParams: applyTo SearchEngineConfig", "[unit][search_tuner][param
     CHECK(config.kgWeight == Approx(0.00f));
     CHECK(config.tagWeight == Approx(0.05f));
     CHECK(config.metadataWeight == Approx(0.05f));
-    CHECK(config.similarityThreshold == Approx(0.0f));
+    CHECK(config.similarityThreshold == Approx(0.30f));
 }
 
 // =============================================================================
@@ -926,8 +926,9 @@ TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
     // rerankAnchoredMinRelativeScore: lerp(0.0, 0.70, 0.60) = 0.42
     CHECK(params.rerankAnchoredMinRelativeScore == Approx(0.42f).epsilon(0.01));
 
-    // similarityThreshold: lerp(0.0, 0.0, 0.60) = 0.0 (F3b top-k unfiltered default)
-    CHECK(params.similarityThreshold.value == Approx(0.0f).epsilon(0.01));
+    // similarityThreshold: lerp(0.30, 0.30, 0.60) = 0.30 (F3b reverted; E7 baseline default
+    // pending coverage-robust fusion)
+    CHECK(params.similarityThreshold.value == Approx(0.30f).epsilon(0.01));
 }
 
 TEST_CASE("applyCommunityLayer: no-op when already in target state",

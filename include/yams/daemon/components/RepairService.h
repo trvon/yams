@@ -48,6 +48,7 @@ class GraphComponent;
 class AbiSymbolExtractorAdapter;
 class PostIngestQueue;
 class IModelProvider;
+class VectorIndexCoordinator;
 
 /**
  * @brief Callback-based dependency bundle for RepairService.
@@ -77,6 +78,8 @@ struct RepairServiceContext {
                                                         const std::vector<std::string>&)>
         rebuildTopologyArtifacts;
     std::function<Result<std::size_t>(const std::string&)> rebuildSemanticNeighborGraph;
+    // Coordinator for vector-index mutations (may be nullptr in tests / CLI contexts).
+    VectorIndexCoordinator* vectorIndexCoordinator{nullptr};
 };
 
 /**
@@ -308,9 +311,8 @@ private:
     std::atomic<std::uint64_t> totalBacklog_{0};
     std::atomic<std::uint64_t> processed_{0};
 
-    std::atomic<bool> dimMismatchRebuildDone_{false};
-    std::atomic<bool> bulkVectorRebuildActive_{false};
     std::shared_ptr<ShutdownState> shutdownState_;
+    VectorIndexCoordinator* coordinator_{nullptr}; // not owned; injected via context
 
     // On-demand repair serialization (only one RPC repair at a time)
     std::mutex repairMutex_;

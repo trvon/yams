@@ -3676,6 +3676,7 @@ MetadataRepository::getDocumentCountsByExtension() {
 
 Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     constexpr auto kCorpusStatsOverlayTtl = std::chrono::minutes(5);
+    const bool countersPrimedForOverlay = countersInitialized_.load(std::memory_order_acquire);
     auto mergeOnlineOverlay = [&](storage::CorpusStats stats) {
         const auto reconciledAtMs = stats.computedAtMs;
         const double reconciledMinDepth = stats.pathDepthAvg - stats.pathRelativeDepthAvg;
@@ -3795,7 +3796,7 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                 return *cachedCorpusStats_;
             }
 
-            if (age < kCorpusStatsOverlayTtl) {
+            if (countersPrimedForOverlay && age < kCorpusStatsOverlayTtl) {
                 auto merged = mergeOnlineOverlay(*cachedCorpusStats_);
                 if (isStale || !docCountUnchanged) {
                     return merged;
@@ -3811,7 +3812,7 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     // ~5s and was previously gating the Search Engine build critical path.
     // The synthesized stats are marked stale so the next call after
     // kCorpusStatsOverlayTtl (5 min) promotes to a reconciled snapshot.
-    if (cachedDocumentCount_.load(std::memory_order_relaxed) > 0) {
+    if (countersPrimedForOverlay && cachedDocumentCount_.load(std::memory_order_relaxed) > 0) {
         storage::CorpusStats baseline;
         auto merged = mergeOnlineOverlay(baseline);
         {

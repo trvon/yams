@@ -965,6 +965,36 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_vector_index_coordinator_bulk_scope_exe = executable(
+    'catch2_vector_index_coordinator_bulk_scope',
+    files('unit/daemon/vector_index_coordinator_bulk_scope_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_vector_index_coordinator_coalesce_exe = executable(
+    'catch2_vector_index_coordinator_coalesce',
+    files('unit/daemon/vector_index_coordinator_coalesce_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_vector_index_coordinator_telemetry_exe = executable(
+    'catch2_vector_index_coordinator_telemetry',
+    files('unit/daemon/vector_index_coordinator_telemetry_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_tuning_loop_wakeup_exe = executable('catch2_tuning_loop_wakeup',
     files('unit/daemon/tuning_loop_wakeup_catch2_test.cpp'),
     include_directories: incs,
@@ -2819,6 +2849,24 @@ if catch2_dep.found()
 
   test('health_check_isolation', catch2_health_check_isolation_exe,
     suite: ['catch2', 'unit', 'daemon', 'state', 'health-check'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('vector_index_coordinator_bulk_scope', catch2_vector_index_coordinator_bulk_scope_exe,
+    suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('vector_index_coordinator_coalesce', catch2_vector_index_coordinator_coalesce_exe,
+    suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('vector_index_coordinator_telemetry', catch2_vector_index_coordinator_telemetry_exe,
+    suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

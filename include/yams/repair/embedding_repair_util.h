@@ -15,7 +15,8 @@
 namespace yams {
 namespace daemon {
 class IModelProvider;
-}
+class VectorIndexCoordinator;
+} // namespace daemon
 } // namespace yams
 
 namespace yams::repair {
@@ -45,14 +46,9 @@ struct EmbeddingRepairConfig {
  * Repair missing embeddings for all documents or specific document hashes.
  * Daemon version that uses IModelProvider directly.
  *
- * @param contentStore The content store to retrieve document content
- * @param metadataRepo The metadata repository to query documents
- * @param modelProvider The model provider (daemon direct access)
- * @param modelName The embedding model name to use
- * @param config Configuration for the repair operation
- * @param documentHashes Optional list of specific document hashes to repair (empty = all)
- * @param progressCallback Optional callback for progress updates
- * @return Result containing repair statistics or error
+ * @param coord  Optional VectorIndexCoordinator (nullptr = CLI path, no bulk management).
+ *               When provided, the entire repair runs inside a single BulkScope so that
+ *               finalizeBulkLoad + buildIndex + persistIndex happen exactly once on return.
  */
 Result<EmbeddingRepairStats>
 repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
@@ -61,7 +57,8 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                         const std::string& modelName, const EmbeddingRepairConfig& config,
                         const std::vector<std::string>& documentHashes = {},
                         EmbeddingRepairProgressCallback progressCallback = nullptr,
-                        const yams::extraction::ContentExtractorList& extractors = {});
+                        const yams::extraction::ContentExtractorList& extractors = {},
+                        daemon::VectorIndexCoordinator* coord = nullptr);
 
 /**
  * Repair missing embeddings for all documents or specific document hashes.

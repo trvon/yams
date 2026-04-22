@@ -15,6 +15,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/repair/embedding_repair_util.h>
 
 #include <spdlog/spdlog.h>
@@ -2165,7 +2166,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
                 auto stats = yams::repair::repairMissingEmbeddings(
                     contentStore, metadataRepo, modelProvider, modelName, repairConfig,
-                    req.documentHashes, progress, contentExtractors);
+                    req.documentHashes, progress, contentExtractors,
+                    sm ? sm->getVectorIndexCoordinator().get() : nullptr);
                 if (!stats) {
                     finishWithError(stats.error().code, stats.error().message);
                     return;
