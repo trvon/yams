@@ -104,9 +104,22 @@ public:
 
     /**
      * @brief Fire-and-forget rebuild request for sync callers.
-     * Does not wait for completion. Safe to call from any thread.
+     *
+     * Internally co_spawns requestRebuild() detached on the strand so that the
+     * caller gets the full coalescing/waiter semantics without having to await.
+     * Safe to call from any thread.
      */
-    void postRebuild(RebuildReason reason) noexcept;
+    void fireRebuild(RebuildReason reason) noexcept;
+
+    /**
+     * @brief Synchronously persist the index through the coordinator strand.
+     *
+     * Serialises with in-flight rebuilds (no concurrent build/persist on the
+     * backend). Used by CheckpointManager so that periodic checkpoints do not
+     * race the rebuild path. Blocks the caller until the strand completes.
+     * Returns false if persistence failed or the VDB is unavailable.
+     */
+    bool requestCheckpoint() noexcept;
 
     /**
      * @brief Coalescing rebuild request.
@@ -156,14 +169,17 @@ public:
     uint64_t testing_rebuildEpoch() const noexcept {
         return rebuildEpoch_.load(std::memory_order_relaxed);
     }
-    // Expose strand so tests can co_spawn requestRebuild on the strand,
-    // ensuring coroutines are serialized with doRebuild for deterministic coalescing.
+    // Expose strand so tests may submit work serialised with the coordinator.
     boost::asio::strand<boost::asio::any_io_executor>& testing_strand() noexcept { return strand_; }
 #endif
 
 private:
     // Called from BulkScope destructor (any thread).
     void releaseBulkScope() noexcept;
+
+    // Post a telemetry refresh to the strand. Single-writer invariant: all
+    // publishTelemetry() writes happen on strand_.
+    void postTelemetryRefresh() noexcept;
 
     // Runs on the strand: finalizes bulk window and persists index.
     void doFinalizeOnStrand();

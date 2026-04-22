@@ -589,6 +589,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
             CheckpointManager::Dependencies checkpointDeps;
             checkpointDeps.vectorSystemManager = vectorSystemManager_.get();
+            checkpointDeps.vectorIndexCoordinator = vectorIndexCoordinator_.get();
             checkpointDeps.state = &state_;
             checkpointDeps.hotzoneManager = nullptr;
             checkpointDeps.metadataRepository = getMetadataRepo().get();

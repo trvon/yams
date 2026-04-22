@@ -3,6 +3,7 @@
 
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/hotzone_manager.h>
@@ -143,8 +144,17 @@ bool CheckpointManager::checkpointVectorIndex() {
         return true;
     }
 
+    // Route through the coordinator when available so the persist runs serialised
+    // on the same strand that owns rebuild/finalize. Falling back to direct
+    // persistIndex() is only safe when the coordinator isn't wired yet (boot).
     try {
-        if (vectorDb->persistIndex()) {
+        bool ok = false;
+        if (deps_.vectorIndexCoordinator) {
+            ok = deps_.vectorIndexCoordinator->requestCheckpoint();
+        } else {
+            ok = vectorDb->persistIndex();
+        }
+        if (ok) {
             auto now = std::chrono::system_clock::now();
             auto epoch =
                 std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();

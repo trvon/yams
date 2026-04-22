@@ -13,7 +13,10 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 
+#include <algorithm>
 #include <chrono>
+#include <future>
+#include <thread>
 
 namespace yams::daemon {
 
@@ -50,25 +53,32 @@ VectorIndexCoordinator::VectorIndexCoordinator(boost::asio::any_io_executor exec
 
 VectorIndexCoordinator::~VectorIndexCoordinator() = default;
 
-void VectorIndexCoordinator::postRebuild(RebuildReason reason) noexcept {
-    pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_relaxed);
-    boost::asio::post(strand_, [this, reason]() {
-        pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_relaxed);
-        bool expected = false;
-        if (rebuildInFlight_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-            const uint32_t reasons = pendingReasons_.exchange(0, std::memory_order_acq_rel);
-            auto t = readTelemetrySeqlock();
-            t.rebuilding = true;
-            t.pendingReasons = reasons;
-            publishTelemetry(t);
-            if (state_) {
-                state_->readiness.vectorIndexReady.store(false, std::memory_order_relaxed);
-                state_->readiness.vectorIndexProgress.store(0, std::memory_order_relaxed);
-            }
-            // Use post() — never inline — to schedule doRebuildOnStrand.
-            boost::asio::post(strand_, [this, reasons]() { doRebuildOnStrand(reasons); });
-        }
-    });
+void VectorIndexCoordinator::fireRebuild(RebuildReason reason) noexcept {
+    // Delegate to requestRebuild() on the strand, detached.  This gives the
+    // caller the full coalescing + waiter-registration semantics without
+    // imposing an awaitable return, and it fixes the "dropped reason" bug that
+    // the old postRebuild() had (it skipped waiter registration, so a rebuild
+    // end-of-loop could drop the pending bit).
+    try {
+        boost::asio::co_spawn(
+            strand_, requestRebuild(reason), [](std::exception_ptr e, Result<void> r) {
+                if (e) {
+                    try {
+                        std::rethrow_exception(e);
+                    } catch (const std::exception& ex) {
+                        spdlog::warn("[VectorIndexCoordinator] fireRebuild failed: {}", ex.what());
+                    } catch (...) {
+                        spdlog::warn("[VectorIndexCoordinator] fireRebuild failed (unknown)");
+                    }
+                } else if (!r) {
+                    spdlog::debug("[VectorIndexCoordinator] fireRebuild: rebuild returned error");
+                }
+            });
+    } catch (const std::exception& ex) {
+        spdlog::warn("[VectorIndexCoordinator] fireRebuild spawn failed: {}", ex.what());
+    } catch (...) {
+        spdlog::warn("[VectorIndexCoordinator] fireRebuild spawn failed (unknown)");
+    }
 }
 
 // Helper: get the VDB under the mutex for callers on any thread.
@@ -78,27 +88,47 @@ getVdbLocked(std::mutex& mu, const std::shared_ptr<vector::VectorDatabase>& vdb)
     return vdb;
 }
 
+// Post a telemetry refresh onto the strand (single-writer seqlock invariant).
+// All publishTelemetry() calls MUST originate from the strand.
+void VectorIndexCoordinator::postTelemetryRefresh() noexcept {
+    boost::asio::post(strand_, [this]() {
+        VectorIndexTelemetry t = seqData_;
+        t.activeBulkScopes = activeBulkScopes_.load(std::memory_order_relaxed);
+        t.pendingReasons = pendingReasons_.load(std::memory_order_relaxed);
+        t.rebuildEpoch = rebuildEpoch_.load(std::memory_order_relaxed);
+        publishTelemetry(t);
+    });
+}
+
 VectorIndexCoordinator::BulkScope VectorIndexCoordinator::beginBulkIngest(RebuildReason reason) {
     pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_relaxed);
 
     // fetch_add is atomic: exactly one caller sees prev == 0 and enters bulk mode.
     const uint32_t prev = activeBulkScopes_.fetch_add(1, std::memory_order_acq_rel);
     if (prev == 0) {
-        auto vdb = getVdbLocked(vdbMutex_, vectorDb_);
-        if (vdb) {
-            if (!vdb->beginBulkLoad()) {
-                spdlog::warn("[VectorIndexCoordinator] beginBulkLoad failed: {}",
-                             vdb->getLastError());
+        // Serialise the backend begin-bulk through the strand so that no other
+        // strand-owned operation (buildIndex/persist/finalize) runs concurrently
+        // with this beginBulkLoad call on the backend.  The caller does NOT need
+        // to wait for the strand to acknowledge — subsequent insertVectorsBatch
+        // calls go through VDB's own mutex, so ordering with beginBulkLoad is
+        // enforced by VDB's internal serialisation regardless of how soon the
+        // strand runs our lambda.
+        boost::asio::post(strand_, [this]() {
+            auto vdb = getVdbLocked(vdbMutex_, vectorDb_);
+            if (vdb) {
+                if (!vdb->beginBulkLoad()) {
+                    spdlog::warn("[VectorIndexCoordinator] beginBulkLoad failed: {}",
+                                 vdb->getLastError());
+                }
             }
-        }
+            VectorIndexTelemetry t = seqData_;
+            t.activeBulkScopes = activeBulkScopes_.load(std::memory_order_relaxed);
+            t.pendingReasons = pendingReasons_.load(std::memory_order_relaxed);
+            publishTelemetry(t);
+        });
+    } else {
+        postTelemetryRefresh();
     }
-
-    // Update seqlock telemetry (best-effort; written from any thread here,
-    // so we use a quick publish that may race with strand writes but is
-    // acceptable for the activeBulkScopes counter).
-    auto t = readTelemetrySeqlock();
-    t.activeBulkScopes = prev + 1;
-    publishTelemetry(t);
 
     return BulkScope(this);
 }
@@ -109,9 +139,7 @@ void VectorIndexCoordinator::releaseBulkScope() noexcept {
         // Last scope: post finalize+persist to strand.
         boost::asio::post(strand_, [this]() { doFinalizeOnStrand(); });
     } else {
-        auto t = readTelemetrySeqlock();
-        t.activeBulkScopes = (prev > 1) ? (prev - 1) : 0;
-        publishTelemetry(t);
+        postTelemetryRefresh();
     }
 }
 
@@ -291,10 +319,47 @@ boost::asio::awaitable<Result<void>> VectorIndexCoordinator::initialBuildIfNeede
                 publishTelemetry(t);
             }
         }
+    } catch (const std::exception& ex) {
+        spdlog::warn("[VectorIndexCoordinator] initialBuildIfNeeded failed: {}", ex.what());
     } catch (...) {
+        spdlog::warn("[VectorIndexCoordinator] initialBuildIfNeeded failed (unknown)");
     }
 
     co_return Result<void>{};
+}
+
+bool VectorIndexCoordinator::requestCheckpoint() noexcept {
+    // Serialise persistIndex through the strand so it cannot race an in-flight
+    // buildIndex/finalizeBulkLoad.  Blocks the caller briefly — acceptable for
+    // CheckpointManager which already blocks on the backend mutex today.
+    std::promise<bool> done;
+    auto fut = done.get_future();
+    try {
+        boost::asio::post(strand_, [this, p = std::move(done)]() mutable {
+            auto vdb = getVdbLocked(vdbMutex_, vectorDb_);
+            if (!vdb || !vdb->isInitialized()) {
+                p.set_value(false);
+                return;
+            }
+            try {
+                p.set_value(vdb->persistIndex());
+            } catch (const std::exception& ex) {
+                spdlog::warn("[VectorIndexCoordinator] requestCheckpoint persistIndex threw: {}",
+                             ex.what());
+                p.set_value(false);
+            } catch (...) {
+                spdlog::warn("[VectorIndexCoordinator] requestCheckpoint persistIndex threw "
+                             "(unknown)");
+                p.set_value(false);
+            }
+        });
+    } catch (const std::exception& ex) {
+        spdlog::warn("[VectorIndexCoordinator] requestCheckpoint post failed: {}", ex.what());
+        return false;
+    } catch (...) {
+        return false;
+    }
+    return fut.get();
 }
 
 VectorIndexTelemetry VectorIndexCoordinator::snapshot() const noexcept {
@@ -312,10 +377,15 @@ void VectorIndexCoordinator::publishTelemetry(const VectorIndexTelemetry& tel) n
 }
 
 VectorIndexTelemetry VectorIndexCoordinator::readTelemetrySeqlock() const noexcept {
-    while (true) {
+    // Bounded seqlock read. If a writer is caught mid-update (or crashes between
+    // the two version bumps) we do not spin forever: after kMaxSpins we return
+    // the data we have and tolerate a potentially torn read for this one call.
+    // Status readers are best-effort; they must never block.
+    constexpr int kMaxSpins = 64;
+    for (int i = 0; i < kMaxSpins; ++i) {
         const uint64_t v1 = seqVersion_.load(std::memory_order_acquire);
         if (v1 & 1u) {
-            // Writer active — spin.
+            std::this_thread::yield();
             continue;
         }
         const VectorIndexTelemetry t = seqData_;
@@ -324,7 +394,11 @@ VectorIndexTelemetry VectorIndexCoordinator::readTelemetrySeqlock() const noexce
         if (v1 == v2) {
             return t;
         }
+        std::this_thread::yield();
     }
+    // Fallback: return last-observed data (may be torn) rather than spin forever.
+    VectorIndexTelemetry fallback = seqData_;
+    return fallback;
 }
 
 // ── Waiters ──────────────────────────────────────────────────────────────────

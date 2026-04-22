@@ -1045,7 +1045,7 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
                         // Coalescing rebuild — the coordinator handles beginBulkLoad / finalize.
                         // Fire-and-forget; the background loop picks up missing embeddings on
                         // the next tick after the rebuild completes.
-                        coordinator_->postRebuild(yams::daemon::RebuildReason::DimensionMismatch);
+                        coordinator_->fireRebuild(yams::daemon::RebuildReason::DimensionMismatch);
                     }
                     // Also recreate the tables with the new dimension so embeddings can be stored.
                     if (vectorDb) {

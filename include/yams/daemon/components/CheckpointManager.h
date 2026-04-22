@@ -19,6 +19,7 @@ class MetadataRepository;
 namespace yams::daemon {
 
 class VectorSystemManager;
+class VectorIndexCoordinator;
 struct StateComponent;
 
 } // namespace yams::daemon
@@ -42,6 +43,7 @@ public:
 
     struct Dependencies {
         VectorSystemManager* vectorSystemManager{nullptr};
+        VectorIndexCoordinator* vectorIndexCoordinator{nullptr};
         StateComponent* state{nullptr};
         search::HotzoneManager* hotzoneManager{nullptr};
         metadata::MetadataRepository* metadataRepository{nullptr};
