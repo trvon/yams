@@ -42,6 +42,11 @@ struct Fts5CandidatePoolStats {
     bool baseFtsSucceeded = false;
 };
 
+struct GraphDocumentExpansionStats {
+    size_t rawHitCount = 0;
+    size_t addedCount = 0;
+};
+
 void appendLexicalBatch(const std::string& query, QueryIntent queryIntent,
                         const SearchEngineConfig& config,
                         const yams::metadata::SearchResults& searchResults, float scorePenalty,
@@ -60,6 +65,14 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
     QueryExpansionStats* expansionStats, std::vector<ComponentResult>& results,
     std::unordered_set<std::string>& seenHashes,
     const std::function<std::vector<std::string>(const std::string&, size_t)>& subPhraseGenerator);
+
+std::unordered_map<std::string, float>
+lookupQueryTermIdf(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+                   const std::string& query);
+
+std::vector<std::string>
+generateQuerySubPhrases(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+                        const std::string& query, size_t maxPhrases);
 
 void applyAggressiveFtsFallback(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
@@ -90,5 +103,11 @@ std::vector<ComponentResult> queryFullTextPipeline(
         aggressiveClauseGenerator,
     const std::function<std::vector<GraphExpansionTerm>()>& graphTermProvider,
     SimeonLexicalBackend* backend, std::string* lastSimeonRouteRecipe);
+
+GraphDocumentExpansionStats appendGraphDocumentExpansionTerms(
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const SearchEngineConfig& config, const std::vector<GraphExpansionTerm>& graphTerms,
+    std::unordered_set<std::string>& existingDocIds, std::vector<ComponentResult>& results,
+    QueryExpansionStats* expansionStats);
 
 } // namespace yams::search::detail

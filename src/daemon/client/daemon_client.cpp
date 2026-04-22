@@ -126,7 +126,8 @@ TimeoutCategory getTimeoutCategory(const Request& req) {
 
 // Requests that should use fresh, single-use connections (avoid pooled reuse)
 bool requires_single_use_connection(const Request& req) {
-    return std::holds_alternative<PruneRequest>(req) || std::holds_alternative<RepairRequest>(req);
+    return std::holds_alternative<StatusRequest>(req) ||
+           std::holds_alternative<PruneRequest>(req) || std::holds_alternative<RepairRequest>(req);
 }
 
 // Get timeout milliseconds for a category

@@ -54,9 +54,9 @@ void VectorIndexCoordinator::postRebuild(RebuildReason reason) noexcept {
     pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_relaxed);
     boost::asio::post(strand_, [this, reason]() {
         pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_relaxed);
-        if (!rebuildInFlight_) {
-            rebuildInFlight_ = true;
-            const uint32_t reasons = pendingReasons_.exchange(0, std::memory_order_relaxed);
+        bool expected = false;
+        if (rebuildInFlight_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            const uint32_t reasons = pendingReasons_.exchange(0, std::memory_order_acq_rel);
             auto t = readTelemetrySeqlock();
             t.rebuilding = true;
             t.pendingReasons = reasons;
@@ -65,7 +65,8 @@ void VectorIndexCoordinator::postRebuild(RebuildReason reason) noexcept {
                 state_->readiness.vectorIndexReady.store(false, std::memory_order_relaxed);
                 state_->readiness.vectorIndexProgress.store(0, std::memory_order_relaxed);
             }
-            boost::asio::co_spawn(strand_, doRebuild(reasons), boost::asio::detached);
+            // Use post() — never inline — to schedule doRebuildOnStrand.
+            boost::asio::post(strand_, [this, reasons]() { doRebuildOnStrand(reasons); });
         }
     });
 }
@@ -152,17 +153,19 @@ void VectorIndexCoordinator::doFinalizeOnStrand() {
 }
 
 boost::asio::awaitable<Result<void>> VectorIndexCoordinator::requestRebuild(RebuildReason reason) {
-    // Ensure we run on the strand.
-    co_await boost::asio::dispatch(strand_, boost::asio::use_awaitable);
+    // This function is safe to call from any executor — use atomics for the
+    // critical path and waitersMutex_ to protect the waiter list.
+    // doRebuild runs on the strand (single-writer for VDB).
+    pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_acq_rel);
 
-    pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_relaxed);
-    const uint64_t targetEpoch = rebuildEpoch_.load(std::memory_order_relaxed) + 1;
+    // Snapshot target epoch BEFORE trying to start a rebuild.
+    const uint64_t targetEpoch = rebuildEpoch_.load(std::memory_order_acquire) + 1;
 
-    if (!rebuildInFlight_) {
-        rebuildInFlight_ = true;
-        const uint32_t reasons = pendingReasons_.exchange(0, std::memory_order_relaxed);
+    // Only one caller wins the CAS and starts the rebuild coroutine.
+    bool expected = false;
+    if (rebuildInFlight_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        const uint32_t reasons = pendingReasons_.exchange(0, std::memory_order_acq_rel);
 
-        // Update telemetry: rebuilding started.
         auto t = readTelemetrySeqlock();
         t.rebuilding = true;
         t.pendingReasons = reasons;
@@ -173,26 +176,26 @@ boost::asio::awaitable<Result<void>> VectorIndexCoordinator::requestRebuild(Rebu
             state_->readiness.vectorIndexProgress.store(0, std::memory_order_relaxed);
         }
 
-        boost::asio::co_spawn(strand_, doRebuild(reasons), boost::asio::detached);
+        // Use post() — never inline — to ensure doRebuildOnStrand runs AFTER all
+        // concurrent requestRebuild callers have stored their waiters.
+        boost::asio::post(strand_, [this, reasons]() { doRebuildOnStrand(reasons); });
     }
 
-    // If epoch already satisfies the target (rebuild was very fast), return immediately.
-    if (rebuildEpoch_.load(std::memory_order_relaxed) >= targetEpoch) {
+    // Fast path: epoch already satisfied.
+    if (rebuildEpoch_.load(std::memory_order_acquire) >= targetEpoch) {
         co_return Result<void>{};
     }
 
-    // Suspend until epoch advances.  doRebuild will call notifyWaiters which
-    // invokes our completion handler on the strand's executor.
+    // Suspend until epoch advances.  notifyWaiters drains our handler when done.
     co_return co_await boost::asio::async_initiate<const boost::asio::use_awaitable_t<>&,
                                                    void(Result<void>)>(
         [this, targetEpoch](auto&& handler) mutable {
-            if (rebuildEpoch_.load(std::memory_order_relaxed) >= targetEpoch) {
-                // Already done — complete inline.
+            if (rebuildEpoch_.load(std::memory_order_acquire) >= targetEpoch) {
                 auto ex = boost::asio::get_associated_executor(handler, strand_);
                 boost::asio::post(ex, [h = std::move(handler)]() mutable { h(Result<void>{}); });
             } else {
-                // Wrap the move-only handler in a shared_ptr so std::function can store it.
                 auto h = std::make_shared<std::decay_t<decltype(handler)>>(std::move(handler));
+                std::lock_guard<std::mutex> lk(waitersMutex_);
                 waiters_.push_back(
                     {targetEpoch, [h](Result<void> r) mutable { (*h)(std::move(r)); }});
             }
@@ -200,8 +203,11 @@ boost::asio::awaitable<Result<void>> VectorIndexCoordinator::requestRebuild(Rebu
         boost::asio::use_awaitable);
 }
 
-boost::asio::awaitable<void> VectorIndexCoordinator::doRebuild(uint32_t /*reasons*/) {
-    // Running on the strand.
+void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
+    // Called via post(strand_, ...) — always deferred, never inline.
+    // post() guarantees this runs AFTER all currently-queued strand items, so
+    // every concurrent requestRebuild caller has already stored its waiter before
+    // we bump the epoch (fixing the coalescing invariant).
     {
         auto vdb = getVdbLocked(vdbMutex_, vectorDb_);
         if (vdb) {
@@ -223,31 +229,34 @@ boost::asio::awaitable<void> VectorIndexCoordinator::doRebuild(uint32_t /*reason
     // rebuild if there are active waiters expecting a future epoch.  Without this
     // guard, concurrent same-reason callers cause spurious extra rebuilds.
     notifyWaiters(epoch);
-    const bool hasNewWaiters =
-        std::any_of(waiters_.begin(), waiters_.end(),
-                    [epoch](const Waiter& w) { return w.targetEpoch > epoch; });
-    const uint32_t nextReasons = pendingReasons_.exchange(0, std::memory_order_relaxed);
-    rebuildInFlight_ = (nextReasons != 0 && hasNewWaiters);
+    bool hasNewWaiters = false;
+    {
+        std::lock_guard<std::mutex> lk(waitersMutex_);
+        hasNewWaiters = std::any_of(waiters_.begin(), waiters_.end(),
+                                    [epoch](const Waiter& w) { return w.targetEpoch > epoch; });
+    }
+    const uint32_t nextReasons = pendingReasons_.exchange(0, std::memory_order_acq_rel);
+    const bool startNext = (nextReasons != 0 && hasNewWaiters);
+    rebuildInFlight_.store(startNext, std::memory_order_release);
 
     VectorIndexTelemetry t{};
     t.rebuildEpoch = epoch;
-    t.rebuilding = rebuildInFlight_;
-    t.ready = !rebuildInFlight_;
+    t.rebuilding = startNext;
+    t.ready = !startNext;
     t.progressPct = 100;
     t.activeBulkScopes = activeBulkScopes_.load(std::memory_order_relaxed);
-    t.pendingReasons = rebuildInFlight_ ? nextReasons : 0u;
+    t.pendingReasons = startNext ? nextReasons : 0u;
     publishTelemetry(t);
 
     if (state_) {
-        state_->readiness.vectorIndexReady.store(!rebuildInFlight_, std::memory_order_relaxed);
+        state_->readiness.vectorIndexReady.store(!startNext, std::memory_order_relaxed);
         state_->readiness.vectorIndexProgress.store(100, std::memory_order_relaxed);
     }
 
-    if (rebuildInFlight_) {
-        boost::asio::co_spawn(strand_, doRebuild(nextReasons), boost::asio::detached);
+    if (startNext) {
+        // Use post() (not co_spawn/dispatch) to keep the deferred semantics.
+        boost::asio::post(strand_, [this, nextReasons]() { doRebuildOnStrand(nextReasons); });
     }
-
-    co_return;
 }
 
 boost::asio::awaitable<Result<void>> VectorIndexCoordinator::initialBuildIfNeeded() {
@@ -321,15 +330,18 @@ VectorIndexTelemetry VectorIndexCoordinator::readTelemetrySeqlock() const noexce
 // ── Waiters ──────────────────────────────────────────────────────────────────
 
 void VectorIndexCoordinator::notifyWaiters(uint64_t currentEpoch) {
-    // Called on the strand after an epoch bump.
+    // Drain waiters whose targetEpoch is satisfied.  Protected by waitersMutex_.
     std::vector<RebuildCompletion> toNotify;
-    auto it = waiters_.begin();
-    while (it != waiters_.end()) {
-        if (it->targetEpoch <= currentEpoch) {
-            toNotify.push_back(std::move(it->handler));
-            it = waiters_.erase(it);
-        } else {
-            ++it;
+    {
+        std::lock_guard<std::mutex> lk(waitersMutex_);
+        auto it = waiters_.begin();
+        while (it != waiters_.end()) {
+            if (it->targetEpoch <= currentEpoch) {
+                toNotify.push_back(std::move(it->handler));
+                it = waiters_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
     for (auto& h : toNotify) {

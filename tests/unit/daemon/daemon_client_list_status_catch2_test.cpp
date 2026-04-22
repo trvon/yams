@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -217,4 +218,101 @@ TEST_CASE("DaemonClient list rewrites repeated EOF to retry guidance",
     REQUIRE(result.error().code == ErrorCode::InvalidState);
     CHECK(result.error().message.find("try again shortly") != std::string::npos);
     CHECK(result.error().message.find("[ipc:eof]") == std::string::npos);
+}
+
+TEST_CASE("DaemonClient status uses a fresh connection for each call",
+          "[daemon][client][status][regression]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("status-fresh-connection-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context serverIo;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        serverIo, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::promise<void> firstAccepted;
+    std::promise<void> secondAccepted;
+    std::atomic<bool> stop{false};
+
+    std::thread firstServerThread([&] {
+        try {
+            boost::asio::local::stream_protocol::socket sock(serverIo);
+            acceptor.accept(sock);
+            firstAccepted.set_value();
+
+            while (!stop.load(std::memory_order_acquire)) {
+                auto frame = readFrame(sock);
+                MessageFramer framer;
+                auto parsed = framer.parse_frame(frame);
+                if (!parsed) {
+                    throw std::runtime_error("failed to parse request frame");
+                }
+
+                const auto& reqMsg = parsed.value();
+                REQUIRE(std::holds_alternative<Request>(reqMsg.payload));
+                const auto& reqVariant = std::get<Request>(reqMsg.payload);
+                REQUIRE(std::holds_alternative<StatusRequest>(reqVariant));
+
+                writeStatusResponse(sock, reqMsg.requestId);
+            }
+        } catch (...) {
+        }
+    });
+
+    std::thread secondServerThread([&] {
+        try {
+            boost::asio::local::stream_protocol::socket sock(serverIo);
+            acceptor.accept(sock);
+            secondAccepted.set_value();
+
+            auto frame = readFrame(sock);
+            MessageFramer framer;
+            auto parsed = framer.parse_frame(frame);
+            if (!parsed) {
+                throw std::runtime_error("failed to parse request frame");
+            }
+
+            const auto& reqMsg = parsed.value();
+            REQUIRE(std::holds_alternative<Request>(reqMsg.payload));
+            const auto& reqVariant = std::get<Request>(reqMsg.payload);
+            REQUIRE(std::holds_alternative<StatusRequest>(reqVariant));
+
+            writeStatusResponse(sock, reqMsg.requestId);
+        } catch (...) {
+        }
+    });
+
+    ClientConfig cfg;
+    cfg.socketPath = socketPath;
+    cfg.requestTimeout = 3s;
+    cfg.headerTimeout = 3s;
+    cfg.bodyTimeout = 3s;
+    cfg.autoStart = false;
+
+    DaemonClient client(cfg);
+
+    auto first = yams::cli::run_sync(client.status(), 5s);
+    REQUIRE(firstAccepted.get_future().wait_for(1s) == std::future_status::ready);
+    REQUIRE(first.has_value());
+
+    auto second = yams::cli::run_sync(client.status(), 5s);
+    REQUIRE(secondAccepted.get_future().wait_for(1s) == std::future_status::ready);
+    REQUIRE(second.has_value());
+
+    stop.store(true, std::memory_order_release);
+    AsioConnectionPool::shutdown_all(100ms);
+    if (firstServerThread.joinable()) {
+        firstServerThread.join();
+    }
+    if (secondServerThread.joinable()) {
+        secondServerThread.join();
+    }
+    boost::system::error_code closeEc;
+    acceptor.close(closeEc);
+    fs::remove(socketPath, ec);
 }

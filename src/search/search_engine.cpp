@@ -847,9 +847,6 @@ private:
     Result<std::vector<ComponentResult>> queryTags(const std::vector<std::string>& tags,
                                                    bool matchAll, size_t limit);
     Result<std::vector<ComponentResult>> queryMetadata(const SearchParams& params, size_t limit);
-    std::unordered_map<std::string, float> lookupQueryTermIdf(const std::string& query) const;
-    std::vector<std::string> generateQuerySubPhrases(const std::string& query,
-                                                     size_t maxPhrases) const;
 
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<vector::VectorDatabase> vectorDb_;
@@ -880,52 +877,6 @@ Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& 
 Result<SearchResponse> SearchEngine::Impl::searchWithResponse(const std::string& query,
                                                               const SearchParams& params) {
     return searchInternal(query, params);
-}
-
-std::unordered_map<std::string, float>
-SearchEngine::Impl::lookupQueryTermIdf(const std::string& query) const {
-    std::unordered_map<std::string, float> idfByToken;
-    if (!metadataRepo_) {
-        return idfByToken;
-    }
-
-    auto tokens = tokenizeQueryTokens(query);
-    std::vector<std::string> uniqueTerms;
-    uniqueTerms.reserve(tokens.size());
-    std::unordered_set<std::string> seen;
-    seen.reserve(tokens.size());
-    for (const auto& token : tokens) {
-        if (token.normalized.size() < 2) {
-            continue;
-        }
-        if (seen.insert(token.normalized).second) {
-            uniqueTerms.push_back(token.normalized);
-        }
-    }
-
-    if (uniqueTerms.empty()) {
-        return idfByToken;
-    }
-
-    auto idfResult = metadataRepo_->getTermIDFBatch(uniqueTerms);
-    if (idfResult) {
-        idfByToken = std::move(idfResult.value());
-    } else {
-        spdlog::debug("lookupQueryTermIdf: IDF batch lookup failed: {}", idfResult.error().message);
-    }
-    return idfByToken;
-}
-
-std::vector<std::string> SearchEngine::Impl::generateQuerySubPhrases(const std::string& query,
-                                                                     size_t maxPhrases) const {
-    if (maxPhrases == 0) {
-        return {};
-    }
-
-    auto idfByToken = lookupQueryTermIdf(query);
-
-    return generateAnchoredSubPhrases(query, maxPhrases,
-                                      idfByToken.empty() ? nullptr : &idfByToken);
 }
 
 Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& query,
@@ -1424,7 +1375,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
 
         if (conceptsMaterialized && concepts.size() < workingConfig.conceptMaxCount) {
-            auto idfByToken = lookupQueryTermIdf(query);
+            auto idfByToken = detail::lookupQueryTermIdf(metadataRepo_, query);
             auto fallbackConcepts =
                 generateFallbackQueryConcepts(query, idfByToken, workingConfig.conceptMaxCount);
             if (!fallbackConcepts.empty()) {
@@ -2311,49 +2262,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 }
             }
 
-            for (const auto& term : docSeedGraphTerms) {
-                auto searchResults = metadataRepo_->search(
-                    term.text, static_cast<int>(workingConfig.textMaxResults), 0);
-                if (!searchResults) {
-                    continue;
-                }
-                const auto& rows = searchResults.value().results;
-                graphDocExpansionFtsHitCount += rows.size();
-
-                detail::LexicalScoringInputs inputs;
-                inputs.candidates =
-                    std::span<const yams::metadata::SearchResult>(rows.data(), rows.size());
-                inputs.applyFilenameBoost = false;
-                inputs.applyIntentAdaptiveWeighting = false;
-                inputs.bm25NormDivisor = workingConfig.bm25NormDivisor;
-                inputs.penalty =
-                    workingConfig.graphExpansionFtsPenalty * std::clamp(term.score, 0.2f, 1.0f);
-                inputs.sourceTag = ComponentResult::Source::GraphText;
-                inputs.startRank = allComponentResults.size();
-                inputs.admissionMinScore = workingConfig.graphTextMinAdmissionScore;
-
-                auto scored = detail::scoreLexicalBatch(inputs);
-
-                for (size_t rank = 0; rank < rows.size(); ++rank) {
-                    const auto& sr = rows[rank];
-                    const auto docId =
-                        documentIdForTrace(sr.document.filePath, sr.document.sha256Hash);
-                    if (!docId.empty() && existingDocIds.contains(docId)) {
-                        continue;
-                    }
-                    auto& opt = scored.results[rank];
-                    if (!opt) {
-                        ++textExpansionStats.graphTextBlockedLowScoreCount;
-                        continue;
-                    }
-                    opt->debugInfo["graph_doc_expansion_term"] = term.text;
-                    allComponentResults.push_back(std::move(*opt));
-                    if (!docId.empty()) {
-                        existingDocIds.insert(docId);
-                    }
-                    ++graphDocExpansionFtsAddedCount;
-                }
-            }
+            const auto graphDocStats = detail::appendGraphDocumentExpansionTerms(
+                metadataRepo_, workingConfig, docSeedGraphTerms, existingDocIds,
+                allComponentResults, &textExpansionStats);
+            graphDocExpansionFtsHitCount += graphDocStats.rawHitCount;
+            graphDocExpansionFtsAddedCount += graphDocStats.addedCount;
 
             if (graphDocExpansionFtsAddedCount > 0) {
                 contributing.push_back("graph_doc_text");
@@ -2374,7 +2287,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("multi_vector::sub_phrase_search");
         auto mvStart = std::chrono::steady_clock::now();
 
-        auto subPhrases = generateQuerySubPhrases(query, workingConfig.multiVectorMaxPhrases);
+        auto subPhrases = detail::generateQuerySubPhrases(metadataRepo_, query,
+                                                          workingConfig.multiVectorMaxPhrases);
         if (!workingConfig.enableMultiVectorQuery) {
             subPhrases.clear();
         }
@@ -4327,11 +4241,12 @@ SearchEngine::Impl::queryFullText(const std::string& query, QueryIntent queryInt
         return detail::queryFullTextPipeline(
             metadataRepo_, query, queryIntent, config, limit, expansionStats,
             [this](const std::string& phraseQuery, size_t maxSubPhrases) {
-                return generateQuerySubPhrases(phraseQuery, maxSubPhrases);
+                return detail::generateQuerySubPhrases(metadataRepo_, phraseQuery, maxSubPhrases);
             },
             [this](const std::string& clauseQuery, size_t maxClauses) {
-                return generateAggressiveFtsFallbackClauses(clauseQuery, maxClauses,
-                                                            lookupQueryTermIdf(clauseQuery));
+                return generateAggressiveFtsFallbackClauses(
+                    clauseQuery, maxClauses,
+                    detail::lookupQueryTermIdf(metadataRepo_, clauseQuery));
             },
             [this, graphExpansionTerms, &query, &config]() {
                 if (graphExpansionTerms != nullptr) {

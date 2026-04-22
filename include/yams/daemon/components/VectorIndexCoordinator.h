@@ -156,6 +156,9 @@ public:
     uint64_t testing_rebuildEpoch() const noexcept {
         return rebuildEpoch_.load(std::memory_order_relaxed);
     }
+    // Expose strand so tests can co_spawn requestRebuild on the strand,
+    // ensuring coroutines are serialized with doRebuild for deterministic coalescing.
+    boost::asio::strand<boost::asio::any_io_executor>& testing_strand() noexcept { return strand_; }
 #endif
 
 private:
@@ -165,8 +168,10 @@ private:
     // Runs on the strand: finalizes bulk window and persists index.
     void doFinalizeOnStrand();
 
-    // Spawned as a coroutine on the strand when a rebuild is needed.
-    boost::asio::awaitable<void> doRebuild(uint32_t reasons);
+    // Plain function (not a coroutine): must be called via post(strand_, ...) to
+    // guarantee deferred execution.  Boost's co_spawn uses dispatch() which runs
+    // inline when already on the strand, defeating the coalescing invariant.
+    void doRebuildOnStrand(uint32_t reasons);
 
     // Seqlock helpers — writer must run on strand.
     void publishTelemetry(const VectorIndexTelemetry& tel) noexcept;
@@ -188,7 +193,9 @@ private:
     // ── Strand-protected rebuild state ─────────────────────────────────────
     // All accesses below are serialized by strand_ (no additional mutex needed).
     std::atomic<uint32_t> pendingReasons_{0}; ///< ORed bitmask of queued reasons
-    bool rebuildInFlight_{false};
+    // rebuildInFlight_ is atomic so that compare_exchange gives exactly-once semantics
+    // even if the strand dispatch hasn't fully transferred the calling coroutine.
+    std::atomic<bool> rebuildInFlight_{false};
     std::atomic<uint64_t> rebuildEpoch_{0};
 
     // Waiters registered by requestRebuild; drained when epoch advances.
@@ -197,7 +204,8 @@ private:
         uint64_t targetEpoch;
         RebuildCompletion handler;
     };
-    std::vector<Waiter> waiters_; // strand-protected
+    std::mutex waitersMutex_; // protects waiters_ (accessed from multiple strand posts)
+    std::vector<Waiter> waiters_;
 
     // ── Seqlock for lock-free snapshot reads ───────────────────────────────
     mutable std::atomic<uint64_t> seqVersion_{0}; // even = stable, odd = writing

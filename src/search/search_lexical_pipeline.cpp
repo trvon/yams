@@ -6,6 +6,7 @@
 #include <yams/search/lexical_scoring.h>
 #include <yams/search/query_expansion.h>
 #include <yams/search/query_text_utils.h>
+#include <yams/search/search_tracing.h>
 #include <yams/search/simeon_lexical_backend.h>
 
 #include <algorithm>
@@ -231,6 +232,53 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
     return stats;
 }
 
+std::unordered_map<std::string, float>
+lookupQueryTermIdf(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+                   const std::string& query) {
+    std::unordered_map<std::string, float> idfByToken;
+    if (!metadataRepo) {
+        return idfByToken;
+    }
+
+    auto tokens = tokenizeQueryTokens(query);
+    std::vector<std::string> uniqueTerms;
+    uniqueTerms.reserve(tokens.size());
+    std::unordered_set<std::string> seen;
+    seen.reserve(tokens.size());
+    for (const auto& token : tokens) {
+        if (token.normalized.size() < 2) {
+            continue;
+        }
+        if (seen.insert(token.normalized).second) {
+            uniqueTerms.push_back(token.normalized);
+        }
+    }
+
+    if (uniqueTerms.empty()) {
+        return idfByToken;
+    }
+
+    auto idfResult = metadataRepo->getTermIDFBatch(uniqueTerms);
+    if (idfResult) {
+        idfByToken = std::move(idfResult.value());
+    } else {
+        spdlog::debug("lookupQueryTermIdf: IDF batch lookup failed: {}", idfResult.error().message);
+    }
+    return idfByToken;
+}
+
+std::vector<std::string>
+generateQuerySubPhrases(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+                        const std::string& query, size_t maxPhrases) {
+    if (maxPhrases == 0) {
+        return {};
+    }
+
+    auto idfByToken = lookupQueryTermIdf(metadataRepo, query);
+    return generateAnchoredSubPhrases(query, maxPhrases,
+                                      idfByToken.empty() ? nullptr : &idfByToken);
+}
+
 void applyAggressiveFtsFallback(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
     const std::string& query, QueryIntent queryIntent, const SearchEngineConfig& config,
@@ -424,6 +472,59 @@ std::vector<ComponentResult> queryFullTextPipeline(
     }
 
     return results;
+}
+
+GraphDocumentExpansionStats appendGraphDocumentExpansionTerms(
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const SearchEngineConfig& config, const std::vector<GraphExpansionTerm>& graphTerms,
+    std::unordered_set<std::string>& existingDocIds, std::vector<ComponentResult>& results,
+    QueryExpansionStats* expansionStats) {
+    GraphDocumentExpansionStats stats;
+
+    for (const auto& term : graphTerms) {
+        auto searchResults =
+            metadataRepo->search(term.text, static_cast<int>(config.textMaxResults), 0);
+        if (!searchResults) {
+            continue;
+        }
+        const auto& rows = searchResults.value().results;
+        stats.rawHitCount += rows.size();
+
+        detail::LexicalScoringInputs inputs;
+        inputs.candidates = std::span<const yams::metadata::SearchResult>(rows.data(), rows.size());
+        inputs.applyFilenameBoost = false;
+        inputs.applyIntentAdaptiveWeighting = false;
+        inputs.bm25NormDivisor = config.bm25NormDivisor;
+        inputs.penalty = config.graphExpansionFtsPenalty * std::clamp(term.score, 0.2f, 1.0f);
+        inputs.sourceTag = ComponentResult::Source::GraphText;
+        inputs.startRank = results.size();
+        inputs.admissionMinScore = config.graphTextMinAdmissionScore;
+
+        auto scored = detail::scoreLexicalBatch(inputs);
+
+        for (size_t rank = 0; rank < rows.size(); ++rank) {
+            const auto& sr = rows[rank];
+            const auto docId = documentIdForTrace(sr.document.filePath, sr.document.sha256Hash);
+            if (!docId.empty() && existingDocIds.contains(docId)) {
+                continue;
+            }
+            auto& opt = scored.results[rank];
+            if (!opt) {
+                if (expansionStats != nullptr) {
+                    ++expansionStats->graphTextBlockedLowScoreCount;
+                }
+                continue;
+            }
+            opt->debugInfo["graph_doc_expansion_term"] = term.text;
+            results.push_back(std::move(*opt));
+            if (!docId.empty()) {
+                existingDocIds.insert(docId);
+            }
+            ++stats.addedCount;
+        }
+    }
+
+    return stats;
 }
 
 } // namespace yams::search::detail
