@@ -894,7 +894,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                     vector::VectorRecord record;
                     record.document_hash = hashes[k];
                     record.chunk_id = vector::utils::generateChunkId(hashes[k], 999999);
-                    record.embedding = embeddings[k];
+                    record.embedding = std::move(embeddings[k]);
                     record.content = texts[k].substr(0, 1000); // Store snippet
                     record.level = vector::EmbeddingLevel::DOCUMENT;
 

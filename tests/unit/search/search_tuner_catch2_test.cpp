@@ -409,7 +409,7 @@ TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][sea
     CHECK(config.pathTreeWeight == Approx(0.00f));
     CHECK(config.kgWeight == Approx(0.00f));
     CHECK(config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM);
-    CHECK(config.fusionStrategy == SearchEngineConfig::FusionStrategy::COMB_MNZ);
+    CHECK(config.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_LINEAR_ZSCORE);
 }
 
 TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {

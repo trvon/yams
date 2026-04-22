@@ -51,6 +51,7 @@ struct HNSWIndexFixture {
         config.embedding_dim = dim;
         config.create_if_missing = true;
         config.use_in_memory = true;
+        config.search_engine = VectorSearchEngine::HnswCosine;
         return config;
     }
 
@@ -516,6 +517,7 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex cold search falls back before firs
     config.embedding_dim = 64;
     config.create_if_missing = true;
     config.use_in_memory = false;
+    config.search_engine = VectorSearchEngine::HnswCosine;
 
     {
         VectorDatabase db(config);

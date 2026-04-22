@@ -231,13 +231,19 @@ struct SearchEngineConfig {
                                // linear combination of lexical+vector components
                                // (training-free recipe; defaults match the simeon
                                // bench's headline cascade row)
-    } fusionStrategy = FusionStrategy::COMB_MNZ;
+    } fusionStrategy = FusionStrategy::WEIGHTED_LINEAR_ZSCORE;
 
     // WEIGHTED_LINEAR_ZSCORE knobs. Defaults reproduce simeon's
     // bm25_pool500_linear_alpha075 bench row on BEIR scifact.
     size_t weightedLinearZScorePoolSize = 500; // BM25 (lexical) pool depth
     float weightedLinearZScoreAlpha = 0.75f;   // Weight on the lexical leg in [0,1]
     bool weightedLinearZScoreUseZScore = true; // Off => raw scores (still alpha-mixed)
+    // R1: when true, pre-fusion pass re-scores both legs over the union of
+    // lex + sem candidates so every pool doc has real (non-imputed) scores on
+    // both legs. Preserves Simeon's α=0.75 semantics under yams' coverage-
+    // asymmetric retrieval (lex-only and sem-only candidates each get the
+    // missing-leg score computed directly instead of imputed to z=0).
+    bool weightedLinearZScoreCoverageAugment = true;
 
     // P7: When true, SearchEngine overrides fusionStrategy to CONVEX once the
     // SearchTuner reports convergence. Default off preserves existing behavior.

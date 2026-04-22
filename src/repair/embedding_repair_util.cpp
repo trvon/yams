@@ -359,15 +359,19 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                 size_t endOffset;
             };
 
+            struct PendingDocumentState {
+                std::vector<float> docEmbeddingSum;
+                std::vector<std::string> sourceChunkIds;
+            };
+
             std::vector<ChunkInfo> allChunks;
-            std::vector<std::string> allTexts;
+            std::vector<PendingDocumentState> docStates(batchDocs.size());
 
             yams::vector::ChunkingConfig ccfg{};
             auto chunker = yams::vector::createChunker(
                 yams::vector::ChunkingStrategy::SENTENCE_BASED, ccfg, nullptr);
 
             allChunks.reserve(texts.size() * 2);
-            allTexts.reserve(texts.size() * 2);
 
             for (size_t docIdx = 0; docIdx < batchDocs.size() && docIdx < texts.size(); ++docIdx) {
                 if (cancelRequested()) {
@@ -382,10 +386,11 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
 
                 auto chunks = chunker->chunkDocument(text, doc.sha256Hash);
                 if (chunks.empty()) {
+                    docStates[docIdx].sourceChunkIds.reserve(1);
                     std::string chunkId = yams::vector::utils::generateChunkId(doc.sha256Hash, 0);
                     allChunks.push_back({docIdx, std::move(chunkId), text, 0, text.size()});
-                    allTexts.push_back(text);
                 } else {
+                    docStates[docIdx].sourceChunkIds.reserve(chunks.size());
                     for (size_t cidx = 0; cidx < chunks.size(); ++cidx) {
                         auto& c = chunks[cidx];
                         std::string chunkId =
@@ -394,12 +399,11 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                                 : c.chunk_id;
                         allChunks.push_back({docIdx, std::move(chunkId), std::move(c.content),
                                              c.start_offset, c.end_offset});
-                        allTexts.push_back(allChunks.back().content);
                     }
                 }
             }
 
-            if (allChunks.empty() || allTexts.empty()) {
+            if (allChunks.empty()) {
                 continue;
             }
 
@@ -412,89 +416,56 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
             if (maxBatch < 1)
                 maxBatch = 1;
 
-            std::vector<std::vector<float>> embeddings;
-            embeddings.reserve(allTexts.size());
+            std::vector<yams::vector::VectorRecord> allRecords;
+            allRecords.reserve(allChunks.size() + batchDocs.size());
             bool embedOk = true;
-            for (size_t start = 0; start < allTexts.size(); start += maxBatch) {
+            for (size_t start = 0; start < allChunks.size(); start += maxBatch) {
                 if (cancelRequested()) {
                     return Error{ErrorCode::OperationCancelled, "cancelled"};
                 }
-                size_t eend = std::min(start + maxBatch, allTexts.size());
-                std::vector<std::string> subBatch(allTexts.begin() + start,
-                                                  allTexts.begin() + eend);
+                size_t eend = std::min(start + maxBatch, allChunks.size());
+                std::vector<std::string> subBatch;
+                subBatch.reserve(eend - start);
+                for (size_t chunkIdx = start; chunkIdx < eend; ++chunkIdx) {
+                    subBatch.push_back(allChunks[chunkIdx].content);
+                }
                 auto embedResult = modelProvider->generateBatchEmbeddingsFor(modelName, subBatch);
                 if (!embedResult) {
                     spdlog::warn("[repair] batch embedding failed ({}-{} of {}): {}", start, eend,
-                                 allTexts.size(), embedResult.error().message);
+                                 allChunks.size(), embedResult.error().message);
                     embedOk = false;
                     break;
                 }
-                auto& batchEmbeddings = embedResult.value();
-                for (auto& emb : batchEmbeddings) {
-                    embeddings.push_back(std::move(emb));
+                auto batchEmbeddings = std::move(embedResult.value());
+                if (batchEmbeddings.size() != (eend - start)) {
+                    spdlog::warn("[repair] batch embedding size mismatch ({}-{} of {}): got {}",
+                                 start, eend, allChunks.size(), batchEmbeddings.size());
+                    embedOk = false;
+                    break;
                 }
-            }
+                for (size_t rel = 0; rel < batchEmbeddings.size(); ++rel) {
+                    const size_t chunkIdx = start + rel;
+                    auto& chunk = allChunks[chunkIdx];
+                    auto& docState = docStates[chunk.docIdx];
+                    auto& embedding = batchEmbeddings[rel];
 
-            if (!embedOk || embeddings.size() != allChunks.size()) {
-                stats.failedOperations += batchDocs.size();
-                continue;
-            }
-
-            // Build VectorRecords (chunk-level + doc-level). Note: insertion happens under lock.
-            std::unordered_map<size_t, std::vector<size_t>> docToChunkIndices;
-            docToChunkIndices.reserve(batchDocs.size());
-            for (size_t idx = 0; idx < allChunks.size(); ++idx) {
-                docToChunkIndices[allChunks[idx].docIdx].push_back(idx);
-            }
-
-            std::vector<yams::vector::VectorRecord> allRecords;
-            allRecords.reserve(allChunks.size() + batchDocs.size());
-
-            for (size_t docIdx = 0; docIdx < batchDocs.size() && docIdx < texts.size(); ++docIdx) {
-                const auto& doc = batchDocs[docIdx];
-                auto it = docToChunkIndices.find(docIdx);
-                if (it == docToChunkIndices.end() || it->second.empty()) {
-                    continue;
-                }
-
-                const auto& chunkIndices = it->second;
-                if (chunkIndices.empty()) {
-                    continue;
-                }
-
-                // Compute document-level embedding (average of chunks, normalized)
-                std::vector<float> docEmbedding;
-                if (!embeddings[chunkIndices[0]].empty()) {
-                    size_t dim = embeddings[chunkIndices[0]].size();
-                    docEmbedding.assign(dim, 0.0f);
-
-                    for (size_t chunkIdx : chunkIndices) {
-                        const auto& emb = embeddings[chunkIdx];
-                        for (size_t j = 0; j < dim && j < emb.size(); ++j) {
-                            docEmbedding[j] += emb[j];
+                    if (!embedding.empty()) {
+                        if (docState.docEmbeddingSum.empty()) {
+                            docState.docEmbeddingSum.assign(embedding.size(), 0.0f);
+                        }
+                        for (size_t j = 0;
+                             j < docState.docEmbeddingSum.size() && j < embedding.size(); ++j) {
+                            docState.docEmbeddingSum[j] += embedding[j];
                         }
                     }
+                    docState.sourceChunkIds.push_back(chunk.chunkId);
 
-                    float norm = 0.0f;
-                    for (float v : docEmbedding) {
-                        norm += v * v;
-                    }
-                    if (norm > 0.0f) {
-                        norm = std::sqrt(norm);
-                        for (float& v : docEmbedding) {
-                            v /= norm;
-                        }
-                    }
-                }
-
-                // Add chunk-level records (moves embeddings)
-                for (size_t chunkIdx : chunkIndices) {
-                    const auto& chunk = allChunks[chunkIdx];
+                    const auto& doc = batchDocs[chunk.docIdx];
                     yams::vector::VectorRecord rec;
                     rec.document_hash = doc.sha256Hash;
-                    rec.chunk_id = chunk.chunkId;
-                    rec.embedding = std::move(embeddings[chunkIdx]);
-                    rec.content = chunk.content;
+                    rec.chunk_id = std::move(chunk.chunkId);
+                    rec.embedding = std::move(embedding);
+                    rec.content = std::move(chunk.content);
                     rec.start_offset = chunk.startOffset;
                     rec.end_offset = chunk.endOffset;
                     rec.level = yams::vector::EmbeddingLevel::CHUNK;
@@ -503,24 +474,42 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                     rec.metadata["path"] = doc.filePath;
                     allRecords.push_back(std::move(rec));
                 }
+            }
 
-                // Add doc-level record (after chunk records exist)
-                if (!docEmbedding.empty()) {
-                    yams::vector::VectorRecord docRec;
-                    docRec.document_hash = doc.sha256Hash;
-                    docRec.chunk_id = yams::vector::utils::generateChunkId(doc.sha256Hash, 999999);
-                    docRec.embedding = std::move(docEmbedding);
-                    docRec.content = texts[docIdx].substr(0, 1000);
-                    docRec.level = yams::vector::EmbeddingLevel::DOCUMENT;
-                    docRec.source_chunk_ids.reserve(chunkIndices.size());
-                    for (size_t chunkIdx : chunkIndices) {
-                        docRec.source_chunk_ids.push_back(allChunks[chunkIdx].chunkId);
-                    }
-                    docRec.metadata["name"] = doc.fileName;
-                    docRec.metadata["mime_type"] = doc.mimeType;
-                    docRec.metadata["path"] = doc.filePath;
-                    allRecords.push_back(std::move(docRec));
+            if (!embedOk) {
+                stats.failedOperations += batchDocs.size();
+                continue;
+            }
+
+            for (size_t docIdx = 0; docIdx < batchDocs.size() && docIdx < texts.size(); ++docIdx) {
+                const auto& doc = batchDocs[docIdx];
+                auto& docState = docStates[docIdx];
+                if (docState.sourceChunkIds.empty() || docState.docEmbeddingSum.empty()) {
+                    continue;
                 }
+
+                float norm = 0.0f;
+                for (float v : docState.docEmbeddingSum) {
+                    norm += v * v;
+                }
+                if (norm > 0.0f) {
+                    norm = std::sqrt(norm);
+                    for (float& v : docState.docEmbeddingSum) {
+                        v /= norm;
+                    }
+                }
+
+                yams::vector::VectorRecord docRec;
+                docRec.document_hash = doc.sha256Hash;
+                docRec.chunk_id = yams::vector::utils::generateChunkId(doc.sha256Hash, 999999);
+                docRec.embedding = std::move(docState.docEmbeddingSum);
+                docRec.content = texts[docIdx].substr(0, 1000);
+                docRec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+                docRec.source_chunk_ids = std::move(docState.sourceChunkIds);
+                docRec.metadata["name"] = doc.fileName;
+                docRec.metadata["mime_type"] = doc.mimeType;
+                docRec.metadata["path"] = doc.filePath;
+                allRecords.push_back(std::move(docRec));
             }
 
             if (allRecords.empty()) {
