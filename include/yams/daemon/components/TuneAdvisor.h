@@ -621,27 +621,26 @@ public:
             def = 1;
         }
 
-        if (const char* s = std::getenv("YAMS_REPAIR_TOKENS_BUSY")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
+#ifdef YAMS_TESTING
+        auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_TOKENS_BUSY", 0u, 256u);
+#else
+        static const auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_TOKENS_BUSY", 0u, 256u);
+#endif
+        if (envValue)
+            return *envValue;
         return def;
     }
     // Threshold of active connections to consider the daemon busy. Default 1.
     static uint32_t repairBusyConnThreshold() {
         uint32_t def = 1;
-        if (const char* s = std::getenv("YAMS_REPAIR_BUSY_CONN_THRESHOLD")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
+#ifdef YAMS_TESTING
+        auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_BUSY_CONN_THRESHOLD", 0u, 1024u);
+#else
+        static const auto envValue =
+            parseBoundedUintEnvNow("YAMS_REPAIR_BUSY_CONN_THRESHOLD", 0u, 1024u);
+#endif
+        if (envValue)
+            return *envValue;
         return def;
     }
 

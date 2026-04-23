@@ -308,6 +308,22 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                                  cfgPath.string());
                 }
             }
+            if (auto it = kv.find("vector_database.vec0_phss_enabled");
+                it != kv.end() && !it->second.empty()) {
+                cfg.vec0_phss_enabled = envTruthy(it->second.c_str());
+                spdlog::info("[VectorInit] vec0 PHSS configured as {} from {}",
+                             cfg.vec0_phss_enabled ? "enabled" : "disabled", cfgPath.string());
+            }
+            if (auto it = kv.find("vector_database.vec0_phss_candidates");
+                it != kv.end() && !it->second.empty()) {
+                try {
+                    cfg.vec0_phss_candidates =
+                        static_cast<size_t>(std::max(1, std::stoi(it->second)));
+                    spdlog::info("[VectorInit] vec0 PHSS candidates configured as {} from {}",
+                                 cfg.vec0_phss_candidates, cfgPath.string());
+                } catch (...) {
+                }
+            }
         } catch (...) {
         }
     }
@@ -324,6 +340,19 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         } else {
             spdlog::warn("[VectorInit] invalid YAMS_VECTOR_SEARCH_ENGINE='{}'; using default {}",
                          env, vector::vectorSearchEngineName(cfg.search_engine));
+        }
+    }
+    if (const char* env = std::getenv("YAMS_VECTOR_VEC0_PHSS_ENABLED")) {
+        cfg.vec0_phss_enabled = envTruthy(env);
+        spdlog::info("[VectorInit] vec0 PHSS overridden to {} via env",
+                     cfg.vec0_phss_enabled ? "enabled" : "disabled");
+    }
+    if (const char* env = std::getenv("YAMS_VECTOR_VEC0_PHSS_CANDIDATES")) {
+        try {
+            cfg.vec0_phss_candidates = static_cast<size_t>(std::max(1, std::stoi(env)));
+            spdlog::info("[VectorInit] vec0 PHSS candidates overridden to {} via env",
+                         cfg.vec0_phss_candidates);
+        } catch (...) {
         }
     }
 

@@ -228,7 +228,7 @@ RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
     handlerConfig.writer_budget_ref = writerBudget_;
     handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
     handlerConfig.enable_streaming = true;
-    handlerConfig.enable_multiplexing = true;
+    handlerConfig.enable_multiplexing = !isProxy;
 
     if (dispatcher) {
         try {
@@ -259,26 +259,28 @@ RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
         streamChunkTimeoutMs = static_cast<uint32_t>(connectionTimeout.count());
     }
     handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
-    handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
-    handlerConfig.admission_control =
-        [this, isProxy](
-            const Request& request) -> std::optional<RequestHandler::Config::AdmissionDecision> {
-        const auto verdict = evaluateRequestAdmission(request, isProxy);
-        if (verdict != SocketAdmissionVerdict::reject) {
-            return std::nullopt;
-        }
+    handlerConfig.max_inflight_per_connection =
+        isProxy ? 1 : TuneAdvisor::serverMaxInflightPerConn();
+    if (!isProxy) {
+        handlerConfig.admission_control = [this, isProxy](const Request& request)
+            -> std::optional<RequestHandler::Config::AdmissionDecision> {
+            const auto verdict = evaluateRequestAdmission(request, isProxy);
+            if (verdict != SocketAdmissionVerdict::reject) {
+                return std::nullopt;
+            }
 
-        const size_t active = isProxy ? proxyActiveConnections_.load(std::memory_order_relaxed)
-                                      : mainActiveConnectionCount();
-        const size_t limit = slotLimit_.load(std::memory_order_relaxed);
+            const size_t active = isProxy ? proxyActiveConnections_.load(std::memory_order_relaxed)
+                                          : mainActiveConnectionCount();
+            const size_t limit = slotLimit_.load(std::memory_order_relaxed);
 
-        if (state_) {
-            state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
-            state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
-        }
-        TuningManager::notifyWakeup();
-        return makeSocketBusyDecision(dispatcher_, state_, active, limit);
-    };
+            if (state_) {
+                state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
+                state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+            }
+            TuningManager::notifyWakeup();
+            return makeSocketBusyDecision(dispatcher_, state_, active, limit);
+        };
+    }
 
     if (state_) {
         handlerConfig.health_check_counter = &state_->stats.healthCheckConnections;

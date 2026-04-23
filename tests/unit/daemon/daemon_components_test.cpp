@@ -8,7 +8,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include "../../common/test_helpers_catch2.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -16,12 +15,13 @@
 #include <optional>
 #include <set>
 #include <thread>
+#include "../../common/test_helpers_catch2.h"
 #include <yams/compat/unistd.h>
 
 #include <yams/daemon/components/IOCoordinator.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
-#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/socket_utils.h>
 #include <yams/daemon/resource/resource_pool.h>
@@ -370,6 +370,17 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
     // Cleanup
     std::error_code ec;
     fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("Socket path resolution: proxy path derived from main socket",
+          "[daemon][components][socket][utils]") {
+    const fs::path mainSocket{"/tmp/yams-daemon.sock"};
+    const auto proxySocket = socket_utils::derive_proxy_socket_path(mainSocket);
+    REQUIRE(proxySocket == fs::path{"/tmp/yams-daemon.proxy.sock"});
+
+    const fs::path nestedSocket{"/run/user/1000/custom.sock"};
+    const auto nestedProxy = socket_utils::derive_proxy_socket_path(nestedSocket);
+    REQUIRE(nestedProxy == fs::path{"/run/user/1000/custom.proxy.sock"});
 }
 
 // =============================================================================

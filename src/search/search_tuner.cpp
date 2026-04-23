@@ -272,7 +272,7 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.similarityThreshold.value = config.similarityThreshold;
     params_.vectorBoostFactor = config.vectorBoostFactor;
     params_.rrfK = static_cast<int>(std::lround(config.rrfK));
-    params_.fusionStrategy = config.fusionStrategy;
+    params_.fusionStrategy.value = config.fusionStrategy;
     params_.vectorOnlyThreshold = config.vectorOnlyThreshold;
     params_.vectorOnlyPenalty = config.vectorOnlyPenalty;
     params_.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;

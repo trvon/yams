@@ -2,8 +2,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -100,6 +100,31 @@ void writeStatusResponse(boost::asio::local::stream_protocol::socket& sock, uint
     boost::asio::write(sock, boost::asio::buffer(framed.value()), ec);
     if (ec) {
         throw std::runtime_error("write response failed: " + ec.message());
+    }
+}
+
+void writeListResponse(boost::asio::local::stream_protocol::socket& sock, uint64_t requestId) {
+    MessageFramer framer;
+
+    ListResponse response{};
+    response.totalCount = 0;
+    response.queryInfo = "list";
+
+    Message responseMsg;
+    responseMsg.version = PROTOCOL_VERSION;
+    responseMsg.requestId = requestId;
+    responseMsg.timestamp = std::chrono::steady_clock::now();
+    responseMsg.payload = response;
+
+    auto framed = framer.frame_message(responseMsg);
+    if (!framed) {
+        throw std::runtime_error("failed to frame list response");
+    }
+
+    boost::system::error_code ec;
+    boost::asio::write(sock, boost::asio::buffer(framed.value()), ec);
+    if (ec) {
+        throw std::runtime_error("write list response failed: " + ec.message());
     }
 }
 
@@ -315,4 +340,107 @@ TEST_CASE("DaemonClient status uses a fresh connection for each call",
     boost::system::error_code closeEc;
     acceptor.close(closeEc);
     fs::remove(socketPath, ec);
+}
+
+TEST_CASE("DaemonClient routes status to proxy and list to main socket",
+          "[daemon][client][proxy][routing]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("proxy-routing-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    auto proxyPath = runtimeDir / "ipc.proxy.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+    fs::remove(proxyPath, ec);
+
+    boost::asio::io_context mainIo;
+    boost::asio::local::stream_protocol::acceptor mainAcceptor(
+        mainIo, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+    boost::asio::io_context proxyIo;
+    boost::asio::local::stream_protocol::acceptor proxyAcceptor(
+        proxyIo, boost::asio::local::stream_protocol::endpoint(proxyPath.string()));
+
+    std::promise<void> proxyAccepted;
+    std::promise<void> mainAccepted;
+
+    std::thread proxyThread([&] {
+        try {
+            boost::asio::local::stream_protocol::socket sock(proxyIo);
+            proxyAcceptor.accept(sock);
+            proxyAccepted.set_value();
+
+            auto frame = readFrame(sock);
+            MessageFramer framer;
+            auto parsed = framer.parse_frame(frame);
+            if (!parsed) {
+                throw std::runtime_error("failed to parse proxy request frame");
+            }
+
+            const auto& reqMsg = parsed.value();
+            REQUIRE(std::holds_alternative<Request>(reqMsg.payload));
+            const auto& reqVariant = std::get<Request>(reqMsg.payload);
+            REQUIRE(std::holds_alternative<StatusRequest>(reqVariant));
+
+            writeStatusResponse(sock, reqMsg.requestId);
+        } catch (...) {
+        }
+    });
+
+    std::thread mainThread([&] {
+        try {
+            boost::asio::local::stream_protocol::socket sock(mainIo);
+            mainAcceptor.accept(sock);
+            mainAccepted.set_value();
+
+            auto frame = readFrame(sock);
+            MessageFramer framer;
+            auto parsed = framer.parse_frame(frame);
+            if (!parsed) {
+                throw std::runtime_error("failed to parse main request frame");
+            }
+
+            const auto& reqMsg = parsed.value();
+            REQUIRE(std::holds_alternative<Request>(reqMsg.payload));
+            const auto& reqVariant = std::get<Request>(reqMsg.payload);
+            REQUIRE(std::holds_alternative<ListRequest>(reqVariant));
+
+            writeListResponse(sock, reqMsg.requestId);
+        } catch (...) {
+        }
+    });
+
+    ClientConfig cfg;
+    cfg.socketPath = socketPath;
+    cfg.proxySocketPath = proxyPath;
+    cfg.requestTimeout = 3s;
+    cfg.headerTimeout = 3s;
+    cfg.bodyTimeout = 3s;
+    cfg.autoStart = false;
+
+    DaemonClient client(cfg);
+
+    auto statusResult = yams::cli::run_sync(client.status(), 5s);
+    REQUIRE(proxyAccepted.get_future().wait_for(1s) == std::future_status::ready);
+    REQUIRE(statusResult.has_value());
+
+    ListRequest listReq;
+    listReq.limit = 1;
+    auto listResult = yams::cli::run_sync(client.list(listReq), 5s);
+    REQUIRE(mainAccepted.get_future().wait_for(1s) == std::future_status::ready);
+    REQUIRE(listResult.has_value());
+
+    if (proxyThread.joinable()) {
+        proxyThread.join();
+    }
+    if (mainThread.joinable()) {
+        mainThread.join();
+    }
+    boost::system::error_code closeEc;
+    mainAcceptor.close(closeEc);
+    proxyAcceptor.close(closeEc);
+    fs::remove(socketPath, ec);
+    fs::remove(proxyPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
 }

@@ -160,4 +160,19 @@ std::filesystem::path resolve_socket_path_config_first() {
     return resolve_socket_path();
 }
 
+std::filesystem::path derive_proxy_socket_path(const std::filesystem::path& mainSocketPath) {
+    if (mainSocketPath.empty()) {
+        return {};
+    }
+
+    auto base = mainSocketPath.stem().string();
+    if (base.empty()) {
+        base = mainSocketPath.filename().string();
+    }
+    if (base.empty()) {
+        base = "yams-daemon";
+    }
+    return mainSocketPath.parent_path() / (base + ".proxy.sock");
+}
+
 } // namespace yams::daemon::socket_utils

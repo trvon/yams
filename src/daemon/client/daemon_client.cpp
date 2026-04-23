@@ -130,6 +130,12 @@ bool requires_single_use_connection(const Request& req) {
            std::holds_alternative<PruneRequest>(req) || std::holds_alternative<RepairRequest>(req);
 }
 
+bool isControlPlaneRequest(const Request& req) {
+    return std::holds_alternative<PingRequest>(req) || std::holds_alternative<StatusRequest>(req) ||
+           std::holds_alternative<GetStatsRequest>(req) ||
+           std::holds_alternative<ShutdownRequest>(req);
+}
+
 // Get timeout milliseconds for a category
 std::chrono::milliseconds getTimeoutForCategory(TimeoutCategory cat) {
     switch (cat) {
@@ -476,6 +482,8 @@ Result<std::shared_ptr<EmbeddedServiceHost>> ensure_embedded_host(daemon::Client
 
 // Forward declaration: used during DaemonClient construction for proxy health checks.
 static bool pingDaemonSync(const std::filesystem::path& socketPath);
+static bool isProxySocketPath(const std::filesystem::path& socketPath);
+static std::filesystem::path deriveMainSocketFromProxy(const std::filesystem::path& socketPath);
 
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<Impl>(config)) {
@@ -517,10 +525,15 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
         }();
 
         if (pImpl->config_.socketPath.empty()) {
-            // Resolve daemon socket path, then prefer a healthy proxy socket derived from it.
-            // IMPORTANT: do not select the proxy based on filesystem existence alone; stale socket
-            // files are common when the daemon crashes.
             auto daemonSock = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
+            if (isProxySocketPath(daemonSock)) {
+                if (pImpl->config_.proxySocketPath.empty()) {
+                    pImpl->config_.proxySocketPath = daemonSock;
+                }
+                if (auto mainSocket = deriveMainSocketFromProxy(daemonSock); !mainSocket.empty()) {
+                    daemonSock = std::move(mainSocket);
+                }
+            }
 
             if (!socketForcedByEnv && !pingDaemonSync(daemonSock)) {
                 if (auto liveSocket = client::discoverLiveDaemonSocket(daemonSock);
@@ -532,30 +545,22 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
                 }
             }
 
-            if (socketForcedByEnv) {
-                pImpl->config_.socketPath = daemonSock;
-            } else {
-                auto deriveProxySock = [](const std::filesystem::path& daemonSocket) {
-                    if (daemonSocket.empty())
-                        return std::filesystem::path{};
-                    auto base = daemonSocket.stem().string();
-                    if (base.empty())
-                        base = daemonSocket.filename().string();
-                    if (base.empty())
-                        base = "yams-daemon";
-                    return daemonSocket.parent_path() / (base + ".proxy.sock");
-                };
-
-                const auto proxyCandidate = deriveProxySock(daemonSock);
-
-                // Prefer proxy only if it is connectable; otherwise fall back to the main daemon
-                // socket.
-                if (!proxyCandidate.empty() && pingDaemonSync(proxyCandidate)) {
-                    pImpl->config_.socketPath = proxyCandidate;
-                } else {
-                    pImpl->config_.socketPath = daemonSock;
-                }
+            pImpl->config_.socketPath = daemonSock;
+            if (pImpl->config_.proxySocketPath.empty()) {
+                pImpl->config_.proxySocketPath =
+                    yams::daemon::socket_utils::derive_proxy_socket_path(daemonSock);
             }
+        } else if (isProxySocketPath(pImpl->config_.socketPath)) {
+            if (pImpl->config_.proxySocketPath.empty()) {
+                pImpl->config_.proxySocketPath = pImpl->config_.socketPath;
+            }
+            if (auto mainSocket = deriveMainSocketFromProxy(pImpl->config_.socketPath);
+                !mainSocket.empty()) {
+                pImpl->config_.socketPath = std::move(mainSocket);
+            }
+        } else if (pImpl->config_.proxySocketPath.empty()) {
+            pImpl->config_.proxySocketPath =
+                yams::daemon::socket_utils::derive_proxy_socket_path(pImpl->config_.socketPath);
         }
     }
 
@@ -737,6 +742,14 @@ static std::filesystem::path deriveMainSocketFromProxy(const std::filesystem::pa
     name.erase(name.size() - kProxySuffix.size());
     name.append(".sock");
     return socketPath.parent_path() / name;
+}
+
+static std::filesystem::path selectSocketPathForRequest(const daemon::ClientConfig& config,
+                                                        const Request& req) {
+    if (isControlPlaneRequest(req) && !config.proxySocketPath.empty()) {
+        return config.proxySocketPath;
+    }
+    return config.socketPath;
 }
 
 static bool shouldRetryViaMainSocket(const Error& err) {
@@ -1136,8 +1149,9 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     if (!impl || impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
     }
+    const auto selectedSocket = selectSocketPathForRequest(impl->config_, ownedReq);
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'",
-                  getRequestName(ownedReq), false, impl->config_.socketPath.string());
+                  getRequestName(ownedReq), false, selectedSocket.string());
     if (impl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
         if (!impl->embeddedHost_) {
             auto host = ensure_embedded_host(impl->config_);
@@ -1157,6 +1171,7 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     }
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
+    opts.socketPath = selectedSocket;
     auto timeout = getTimeoutForCategory(getTimeoutCategory(ownedReq));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -1179,8 +1194,6 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
             AsioTransportAdapter retryAdapter(retryOpts);
             auto retryRes = co_await retryAdapter.send_request(std::move(retryReq));
             if (retryRes) {
-                impl->config_.socketPath = fallbackSocket;
-                impl->refresh_transport();
                 co_return retryRes.value();
             }
             r = std::move(retryRes);
@@ -1203,8 +1216,9 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
         co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
     }
     const auto type = getRequestName(req);
+    const auto selectedSocket = selectSocketPathForRequest(impl->config_, req);
     spdlog::debug("DaemonClient::sendRequest(move): [{}] streaming={} sock='{}'", type, false,
-                  impl->config_.socketPath.string());
+                  selectedSocket.string());
     if (impl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
         if (!impl->embeddedHost_) {
             auto host = ensure_embedded_host(impl->config_);
@@ -1224,6 +1238,7 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     }
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
+    opts.socketPath = selectedSocket;
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -1245,8 +1260,6 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
             AsioTransportAdapter retryAdapter(retryOpts);
             auto retryRes = co_await retryAdapter.send_request(std::move(retryReq));
             if (retryRes) {
-                impl->config_.socketPath = fallbackSocket;
-                impl->refresh_transport();
                 co_return retryRes.value();
             }
             r = std::move(retryRes);
@@ -1704,6 +1717,8 @@ DaemonClient::sendRequestStreaming(const Request& req,
     if (!impl || impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
     }
+    const auto selectedSocket = selectSocketPathForRequest(impl->config_, ownedReq);
+
     // Skip the legacy connect() call when using AsioTransportAdapter
     // The adapter creates its own connection, and calling connect() here
     // causes a double connection issue where the POSIX socket immediately EOFs
@@ -1755,6 +1770,7 @@ DaemonClient::sendRequestStreaming(const Request& req,
 
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
+    opts.socketPath = selectedSocket;
     auto timeout = getTimeoutForCategory(getTimeoutCategory(ownedReq));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -1779,8 +1795,6 @@ DaemonClient::sendRequestStreaming(const Request& req,
             auto retryRes = co_await retryAdapter.send_request_streaming(
                 std::move(retryReq), onHeader, onChunk, onError, onComplete);
             if (retryRes) {
-                impl->config_.socketPath = fallbackSocket;
-                impl->refresh_transport();
                 co_return Result<void>();
             }
             res = std::move(retryRes);

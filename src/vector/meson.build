@@ -46,6 +46,8 @@ vector_cppargs = [
   '-DSQLITE_ENABLE_LOAD_EXTENSION=1',
 ]
 
+sqlite_vec_feature_cppargs = []
+
 # SIMD codegen flags for sqlite-vec-cpp only. These are applied per-TU to
 # the sqlite_vec_cpp sources so the rest of yams_vector (tokenizer,
 # chunker, etc.) is not locked into requiring AVX2 / dotprod at runtime.
@@ -56,16 +58,16 @@ cpp_comp = meson.get_compiler('cpp')
 host_cpu = host_machine.cpu_family()
 if host_cpu == 'x86_64' or host_cpu == 'x86'
   if cpp_comp.has_argument('-mavx') and cpp_comp.has_argument('-mfma')
-    vector_cppargs += ['-DSQLITE_VEC_ENABLE_AVX']
+    sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_AVX']
     vec_simd_cppargs += ['-mavx', '-mfma']
     if cpp_comp.has_argument('-mavx2')
-      vector_cppargs += ['-DSQLITE_VEC_ENABLE_AVX2']
+      sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_AVX2']
       vec_simd_cppargs += ['-mavx2']
     endif
   endif
 elif host_cpu == 'aarch64' or host_cpu == 'arm'
   # NEON is baseline on aarch64; on 32-bit arm it may depend on sub-arch
-  vector_cppargs += ['-DSQLITE_VEC_ENABLE_NEON']
+  sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_NEON']
   # DotProd (ARMv8.2+): compile-test vdotq_s32; all Apple Silicon supports this
   dotprod_test = '''
   #include <arm_neon.h>
@@ -98,7 +100,6 @@ srcs = [
   'model_registry.cpp',
   'model_cache.cpp',
   'model_loader.cpp',
-  'sqlite_vec_backend.cpp',
   'vector_schema_migration.cpp',
   'mock_embedding_provider.cpp',
   'dim_resolver.cpp',
@@ -116,7 +117,7 @@ if sqlite_vec_cpp_src.length() > 0
     sqlite_vec_cpp_src,
     include_directories: [sqlite_vec_cpp_inc, include_directories('../../include'), include_directories('.')],
     dependencies: [sqlite_dep, spdlog_dep],
-    cpp_args: vector_cppargs + vec_simd_cppargs,
+    cpp_args: vector_cppargs + sqlite_vec_feature_cppargs + vec_simd_cppargs,
     install: false,
   )
 endif
@@ -215,11 +216,19 @@ if host_machine.system() == 'windows'
   vector_platform_deps += [cpp_comp.find_library('dxgi', required: true)]
 endif
 
+sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
+  ['sqlite_vec_backend.cpp'],
+  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
+  dependencies: deps_vec + vector_platform_deps,
+  cpp_args: vector_cppargs + sqlite_vec_feature_cppargs + vec_simd_cppargs + simeon_simd_defines,
+  install: false,
+)
+
 yams_vector = static_library('yams_vector',
   srcs,
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
   dependencies: deps_vec + vector_platform_deps,
-  link_with: [simeon_lib] + sqlite_vec_cpp_lib,
+  link_with: [simeon_lib, sqlite_vec_backend_lib] + sqlite_vec_cpp_lib,
   cpp_args: vector_cppargs + simeon_simd_defines,
   install: true,
 )

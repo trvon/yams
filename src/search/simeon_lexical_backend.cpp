@@ -161,8 +161,12 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
 
         std::unordered_map<std::int64_t, std::uint32_t> mapping;
         mapping.reserve(ids.size());
+        const bool retainCorpusTexts =
+            cfg_.fragment_geometry_enabled && ids.size() >= cfg_.fragment_geometry_min_corpus_docs;
         std::vector<std::string> corpus_texts;
-        corpus_texts.reserve(ids.size());
+        if (retainCorpusTexts) {
+            corpus_texts.reserve(ids.size());
+        }
 
         std::uint32_t dense = 0;
         std::size_t missing = 0;
@@ -182,7 +186,9 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             if (atire) {
                 atire->add_doc(content.contentText);
             }
-            corpus_texts.push_back(content.contentText);
+            if (retainCorpusTexts) {
+                corpus_texts.push_back(content.contentText);
+            }
             mapping.emplace(docId, dense++);
         }
         if (stop.stop_requested()) {
@@ -210,10 +216,9 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         std::unique_ptr<simeon::PmiEmbeddings> pmi;
         std::unique_ptr<simeon::Encoder> fragmentEncoder;
         std::vector<std::vector<simeon::SemanticFragment>> docFrags;
-        const std::size_t uniqueWordCount = estimateUniqueWordCount(corpus_texts);
-        if (cfg_.fragment_geometry_enabled &&
-            corpus_texts.size() >= cfg_.fragment_geometry_min_corpus_docs &&
-            uniqueWordCount >= 64) {
+        const std::size_t uniqueWordCount =
+            retainCorpusTexts ? estimateUniqueWordCount(corpus_texts) : 0;
+        if (retainCorpusTexts && uniqueWordCount >= 64) {
             try {
                 std::vector<std::string_view> seedViews;
                 seedViews.reserve(corpus_texts.size());
@@ -257,12 +262,15 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 fragmentEncoder.reset();
                 docFrags.clear();
             }
-        } else if (cfg_.fragment_geometry_enabled && !corpus_texts.empty()) {
+        } else if (retainCorpusTexts && !corpus_texts.empty()) {
             spdlog::info("[simeon-lexical] fragment geometry skipped: corpus {} docs / {} unique "
                          "words below thresholds (min_docs={}, min_unique_words=64)",
                          corpus_texts.size(), uniqueWordCount,
                          cfg_.fragment_geometry_min_corpus_docs);
         }
+
+        corpus_texts.clear();
+        corpus_texts.shrink_to_fit();
 
         if (stop.stop_requested()) {
             building_.store(false, std::memory_order_release);

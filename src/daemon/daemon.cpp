@@ -29,6 +29,7 @@
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/connection_fsm.h>
+#include <yams/daemon/ipc/socket_utils.h>
 #if defined(TRACY_ENABLE)
 #include <tracy/Tracy.hpp>
 #endif
@@ -442,15 +443,8 @@ Result<void> YamsDaemon::start() {
     }
 
     // Derive proxy socket path from daemon socket to avoid global /tmp/proxy.sock collisions.
-    {
-        const auto& daemonSocket = socketConfig.socketPath;
-        auto base = daemonSocket.stem().string();
-        if (base.empty())
-            base = daemonSocket.filename().string();
-        if (base.empty())
-            base = "yams-daemon";
-        socketConfig.proxySocketPath = daemonSocket.parent_path() / (base + ".proxy.sock");
-    }
+    socketConfig.proxySocketPath =
+        yams::daemon::socket_utils::derive_proxy_socket_path(socketConfig.socketPath);
 
     socketServer_ = std::make_unique<SocketServer>(socketConfig, ioCoordinator_.get(),
                                                    serviceManager_->getWorkCoordinator(),

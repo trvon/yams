@@ -468,6 +468,7 @@ if catch2_dep.found()
       'unit/daemon/components/plugin_manager_test.cpp',
       'unit/daemon/plugin_manager_config_test.cpp',
       'unit/daemon/components/request_queue_test.cpp',
+      'unit/daemon/components/topology_tuner_catch2_test.cpp',
       'unit/daemon/components/vector_system_manager_test.cpp',
     ),
     include_directories: incs,

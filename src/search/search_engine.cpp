@@ -1669,8 +1669,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
 
-            // Extract Tier 1 candidate hashes only when needed (narrowing).
-            const bool needTier1Candidates = workingConfig.tieredNarrowVectorSearch;
+            // Tier-1 candidate hashes feed both optional vector narrowing and
+            // weak-query topology routing (especially the VectorSeed variant).
+            // Topology routing should not silently depend on the narrowing knob.
+            const bool needTier1Candidates = workingConfig.tieredNarrowVectorSearch ||
+                                             workingConfig.enableTopologyWeakQueryRouting;
             std::unordered_set<std::string> tier1Candidates;
             if (needTier1Candidates) {
                 tier1Candidates.reserve(allComponentResults.size());

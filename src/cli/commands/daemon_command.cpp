@@ -1785,103 +1785,33 @@ private:
             setenv("YAMS_CLIENT_DEBUG", "1", 1);
         }
 
-        // Check if daemon is running (prefer socket; fall back to PID)
-        if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+        // Check if daemon is running (prefer socket; fall back to PID).
+        // If the socket preflight is flaky but the daemon process is clearly alive,
+        // continue on to the actual StatusRequest rather than bailing out early.
+        bool preflightUnavailable = !daemon::DaemonClient::isDaemonRunning(effectiveSocket);
+        if (preflightUnavailable) {
+            bool daemonLikelyAlive = false;
             // Try PID-based detection to distinguish "starting" vs "not running"
             pid_t pid = readPidFromFile(pidFile_);
 #ifndef _WIN32
             if (pid > 0 && kill(pid, 0) == 0) {
-                std::cout << "YAMS daemon is starting/initializing (IPC not yet available)\n";
-                if (effectiveSocket != configuredSocket) {
-                    std::cout << "Configured socket: " << configuredSocket << "\n";
-                    std::cout << "Live daemon socket: " << effectiveSocket << "\n";
-                }
-                if (detailed_) {
-                    try {
-                        auto logPath = daemon::YamsDaemon::resolveSystemPath(
-                                           daemon::YamsDaemon::PathType::LogFile)
-                                           .string();
-                        std::cout << "[INFO] Likely waiting on search stack (index, models).\n";
-                        std::cout << "[INFO] Tail log for details: " << logPath << "\n";
-                        // Try bootstrap status file for early readiness
-                        try {
-                            auto rt =
-                                daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
-                            std::ifstream bf(rt);
-                            if (bf) {
-                                json j;
-                                bf >> j;
-                                if (j.contains("readiness")) {
-                                    std::vector<std::string> waiting;
-                                    for (auto it = j["readiness"].begin();
-                                         it != j["readiness"].end(); ++it) {
-                                        if (!it.value().get<bool>()) {
-                                            std::ostringstream w;
-                                            w << it.key();
-                                            if (j.contains("progress") &&
-                                                j["progress"].contains(it.key())) {
-                                                try {
-                                                    w << " (" << j["progress"][it.key()].get<int>()
-                                                      << "%)";
-                                                } catch (...) {
-                                                }
-                                            }
-                                            if (j.contains("uptime_seconds")) {
-                                                try {
-                                                    w << ", elapsed ~"
-                                                      << j["uptime_seconds"].get<long>() << "s";
-                                                } catch (...) {
-                                                }
-                                            }
-                                            waiting.push_back(w.str());
-                                        }
-                                    }
-                                    if (!waiting.empty()) {
-                                        std::cout << "[INFO] Waiting on: ";
-                                        for (size_t i = 0; i < waiting.size() && i < 3; ++i) {
-                                            if (i)
-                                                std::cout << ", ";
-                                            std::cout << waiting[i];
-                                        }
-                                        if (waiting.size() > 3)
-                                            std::cout << ", …";
-                                        std::cout << "\n";
-                                    }
-                                    if (j.contains("top_slowest") && j["top_slowest"].is_array() &&
-                                        !j["top_slowest"].empty()) {
-                                        std::cout << "[INFO] Top slow components: ";
-                                        auto arr = j["top_slowest"];
-                                        for (size_t i = 0; i < arr.size() && i < 3; ++i) {
-                                            const auto& e = arr[i];
-                                            std::string name =
-                                                e.value("name", std::string{"unknown"});
-                                            uint64_t ms = e.value("elapsed_ms", 0ULL);
-                                            if (i)
-                                                std::cout << ", ";
-                                            std::cout << name << " (" << ms << "ms)";
-                                        }
-                                        if (arr.size() > 3)
-                                            std::cout << ", …";
-                                        std::cout << "\n";
-                                    }
-                                }
-                            }
-                        } catch (...) {
-                        }
-                    } catch (...) {
-                    }
-                }
-                return;
+                daemonLikelyAlive = true;
             }
             // Do not guess by scanning /proc — if socket is down and no PID file, report not
             // running.
-#endif
-            std::cout << "YAMS daemon is not running\n";
-            if (effectiveSocket != configuredSocket) {
-                std::cout << "Configured socket: " << configuredSocket << "\n";
-                std::cout << "Last live daemon socket: " << effectiveSocket << "\n";
+#else
+            if (pid > 0) {
+                daemonLikelyAlive = true;
             }
-            return;
+#endif
+            if (!daemonLikelyAlive) {
+                std::cout << "YAMS daemon is not running\n";
+                if (effectiveSocket != configuredSocket) {
+                    std::cout << "Configured socket: " << configuredSocket << "\n";
+                    std::cout << "Last live daemon socket: " << effectiveSocket << "\n";
+                }
+                return;
+            }
         }
 
         if (!detailed_) {

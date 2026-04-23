@@ -98,8 +98,11 @@ struct TunedParams {
     // Default 1.0 means full vectorWeight is used; lower values reduce vector impact
     float vectorBoostFactor = 1.0f;
 
-    SearchEngineConfig::FusionStrategy fusionStrategy =
-        SearchEngineConfig::FusionStrategy::COMB_MNZ;
+    // Fusion strategy is tracked through the TuningSlot pipeline so that the
+    // SearchEngineConfig default is preserved when no profile, mode, or env
+    // layer explicitly overrides it. Default mirrors SearchEngineConfig.
+    TuningSlot<SearchEngineConfig::FusionStrategy> fusionStrategy{
+        SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK, TuningLayer::Default};
 
     // Hybrid precision guardrails (default to SearchEngineConfig defaults)
     float vectorOnlyThreshold = 0.90f;
@@ -169,7 +172,7 @@ struct TunedParams {
         config.similarityThreshold = similarityThreshold.value;
         config.vectorBoostFactor = vectorBoostFactor;
         config.rrfK = static_cast<float>(rrfK);
-        config.fusionStrategy = fusionStrategy;
+        config.fusionStrategy = fusionStrategy.value;
         config.enableGraphRerank = enableGraphRerank;
         config.graphRerankTopN = graphRerankTopN;
         config.graphRerankWeight = graphRerankWeight;
@@ -331,7 +334,8 @@ struct TunedParams {
             // F3b's top-k unfiltered (0.0) regressed on scifact under COMB_MNZ; reverted to
             // 0.30 (E7 baseline) until a coverage-robust fusion (RRF) is wired.
             params.similarityThreshold = TuningSlot<float>(0.30f, TuningLayer::Profile);
-            params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
+            params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL,
+                                           TuningLayer::Profile);
             // Sub-phrase rescoring re-scores already-retrieved docs via AND-clause
             // sub-phrase queries. This is the only mechanism that helps when base FTS5
             // returns the entire corpus at low scores (expansion gates never fire).

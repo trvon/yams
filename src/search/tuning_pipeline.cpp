@@ -78,7 +78,7 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     params.similarityThreshold =
         TuningSlot<float>(config.similarityThreshold, TuningLayer::Default);
     params.vectorBoostFactor = config.vectorBoostFactor;
-    params.fusionStrategy = config.fusionStrategy;
+    params.fusionStrategy.value = config.fusionStrategy;
     params.vectorOnlyThreshold = config.vectorOnlyThreshold;
     params.vectorOnlyPenalty = config.vectorOnlyPenalty;
     params.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
@@ -350,7 +350,8 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
 // ---------------------------------------------------------------------------
 
 void applySemanticOnlyLayer(TunedParams& params) {
-    params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
+    params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::WEIGHTED_SUM,
+                                   TuningLayer::Mode);
     params.similarityThreshold.forceSet(std::min(params.similarityThreshold.value, 0.0f),
                                         TuningLayer::Mode);
     params.weights.text.forceSet(std::min(params.weights.text.value, 0.20f), TuningLayer::Mode);
