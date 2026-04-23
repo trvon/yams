@@ -67,6 +67,19 @@ public:
         std::optional<std::size_t> featureSmoothingHops;
     };
 
+    // Per-corpus adaptive tuner for the topology layer (Phase G). Disabled
+    // by default; opt-in via [topology.tuner] in TOML. Reward weights default
+    // to the Phase G plan values when not overridden.
+    struct TopologyTunerPolicy {
+        std::optional<bool> enabled;
+        std::optional<std::uint32_t> cooldownMinutes;
+        std::optional<std::size_t> docCountDelta;
+        std::optional<double> rewardAlphaSingleton;
+        std::optional<double> rewardBetaGiantCluster;
+        std::optional<double> rewardGammaGiniDeviation;
+        std::optional<double> rewardDeltaIntraEdge;
+    };
+
     struct PostIngestCaps {
         std::optional<std::uint32_t> totalConcurrent;
         std::optional<std::uint32_t> embedConcurrent;
@@ -325,6 +338,20 @@ public:
      *   propagation over the semantic-neighbor graph before clustering)
      */
     static TopologyEnginePolicy resolveTopologyEnginePolicy();
+
+    /**
+     * @brief Resolve topology corpus-adaptive tuner config (Phase G).
+     *
+     * Disabled by default. Recognized TOML keys:
+     * - topology.tuner.enabled                     = bool
+     * - topology.tuner.cooldown_minutes            = int
+     * - topology.tuner.doc_count_delta             = int
+     * - topology.tuner.reward.alpha_singleton      = float
+     * - topology.tuner.reward.beta_giant_cluster   = float
+     * - topology.tuner.reward.gamma_gini_deviation = float
+     * - topology.tuner.reward.delta_intra_edge     = float
+     */
+    static TopologyTunerPolicy resolveTopologyTunerPolicy();
 
     /**
      * @brief Resolve Simeon encoder config from env + config file.

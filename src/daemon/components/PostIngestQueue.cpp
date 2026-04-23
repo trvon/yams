@@ -1910,6 +1910,9 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
         // Populate KG with NL entities if we have any and KGWriteQueue is available
         if (!nlEntities.empty() && kgWriteQueue_ && kg_) {
             auto batch = std::make_unique<DeferredKGBatch>();
+            batch->nodes.reserve(nlEntities.size() + 6);
+            batch->deferredEdges.reserve(nlEntities.size() * 4 + 8);
+            batch->aliases.reserve(nlEntities.size() * 3);
             const std::string normalizedFilePath = normalizeGraphPath(filePath);
             batch->sourceFile = normalizedFilePath.empty() ? filePath : normalizedFilePath;
 
@@ -2679,6 +2682,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         job.preparedDocs = std::move(embedPreparedBatch);
         job.hashes = std::move(embedHashBatch);
         job.batchSize = static_cast<uint32_t>(job.preparedDocs.size() + job.hashes.size());
+        const auto batchSize = job.batchSize;
         job.hashes.reserve(job.hashes.size() + job.preparedDocs.size());
         for (const auto& doc : job.preparedDocs) {
             job.hashes.push_back(doc.hash);
@@ -2688,8 +2692,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
         uint32_t waits = 0;
         while (!stop_.load(std::memory_order_acquire)) {
-            if (embedQ->push_wait(job, kEnqueueTimeout)) {
-                InternalEventBus::instance().incEmbedQueued(job.batchSize);
+            if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
+                InternalEventBus::instance().incEmbedQueued(batchSize);
                 TuningManager::notifyWakeup();
                 if (preparedDocsCount > 0) {
                     InternalEventBus::instance().incEmbedPreparedQueued(preparedDocsCount,
@@ -2704,11 +2708,11 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             if ((waits % 20u) == 1u) {
                 spdlog::warn(
                     "[PostIngestQueue] embed enqueue waiting on full channel (batch={}, waits={})",
-                    job.batchSize, waits);
+                    batchSize, waits);
             }
         }
         if (stop_.load(std::memory_order_acquire)) {
-            InternalEventBus::instance().incEmbedDropped(job.batchSize);
+            InternalEventBus::instance().incEmbedDropped(batchSize);
         }
         embedPreparedBatch.clear();
         embedHashBatch.clear();
@@ -2730,7 +2734,26 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         src.fileName = prepared.fileName;
         src.filePath = prepared.filePath;
         src.mimeType = prepared.mimeType;
-        return embed::prepareEmbedPreparedDoc(src, *embedChunker, selectionCfg);
+        auto preparedDoc = embed::prepareEmbedPreparedDoc(src, *embedChunker, selectionCfg);
+        if (!preparedDoc) {
+            return std::nullopt;
+        }
+
+        // Keep the in-process embed channel from becoming a second large text store. Large
+        // documents fall back to hash-only jobs; EmbeddingService can gather/chunk from metadata
+        // when the worker is ready instead of pinning all chunk strings in the ring buffer.
+        constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4u * 1024u * 1024u;
+        std::size_t payloadBytes = 0;
+        for (const auto& chunk : preparedDoc->chunks) {
+            payloadBytes += chunk.content.size();
+            if (payloadBytes > kMaxPreparedEmbedPayloadBytes) {
+                spdlog::debug("[PostIngestQueue] prepared embed payload for {} is {} bytes; "
+                              "queueing hash-only fallback",
+                              prepared.hash, payloadBytes);
+                return std::nullopt;
+            }
+        }
+        return preparedDoc;
     };
 
     auto getOrLoadContent =

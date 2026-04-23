@@ -74,6 +74,7 @@
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TopologyTuner.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/VectorSystemManager.h>
@@ -223,6 +224,11 @@ ServiceManager::PluginStatusSnapshot ServiceManager::getPluginStatusSnapshot() c
     return snap ? *snap : PluginStatusSnapshot{};
 }
 
+std::shared_ptr<const ServiceManager::PluginStatusSnapshot>
+ServiceManager::getPluginStatusSnapshotPtr() const {
+    return std::atomic_load_explicit(&pluginStatusSnapshot_, std::memory_order_acquire);
+}
+
 void ServiceManager::refreshPluginStatusSnapshot() {
     PluginStatusSnapshot snapshot;
     try {
@@ -274,12 +280,12 @@ void ServiceManager::refreshPluginStatusSnapshot() {
         }
 
         // PBI-096: External (Python/JS) plugins
-        spdlog::info("[refreshPluginStatusSnapshot] Checking external plugins, pluginManager_={}",
-                     static_cast<void*>(pluginManager_.get()));
+        spdlog::debug("[refreshPluginStatusSnapshot] Checking external plugins, pluginManager_={}",
+                      static_cast<void*>(pluginManager_.get()));
         if (auto* external = getExternalPluginHost()) {
             auto externalLoaded = external->listLoaded();
-            spdlog::info("[refreshPluginStatusSnapshot] External host returned {} plugins",
-                         externalLoaded.size());
+            spdlog::debug("[refreshPluginStatusSnapshot] External host returned {} plugins",
+                          externalLoaded.size());
             // Reserve additional space for external plugins
             snapshot.records.reserve(snapshot.records.size() + externalLoaded.size());
             addPluginRecords(externalLoaded, "external");
@@ -330,6 +336,61 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             topologyManager_.setFeatureSmoothingHops(*enginePolicy.featureSmoothingHops);
             spdlog::info("Topology feature_smoothing_hops applied via config: {}",
                          *enginePolicy.featureSmoothingHops);
+        }
+    }
+
+    // Phase G: optional adaptive topology tuner. Disabled by default;
+    // opt-in via [topology.tuner].enabled=true in the daemon config.
+    {
+        auto tunerPolicy = ConfigResolver::resolveTopologyTunerPolicy();
+        const bool tunerEnabled = tunerPolicy.enabled.value_or(false);
+        if (tunerEnabled) {
+            TopologyTunerConfig tcfg;
+            tcfg.enabled = true;
+            if (tunerPolicy.cooldownMinutes) {
+                tcfg.cooldown = std::chrono::minutes{*tunerPolicy.cooldownMinutes};
+            }
+            if (tunerPolicy.docCountDelta) {
+                tcfg.docCountDelta = *tunerPolicy.docCountDelta;
+            }
+            if (tunerPolicy.rewardAlphaSingleton) {
+                tcfg.weights.alphaSingleton = *tunerPolicy.rewardAlphaSingleton;
+            }
+            if (tunerPolicy.rewardBetaGiantCluster) {
+                tcfg.weights.betaGiantCluster = *tunerPolicy.rewardBetaGiantCluster;
+            }
+            if (tunerPolicy.rewardGammaGiniDeviation) {
+                tcfg.weights.gammaGiniDeviation = *tunerPolicy.rewardGammaGiniDeviation;
+            }
+            if (tunerPolicy.rewardDeltaIntraEdge) {
+                tcfg.weights.deltaIntraEdge = *tunerPolicy.rewardDeltaIntraEdge;
+            }
+            // Persist MAB state under data_dir so arm-pull history survives
+            // daemon restarts. Without this, UCB1 always picks the alphabetically
+            // first arm on each fresh daemon spawn (no pulls, infinite UCB).
+            if (!config_.dataDir.empty()) {
+                tcfg.statePath = config_.dataDir / "topology_tuner_state.json";
+            }
+            // V1: arm grid is built for a typical corpus (~5k docs); adaptive
+            // resizing as the corpus grows is a future iteration.
+            constexpr std::size_t kInitialCorpusEstimate = 5000;
+            auto tuner = std::make_shared<TopologyTuner>(tcfg);
+            tuner->setArms(defaultArmGrid(kInitialCorpusEstimate));
+            if (tcfg.statePath) {
+                if (auto r = tuner->loadState(*tcfg.statePath); !r) {
+                    spdlog::debug("[ServiceManager] topology tuner: no prior state at {} ({})",
+                                  tcfg.statePath->string(), r.error().message);
+                } else {
+                    spdlog::info("[ServiceManager] topology tuner loaded state from {}",
+                                 tcfg.statePath->string());
+                }
+            }
+            topologyManager_.setTopologyTuner(tuner);
+            spdlog::info("[ServiceManager] topology tuner enabled (cooldown={}min "
+                         "doc_delta={} arms={} state={})",
+                         std::chrono::duration_cast<std::chrono::minutes>(tcfg.cooldown).count(),
+                         tcfg.docCountDelta, tuner->arms().size(),
+                         tcfg.statePath ? tcfg.statePath->string() : std::string{"<ephemeral>"});
         }
     }
 

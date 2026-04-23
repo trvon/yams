@@ -1432,6 +1432,60 @@ FROM vectors WHERE level = ?
         return results;
     }
 
+    Result<size_t> forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) {
+        if (!visitor) {
+            return Error{ErrorCode::InvalidArgument, "forEachDocumentLevelVector visitor is empty"};
+        }
+
+        std::shared_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        static constexpr const char* kSelectAllDocLevel = R"sql(
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+       start_offset, end_offset, metadata,
+       model_id, model_version, embedding_version, content_hash,
+       created_at, embedded_at, is_stale, level,
+       source_chunk_ids, parent_document_hash, child_document_hashes,
+       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+FROM vectors WHERE level = ?
+)sql";
+
+        std::lock_guard stmt_lock(stmt_mutex_);
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, kSelectAllDocLevel, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"prepare forEachDocumentLevelVector: "} + sqlite3_errmsg(db_)};
+        }
+
+        struct FinalizeGuard {
+            sqlite3_stmt* stmt{nullptr};
+            ~FinalizeGuard() {
+                if (stmt) {
+                    sqlite3_finalize(stmt);
+                }
+            }
+        } finalize{stmt};
+
+        sqlite3_bind_int(stmt, 1, static_cast<int>(EmbeddingLevel::DOCUMENT));
+
+        size_t delivered = 0;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto record = recordFromStatement(stmt);
+            if (record.document_hash.empty()) {
+                continue;
+            }
+            ++delivered;
+            if (!visitor(std::move(record))) {
+                break;
+            }
+        }
+
+        return delivered;
+    }
+
     Result<bool> hasEmbedding(const std::string& document_hash) {
         std::shared_lock lock(mutex_);
 
@@ -3463,6 +3517,11 @@ SqliteVecBackend::getVectorsByDocument(const std::string& document_hash) {
 Result<std::unordered_map<std::string, VectorRecord>>
 SqliteVecBackend::getDocumentLevelVectorsAll() {
     return impl_->getDocumentLevelVectorsAll();
+}
+
+Result<size_t>
+SqliteVecBackend::forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) {
+    return impl_->forEachDocumentLevelVector(visitor);
 }
 
 Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {

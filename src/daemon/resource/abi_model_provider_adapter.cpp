@@ -212,10 +212,10 @@ AbiModelProviderAdapter::generateBatchEmbeddingsFor(const std::string& modelName
 
     std::vector<std::vector<float>> result;
     try {
-        result.resize(out_batch);
+        result.reserve(out_batch);
         for (size_t i = 0; i < out_batch; ++i) {
             const float* row = vecs + i * out_dim;
-            result[i].assign(row, row + out_dim);
+            result.emplace_back(row, row + out_dim);
         }
     } catch (...) {
         if (table_->free_embedding_batch)

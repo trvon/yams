@@ -356,6 +356,76 @@ TEST_CASE_METHOD(ConfigResolverFixture,
     }
 }
 
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyTunerPolicy defaults are empty when missing",
+                 "[daemon][components][config][topology_tuner][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[daemon]
+socket_path = "/tmp/test.sock"
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyTunerPolicy();
+
+    CHECK_FALSE(policy.enabled.has_value());
+    CHECK_FALSE(policy.cooldownMinutes.has_value());
+    CHECK_FALSE(policy.docCountDelta.has_value());
+    CHECK_FALSE(policy.rewardAlphaSingleton.has_value());
+    CHECK_FALSE(policy.rewardBetaGiantCluster.has_value());
+    CHECK_FALSE(policy.rewardGammaGiniDeviation.has_value());
+    CHECK_FALSE(policy.rewardDeltaIntraEdge.has_value());
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyTunerPolicy reads populated TOML block",
+                 "[daemon][components][config][topology_tuner][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[topology.tuner]
+enabled = true
+cooldown_minutes = 30
+doc_count_delta = 250
+
+[topology.tuner.reward]
+alpha_singleton = 0.5
+beta_giant_cluster = 0.3
+gamma_gini_deviation = 0.15
+delta_intra_edge = 0.05
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyTunerPolicy();
+
+    REQUIRE(policy.enabled.has_value());
+    CHECK(*policy.enabled == true);
+    REQUIRE(policy.cooldownMinutes.has_value());
+    CHECK(*policy.cooldownMinutes == 30u);
+    REQUIRE(policy.docCountDelta.has_value());
+    CHECK(*policy.docCountDelta == 250u);
+    REQUIRE(policy.rewardAlphaSingleton.has_value());
+    CHECK(*policy.rewardAlphaSingleton == 0.5);
+    REQUIRE(policy.rewardBetaGiantCluster.has_value());
+    CHECK(*policy.rewardBetaGiantCluster == 0.3);
+    REQUIRE(policy.rewardGammaGiniDeviation.has_value());
+    CHECK(*policy.rewardGammaGiniDeviation == 0.15);
+    REQUIRE(policy.rewardDeltaIntraEdge.has_value());
+    CHECK(*policy.rewardDeltaIntraEdge == 0.05);
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyTunerPolicy honors disabled flag explicitly",
+                 "[daemon][components][config][topology_tuner][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[topology.tuner]
+enabled = false
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyTunerPolicy();
+
+    REQUIRE(policy.enabled.has_value());
+    CHECK(*policy.enabled == false);
+}
+
 TEST_CASE("ConfigResolver vector sentinel operations",
           "[daemon][components][config][catch2][sentinel]") {
     auto tempDir = std::filesystem::temp_directory_path() /

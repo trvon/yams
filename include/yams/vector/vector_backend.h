@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -132,6 +133,16 @@ public:
      * macOS this sidesteps libsqlite3's `purgeableCacheShrink` per-reset cost.
      */
     virtual Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() = 0;
+
+    /**
+     * @brief Stream every document-level vector to a visitor without building an
+     * intermediate corpus map in the backend.
+     *
+     * The visitor returns false to stop early. The returned size is the number
+     * of records delivered to the visitor.
+     */
+    virtual Result<size_t>
+    forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) = 0;
 
     /**
      * @brief Check if a document has embeddings

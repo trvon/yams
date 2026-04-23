@@ -293,6 +293,7 @@ public:
     }
 
     PluginStatusSnapshot getPluginStatusSnapshot() const;
+    std::shared_ptr<const PluginStatusSnapshot> getPluginStatusSnapshotPtr() const;
     void refreshPluginStatusSnapshot();
     boost::asio::any_io_executor getWorkerExecutor() const;
     std::function<void(bool)> getWorkerJobSignal();

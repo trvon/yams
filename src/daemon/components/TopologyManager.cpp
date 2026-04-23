@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include <yams/daemon/components/TopologyTuner.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/vector/vector_database.h>
@@ -164,6 +165,15 @@ TopologyManager::TelemetrySnapshot TopologyManager::getTelemetrySnapshot() const
     return snapshot;
 }
 
+void TopologyManager::setTopologyTuner(std::shared_ptr<TopologyTuner> tuner) {
+    std::lock_guard<std::mutex> lock(tunerMutex_);
+    tuner_ = std::move(tuner);
+    tunerCurrentArmId_.clear();
+    tunerLastPullTime_ = std::chrono::steady_clock::time_point{};
+    tunerLastDuration_ = std::chrono::milliseconds{0};
+    tunerLastPullDocCount_ = 0;
+}
+
 Result<TopologyManager::RebuildStats>
 TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
                                   const std::vector<std::string>& documentHashes,
@@ -199,7 +209,36 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
         telemetry_.lastCellIdentity = cellIdentity;
     }
 
-    auto result = runRebuild(reason, dryRun, documentHashes, topologyAlgorithm);
+    std::string effectiveAlgorithm = topologyAlgorithm;
+    std::string pulledArmId;
+    {
+        std::lock_guard<std::mutex> lock(tunerMutex_);
+        if (tuner_ && tuner_->config().enabled) {
+            const auto now = std::chrono::steady_clock::now();
+            const std::size_t curDocCount = documentHashes.size();
+            if (tuner_->canPullArm(now, tunerLastPullTime_, tunerLastDuration_, curDocCount,
+                                   tunerLastPullDocCount_)) {
+                if (auto arm = tuner_->selectArm()) {
+                    pulledArmId = arm->id;
+                    tunerCurrentArmId_ = arm->id;
+                    tunerLastPullTime_ = now;
+                    tunerLastPullDocCount_ = curDocCount;
+                    setHdbscanMinClusterSize(arm->hdbscanMinClusterSize);
+                    setHdbscanMinPoints(arm->hdbscanMinPoints);
+                    setFeatureSmoothingHops(arm->featureSmoothingHops);
+                    if (!arm->engine.empty()) {
+                        effectiveAlgorithm = arm->engine;
+                    }
+                    spdlog::info("[TopologyManager] tuner pulled arm '{}' (engine={} minc={} "
+                                 "minp={} hops={})",
+                                 arm->id, arm->engine, arm->hdbscanMinClusterSize,
+                                 arm->hdbscanMinPoints, arm->featureSmoothingHops);
+                }
+            }
+        }
+    }
+
+    auto result = runRebuild(reason, dryRun, documentHashes, effectiveAlgorithm);
     if (result) {
         result.value().cellIdentity = cellIdentity;
     }
@@ -261,6 +300,25 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
                      reason, stats.documentsProcessed, stats.clustersBuilt, stats.membershipsBuilt,
                      stats.stored ? 1 : 0, stats.snapshotId);
     }
+
+    {
+        std::lock_guard<std::mutex> lock(tunerMutex_);
+        if (tuner_ && !tunerCurrentArmId_.empty()) {
+            tunerLastDuration_ =
+                std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - startedAt)
+                        .count())};
+            tuner_->observeRebuildStats(tunerCurrentArmId_, stats);
+            const double reward = computeIntrinsicReward(stats, tuner_->config().weights);
+            spdlog::info("[TopologyManager] tuner observed arm '{}' reward={:.4f} "
+                         "(singleton={:.3f} giant={:.3f} gini={:.3f} intra={:.3f})",
+                         tunerCurrentArmId_, reward, stats.singletonRatio, stats.giantClusterRatio,
+                         stats.clusterSizeGini, stats.avgIntraEdgeWeight);
+            tunerCurrentArmId_.clear();
+        }
+    }
+
     return result;
 }
 

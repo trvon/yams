@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -31,14 +32,15 @@ struct TopologyArm {
 };
 
 // Weights for the intrinsic-reward formula. The reward is clamped to [0, 1].
-// Defaults derived from the Phase G plan: penalize singleton-heavy and
-// giant-cluster collapses; mildly penalize Gini deviation from 0.4; mildly
-// reward intra-cluster cohesion.
+// Singleton and giant-cluster penalties are applied QUADRATICALLY — small
+// values (well-clustered corpus) have negligible penalty, pathological values
+// (singleton=1 or giant=1) take the full α/β hit. Gini deviation from 0.4 is
+// applied linearly; intra-cluster cohesion adds a small bonus.
 struct IntrinsicRewardWeights {
-    double alphaSingleton{0.4};
-    double betaGiantCluster{0.4};
-    double gammaGiniDeviation{0.1};
-    double deltaIntraEdge{0.1};
+    double alphaSingleton{0.7};
+    double betaGiantCluster{0.7};
+    double gammaGiniDeviation{0.15};
+    double deltaIntraEdge{0.15};
 };
 
 struct TopologyTunerConfig {
@@ -46,6 +48,10 @@ struct TopologyTunerConfig {
     std::chrono::minutes cooldown{10};
     std::size_t docCountDelta{100};
     IntrinsicRewardWeights weights;
+    // When set, the tuner persists its MAB state to this file after each
+    // observeRebuildStats call, and loads from it on construction. Lets
+    // UCB1 accumulate arm-pull history across daemon restarts.
+    std::optional<std::filesystem::path> statePath;
 };
 
 [[nodiscard]] double computeIntrinsicReward(const TopologyManager::RebuildStats& stats,
@@ -78,6 +84,10 @@ public:
 
     [[nodiscard]] nlohmann::json toJson() const;
     [[nodiscard]] Result<void> fromJson(const nlohmann::json& payload);
+
+    // Load/save MAB state to disk. Fail-soft on missing/corrupt files.
+    [[nodiscard]] Result<void> loadState(const std::filesystem::path& path);
+    [[nodiscard]] Result<void> saveState(const std::filesystem::path& path) const;
 
 private:
     mutable std::mutex mutex_;

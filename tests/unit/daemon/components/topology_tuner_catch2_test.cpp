@@ -7,6 +7,8 @@
 #include <yams/daemon/components/TopologyTuner.h>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 
 using Catch::Approx;
 using yams::daemon::computeIntrinsicReward;
@@ -103,6 +105,23 @@ TEST_CASE("TopologyTuner: computeIntrinsicReward favors balanced clusterings",
         CHECK(r >= 0.0);
         CHECK(r <= 1.0);
     }
+
+    SECTION("quadratic penalty: giant=1.0 collapse scores well below half") {
+        // With the plan-G quadratic formula (α=β=0.7), giant=1.0 removes 0.7
+        // from the baseline 1.0, leaving ~0.3 plus a small intra bonus. This
+        // is the pathological all-in-one-cluster case from Phase G bench.
+        auto stats = makeStats(/*singleton=*/0.0, /*giant=*/1.0, /*gini=*/0.0, /*intra=*/0.5);
+        const double r = computeIntrinsicReward(stats, w);
+        CHECK(r < 0.45);
+    }
+
+    SECTION("quadratic penalty: moderate imbalance (~0.2) is nearly free") {
+        // Same inputs under linear would be 1 - 0.14 = 0.86; under quadratic
+        // are 1 - 0.028 = 0.97. The bandit should tolerate normal variance.
+        auto stats = makeStats(/*singleton=*/0.2, /*giant=*/0.2, /*gini=*/0.4, /*intra=*/0.5);
+        const double r = computeIntrinsicReward(stats, w);
+        CHECK(r > 0.9);
+    }
 }
 
 TEST_CASE("TopologyTuner: cooldown gate blocks back-to-back pulls",
@@ -186,4 +205,86 @@ TEST_CASE("TopologyTuner: disabled tuner returns nullopt from selectArm",
     TopologyTuner tuner(cfg);
     tuner.setArms(defaultArmGrid(1000));
     CHECK_FALSE(tuner.selectArm().has_value());
+}
+
+TEST_CASE("TopologyTuner: saveState / loadState round-trip preserves arm rewards",
+          "[unit][daemon][topology_tuner][catch2]") {
+    namespace fs = std::filesystem;
+    auto tmpDir = fs::temp_directory_path() /
+                  ("yams_topology_tuner_state_" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(tmpDir);
+    const auto statePath = tmpDir / "topology_tuner_state.json";
+
+    // Producer: tune an arm with a known reward, save.
+    {
+        TopologyTunerConfig cfg;
+        cfg.enabled = true;
+        TopologyTuner tuner(cfg);
+        tuner.setArms(defaultArmGrid(1000));
+        auto arm = tuner.selectArm();
+        REQUIRE(arm.has_value());
+        auto good = makeStats(0.05, 0.10, 0.4, 0.5);
+        tuner.observeRebuildStats(arm->id, good);
+        auto saved = tuner.saveState(statePath);
+        REQUIRE(saved.has_value());
+        REQUIRE(fs::exists(statePath));
+    }
+
+    // Consumer: construct a new tuner, load state, verify bestArmId is
+    // populated (non-empty) — the loaded pulls count carried over.
+    {
+        TopologyTunerConfig cfg;
+        cfg.enabled = true;
+        TopologyTuner tuner(cfg);
+        tuner.setArms(defaultArmGrid(1000));
+        auto loaded = tuner.loadState(statePath);
+        REQUIRE(loaded.has_value());
+        auto best = tuner.bestArmId();
+        CHECK(best.has_value());
+    }
+
+    std::error_code ec;
+    fs::remove_all(tmpDir, ec);
+}
+
+TEST_CASE("TopologyTuner: loadState on missing path returns FileNotFound",
+          "[unit][daemon][topology_tuner][catch2]") {
+    namespace fs = std::filesystem;
+    const auto missingPath = fs::temp_directory_path() / "yams_topology_tuner_does_not_exist.json";
+    std::error_code ec;
+    fs::remove(missingPath, ec);
+
+    TopologyTunerConfig cfg;
+    cfg.enabled = true;
+    TopologyTuner tuner(cfg);
+    tuner.setArms(defaultArmGrid(1000));
+    auto result = tuner.loadState(missingPath);
+    CHECK_FALSE(result.has_value());
+}
+
+TEST_CASE("TopologyTuner: auto-save fires when statePath is configured",
+          "[unit][daemon][topology_tuner][catch2]") {
+    namespace fs = std::filesystem;
+    auto tmpDir = fs::temp_directory_path() /
+                  ("yams_topology_tuner_autosave_" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(tmpDir);
+    const auto statePath = tmpDir / "tuner_state.json";
+
+    TopologyTunerConfig cfg;
+    cfg.enabled = true;
+    cfg.statePath = statePath;
+    TopologyTuner tuner(cfg);
+    tuner.setArms(defaultArmGrid(1000));
+    auto arm = tuner.selectArm();
+    REQUIRE(arm.has_value());
+    auto good = makeStats(0.05, 0.10, 0.4, 0.5);
+    tuner.observeRebuildStats(arm->id, good);
+
+    // observeRebuildStats with statePath set auto-persists the state.
+    CHECK(fs::exists(statePath));
+
+    std::error_code ec;
+    fs::remove_all(tmpDir, ec);
 }

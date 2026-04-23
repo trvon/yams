@@ -535,6 +535,42 @@ hdbscan_min_cluster_size = 0
 # Ignored by the "connected" engine (which uses graph topology only).
 feature_smoothing_hops = 0
 
+[topology.tuner]
+# Phase G: per-corpus adaptive topology tuner (UCB1 multi-armed bandit over
+# {engine, HDBSCAN params, SGC hops}). Each successful rebuild produces an
+# intrinsic-quality reward (singletonRatio, giantClusterRatio, gini, intraEdge);
+# the bandit learns which arm fits the corpus shape best. No relevance labels
+# required. Off by default.
+#
+# Tuning recipes — uncomment one block to activate, leaving the others as
+# documentation. Enabling the tuner overrides the static [topology] knobs above
+# whenever an arm is pulled.
+#
+# off (default): static [topology] knobs win; bandit dormant.
+enabled = false
+#
+# default: 10-min cooldown, 100-doc delta, plan-G reward weights.
+# Best fit for steady-state corpora that grow modestly between rebuilds.
+# enabled = true
+# cooldown_minutes = 10
+# doc_count_delta = 100
+#
+# aggressive: 30-min cooldown, 500-doc delta, lower singleton penalty.
+# Best fit for fast-growing corpora where rebuilds are expensive (50k+ docs).
+# enabled = true
+# cooldown_minutes = 30
+# doc_count_delta = 500
+
+[topology.tuner.reward]
+# Intrinsic-reward weights. Reward = clamp(1 - α·singleton - β·giant -
+# γ·|gini-0.4| + δ·intraEdge, 0, 1). Defaults reflect the Phase G plan.
+# Lowering alpha/beta accepts noisier clusterings; raising delta favors
+# tighter intra-cluster cohesion at the cost of global structure.
+alpha_singleton = 0.4
+beta_giant_cluster = 0.4
+gamma_gini_deviation = 0.1
+delta_intra_edge = 0.1
+
 [knowledge_graph]
 # Database path for KG (relative to data_dir if not absolute)
 # Defaults to {data_dir}/yams.db

@@ -705,6 +705,28 @@ public:
         return records;
     }
 
+    Result<size_t>
+    forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) const {
+        if (!visitor) {
+            return Error{ErrorCode::InvalidArgument, "forEachDocumentLevelVector visitor is empty"};
+        }
+
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        TurboQuantMSE* tq = (config_.enable_turboquant_storage || config_.quantized_primary_storage)
+                                ? ensureTurboQuant()
+                                : nullptr;
+
+        return backend_->forEachDocumentLevelVector([&](VectorRecord&& rec) {
+            if ((config_.enable_turboquant_storage || config_.quantized_primary_storage) &&
+                rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
+                !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
+                rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
+                                                                     config_.embedding_dim, tq);
+            }
+            return visitor(std::move(rec));
+        });
+    }
+
     bool hasEmbedding(const std::string& document_hash) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
         auto result = backend_->hasEmbedding(document_hash);
@@ -1328,6 +1350,17 @@ std::unordered_map<std::string, VectorRecord> VectorDatabase::getDocumentLevelVe
     YAMS_ZONE_SCOPED_N("VectorDB::getDocumentLevelVectorsAll");
     auto result = pImpl->getDocumentLevelVectorsAll();
     YAMS_PLOT("vector_db::document_level_vectors_all", static_cast<int64_t>(result.size()));
+    return result;
+}
+
+Result<size_t> VectorDatabase::forEachDocumentLevelVector(
+    const std::function<bool(VectorRecord&&)>& visitor) const {
+    YAMS_ZONE_SCOPED_N("VectorDB::forEachDocumentLevelVector");
+    auto result = pImpl->forEachDocumentLevelVector(visitor);
+    if (result) {
+        YAMS_PLOT("vector_db::document_level_vectors_streamed",
+                  static_cast<int64_t>(result.value()));
+    }
     return result;
 }
 

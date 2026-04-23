@@ -819,6 +819,60 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
     return policy;
 }
 
+ConfigResolver::TopologyTunerPolicy ConfigResolver::resolveTopologyTunerPolicy() {
+    TopologyTunerPolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return policy;
+        }
+
+        auto kv = parseSimpleTomlFlat(cfgPath);
+
+        auto parseDouble = [](const std::string& v) -> std::optional<double> {
+            try {
+                return std::stod(v);
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        };
+
+        if (auto it = kv.find("topology.tuner.enabled"); it != kv.end()) {
+            policy.enabled = ConfigResolver::envTruthy(it->second.c_str());
+        }
+        if (auto it = kv.find("topology.tuner.cooldown_minutes"); it != kv.end()) {
+            try {
+                policy.cooldownMinutes = static_cast<std::uint32_t>(std::stoul(it->second));
+            } catch (const std::exception&) {
+            }
+        }
+        if (auto it = kv.find("topology.tuner.doc_count_delta"); it != kv.end()) {
+            try {
+                policy.docCountDelta = static_cast<std::size_t>(std::stoul(it->second));
+            } catch (const std::exception&) {
+            }
+        }
+        if (auto it = kv.find("topology.tuner.reward.alpha_singleton"); it != kv.end()) {
+            policy.rewardAlphaSingleton = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.tuner.reward.beta_giant_cluster"); it != kv.end()) {
+            policy.rewardBetaGiantCluster = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.tuner.reward.gamma_gini_deviation"); it != kv.end()) {
+            policy.rewardGammaGiniDeviation = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.tuner.reward.delta_intra_edge"); it != kv.end()) {
+            policy.rewardDeltaIntraEdge = parseDouble(it->second);
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for topology tuner policy: {}", e.what());
+    }
+
+    return policy;
+}
+
 namespace {
 
 std::optional<std::string> readEnvString(const char* name) {

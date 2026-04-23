@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -299,6 +300,14 @@ public:
     getEdgesBidirectional(std::int64_t nodeId,
                           std::optional<std::string_view> relation = std::nullopt,
                           std::size_t limit = 400) = 0;
+
+    // Stream lightweight edge tuples for a relation. The callback returns false to stop early.
+    // This avoids materializing relation/properties strings for corpus-wide maintenance passes.
+    virtual Result<void>
+    forEachEdgeByRelation(std::string_view relation,
+                          const std::function<bool(std::int64_t edgeId, std::int64_t srcNodeId,
+                                                   std::int64_t dstNodeId, float weight)>& visitor,
+                          std::size_t limit = 0) = 0;
 
     // For quick structural scoring: neighbor ids only (fast path)
     virtual Result<std::vector<std::int64_t>> neighbors(std::int64_t nodeId,

@@ -1069,6 +1069,49 @@ public:
         });
     }
 
+    Result<void>
+    forEachEdgeByRelation(std::string_view relation,
+                          const std::function<bool(std::int64_t edgeId, std::int64_t srcNodeId,
+                                                   std::int64_t dstNodeId, float weight)>& visitor,
+                          std::size_t limit) override {
+        if (!visitor) {
+            return Error{ErrorCode::InvalidArgument, "edge visitor callback is required"};
+        }
+        return pool_->withConnection([&](Database& db) -> Result<void> {
+            auto stmtR = limit > 0 ? db.prepare("SELECT id, src_node_id, dst_node_id, weight "
+                                                "FROM kg_edges WHERE relation = ? ORDER BY id "
+                                                "LIMIT ?")
+                                   : db.prepare("SELECT id, src_node_id, dst_node_id, weight "
+                                                "FROM kg_edges WHERE relation = ? ORDER BY id");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            auto br = stmt.bind(1, relation);
+            if (!br)
+                return br.error();
+            if (limit > 0) {
+                br = stmt.bind(2, static_cast<int64_t>(limit));
+                if (!br)
+                    return br.error();
+            }
+
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                const auto keepGoing = visitor(stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2),
+                                               static_cast<float>(stmt.getDouble(3)));
+                if (!keepGoing) {
+                    break;
+                }
+            }
+            return Result<void>();
+        });
+    }
+
     Result<std::vector<std::int64_t>> neighbors(std::int64_t nodeId,
                                                 std::size_t maxNeighbors) override {
         return pool_->withConnection([&](Database& db) -> Result<std::vector<std::int64_t>> {

@@ -3,8 +3,10 @@
 
 #include <yams/daemon/components/TopologyTuner.h>
 
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <sstream>
 
 namespace yams::daemon {
@@ -62,8 +64,14 @@ double computeIntrinsicReward(const TopologyManager::RebuildStats& stats,
         return 0.0;
     }
 
-    const double singletonPenalty = weights.alphaSingleton * clamp01(stats.singletonRatio);
-    const double giantPenalty = weights.betaGiantCluster * clamp01(stats.giantClusterRatio);
+    // Quadratic penalty: pathological clusterings (singleton≈1 or giant≈1)
+    // take the full α/β hit; moderate values (~0.1) are nearly free. This
+    // sharpens the bandit's preference against degenerate topologies without
+    // over-penalizing normal distributions.
+    const double singletonClamped = clamp01(stats.singletonRatio);
+    const double giantClamped = clamp01(stats.giantClusterRatio);
+    const double singletonPenalty = weights.alphaSingleton * singletonClamped * singletonClamped;
+    const double giantPenalty = weights.betaGiantCluster * giantClamped * giantClamped;
     const double giniDeviation = std::abs(stats.clusterSizeGini - kGiniTarget);
     const double giniPenalty = weights.gammaGiniDeviation * clamp01(giniDeviation);
     const double intraEdgeBonus =
@@ -138,18 +146,28 @@ std::optional<TopologyArm> TopologyTuner::selectArm() {
 
 void TopologyTuner::observeRebuildStats(std::string_view armId,
                                         const TopologyManager::RebuildStats& stats) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (arms_.empty()) {
-        return;
+    std::optional<std::filesystem::path> persistPath;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (arms_.empty()) {
+            return;
+        }
+        auto it = std::find_if(arms_.begin(), arms_.end(),
+                               [&](const TopologyArm& arm) { return arm.id == armId; });
+        if (it == arms_.end()) {
+            return;
+        }
+        const auto idx = static_cast<std::size_t>(std::distance(arms_.begin(), it));
+        const double reward = computeIntrinsicReward(stats, cfg_.weights);
+        mab_.recordReward(idx, reward, yams::search::TunerMAB::RewardSource::Proxy);
+        persistPath = cfg_.statePath;
     }
-    auto it = std::find_if(arms_.begin(), arms_.end(),
-                           [&](const TopologyArm& arm) { return arm.id == armId; });
-    if (it == arms_.end()) {
-        return;
+    if (persistPath) {
+        if (auto r = saveState(*persistPath); !r) {
+            spdlog::debug("[TopologyTuner] failed to persist state to {}: {}",
+                          persistPath->string(), r.error().message);
+        }
     }
-    const auto idx = static_cast<std::size_t>(std::distance(arms_.begin(), it));
-    const double reward = computeIntrinsicReward(stats, cfg_.weights);
-    mab_.recordReward(idx, reward, yams::search::TunerMAB::RewardSource::Proxy);
 }
 
 bool TopologyTuner::canPullArm(std::chrono::steady_clock::time_point now,
@@ -205,6 +223,47 @@ Result<void> TopologyTuner::fromJson(const nlohmann::json& payload) {
         return Error{ErrorCode::InvalidArgument, "TopologyTuner state missing 'mab' field"};
     }
     return mab_.fromJson(payload.at("mab"));
+}
+
+Result<void> TopologyTuner::loadState(const std::filesystem::path& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(path, ec) || ec) {
+        return Error{ErrorCode::FileNotFound, "state file missing: " + path.string()};
+    }
+    std::ifstream in(path);
+    if (!in) {
+        return Error{ErrorCode::IOError, "cannot open state file: " + path.string()};
+    }
+    nlohmann::json payload;
+    try {
+        in >> payload;
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InvalidData, std::string{"state file parse error: "} + e.what()};
+    }
+    return fromJson(payload);
+}
+
+Result<void> TopologyTuner::saveState(const std::filesystem::path& path) const {
+    namespace fs = std::filesystem;
+    nlohmann::json payload = toJson();
+    std::error_code ec;
+    if (auto parent = path.parent_path(); !parent.empty()) {
+        fs::create_directories(parent, ec);
+    }
+    const auto tmp = path.string() + ".tmp";
+    {
+        std::ofstream out(tmp);
+        if (!out) {
+            return Error{ErrorCode::IOError, "cannot open state file for write: " + tmp};
+        }
+        out << payload.dump(2);
+    }
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError, "rename failed: " + ec.message()};
+    }
+    return Result<void>{};
 }
 
 } // namespace yams::daemon

@@ -102,6 +102,8 @@ public:
     Result<std::vector<VectorRecord>>
     getVectorsByDocument(const std::string& document_hash) override;
     Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() override;
+    Result<size_t>
+    forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) override;
 
     Result<bool> hasEmbedding(const std::string& document_hash) override;
     Result<std::unordered_set<std::string>> getEmbeddedDocumentHashes() override;

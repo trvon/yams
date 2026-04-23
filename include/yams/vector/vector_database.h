@@ -5,6 +5,7 @@
 #include <yams/vector/vector_types.h>
 
 #include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -55,6 +56,8 @@ public:
     getVectorsBatch(const std::vector<std::string>& chunk_ids) const;
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const;
     std::unordered_map<std::string, VectorRecord> getDocumentLevelVectorsAll() const;
+    Result<size_t>
+    forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) const;
     bool hasEmbedding(const std::string& document_hash) const;
     std::unordered_set<std::string> getEmbeddedDocumentHashes() const;
 

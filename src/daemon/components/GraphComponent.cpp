@@ -44,6 +44,7 @@ collectDirectedSemanticNeighborEdges(metadata::KnowledgeGraphStore* kgStore,
     if (!kgStore) {
         return Error{ErrorCode::InvalidArgument, "KnowledgeGraphStore is required"};
     }
+    (void)batchSize;
 
     auto docsResult = kgStore->findNodesByType("document", 1'000'000, 0);
     if (!docsResult) {
@@ -59,37 +60,20 @@ collectDirectedSemanticNeighborEdges(metadata::KnowledgeGraphStore* kgStore,
     std::unordered_map<DirectedNodePair, std::int64_t, DirectedNodePairHash> edgeIdsByPair;
     edgeIdsByPair.reserve(documentIds.size() * 4);
 
-    for (const auto& doc : docsResult.value()) {
-        std::size_t offset = 0;
-        while (true) {
-            auto edgesResult = kgStore->getEdgesFrom(doc.id, std::string_view("semantic_neighbor"),
-                                                     batchSize, offset);
-            if (!edgesResult) {
-                return edgesResult.error();
+    auto streamResult = kgStore->forEachEdgeByRelation(
+        std::string_view("semantic_neighbor"),
+        [&](std::int64_t edgeId, std::int64_t srcNodeId, std::int64_t dstNodeId, float) {
+            if (!documentIds.contains(srcNodeId)) {
+                return true;
             }
-
-            const auto& edges = edgesResult.value();
-            if (edges.empty()) {
-                break;
+            if (srcNodeId != dstNodeId && !documentIds.contains(dstNodeId)) {
+                return true;
             }
-
-            for (const auto& edge : edges) {
-                if (edge.srcNodeId == edge.dstNodeId) {
-                    edgeIdsByPair.emplace(DirectedNodePair{edge.srcNodeId, edge.dstNodeId},
-                                          edge.id);
-                    continue;
-                }
-                if (!documentIds.contains(edge.dstNodeId)) {
-                    continue;
-                }
-                edgeIdsByPair.emplace(DirectedNodePair{edge.srcNodeId, edge.dstNodeId}, edge.id);
-            }
-
-            offset += edges.size();
-            if (edges.size() < batchSize) {
-                break;
-            }
-        }
+            edgeIdsByPair.emplace(DirectedNodePair{srcNodeId, dstNodeId}, edgeId);
+            return true;
+        });
+    if (!streamResult) {
+        return streamResult.error();
     }
 
     return edgeIdsByPair;

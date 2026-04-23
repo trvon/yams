@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -21,6 +22,8 @@ class VectorDatabase;
 } // namespace yams::vector
 
 namespace yams::daemon {
+
+class TopologyTuner;
 
 class TopologyManager {
 public:
@@ -164,6 +167,11 @@ public:
         return featureSmoothingHops_.load(std::memory_order_acquire);
     }
 
+    // Phase G: optional adaptive tuner. When set and enabled, each
+    // rebuildArtifacts() call may pull a new arm (within cooldown) and
+    // overwrite the HDBSCAN parameters + algorithm before clustering runs.
+    void setTopologyTuner(std::shared_ptr<TopologyTuner> tuner);
+
     [[nodiscard]] TelemetrySnapshot getTelemetrySnapshot() const;
 
     Result<RebuildStats> rebuildArtifacts(const std::string& reason, bool dryRun,
@@ -193,6 +201,15 @@ private:
     std::atomic<std::size_t> hdbscanMinPoints_{0};
     std::atomic<std::size_t> hdbscanMinClusterSize_{0};
     std::atomic<std::size_t> featureSmoothingHops_{0};
+
+    // Tuner state (Phase G). Protected by tunerMutex_ since multiple
+    // fields move together on each pull / observation.
+    mutable std::mutex tunerMutex_;
+    std::shared_ptr<TopologyTuner> tuner_;
+    std::chrono::steady_clock::time_point tunerLastPullTime_{};
+    std::chrono::milliseconds tunerLastDuration_{0};
+    std::size_t tunerLastPullDocCount_{0};
+    std::string tunerCurrentArmId_;
 };
 
 } // namespace yams::daemon

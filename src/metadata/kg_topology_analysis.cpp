@@ -4,10 +4,10 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <deque>
-#include <tuple>
+#include <numeric>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace yams::metadata {
 
@@ -21,6 +21,43 @@ std::uint64_t makeUndirectedPairKey(std::size_t a, std::size_t b) {
 std::uint64_t makeDirectedPairKey(std::size_t src, std::size_t dst) {
     return (static_cast<std::uint64_t>(src) << 32U) | static_cast<std::uint64_t>(dst);
 }
+
+class DisjointSet {
+public:
+    explicit DisjointSet(std::size_t size) : parent_(size), size_(size, 1) {
+        std::iota(parent_.begin(), parent_.end(), std::size_t{0});
+    }
+
+    std::size_t find(std::size_t value) {
+        auto root = value;
+        while (parent_[root] != root) {
+            root = parent_[root];
+        }
+        while (parent_[value] != value) {
+            const auto next = parent_[value];
+            parent_[value] = root;
+            value = next;
+        }
+        return root;
+    }
+
+    void unite(std::size_t lhs, std::size_t rhs) {
+        auto lhsRoot = find(lhs);
+        auto rhsRoot = find(rhs);
+        if (lhsRoot == rhsRoot) {
+            return;
+        }
+        if (size_[lhsRoot] < size_[rhsRoot]) {
+            std::swap(lhsRoot, rhsRoot);
+        }
+        parent_[rhsRoot] = lhsRoot;
+        size_[lhsRoot] += size_[rhsRoot];
+    }
+
+private:
+    std::vector<std::size_t> parent_;
+    std::vector<std::size_t> size_;
+};
 
 } // namespace
 
@@ -48,59 +85,64 @@ std::optional<KGTopologySummary> analyzeDocumentTopology(KnowledgeGraphStore* kg
         nodeIndex.emplace(docs[i].id, i);
     }
 
-    std::vector<std::vector<std::size_t>> adjacency(docs.size());
-    std::vector<std::vector<std::size_t>> reciprocalAdjacency(docs.size());
     std::vector<std::size_t> semanticDegree(docs.size(), 0);
     std::unordered_set<std::uint64_t> directedPairs;
+    std::unordered_set<std::uint64_t> semanticPairs;
     std::unordered_set<std::uint64_t> reciprocalPairs;
     std::unordered_set<std::uint64_t> reciprocalDocs;
+    const auto reserveHint =
+        docs.size() * std::min<std::size_t>(std::max<std::size_t>(1, maxNeighborsPerNode), 16);
+    directedPairs.reserve(reserveHint);
+    semanticPairs.reserve(reserveHint);
 
-    for (std::size_t i = 0; i < docs.size(); ++i) {
-        auto edgesResult =
-            kgStore->getEdgesBidirectional(docs[i].id, std::string_view("semantic_neighbor"),
-                                           std::max<std::size_t>(1, maxNeighborsPerNode * 2));
-        if (!edgesResult) {
-            continue;
-        }
-
-        std::unordered_set<std::size_t> uniqueNeighbors;
-        for (const auto& edge : edgesResult.value()) {
-            const auto otherNodeId = edge.srcNodeId == docs[i].id ? edge.dstNodeId : edge.srcNodeId;
-            auto it = nodeIndex.find(otherNodeId);
-            if (it == nodeIndex.end()) {
-                continue;
+    auto streamResult = kgStore->forEachEdgeByRelation(
+        std::string_view("semantic_neighbor"),
+        [&](std::int64_t, std::int64_t srcNodeId, std::int64_t dstNodeId, float) {
+            const auto srcIt = nodeIndex.find(srcNodeId);
+            const auto dstIt = nodeIndex.find(dstNodeId);
+            if (srcIt == nodeIndex.end() || dstIt == nodeIndex.end()) {
+                return true;
             }
-            if (it->second == i) {
-                continue;
+            const auto src = srcIt->second;
+            const auto dst = dstIt->second;
+            if (src == dst) {
+                return true;
             }
-
-            if (edge.srcNodeId == docs[i].id) {
-                directedPairs.insert(makeDirectedPairKey(i, it->second));
-            }
-            uniqueNeighbors.insert(it->second);
-        }
-
-        semanticDegree[i] = uniqueNeighbors.size();
-        if (!uniqueNeighbors.empty()) {
-            summary.documentsWithSemanticNeighbors++;
-        }
-        summary.semanticEdgeCount += uniqueNeighbors.size();
-
-        adjacency[i].reserve(uniqueNeighbors.size());
-        for (const auto neighborIndex : uniqueNeighbors) {
-            adjacency[i].push_back(neighborIndex);
-        }
+            directedPairs.insert(makeDirectedPairKey(src, dst));
+            semanticPairs.insert(makeUndirectedPairKey(src, dst));
+            return true;
+        });
+    if (!streamResult) {
+        return std::nullopt;
     }
 
+    DisjointSet semanticComponents(docs.size());
+    for (const auto pair : semanticPairs) {
+        const auto src = static_cast<std::size_t>(pair >> 32U);
+        const auto dst = static_cast<std::size_t>(pair & 0xffffffffU);
+        ++semanticDegree[src];
+        ++semanticDegree[dst];
+        semanticComponents.unite(src, dst);
+    }
+
+    for (const auto degree : semanticDegree) {
+        if (degree > 0) {
+            ++summary.documentsWithSemanticNeighbors;
+        }
+    }
+    summary.semanticEdgeCount = semanticPairs.size();
+
+    DisjointSet reciprocalComponents(docs.size());
     for (const auto pair : directedPairs) {
         const auto src = static_cast<std::size_t>(pair >> 32U);
         const auto dst = static_cast<std::size_t>(pair & 0xffffffffU);
         if (directedPairs.contains(makeDirectedPairKey(dst, src))) {
-            reciprocalPairs.insert(makeUndirectedPairKey(src, dst));
-            reciprocalDocs.insert(src);
-            reciprocalDocs.insert(dst);
-            reciprocalAdjacency[src].push_back(dst);
-            reciprocalAdjacency[dst].push_back(src);
+            const auto [_, inserted] = reciprocalPairs.insert(makeUndirectedPairKey(src, dst));
+            if (inserted) {
+                reciprocalDocs.insert(src);
+                reciprocalDocs.insert(dst);
+                reciprocalComponents.unite(src, dst);
+            }
         }
     }
 
@@ -118,81 +160,40 @@ std::optional<KGTopologySummary> analyzeDocumentTopology(KnowledgeGraphStore* kg
                                    static_cast<double>(summary.documentNodeCount);
     }
 
-    std::vector<bool> visited(docs.size(), false);
+    std::unordered_map<std::size_t, std::size_t> componentSizesByRoot;
+    componentSizesByRoot.reserve(docs.size());
     for (std::size_t i = 0; i < docs.size(); ++i) {
-        if (visited[i]) {
-            continue;
-        }
-
-        if (adjacency[i].empty()) {
-            visited[i] = true;
+        if (semanticDegree[i] == 0) {
             summary.isolatedDocumentCount++;
             summary.semanticSingletonCount++;
-            summary.connectedComponentCount++;
-            summary.componentSizes.push_back(1);
-            summary.largestComponentSize = std::max<std::size_t>(summary.largestComponentSize, 1);
-            continue;
         }
-
-        std::deque<std::size_t> queue;
-        queue.push_back(i);
-        visited[i] = true;
-        std::size_t componentSize = 0;
-
-        while (!queue.empty()) {
-            const auto cur = queue.front();
-            queue.pop_front();
-            ++componentSize;
-
-            for (const auto neighbor : adjacency[cur]) {
-                if (visited[neighbor]) {
-                    continue;
-                }
-                visited[neighbor] = true;
-                queue.push_back(neighbor);
-            }
-        }
-
-        summary.connectedComponentCount++;
-        summary.componentSizes.push_back(componentSize);
-        summary.largestComponentSize = std::max(summary.largestComponentSize, componentSize);
+        ++componentSizesByRoot[semanticComponents.find(i)];
+    }
+    summary.connectedComponentCount = componentSizesByRoot.size();
+    summary.componentSizes.reserve(componentSizesByRoot.size());
+    for (const auto& [_, size] : componentSizesByRoot) {
+        summary.componentSizes.push_back(size);
+        summary.largestComponentSize = std::max(summary.largestComponentSize, size);
     }
 
     if (!summary.componentSizes.empty()) {
         std::sort(summary.componentSizes.begin(), summary.componentSizes.end(), std::greater<>());
     }
 
-    std::vector<bool> reciprocalVisited(docs.size(), false);
-    for (std::size_t i = 0; i < docs.size(); ++i) {
-        if (reciprocalVisited[i] || reciprocalAdjacency[i].empty()) {
+    std::unordered_map<std::size_t, std::size_t> reciprocalSizesByRoot;
+    reciprocalSizesByRoot.reserve(reciprocalDocs.size());
+    for (const auto doc : reciprocalDocs) {
+        ++reciprocalSizesByRoot[reciprocalComponents.find(doc)];
+    }
+    summary.reciprocalCommunitySizes.reserve(reciprocalSizesByRoot.size());
+    for (const auto& [_, size] : reciprocalSizesByRoot) {
+        if (size < 2) {
             continue;
         }
-
-        std::deque<std::size_t> queue;
-        queue.push_back(i);
-        reciprocalVisited[i] = true;
-        std::size_t communitySize = 0;
-
-        while (!queue.empty()) {
-            const auto cur = queue.front();
-            queue.pop_front();
-            ++communitySize;
-
-            for (const auto neighbor : reciprocalAdjacency[cur]) {
-                if (reciprocalVisited[neighbor]) {
-                    continue;
-                }
-                reciprocalVisited[neighbor] = true;
-                queue.push_back(neighbor);
-            }
-        }
-
-        if (communitySize >= 2) {
-            ++summary.reciprocalCommunityCount;
-            summary.reciprocalCommunitySizes.push_back(communitySize);
-            summary.largestReciprocalCommunitySize =
-                std::max(summary.largestReciprocalCommunitySize, communitySize);
-        }
+        ++summary.reciprocalCommunityCount;
+        summary.reciprocalCommunitySizes.push_back(size);
+        summary.largestReciprocalCommunitySize =
+            std::max(summary.largestReciprocalCommunitySize, size);
     }
 
     if (!summary.reciprocalCommunitySizes.empty()) {
@@ -200,7 +201,6 @@ std::optional<KGTopologySummary> analyzeDocumentTopology(KnowledgeGraphStore* kg
                   std::greater<>());
     }
 
-    summary.semanticEdgeCount /= 2;
     summary.unreciprocatedSemanticEdgeCount =
         summary.semanticEdgeCount > summary.reciprocalSemanticEdgeCount
             ? summary.semanticEdgeCount - summary.reciprocalSemanticEdgeCount

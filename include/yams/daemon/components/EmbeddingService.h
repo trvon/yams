@@ -97,9 +97,8 @@ private:
     void updateSemanticNeighborGraph(
         const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
-        const std::vector<InternalEventBus::EmbedPreparedDoc>& preparedDocs,
-        const std::vector<std::tuple<std::string, std::string, std::vector<float>>>&
-            documentEmbeddings);
+        const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
+        bool sourceAllCorpus = false);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
