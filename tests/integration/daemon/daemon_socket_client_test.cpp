@@ -7,10 +7,13 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <string>
 #include <thread>
 
 #include "../../common/test_helpers_catch2.h"
@@ -30,6 +33,40 @@ using namespace yams::test;
 using namespace std::chrono_literals;
 
 namespace {
+class EnvGuard {
+public:
+    EnvGuard(const std::string& envName, const std::string& newValue) : name_(envName) {
+        if (const char* orig = std::getenv(name_.c_str())) {
+            originalValue_ = orig;
+        }
+#ifdef _WIN32
+        _putenv_s(name_.c_str(), newValue.c_str());
+#else
+        setenv(name_.c_str(), newValue.c_str(), 1);
+#endif
+    }
+
+    ~EnvGuard() {
+        if (originalValue_) {
+#ifdef _WIN32
+            _putenv_s(name_.c_str(), originalValue_->c_str());
+#else
+            setenv(name_.c_str(), originalValue_->c_str(), 1);
+#endif
+        } else {
+#ifdef _WIN32
+            _putenv_s(name_.c_str(), "");
+#else
+            unsetenv(name_.c_str());
+#endif
+        }
+    }
+
+private:
+    std::string name_;
+    std::optional<std::string> originalValue_;
+};
+
 class StubModelProvider : public yams::daemon::IModelProvider {
 public:
     yams::Result<std::vector<float>> generateEmbedding(const std::string& text) override {
@@ -834,7 +871,10 @@ TEST_CASE("Daemon client download job request execution", "[daemon][socket][down
 TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][model]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    DaemonHarness harness;
+    EnvGuard backendGuard("YAMS_EMBED_BACKEND", "daemon");
+    DaemonHarnessOptions options;
+    options.useMockModelProvider = false;
+    DaemonHarness harness(options);
     startHarnessWithRetry(harness);
     std::this_thread::sleep_for(200ms);
 
@@ -2315,18 +2355,8 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
         // so we don't require the IPC response to succeed. The important thing is that
         // the daemon eventually stops.
         (void)yams::cli::run_sync(client.shutdown(true), 10s);
-
-        // Wait for daemon to actually stop - this is the important assertion
-        bool stopped = false;
-        for (int i = 0; i < 50; ++i) {
-            std::this_thread::sleep_for(100ms);
-            if (!harness.daemon()->isRunning()) {
-                stopped = true;
-                break;
-            }
-        }
-
-        REQUIRE(stopped);
+        REQUIRE(harness.daemon() != nullptr);
+        REQUIRE(harness.daemon()->waitForStopCompletion(10s));
     }
 
     SECTION("socket file removed on stop") {

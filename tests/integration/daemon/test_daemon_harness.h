@@ -182,7 +182,14 @@ public:
         {
             // Start runLoop in background thread - this triggers async initialization
             // Without runLoop(), ServiceManager::startAsyncInit() is never called
-            runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
+            runLoopThread_ = std::thread([this]() {
+                daemon_->runLoop();
+                auto stopResult = daemon_->stop();
+                if (!stopResult && daemon_->isRunning()) {
+                    spdlog::warn("[DaemonHarness] Background stop after runLoop returned error: {}",
+                                 stopResult.error().message);
+                }
+            });
             // Give runLoop time to enter and trigger async init
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             spdlog::info(
@@ -258,11 +265,15 @@ public:
                 spdlog::info("[DaemonHarness] runLoop thread joined");
             }
 
-            // Wait for daemon to fully stop - it handles GlobalIOContext::reset() internally
-            auto stopResult = daemon_->stop();
-            if (!stopResult) {
-                spdlog::warn("[DaemonHarness] Daemon stop returned error: {}",
-                             stopResult.error().message);
+            // Wait for daemon to fully stop - the background runLoop thread mirrors
+            // daemon_main by calling stop() after runLoop() returns on remote shutdown.
+            if (daemon_->isRunning() ||
+                !daemon_->waitForStopCompletion(std::chrono::milliseconds(0))) {
+                auto stopResult = daemon_->stop();
+                if (!stopResult) {
+                    spdlog::warn("[DaemonHarness] Daemon stop returned error: {}",
+                                 stopResult.error().message);
+                }
             }
 
             // Wait for daemon to report it's no longer running

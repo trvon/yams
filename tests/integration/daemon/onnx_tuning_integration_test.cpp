@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <thread>
 #include <vector>
 
@@ -592,6 +594,71 @@ TEST_CASE("AbiModelProviderAdapter acquires SlotGuard during real embedding",
     }
 
     harness.stop();
+}
+
+TEST_CASE("Config selecting onnx backend uses ONNX provider for embeddings",
+          "[daemon][onnx][config][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
+    ScopedEnvVar forceCpuEnv("YAMS_ONNX_FORCE_CPU", "1");
+
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto configRoot =
+        std::filesystem::temp_directory_path() /
+        ("yams_onnx_backend_config_" + std::to_string(::getpid()) + "_" + std::to_string(now));
+    std::filesystem::create_directories(configRoot);
+    const auto configPath = configRoot / "config.toml";
+    {
+        std::ofstream out(configPath, std::ios::trunc);
+        REQUIRE(out.is_open());
+        out << "[version]\n";
+        out << "config_version = 3\n";
+        out << "\n[embeddings]\n";
+        out << "backend = \"onnx\"\n";
+        out << "preferred_model = \"all-MiniLM-L6-v2\"\n";
+    }
+
+    DaemonHarness::Options opts;
+    opts.useMockModelProvider = false;
+    opts.enableModelProvider = true;
+    opts.autoLoadPlugins = true;
+    opts.configureModelPool = true;
+    opts.modelPoolLazyLoading = false;
+    opts.preloadModels = {"all-MiniLM-L6-v2"};
+    opts.pluginDir = std::filesystem::current_path() / "builddir" / "plugins";
+    opts.pluginConfigs["onnx_plugin"] = R"({"preferred_model": "all-MiniLM-L6-v2"})";
+    opts.configPath = configPath;
+
+    DaemonHarness harness(opts);
+    if (!harness.start(std::chrono::seconds(60))) {
+        std::error_code ec;
+        std::filesystem::remove_all(configRoot, ec);
+        SKIP(
+            "Failed to start daemon with ONNX backend config - plugin or model may be unavailable");
+    }
+
+    ClientConfig clientCfg;
+    clientCfg.socketPath = harness.socketPath();
+    clientCfg.requestTimeout = 30s;
+    clientCfg.autoStart = false;
+    DaemonClient client(clientCfg);
+    auto connected = yams::cli::run_sync(client.connect(), 10s);
+    REQUIRE(connected.has_value());
+
+    GenerateEmbeddingRequest req;
+    req.text = "config-selected onnx embedding";
+    req.modelName.clear();
+    req.normalize = true;
+
+    auto embedResult = yams::cli::run_sync(client.generateEmbedding(req), 30s);
+    REQUIRE(embedResult.has_value());
+    CHECK_FALSE(embedResult.value().embedding.empty());
+    CHECK(embedResult.value().embedding.size() > 1);
+
+    harness.stop();
+    std::error_code ec;
+    std::filesystem::remove_all(configRoot, ec);
 }
 
 // =============================================================================

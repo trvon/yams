@@ -330,6 +330,11 @@ public:
         return kEmpty;
     }
 
+    bool hasTitleExtractor() const {
+        auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+        return piq && piq->hasTitleExtractor();
+    }
+
     // Knowledge Graph Store (PBI-059)
     std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const {
         return databaseManager_ ? databaseManager_->getKgStore() : nullptr;

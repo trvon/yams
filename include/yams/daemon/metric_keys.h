@@ -178,6 +178,11 @@ constexpr std::string_view kWorkCoordinatorRunning = "work_coordinator_running";
 constexpr std::string_view kServiceFsmState = "service_fsm_state";
 constexpr std::string_view kEmbeddingState = "embedding_state";
 constexpr std::string_view kPluginHostState = "plugin_host_state";
+constexpr std::string_view kPluginSkippedCount = "plugin_skipped_count";
+constexpr std::string_view kContentExtractorsLoaded = "content_extractors_loaded";
+constexpr std::string_view kSymbolExtractorsLoaded = "symbol_extractors_loaded";
+constexpr std::string_view kEntityExtractorsLoaded = "entity_extractors_loaded";
+constexpr std::string_view kTitleExtractorEnabled = "title_extractor_enabled";
 constexpr std::string_view kPostIngestUseBus = "post_ingest_use_bus";
 
 // Stream metrics
@@ -263,6 +268,11 @@ constexpr std::string_view kEmbeddingReady = "embedding_ready";
 constexpr std::string_view kEmbeddingDegraded = "embedding_degraded";
 constexpr std::string_view kPluginsReady = "plugins_ready";
 constexpr std::string_view kPluginsDegraded = "plugins_degraded";
+constexpr std::string_view kContentExtractorsReady = "content_extractors_ready";
+constexpr std::string_view kSymbolExtractorsReady = "symbol_extractors_ready";
+constexpr std::string_view kEntityExtractorsReady = "entity_extractors_ready";
+constexpr std::string_view kTitleExtractorReady = "title_extractor_ready";
+constexpr std::string_view kPluginWarningsPresent = "plugin_warnings_present";
 constexpr std::string_view kTopologyArtifactsFresh = "topology_artifacts_fresh";
 constexpr std::string_view kTopologyRebuildRunning = "topology_rebuild_running";
 constexpr std::string_view kVectorEmbeddingsAvailable = "vector_embeddings_available";

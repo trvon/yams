@@ -653,6 +653,8 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                     static_cast<uint64_t>(pendingDocuments_.size()));
         }
         if (batch.empty()) {
+            if (state_)
+                state_->stats.repairIdleTicks++;
             timer.expires_after(100ms);
             co_await timer.async_wait(boost::asio::use_awaitable);
             continue;
@@ -662,7 +664,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             continue;
 
         if (state_)
-            state_->stats.repairIdleTicks++;
+            state_->stats.repairBusyTicks++;
 
         auto [missingEmbeddings, missingFts5] = detectMissingWork(batch);
         auto meta_repo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;

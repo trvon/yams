@@ -90,6 +90,11 @@ TEST_CASE("SimeonLexicalBackend default config uses SabSmooth", "[search][simeon
     CHECK(cfg.variant == SimeonLexicalBackend::Variant::SabSmooth);
     CHECK(cfg.subword_gamma == 5.0f);
     CHECK(cfg.max_corpus_docs == 200'000u);
+    CHECK(cfg.fragment_geometry_enabled);
+    CHECK(cfg.fragment_geometry_min_corpus_docs == 1000u);
+    CHECK(cfg.fragment_geometry_config.use_phss);
+    CHECK(cfg.fragment_geometry_config.phss_config.criterion ==
+          simeon::PhssConfig::Criterion::LargestGap);
 }
 
 TEST_CASE("SimeonLexicalBackend buildAsync flips ready on small corpus",
@@ -124,6 +129,28 @@ TEST_CASE("SimeonLexicalBackend score returns one float per candidate",
     auto scores = backend.score("beta", corpus.docIds);
     REQUIRE(scores.has_value());
     CHECK(scores.value().size() == corpus.docIds.size());
+}
+
+TEST_CASE("SimeonLexicalBackend skips fragment geometry below the default corpus threshold",
+          "[search][simeon][catch2]") {
+    std::vector<std::pair<std::string, std::string>> docs;
+    docs.reserve(80);
+    for (int i = 0; i < 80; ++i) {
+        std::string content;
+        for (int j = 0; j < 20; ++j) {
+            if (j > 0) {
+                content.push_back(' ');
+            }
+            content += "token" + std::to_string((i + j) % 80);
+        }
+        docs.emplace_back("hash_" + std::to_string(i), std::move(content));
+    }
+    auto corpus = makeCorpus(docs);
+
+    SimeonLexicalBackend backend(SimeonLexicalBackend::Config{});
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(10)));
+    CHECK_FALSE(backend.fragmentGeometryReady());
 }
 
 TEST_CASE("SimeonLexicalBackend score returns 0 for unknown doc_ids", "[search][simeon][catch2]") {

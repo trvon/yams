@@ -187,6 +187,29 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                 setReady(readiness::kPluginsDegraded, ps.state == PluginHostState::Failed);
             } catch (...) {
             }
+            try {
+                const auto contentExtractorCount = serviceManager->getContentExtractors().size();
+                const auto symbolExtractorCount = serviceManager->getSymbolExtractors().size();
+                const auto entityExtractorCount = serviceManager->getEntityExtractors().size();
+                const bool titleExtractorReady = serviceManager->hasTitleExtractor();
+
+                std::size_t skippedPlugins = 0;
+                if (auto* abi = serviceManager->getAbiPluginHost()) {
+                    skippedPlugins = abi->getLastScanSkips().size();
+                }
+
+                setVal(metrics::kContentExtractorsLoaded, contentExtractorCount);
+                setVal(metrics::kSymbolExtractorsLoaded, symbolExtractorCount);
+                setVal(metrics::kEntityExtractorsLoaded, entityExtractorCount);
+                setVal(metrics::kTitleExtractorEnabled, titleExtractorReady ? 1 : 0);
+                setVal(metrics::kPluginSkippedCount, skippedPlugins);
+
+                setReady(readiness::kContentExtractorsReady, contentExtractorCount > 0);
+                setReady(readiness::kSymbolExtractorsReady, symbolExtractorCount > 0);
+                setReady(readiness::kEntityExtractorsReady, entityExtractorCount > 0);
+                setReady(readiness::kTitleExtractorReady, titleExtractorReady);
+            } catch (...) {
+            }
         }
     } catch (...) {
     }
@@ -449,6 +472,9 @@ void populateStatusFromSnapshot(StatusResponse& res, const MetricsSnapshot& snap
     res.retryAfterMs = computeSnapshotRetryAfter(snap, includeExtendedStatus);
     populateStatusCoreFromSnapshot(res, snap);
     populateStatusCountsFromSnapshot(res, snap, includeExtendedStatus, serviceManager, state);
+    for (const auto& [key, value] : snap.memoryBreakdownBytes) {
+        res.requestCounts[std::string{"status_mem_"} + key] = static_cast<size_t>(value);
+    }
 }
 
 } // namespace
@@ -457,6 +483,17 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
     // Minimal and safe status path using centralized DaemonMetrics when available
     StatusResponse res;
     const bool includeExtendedStatus = req.detailed;
+    auto finalizeStatusResponse = [&]() -> Response {
+        try {
+            if (state_) {
+                const auto currentCount =
+                    state_->stats.requestsProcessed.fetch_add(1, std::memory_order_relaxed) + 1;
+                res.requestsProcessed = currentCount;
+            }
+        } catch (...) {
+        }
+        return Response{res};
+    };
     try {
         // Status path returns cached snapshot - NO I/O on request path
         // DaemonMetrics background thread keeps cache hot
@@ -468,7 +505,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.version = YAMS_VERSION_STRING;
                 res.ready = false;
                 res.overallStatus = "initializing";
-                co_return res;
+                co_return finalizeStatusResponse();
             }
             populateStatusFromSnapshot(res, *snap, includeExtendedStatus, serviceManager_, state_);
         } else {
@@ -602,6 +639,40 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     vectorBackendUsable;
                 res.readinessStates[std::string(readiness::kSearchEngineHybridUsable)] =
                     hybridUsable;
+            } catch (...) {
+            }
+
+            try {
+                if (serviceManager_) {
+                    const auto contentExtractorCount =
+                        serviceManager_->getContentExtractors().size();
+                    const auto symbolExtractorCount = serviceManager_->getSymbolExtractors().size();
+                    const auto entityExtractorCount = serviceManager_->getEntityExtractors().size();
+                    const bool titleExtractorReady = serviceManager_->hasTitleExtractor();
+                    std::size_t skippedPlugins = 0;
+                    if (auto* abi = serviceManager_->getAbiPluginHost()) {
+                        skippedPlugins = abi->getLastScanSkips().size();
+                    }
+
+                    res.requestCounts[std::string(metrics::kContentExtractorsLoaded)] =
+                        contentExtractorCount;
+                    res.requestCounts[std::string(metrics::kSymbolExtractorsLoaded)] =
+                        symbolExtractorCount;
+                    res.requestCounts[std::string(metrics::kEntityExtractorsLoaded)] =
+                        entityExtractorCount;
+                    res.requestCounts[std::string(metrics::kTitleExtractorEnabled)] =
+                        titleExtractorReady ? 1 : 0;
+                    res.requestCounts[std::string(metrics::kPluginSkippedCount)] = skippedPlugins;
+
+                    res.readinessStates[std::string(readiness::kContentExtractorsReady)] =
+                        contentExtractorCount > 0;
+                    res.readinessStates[std::string(readiness::kSymbolExtractorsReady)] =
+                        symbolExtractorCount > 0;
+                    res.readinessStates[std::string(readiness::kEntityExtractorsReady)] =
+                        entityExtractorCount > 0;
+                    res.readinessStates[std::string(readiness::kTitleExtractorReady)] =
+                        titleExtractorReady;
+                }
             } catch (...) {
             }
         }
@@ -849,7 +920,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         fallback.overallStatus = "starting";
         co_return fallback;
     }
-    co_return res;
+    co_return finalizeStatusResponse();
 }
 
 boost::asio::awaitable<Response>

@@ -253,6 +253,10 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
     if (ec)
         canon = file;
 
+    const auto recordSkip = [&](std::string reason) {
+        lastSkips_.push_back(SkipInfo{canon, std::move(reason)});
+    };
+
     // Refuse world-writable plugin path (and immediate parent)
     // NOTE: On Windows, std::filesystem::permissions() returns synthetic values (all bits set)
     // that do not reflect actual NTFS ACLs. Skip this POSIX-style check on Windows.
@@ -281,6 +285,7 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
 
 #if defined(__APPLE__)
     if (!dlopen_preflight(canon.string().c_str())) {
+        recordSkip("preflight failed");
         return Error{ErrorCode::InvalidState, "preflight failed"};
     }
 #endif
@@ -289,6 +294,7 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
     if (!handle) {
         const char* err = dlerror();
         std::string msg = std::string("dlopen failed: ") + (err ? err : "unknown");
+        recordSkip(msg);
         return Error{ErrorCode::InternalError, std::move(msg)};
     }
     // Try new ABI with host_context first
@@ -309,6 +315,7 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
                 host_ctx = nullptr;
             }
             dlclose(handle);
+            recordSkip("Plugin init failed");
             return Error{ErrorCode::InvalidState, "Plugin init failed"};
         }
     } else {
@@ -320,6 +327,7 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
             int rc = init1(configJson.c_str());
             if (rc != YAMS_PLUGIN_OK) {
                 dlclose(handle);
+                recordSkip("Plugin init failed");
                 return Error{ErrorCode::InvalidState, "Plugin init failed"};
             }
         }

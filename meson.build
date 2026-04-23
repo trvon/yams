@@ -268,6 +268,42 @@ if not onnxruntime_resolved_dep.found()
   onnxruntime_resolved_dep = dependency('libonnxruntime', required: false)
 endif
 
+# Normalize ONNX Runtime linkage to the current library location instead of any stale
+# Homebrew copies that may remain under /opt/homebrew/lib after upgrades.
+if onnxruntime_resolved_dep.found()
+  onnxruntime_link_dirs = []
+  onnxruntime_pkg_libdir = onnxruntime_resolved_dep.get_variable(pkgconfig: 'libdir', default_value: '')
+  if onnxruntime_pkg_libdir != ''
+    onnxruntime_link_dirs += [onnxruntime_pkg_libdir]
+  endif
+
+  onnxruntime_cmake_prefix = onnxruntime_resolved_dep.get_variable(cmake: 'PACKAGE_PREFIX_DIR', default_value: '')
+  if onnxruntime_cmake_prefix != ''
+    onnxruntime_link_dirs += [join_paths(onnxruntime_cmake_prefix, 'lib')]
+  endif
+
+  if host_machine.system() == 'darwin'
+    brew_onnx_libdir = '/opt/homebrew/opt/onnxruntime/lib'
+    if fs.exists(brew_onnx_libdir)
+      onnxruntime_link_dirs = [brew_onnx_libdir] + onnxruntime_link_dirs
+    endif
+  endif
+
+  onnxruntime_compile_dep = onnxruntime_resolved_dep.partial_dependency(compile_args: true, includes: true)
+  onnxruntime_cpp = meson.get_compiler('cpp')
+  onnxruntime_link_dep = onnxruntime_cpp.find_library('onnxruntime', dirs: onnxruntime_link_dirs, required: false)
+  if not onnxruntime_link_dep.found()
+    onnxruntime_link_dep = onnxruntime_cpp.find_library('onnxruntime', required: false)
+  endif
+
+  if onnxruntime_link_dep.found()
+    onnxruntime_resolved_dep = declare_dependency(
+      dependencies: [onnxruntime_compile_dep, onnxruntime_link_dep],
+    )
+    message('ONNX Runtime linkage normalized via current library search path')
+  endif
+endif
+
 tbb_resolved_dep = dependency('tbb', required: false, method: 'pkg-config')
 if not tbb_resolved_dep.found()
   tbb_resolved_dep = dependency('onetbb', required: false, method: 'pkg-config')

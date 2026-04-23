@@ -2,18 +2,22 @@
 
 #include <yams/core/types.h>
 
+#include <simeon/fragment_geometry.hpp>
+
 #include <atomic>
-#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace simeon {
 class Bm25Index;
+class Encoder;
+class PmiEmbeddings;
 class QueryRouter;
 struct RouterConfig;
 enum class Recipe : std::uint8_t;
@@ -25,12 +29,10 @@ class MetadataRepository;
 
 namespace yams::search {
 
-// In-memory SAB-smooth BM25 reranker over the FTS5 candidate pool. Wraps
-// simeon::Bm25Index (third_party/simeon/include/simeon/bm25.hpp) so the
-// SearchEngine can rescore FTS5 hits with simeon's SubwordAwareBackoff
-// variant, which matches MiniLM-L6 on NFCorpus nDCG@10 and ties the best
-// pool-rerank baselines on scifact / FiQA (see
-// third_party/simeon/docs/benchmarks.md).
+// In-memory simeon lexical / fragment-geometry reranker over the FTS5 candidate
+// pool. Wraps simeon::Bm25Index plus optional PMI fragment geometry so the
+// SearchEngine can rescore FTS5 hits with simeon's strongest training-free
+// sparse retrieval stack.
 //
 // Activation is bundled with the existing simeon embedding opt-in:
 // SearchEngine instantiates this only when
@@ -74,6 +76,17 @@ public:
         std::size_t max_corpus_docs = 200'000;
         bool router_enabled = false;
         RouterPreset router_preset{};
+
+        // Default-on fragment geometry reranker. Uses the primary BM25 variant
+        // as the lexical leg and PHSS-driven fragment propagation as the
+        // semantic leg. To keep local/test corpora stable, auto-activation is
+        // gated by fragment_geometry_min_corpus_docs and a vocabulary-richness
+        // preflight; below those thresholds yams falls back to plain BM25.
+        bool fragment_geometry_enabled = true;
+        std::size_t fragment_geometry_min_corpus_docs = 1000;
+        std::uint32_t fragment_build_top_sentences = 6;
+        std::uint32_t fragment_build_signature_terms = 8;
+        simeon::FragmentGeometryConfig fragment_geometry_config{};
     };
 
     explicit SimeonLexicalBackend(Config cfg);
@@ -91,6 +104,9 @@ public:
     bool ready() const noexcept { return ready_.load(std::memory_order_acquire); }
     std::size_t doc_count() const noexcept { return doc_count_; }
     const Config& config() const noexcept { return cfg_; }
+    bool fragmentGeometryReady() const noexcept {
+        return fragment_encoder_ != nullptr && !doc_frags_.empty();
+    }
 
     // Rescore an FTS5 candidate pool. Runs the full-corpus
     // simeon::Bm25Index::score() internally and projects to the requested
@@ -134,6 +150,9 @@ private:
         index_; // variant per cfg_.variant (or SabSmooth if router on)
     std::unique_ptr<simeon::Bm25Index> atire_index_; // built only when router_enabled
     std::unique_ptr<simeon::QueryRouter> router_;    // built only when router_enabled
+    std::unique_ptr<simeon::PmiEmbeddings> pmi_;     // built only when fragment geometry is on
+    std::unique_ptr<simeon::Encoder> fragment_encoder_;
+    std::vector<std::vector<simeon::SemanticFragment>> doc_frags_;
     std::unordered_map<std::int64_t, std::uint32_t> doc_id_to_index_;
     std::size_t doc_count_ = 0;
 };

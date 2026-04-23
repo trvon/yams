@@ -3156,6 +3156,66 @@ private:
                     render_rows(std::cout, providerRows);
                 }
 
+                {
+                    auto getCount = [&](std::string_view key) -> uint64_t {
+                        auto it = status.requestCounts.find(std::string(key));
+                        return it == status.requestCounts.end() ? 0ULL : it->second;
+                    };
+                    const auto contentExtractorCount = getCount("content_extractors_loaded");
+                    const auto symbolExtractorCount = getCount("symbol_extractors_loaded");
+                    const auto entityExtractorCount = getCount("entity_extractors_loaded");
+                    const bool titleExtractorEnabled = getCount("title_extractor_enabled") != 0;
+                    const auto skippedPluginCount = getCount("plugin_skipped_count");
+                    if (contentExtractorCount > 0 || symbolExtractorCount > 0 ||
+                        entityExtractorCount > 0 || titleExtractorEnabled ||
+                        skippedPluginCount > 0) {
+                        std::cout << "\n" << section_header("Plugin Capabilities") << "\n\n";
+                        std::vector<Row> capabilityRows;
+                        capabilityRows.push_back(
+                            {"Content Extractors",
+                             paintStatus(contentExtractorCount > 0 ? Severity::Good
+                                                                   : Severity::Warn,
+                                         contentExtractorCount > 0 ? "Ready" : "Unavailable"),
+                             std::to_string(contentExtractorCount) + " loaded"});
+                        capabilityRows.push_back(
+                            {"Symbol Extractors",
+                             paintStatus(symbolExtractorCount > 0 ? Severity::Good : Severity::Warn,
+                                         symbolExtractorCount > 0 ? "Ready" : "Unavailable"),
+                             std::to_string(symbolExtractorCount) + " loaded"});
+                        capabilityRows.push_back(
+                            {"Entity Extractors",
+                             paintStatus(entityExtractorCount > 0 ? Severity::Good : Severity::Warn,
+                                         entityExtractorCount > 0 ? "Ready" : "Unavailable"),
+                             std::to_string(entityExtractorCount) + " loaded"});
+                        capabilityRows.push_back(
+                            {"Title Extractor",
+                             paintStatus(titleExtractorEnabled ? Severity::Good : Severity::Warn,
+                                         titleExtractorEnabled ? "Enabled" : "Disabled"),
+                             titleExtractorEnabled ? "entity-backed title enrichment"
+                                                   : "requires entity extractors"});
+                        if (skippedPluginCount > 0) {
+                            capabilityRows.push_back(
+                                {"Plugin Warnings",
+                                 paintStatus(Severity::Warn, "Skipped during load"),
+                                 std::to_string(skippedPluginCount) + " plugin(s)"});
+                        }
+                        render_rows(std::cout, capabilityRows);
+                    }
+                }
+
+                if (!status.skippedPlugins.empty()) {
+                    std::cout << "\n" << section_header("Skipped Plugins") << "\n\n";
+                    std::vector<Row> skippedRows;
+                    const std::size_t limit =
+                        std::min<std::size_t>(status.skippedPlugins.size(), 8);
+                    for (std::size_t i = 0; i < limit; ++i) {
+                        const auto& sp = status.skippedPlugins[i];
+                        skippedRows.push_back({sp.path.empty() ? "(unknown)" : sp.path,
+                                               paintStatus(Severity::Warn, "Skipped"), sp.reason});
+                    }
+                    render_rows(std::cout, skippedRows);
+                }
+
                 if (!status.models.empty()) {
                     std::cout << "\n" << section_header("Models") << "\n\n";
                     std::vector<Row> modelRows;

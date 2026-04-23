@@ -7,7 +7,6 @@
 
 #include <array>
 #include <cstdlib>
-#include "../../common/test_helpers_catch2.h"
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -17,6 +16,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include "../../common/test_helpers_catch2.h"
 
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/session_service.hpp>
@@ -994,7 +994,7 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     REQUIRE(std::holds_alternative<StatusResponse>(resp));
     const auto& status = std::get<StatusResponse>(resp);
 
-    const std::array<std::string_view, 23> requiredCoreReadinessKeys = {
+    const std::array<std::string_view, 27> requiredCoreReadinessKeys = {
         readiness::kIpcServer,
         readiness::kContentStore,
         readiness::kDatabase,
@@ -1011,6 +1011,10 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
         readiness::kEmbeddingDegraded,
         readiness::kPluginsReady,
         readiness::kPluginsDegraded,
+        readiness::kContentExtractorsReady,
+        readiness::kSymbolExtractorsReady,
+        readiness::kEntityExtractorsReady,
+        readiness::kTitleExtractorReady,
         readiness::kRepairService,
         readiness::kSearchEngineBuildReasonInitial,
         readiness::kSearchEngineBuildReasonRebuild,
@@ -1022,6 +1026,17 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     for (const auto key : requiredCoreReadinessKeys) {
         INFO("missing readiness key: " << key);
         REQUIRE(status.readinessStates.count(std::string(key)) > 0);
+    }
+
+    const std::array<std::string_view, 5> requiredCapabilityMetricKeys = {
+        metrics::kContentExtractorsLoaded, metrics::kSymbolExtractorsLoaded,
+        metrics::kEntityExtractorsLoaded,  metrics::kTitleExtractorEnabled,
+        metrics::kPluginSkippedCount,
+    };
+
+    for (const auto key : requiredCapabilityMetricKeys) {
+        INFO("missing capability metric key: " << key);
+        REQUIRE(status.requestCounts.count(std::string(key)) > 0);
     }
 }
 
@@ -1102,6 +1117,27 @@ TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
     REQUIRE(status.requestCounts.count(std::string(metrics::kRepairBusyTicks)) > 0);
     REQUIRE(status.requestCounts.count(std::string(metrics::kRepairRunning)) > 0);
     REQUIRE(status.requestCounts.count(std::string(metrics::kRepairInProgress)) > 0);
+}
+
+TEST_CASE("RequestDispatcher: status includes the current request in requestsProcessed",
+          "[daemon][status][requests]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_request_count_");
+
+    YamsDaemon daemon(cfg);
+    DaemonLifecycleAdapter lifecycleAdapter(&daemon);
+    StateComponent state;
+    state.stats.requestsProcessed.store(41, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
+
+    auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
+
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+    CHECK(status.requestsProcessed == 42);
+    CHECK(state.stats.requestsProcessed.load(std::memory_order_relaxed) == 42);
 }
 
 TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
@@ -6313,6 +6349,48 @@ TEST_CASE("RequestDispatcher: cold status still reports active repair work",
     CHECK(status.requestCounts.at(std::string(metrics::kRepairQueueDepth)) == 7);
 }
 
+TEST_CASE("RequestDispatcher: status mirrors memory breakdown into requestCounts",
+          "[daemon][status][memory]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_mem_breakdown_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+    RequestDispatcher dispatcher(nullptr, &svc, &state, &metrics);
+
+    auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+
+    REQUIRE(status.requestCounts.count("status_mem_rss_bytes") == 1);
+    CHECK(status.requestCounts.at("status_mem_rss_bytes") > 0);
+#if defined(__APPLE__)
+    REQUIRE(status.requestCounts.count("status_mem_phys_footprint_bytes") == 1);
+    const auto footprintBytes = status.requestCounts.at("status_mem_phys_footprint_bytes");
+    CHECK(footprintBytes > 0);
+    const auto expectedMb = static_cast<double>(footprintBytes) / (1024.0 * 1024.0);
+    CHECK(std::abs(status.memoryUsageMb - expectedMb) < std::max(1.0, expectedMb * 0.05));
+#endif
+}
+
+TEST_CASE("DaemonMetrics: repair idle and busy counters export from state",
+          "[daemon][metrics][repair]") {
+    StateComponent state;
+    state.stats.repairIdleTicks.store(3, std::memory_order_relaxed);
+    state.stats.repairBusyTicks.store(9, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_repair_counter_export_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    CHECK(snap->repairIdleTicks == 3);
+    CHECK(snap->repairBusyTicks == 9);
+}
+
 TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",
           "[daemon][status][protocol][post_ingest]") {
     StatusResponse s{};
@@ -6392,6 +6470,64 @@ TEST_CASE("StatusResponse: backpressure requestCounts keys round-trip",
     REQUIRE(decoded.requestCounts.at("kg_jobs_depth") == 3880);
     REQUIRE(decoded.requestCounts.at("kg_jobs_capacity") == 4096);
     REQUIRE(decoded.requestCounts.at("kg_jobs_fill_pct") == 95);
+}
+
+TEST_CASE("StatusResponse: memory breakdown requestCounts keys round-trip",
+          "[daemon][status][protocol][memory]") {
+    StatusResponse s{};
+    s.requestCounts["status_mem_rss_bytes"] = 123456;
+    s.requestCounts["status_mem_phys_footprint_bytes"] = 654321;
+    s.requestCounts["status_mem_malloc_allocated_bytes"] = 777777;
+
+    Message m{};
+    m.payload = Response{std::in_place_type<StatusResponse>, s};
+
+    auto enc = ProtoSerializer::encode_payload(m);
+    REQUIRE(enc.has_value());
+
+    auto dec = ProtoSerializer::decode_payload(enc.value());
+    REQUIRE(dec.has_value());
+
+    const auto& resp = std::get<Response>(dec.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+
+    const auto& decoded = std::get<StatusResponse>(resp);
+    REQUIRE(decoded.requestCounts.at("status_mem_rss_bytes") == 123456);
+    REQUIRE(decoded.requestCounts.at("status_mem_phys_footprint_bytes") == 654321);
+    REQUIRE(decoded.requestCounts.at("status_mem_malloc_allocated_bytes") == 777777);
+}
+
+TEST_CASE("AbiPluginHost: failed plugin loads are retained in last scan skips",
+          "[daemon][plugin][status][load-failure]") {
+#if defined(__APPLE__)
+    const std::filesystem::path pluginPath{"/opt/homebrew/lib/yams/plugins/yams_glint.dylib"};
+    if (!std::filesystem::exists(pluginPath)) {
+        SKIP("Installed yams_glint plugin not present");
+    }
+
+    AbiPluginHost host(nullptr);
+    const auto trustFile = makeTempDir("yams_glint_skip_status_") / "plugins.trust";
+    host.setTrustFile(trustFile);
+    REQUIRE(host.trustAdd(pluginPath.parent_path()));
+
+    const auto loadResult = host.load(pluginPath, "{}");
+    if (loadResult) {
+        SUCCEED("yams_glint loaded successfully on this machine");
+        REQUIRE(host.unload(loadResult.value().name));
+        return;
+    }
+
+    const auto skips = host.getLastScanSkips();
+    REQUIRE_FALSE(skips.empty());
+    const auto it = std::find_if(skips.begin(), skips.end(),
+                                 [&](const auto& entry) { return entry.first == pluginPath; });
+    REQUIRE(it != skips.end());
+    CHECK((it->second.find("dlopen failed") != std::string::npos ||
+           it->second.find("preflight failed") != std::string::npos ||
+           it->second.find("Plugin init failed") != std::string::npos));
+#else
+    SUCCEED("macOS-specific plugin load retention test");
+#endif
 }
 
 // =============================================================================

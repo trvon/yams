@@ -371,6 +371,9 @@ public:
         drainCallback_ = std::move(callback);
     }
 
+    [[nodiscard]] search::EntityExtractionFunc getTitleExtractor() const;
+    [[nodiscard]] bool hasTitleExtractor() const;
+
 private:
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
@@ -433,8 +436,6 @@ private:
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
                             const std::string& mimeType, const std::string& extension) const;
-    [[nodiscard]] search::EntityExtractionFunc getTitleExtractor() const;
-    [[nodiscard]] bool hasTitleExtractor() const;
     void refreshStageAvailability();
     void logStageAvailabilitySnapshot() const;
     void requeueMissedEntityExtractions();

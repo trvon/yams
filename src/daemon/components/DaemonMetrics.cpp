@@ -53,11 +53,17 @@
 #ifdef __APPLE__
 #include <unistd.h>
 #include <mach/mach.h>
+#include <malloc/malloc.h>
 #endif
 
 namespace yams::daemon {
 
 namespace {
+struct MemoryUsageSample {
+    double memoryUsageMb{0.0};
+    std::map<std::string, std::uint64_t> breakdownBytes;
+};
+
 // Read Proportional Set Size (PSS) in kB from smaps_rollup when available (Linux), else 0.
 static std::uint64_t readPssKb() {
 #if defined(_WIN32)
@@ -115,6 +121,74 @@ static std::uint64_t readRssKb() {
     }
     return 0;
 #endif
+}
+
+static MemoryUsageSample sampleMemoryUsage() {
+    MemoryUsageSample sample;
+
+    const std::uint64_t pss_kb = readPssKb();
+    const std::uint64_t rss_kb = readRssKb();
+    if (pss_kb > 0) {
+        sample.memoryUsageMb = static_cast<double>(pss_kb) / 1024.0;
+        sample.breakdownBytes["pss_bytes"] = pss_kb * 1024ull;
+    } else if (rss_kb > 0) {
+        sample.memoryUsageMb = static_cast<double>(rss_kb) / 1024.0;
+    }
+    if (rss_kb > 0) {
+        sample.breakdownBytes["rss_bytes"] = rss_kb * 1024ull;
+    }
+
+#if defined(__APPLE__)
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) ==
+        KERN_SUCCESS) {
+        if (info.resident_size > 0) {
+            sample.breakdownBytes["rss_bytes"] = info.resident_size;
+        }
+        if (info.resident_size_peak > 0) {
+            sample.breakdownBytes["rss_peak_bytes"] = info.resident_size_peak;
+        }
+        if (info.phys_footprint > 0) {
+            sample.breakdownBytes["phys_footprint_bytes"] = info.phys_footprint;
+            sample.memoryUsageMb = static_cast<double>(info.phys_footprint) / (1024.0 * 1024.0);
+        }
+        if (info.internal > 0) {
+            sample.breakdownBytes["internal_bytes"] = info.internal;
+        }
+        if (info.external > 0) {
+            sample.breakdownBytes["external_bytes"] = info.external;
+        }
+        if (info.reusable > 0) {
+            sample.breakdownBytes["reusable_bytes"] = info.reusable;
+        }
+        if (info.compressed > 0) {
+            sample.breakdownBytes["compressed_bytes"] = info.compressed;
+        }
+        if (info.compressed_peak > 0) {
+            sample.breakdownBytes["compressed_peak_bytes"] = info.compressed_peak;
+        }
+    }
+
+    malloc_statistics_t mallocStats{};
+    if (auto* defaultZone = malloc_default_zone(); defaultZone != nullptr) {
+        malloc_zone_statistics(defaultZone, &mallocStats);
+        if (mallocStats.size_allocated > 0) {
+            sample.breakdownBytes["malloc_allocated_bytes"] = mallocStats.size_allocated;
+        }
+        if (mallocStats.size_in_use > 0) {
+            sample.breakdownBytes["malloc_in_use_bytes"] = mallocStats.size_in_use;
+        }
+        if (mallocStats.max_size_in_use > 0) {
+            sample.breakdownBytes["malloc_peak_in_use_bytes"] = mallocStats.max_size_in_use;
+        }
+        if (mallocStats.blocks_in_use > 0) {
+            sample.breakdownBytes["malloc_blocks_in_use"] = mallocStats.blocks_in_use;
+        }
+    }
+#endif
+
+    return sample;
 }
 
 template <typename NumeratorT, typename DenominatorT>
@@ -353,23 +427,12 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             // Poll CPU and memory here, and cache the results.
             {
                 double cpu = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
-                const std::uint64_t pss_kb = readPssKb();
-                const std::uint64_t rss_kb = readRssKb();
-                double mem_mb = 0.0;
-                std::map<std::string, std::uint64_t> mem_breakdown;
-                if (pss_kb > 0) {
-                    mem_mb = static_cast<double>(pss_kb) / 1024.0;
-                    mem_breakdown["pss_bytes"] = pss_kb * 1024ull;
-                } else {
-                    mem_mb = static_cast<double>(rss_kb) / 1024.0;
-                }
-                if (rss_kb > 0)
-                    mem_breakdown["rss_bytes"] = rss_kb * 1024ull;
+                auto memSample = sampleMemoryUsage();
 
                 std::unique_lock lock(cacheMutex_);
                 cached_.cpuUsagePercent = cpu;
-                cached_.memoryUsageMb = mem_mb;
-                cached_.memoryBreakdownBytes = mem_breakdown;
+                cached_.memoryUsageMb = memSample.memoryUsageMb;
+                cached_.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
             }
 
             // Update expensive DB counts in background (separate from snapshot cache)
@@ -1366,11 +1429,21 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
 
     // OS resource hints (fast probes)
     try {
-        // Read from cache (no I/O on hot path)
-        std::shared_lock lock(cacheMutex_);
-        out.memoryUsageMb = cached_.memoryUsageMb;
-        out.cpuUsagePercent = cached_.cpuUsagePercent;
-        out.memoryBreakdownBytes = cached_.memoryBreakdownBytes;
+        bool needMemoryFallback = false;
+        {
+            // Read from cache (no I/O on hot path) when the background polling loop has populated
+            // it.
+            std::shared_lock lock(cacheMutex_);
+            out.memoryUsageMb = cached_.memoryUsageMb;
+            out.cpuUsagePercent = cached_.cpuUsagePercent;
+            out.memoryBreakdownBytes = cached_.memoryBreakdownBytes;
+            needMemoryFallback = (out.memoryUsageMb <= 0.0 && out.memoryBreakdownBytes.empty());
+        }
+        if (needMemoryFallback) {
+            auto memSample = sampleMemoryUsage();
+            out.memoryUsageMb = memSample.memoryUsageMb;
+            out.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
+        }
 #if defined(TRACY_ENABLE)
         TracyPlot("daemon.mem.mb", out.memoryUsageMb);
         TracyPlot("daemon.cpu.pct", out.cpuUsagePercent);

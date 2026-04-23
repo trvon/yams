@@ -570,6 +570,15 @@ else
       args: ['AbiModelProviderAdapter acquires SlotGuard during real embedding', '--allow-running-no-tests'],
     )
 
+    test('onnx_tuning_config_backend',
+      onnx_tuning_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'onnx', 'config'],
+      env: _kg_test_env,
+      is_parallel: false,
+      timeout: 300,
+      args: ['Config selecting onnx backend uses ONNX provider for embeddings', '--allow-running-no-tests'],
+    )
+
     test('onnx_tuning_timeout',
       onnx_tuning_integration_exe,
       suite: ['integration', 'daemon', 'catch2', 'onnx', 'timeout'],

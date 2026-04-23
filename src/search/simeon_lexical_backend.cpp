@@ -2,9 +2,12 @@
 
 #include <yams/metadata/metadata_repository.h>
 
-#include <simeon/bm25.hpp>
-#include <simeon/query_router.hpp>
 #include <spdlog/spdlog.h>
+#include <simeon/bm25.hpp>
+#include <simeon/fragment_geometry.hpp>
+#include <simeon/pmi.hpp>
+#include <simeon/query_router.hpp>
+#include <simeon/simeon.hpp>
 
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
@@ -12,12 +15,15 @@
 #include <malloc.h>
 #endif
 
+#include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -55,6 +61,28 @@ simeon::RouterConfig toRouterConfig(const SimeonLexicalBackend::RouterPreset& p)
     rc.atire_min_scq = p.atire_min_scq;
     rc.atire_max_clarity = p.atire_max_clarity;
     return rc;
+}
+
+std::size_t estimateUniqueWordCount(std::span<const std::string> docs) {
+    std::unordered_set<std::string> uniq;
+    std::string tok;
+    for (const auto& doc : docs) {
+        tok.clear();
+        for (unsigned char c : doc) {
+            if (std::isalnum(c)) {
+                tok.push_back(static_cast<char>(std::tolower(c)));
+            } else if (!tok.empty()) {
+                if (tok.size() >= 3) {
+                    uniq.insert(tok);
+                }
+                tok.clear();
+            }
+        }
+        if (!tok.empty() && tok.size() >= 3) {
+            uniq.insert(tok);
+        }
+    }
+    return uniq.size();
 }
 
 } // namespace
@@ -133,6 +161,8 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
 
         std::unordered_map<std::int64_t, std::uint32_t> mapping;
         mapping.reserve(ids.size());
+        std::vector<std::string> corpus_texts;
+        corpus_texts.reserve(ids.size());
 
         std::uint32_t dense = 0;
         std::size_t missing = 0;
@@ -152,6 +182,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             if (atire) {
                 atire->add_doc(content.contentText);
             }
+            corpus_texts.push_back(content.contentText);
             mapping.emplace(docId, dense++);
         }
         if (stop.stop_requested()) {
@@ -176,6 +207,63 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 std::make_unique<simeon::QueryRouter>(rindex, toRouterConfig(cfg_.router_preset));
         }
 
+        std::unique_ptr<simeon::PmiEmbeddings> pmi;
+        std::unique_ptr<simeon::Encoder> fragmentEncoder;
+        std::vector<std::vector<simeon::SemanticFragment>> docFrags;
+        const std::size_t uniqueWordCount = estimateUniqueWordCount(corpus_texts);
+        if (cfg_.fragment_geometry_enabled &&
+            corpus_texts.size() >= cfg_.fragment_geometry_min_corpus_docs &&
+            uniqueWordCount >= 64) {
+            try {
+                std::vector<std::string_view> seedViews;
+                seedViews.reserve(corpus_texts.size());
+                for (const auto& doc : corpus_texts) {
+                    seedViews.emplace_back(doc);
+                }
+
+                simeon::PmiConfig pcfg;
+                pcfg.target_rank = 32;
+                pcfg.min_token_count = 5;
+                pcfg.max_vocab_size = 20'000;
+                auto learned = simeon::PmiEmbeddings::learn(
+                    std::span<const std::string_view>(seedViews), pcfg);
+
+                simeon::EncoderConfig ecfg;
+                ecfg.ngram_mode = simeon::NGramMode::WordOnly;
+                ecfg.ngram_min = 1;
+                ecfg.ngram_max = 1;
+                ecfg.sketch_dim = 0;
+                ecfg.output_dim = learned.dim();
+                ecfg.projection = simeon::ProjectionMode::None;
+                ecfg.l2_normalize = true;
+
+                pmi = std::make_unique<simeon::PmiEmbeddings>(std::move(learned));
+                ecfg.pmi_rows = pmi.get();
+                fragmentEncoder = std::make_unique<simeon::Encoder>(ecfg);
+
+                docFrags.reserve(corpus_texts.size());
+                for (const auto& doc : corpus_texts) {
+                    if ((docFrags.size() & 0x3ffu) == 0u && stop.stop_requested()) {
+                        building_.store(false, std::memory_order_release);
+                        return;
+                    }
+                    docFrags.push_back(simeon::build_doc_semantic_fragments(
+                        *fragmentEncoder, doc, *primary, cfg_.fragment_build_top_sentences,
+                        cfg_.fragment_build_signature_terms));
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("[simeon-lexical] fragment geometry disabled: {}", e.what());
+                pmi.reset();
+                fragmentEncoder.reset();
+                docFrags.clear();
+            }
+        } else if (cfg_.fragment_geometry_enabled && !corpus_texts.empty()) {
+            spdlog::info("[simeon-lexical] fragment geometry skipped: corpus {} docs / {} unique "
+                         "words below thresholds (min_docs={}, min_unique_words=64)",
+                         corpus_texts.size(), uniqueWordCount,
+                         cfg_.fragment_geometry_min_corpus_docs);
+        }
+
         if (stop.stop_requested()) {
             building_.store(false, std::memory_order_release);
             return;
@@ -187,14 +275,18 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         index_ = std::move(primary);
         atire_index_ = std::move(atire);
         router_ = std::move(router);
+        pmi_ = std::move(pmi);
+        fragment_encoder_ = std::move(fragmentEncoder);
+        doc_frags_ = std::move(docFrags);
         doc_id_to_index_ = std::move(mapping);
         doc_count_ = dense;
         ready_.store(true, std::memory_order_release);
         building_.store(false, std::memory_order_release);
 
-        spdlog::info("[simeon-lexical] ready: variant={} router={} docs={} missing={} build_ms={}",
-                     variantLabel(cfg_.variant), cfg_.router_enabled ? "on" : "off", dense, missing,
-                     buildMs);
+        spdlog::info("[simeon-lexical] ready: variant={} router={} fragment_geometry={} docs={} "
+                     "missing={} build_ms={}",
+                     variantLabel(cfg_.variant), cfg_.router_enabled ? "on" : "off",
+                     fragment_encoder_ ? "on" : "off", dense, missing, buildMs);
         // Release the transient tf / posting scratch pages back to the OS.
         // BM25 index construction churns hundreds of MB of short-lived
         // allocations (per-doc tf maps, rehashes in FlatHashMapU64); macOS
@@ -216,14 +308,29 @@ SimeonLexicalBackend::score(std::string_view query,
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
 
-    std::vector<float> full(doc_count_, 0.0f);
-    index_->score(query, std::span<float>{full});
+    std::vector<float> full;
+    std::vector<float> lexical;
+    if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
+        full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
+                                               cfg_.fragment_geometry_config);
+        lexical.assign(doc_count_, 0.0f);
+        index_->score(query, std::span<float>{lexical});
+    } else {
+        full.assign(doc_count_, 0.0f);
+        index_->score(query, std::span<float>{full});
+    }
 
     std::vector<float> out;
     out.reserve(candidate_doc_ids.size());
     for (auto id : candidate_doc_ids) {
         auto it = doc_id_to_index_.find(id);
-        out.push_back(it == doc_id_to_index_.end() ? 0.0f : full[it->second]);
+        if (it == doc_id_to_index_.end()) {
+            out.push_back(0.0f);
+            continue;
+        }
+        const auto di = it->second;
+        const float score = std::isfinite(full[di]) ? full[di] : lexical[di];
+        out.push_back(score);
     }
     return out;
 }
@@ -259,15 +366,30 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
     // else (Bm25SabSmooth, CascadeLinearAlpha) → primary index, which is
     // SabSmooth by convention when routing is on.
 
-    std::vector<float> full(doc_count_, 0.0f);
-    chosen->score(query, std::span<float>{full});
+    std::vector<float> full;
+    std::vector<float> lexical;
+    if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
+        full = simeon::score_fragment_geometry(query, *chosen, *fragment_encoder_, doc_frags_,
+                                               cfg_.fragment_geometry_config);
+        lexical.assign(doc_count_, 0.0f);
+        chosen->score(query, std::span<float>{lexical});
+    } else {
+        full.assign(doc_count_, 0.0f);
+        chosen->score(query, std::span<float>{full});
+    }
 
     RescoreDecision decision;
     decision.recipe_name = recipe_label;
     decision.scores.reserve(candidate_doc_ids.size());
     for (auto id : candidate_doc_ids) {
         auto it = doc_id_to_index_.find(id);
-        decision.scores.push_back(it == doc_id_to_index_.end() ? 0.0f : full[it->second]);
+        if (it == doc_id_to_index_.end()) {
+            decision.scores.push_back(0.0f);
+            continue;
+        }
+        const auto di = it->second;
+        const float score = std::isfinite(full[di]) ? full[di] : lexical[di];
+        decision.scores.push_back(score);
     }
     return decision;
 }
