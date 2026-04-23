@@ -1220,6 +1220,25 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     });
     REQUIRE(settled);
 
+    const bool vectorsSettled = waitForCondition(std::chrono::seconds(10), [&]() {
+        for (const auto& seeded : docs) {
+            auto docRes = meta->getDocumentByHash(seeded.hash);
+            if (!docRes.has_value() || !docRes.value().has_value()) {
+                return false;
+            }
+            const auto vectors = vectorDb->getVectorsByDocument(seeded.hash);
+            if (seeded.expectEmbedding) {
+                if (vectors.empty()) {
+                    return false;
+                }
+            } else if (docRes.value()->repairStatus != metadata::RepairStatus::Failed) {
+                return false;
+            }
+        }
+        return true;
+    });
+    REQUIRE(vectorsSettled);
+
     for (const auto& seeded : docs) {
         auto docRes = meta->getDocumentByHash(seeded.hash);
         REQUIRE(docRes.has_value());

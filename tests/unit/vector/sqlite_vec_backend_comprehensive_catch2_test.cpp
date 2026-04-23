@@ -21,9 +21,9 @@
 
 #include <sqlite3.h>
 #include <yams/vector/sqlite_vec_backend.h>
-#include <yams/vector/vector_utils.h>
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_schema_migration.h>
+#include <yams/vector/vector_utils.h>
 
 using namespace yams::vector;
 using Catch::Matchers::WithinAbs;
@@ -528,6 +528,31 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 search engine b
     sqlite3_bind_text(stmt, 1, "vectors_64_vec0", -1, SQLITE_TRANSIENT);
     CHECK(sqlite3_step(stmt) == SQLITE_ROW);
     sqlite3_finalize(stmt);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 PHSS search path basic",
+                 "[vector][backend][search][vec0][phss][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::Vec0L2;
+    config.vec0_phss_enabled = true;
+    config.vec0_phss_candidates = 8;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    for (int i = 0; i < 12; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        REQUIRE(backend.insertVector(createVectorRecord("vec0_phss_" + std::to_string(i), emb))
+                    .has_value());
+    }
+
+    auto query = createEmbedding(64, 1.0f);
+    auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+    REQUIRE(searchResult.has_value());
+    REQUIRE(searchResult.value().size() == 5);
+    CHECK(searchResult.value()[0].chunk_id == "chunk_vec0_phss_0");
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend Simeon PQ search engine basic",

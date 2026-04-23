@@ -1,8 +1,8 @@
 #include <yams/vector/sqlite_vec_backend.h>
-#include <yams/vector/vector_utils.h>
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_schema_migration.h>
+#include <yams/vector/vector_utils.h>
 
 #include <yams/daemon/components/TuneAdvisor.h>
 
@@ -32,11 +32,11 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
+#include <simeon/pq.hpp>
 #include <sqlite-vec-cpp/distances/cosine.hpp>
 #include <sqlite-vec-cpp/distances/inner_product.hpp>
 #include <sqlite-vec-cpp/distances/l2.hpp>
 #include <sqlite-vec-cpp/sqlite/registration.hpp>
-#include <simeon/pq.hpp>
 
 namespace yams::vector {
 
@@ -3266,8 +3266,12 @@ ORDER BY rowid
         const size_t query_dim = query_embedding.size();
 
         sqlite3_stmt* stmt = nullptr;
-        const std::string sql = "SELECT rowid, distance FROM \"" + vec0TableName(query_dim) +
-                                "\" WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance";
+        std::string sql = "SELECT rowid, distance FROM \"" + vec0TableName(query_dim) +
+                          "\" WHERE embedding MATCH ?1 AND k = ?2";
+        if (config_.vec0_phss_enabled) {
+            sql += " AND phss = ?3 AND phss_candidates = ?4";
+        }
+        sql += " ORDER BY distance";
         int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
             spdlog::warn("[vec0] Failed to prepare search query for dim {}: {}", query_dim,
@@ -3280,6 +3284,11 @@ ORDER BY rowid
                           static_cast<int>(query_embedding.size() * sizeof(float)),
                           SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(k));
+        if (config_.vec0_phss_enabled) {
+            sqlite3_bind_int(stmt, 3, 1);
+            sqlite3_bind_int64(
+                stmt, 4, static_cast<sqlite3_int64>(std::max(k, config_.vec0_phss_candidates)));
+        }
 
         std::vector<VectorRecord> records;
         records.reserve(k);

@@ -49,6 +49,7 @@ jobs:
           }
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/simeon
           retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
 
       - name: Determine version
@@ -175,6 +176,7 @@ jobs:
           }
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/simeon
           retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
 
       - name: Verify Docker daemon is running

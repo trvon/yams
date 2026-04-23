@@ -271,6 +271,8 @@ TEST_CASE("EmbedDocuments request model handling with daemon harness",
     opts.autoLoadPlugins = false;
 
     SECTION("Repro: fails when neither request nor service config provides a model") {
+        yams::test::ScopedEnvVar embedBackendEnv("YAMS_EMBED_BACKEND",
+                                                 std::optional<std::string>{"daemon"});
         // Isolate from host config — prevent resolvePreferredModel() from reading
         // ~/.config/yams/config.toml which would defeat the "no model" scenario.
         auto emptyCfgDir = makeUniqueTempDir("codex_embed_nocfg_");

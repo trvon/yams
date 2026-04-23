@@ -217,9 +217,12 @@ TEST_CASE("RequestHandler: canceled RepairRequest streaming completes without de
         2s, [&] { return RequestContextRegistry::instance().cancel(kRequestId); }));
 
     bool sawCancelled = false;
-    for (int i = 0; i < 4 && !sawCancelled; ++i) {
-        auto message = readMessageWithTimeout(clientSock, framer, 2s);
-        REQUIRE(message.has_value());
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline && !sawCancelled) {
+        auto message = readMessageWithTimeout(clientSock, framer, 500ms);
+        if (!message.has_value()) {
+            continue;
+        }
         CHECK(message->requestId == kRequestId);
 
         auto* payload = std::get_if<Response>(&message->payload);

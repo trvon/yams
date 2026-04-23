@@ -2,12 +2,12 @@
 #include <spdlog/spdlog.h>
 #include <fstream>
 #include <yams/core/atomic_utils.h>
-#include <yams/vector/vector_utils.h>
 #include <yams/profiling.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_backend.h>
 #include <yams/vector/vector_database.h>
+#include <yams/vector/vector_utils.h>
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +40,8 @@ public:
         backend_config.turboquant_bits = config_.turboquant_bits;
         backend_config.turboquant_seed = config_.turboquant_seed;
         backend_config.search_engine = config_.search_engine;
+        backend_config.vec0_phss_enabled = config_.vec0_phss_enabled;
+        backend_config.vec0_phss_candidates = config_.vec0_phss_candidates;
         backend_config.simeon_pq_subquantizers = config_.simeon_pq_subquantizers;
         backend_config.simeon_pq_centroids = config_.simeon_pq_centroids;
         backend_config.simeon_pq_train_limit = config_.simeon_pq_train_limit;

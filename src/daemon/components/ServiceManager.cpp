@@ -1846,7 +1846,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         }
                         return false;
                     }();
-                    if (auto graphComponent = getGraphComponent()) {
+                    const bool repairActive =
+                        state_.stats.repairInProgress.load(std::memory_order_relaxed);
+                    if (repairActive) {
+                        spdlog::info("[ServiceManager] Skipping drain-triggered graph maintenance "
+                                     "while repair RPC is active");
+                    } else if (auto graphComponent = getGraphComponent()) {
                         auto maintenance = graphComponent->maintainSemanticTopology(false);
                         if (!maintenance) {
                             spdlog::warn(
@@ -1858,7 +1863,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                          maintenance.value().semanticEdgesPruned);
                         }
                     }
-                    if (!disableDrainTopologyRebuild) {
+                    if (!disableDrainTopologyRebuild && !repairActive) {
                         requestTopologyRebuild("post_ingest_drain");
                     }
                     const auto lexicalDelta = searchEngineManager_.getLexicalDeltaSnapshot();

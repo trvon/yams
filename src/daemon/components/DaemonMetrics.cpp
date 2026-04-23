@@ -64,6 +64,25 @@ struct MemoryUsageSample {
     std::map<std::string, std::uint64_t> breakdownBytes;
 };
 
+bool allocatorBreakdownEnabled() {
+#ifdef YAMS_TESTING
+    if (const char* env = std::getenv("YAMS_STATUS_ALLOCATOR_BREAKDOWN")) {
+        return std::string_view(env) == "1" || std::string_view(env) == "true" ||
+               std::string_view(env) == "on";
+    }
+    return false;
+#else
+    static const bool enabled = []() {
+        if (const char* env = std::getenv("YAMS_STATUS_ALLOCATOR_BREAKDOWN")) {
+            return std::string_view(env) == "1" || std::string_view(env) == "true" ||
+                   std::string_view(env) == "on";
+        }
+        return false;
+    }();
+    return enabled;
+#endif
+}
+
 // Read Proportional Set Size (PSS) in kB from smaps_rollup when available (Linux), else 0.
 static std::uint64_t readPssKb() {
 #if defined(_WIN32)
@@ -123,7 +142,7 @@ static std::uint64_t readRssKb() {
 #endif
 }
 
-static MemoryUsageSample sampleMemoryUsage() {
+static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown) {
     MemoryUsageSample sample;
 
     const std::uint64_t pss_kb = readPssKb();
@@ -170,20 +189,22 @@ static MemoryUsageSample sampleMemoryUsage() {
         }
     }
 
-    malloc_statistics_t mallocStats{};
-    if (auto* defaultZone = malloc_default_zone(); defaultZone != nullptr) {
-        malloc_zone_statistics(defaultZone, &mallocStats);
-        if (mallocStats.size_allocated > 0) {
-            sample.breakdownBytes["malloc_allocated_bytes"] = mallocStats.size_allocated;
-        }
-        if (mallocStats.size_in_use > 0) {
-            sample.breakdownBytes["malloc_in_use_bytes"] = mallocStats.size_in_use;
-        }
-        if (mallocStats.max_size_in_use > 0) {
-            sample.breakdownBytes["malloc_peak_in_use_bytes"] = mallocStats.max_size_in_use;
-        }
-        if (mallocStats.blocks_in_use > 0) {
-            sample.breakdownBytes["malloc_blocks_in_use"] = mallocStats.blocks_in_use;
+    if (includeAllocatorBreakdown) {
+        malloc_statistics_t mallocStats{};
+        if (auto* defaultZone = malloc_default_zone(); defaultZone != nullptr) {
+            malloc_zone_statistics(defaultZone, &mallocStats);
+            if (mallocStats.size_allocated > 0) {
+                sample.breakdownBytes["malloc_allocated_bytes"] = mallocStats.size_allocated;
+            }
+            if (mallocStats.size_in_use > 0) {
+                sample.breakdownBytes["malloc_in_use_bytes"] = mallocStats.size_in_use;
+            }
+            if (mallocStats.max_size_in_use > 0) {
+                sample.breakdownBytes["malloc_peak_in_use_bytes"] = mallocStats.max_size_in_use;
+            }
+            if (mallocStats.blocks_in_use > 0) {
+                sample.breakdownBytes["malloc_blocks_in_use"] = mallocStats.blocks_in_use;
+            }
         }
     }
 #endif
@@ -427,7 +448,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             // Poll CPU and memory here, and cache the results.
             {
                 double cpu = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
-                auto memSample = sampleMemoryUsage();
+                auto memSample = sampleMemoryUsage(false);
 
                 std::unique_lock lock(cacheMutex_);
                 cached_.cpuUsagePercent = cpu;
@@ -1440,7 +1461,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             needMemoryFallback = (out.memoryUsageMb <= 0.0 && out.memoryBreakdownBytes.empty());
         }
         if (needMemoryFallback) {
-            auto memSample = sampleMemoryUsage();
+            auto memSample = sampleMemoryUsage(detailed && allocatorBreakdownEnabled());
             out.memoryUsageMb = memSample.memoryUsageMb;
             out.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
         }

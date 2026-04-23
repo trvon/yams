@@ -47,6 +47,8 @@ public:
         uint8_t turboquant_bits = 4;
         uint64_t turboquant_seed = 42;
         VectorSearchEngine search_engine = VectorSearchEngine::SimeonPqAdc;
+        bool vec0_phss_enabled = false;
+        size_t vec0_phss_candidates = 64;
         size_t simeon_pq_subquantizers = 32;
         size_t simeon_pq_centroids = 256;
         size_t simeon_pq_train_limit = 4096;

@@ -183,6 +183,7 @@ jobs:
           # Init submodules required for the build
           # Skip other submodules that use SSH URLs requiring authentication
           retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/simeon
           retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
       - name: Skip non-linux entries under act (build)
         if: github.actor == 'nektos/act' && !startsWith(matrix.os, 'linux-hosted')

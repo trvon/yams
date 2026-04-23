@@ -38,6 +38,7 @@ jobs:
         shell: bash
         run: |
           git submodule update --init --depth 1 third_party/sqlite-vec-cpp || true
+          git submodule update --init --depth 1 third_party/simeon || true
           git submodule update --init --depth 1 third_party/symspell || true
 
       - name: Install static analysis tools
@@ -204,6 +205,7 @@ jobs:
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           # Only init submodules required for the build
           retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/simeon
           retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'

@@ -97,9 +97,10 @@ jobs:
           }
           # Force HTTPS for GitHub to handle SSH submodule URLs in CI
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          # Only init sqlite-vec-cpp which is required for the build
+          # Only init the build-required third_party submodules
           # Skip other submodules that use SSH URLs requiring authentication
           retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/simeon
           retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
 
       - name: Cache Conan packages (warm)
