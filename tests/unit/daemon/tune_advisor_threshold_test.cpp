@@ -1009,3 +1009,23 @@ TEST_CASE("computeCpuThrottleDelayMs clamps to max 25ms", "[daemon][governance][
     int32_t delay = TuneAdvisor::computeCpuThrottleDelayMs(100.0);
     CHECK(delay <= 25);
 }
+
+TEST_CASE("cpuHighThresholdPercent setter overrides profile and env",
+          "[daemon][governance][catch2]") {
+    TuneAdvisor::resetCpuHighThresholdPercentOverride();
+
+    SECTION("setter overrides profile default") {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        TuneAdvisor::setCpuHighThresholdPercent(72.0);
+        CHECK(TuneAdvisor::cpuHighThresholdPercent() == Catch::Approx(72.0));
+        TuneAdvisor::resetCpuHighThresholdPercentOverride();
+    }
+
+    SECTION("setter overrides env var") {
+        ScopedEnvVar envGuard("YAMS_CPU_HIGH_PCT", "55");
+        CHECK(TuneAdvisor::cpuHighThresholdPercent() == Catch::Approx(55.0));
+        TuneAdvisor::setCpuHighThresholdPercent(68.0);
+        CHECK(TuneAdvisor::cpuHighThresholdPercent() == Catch::Approx(68.0));
+        TuneAdvisor::resetCpuHighThresholdPercentOverride();
+    }
+}

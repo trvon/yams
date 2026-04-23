@@ -851,6 +851,30 @@ jobs:
           fi
           echo "STAGE_DIR=$BD/stage" >> "$GITHUB_ENV"
 
+      - name: Prune staged runtime payload (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${STAGE_DIR:?STAGE_DIR not set}"
+
+          PREFIX="${YAMS_INSTALL_PREFIX:-}"
+          if [ -z "$PREFIX" ]; then
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              PREFIX="/usr"
+            else
+              PREFIX="/usr/local"
+            fi
+          fi
+
+          INSTALL_ROOT="$STAGE_DIR$PREFIX"
+          if [ ! -d "$INSTALL_ROOT" ]; then
+            echo "Missing staged install root: $INSTALL_ROOT" >&2
+            exit 1
+          fi
+
+          bash scripts/prune-runtime-install.sh "$INSTALL_ROOT"
+
       - name: Verify staged runtime assets (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash

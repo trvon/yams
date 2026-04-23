@@ -16,6 +16,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
+#include <yams/app/services/session_service.hpp>
 #include <yams/mcp/mcp_server.h>
 
 #include "../../common/daemon_preflight.h"
@@ -23,6 +24,12 @@
 #include "../../common/fixture_manager.h"
 
 namespace {
+
+void clear_current_session_state() {
+    ::unsetenv("YAMS_SESSION_CURRENT");
+    auto sessionSvc = yams::app::services::makeSessionService(nullptr);
+    sessionSvc->close();
+}
 
 /// Local daemon fixture for GTest smoke tests. Replaces the former
 /// tests/common/daemon_test_fixture.h header that was deprecated in the
@@ -37,6 +44,7 @@ struct LocalDaemonFixture {
     std::thread runLoopThread_;
 
     LocalDaemonFixture() {
+        clear_current_session_state();
         auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         root_ = std::filesystem::temp_directory_path() / ("yams_test_" + unique);
         storageDir_ = root_ / "storage";
@@ -66,6 +74,7 @@ struct LocalDaemonFixture {
     }
 
     ~LocalDaemonFixture() {
+        clear_current_session_state();
         if (daemon_) {
             daemon_->stop();
             if (runLoopThread_.joinable()) {
@@ -247,6 +256,66 @@ bool wait_for_list_tag_match(MCPServer& server, const std::vector<std::string>& 
     }
     return false;
 }
+
+bool wait_for_list_name_match(MCPServer& server, const std::string& expectedName,
+                              std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    using namespace std::chrono_literals;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto res = server.callToolPublic(
+            "list", json{{"name", expectedName}, {"paths_only", false}, {"limit", 20}});
+        if (res.is_object() && !res.contains("error")) {
+            auto data = extract_tool_data(res);
+            if (data.has_value() && data->contains("documents") &&
+                (*data)["documents"].is_array()) {
+                std::vector<std::string> listedNames;
+                for (const auto& doc : (*data)["documents"]) {
+                    listedNames.push_back(doc.value("name", std::string{}));
+                }
+                if (contains_subpath(listedNames, expectedName)) {
+                    return true;
+                }
+            }
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    return false;
+}
+
+bool wait_for_get_name_match(MCPServer& server, const std::string& expectedName,
+                             std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    using namespace std::chrono_literals;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto res =
+            server.callToolPublic("get", json{{"name", expectedName}, {"include_content", false}});
+        if (res.is_object() && !res.contains("error")) {
+            return true;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    return false;
+}
+
+bool wait_for_grep_match_count(MCPServer& server, const std::string& pattern, size_t minMatchCount,
+                               std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    using namespace std::chrono_literals;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto res = server.callToolPublic(
+            "grep", json{{"pattern", pattern}, {"use_session", false}, {"with_filename", true}});
+        if (res.is_object() && !res.contains("error")) {
+            auto data = extract_tool_data(res);
+            if (data.has_value() && data->contains("match_count") &&
+                (*data)["match_count"].is_number_unsigned() &&
+                (*data)["match_count"].get<size_t>() >= minMatchCount) {
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    return false;
+}
 } // namespace
 
 // Linux-only: relies on AF_UNIX socket semantics and short XDG_RUNTIME_DIR
@@ -337,10 +406,12 @@ TEST_CASE("MCPDoctorPositiveSmoke.DoctorReportsReadyWithLiveDaemon",
 // Test fixture for MCP smoke tests with proper isolation
 struct MCPSmokeFixture {
     MCPSmokeFixture() {
+        clear_current_session_state();
         ::unsetenv("YAMS_SOCKET_PATH");
         ::unsetenv("YAMS_DAEMON_SOCKET");
     }
     ~MCPSmokeFixture() {
+        clear_current_session_state();
         ::unsetenv("YAMS_SOCKET_PATH");
         ::unsetenv("YAMS_DAEMON_SOCKET");
     }
@@ -408,6 +479,8 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "DocOpsRoundTrip", "[smoke][mcpdocopsfixture]
     REQUIRE(addRes.is_object());
     INFO(addRes.dump());
     REQUIRE_FALSE(addRes.contains("error"));
+    INFO("name resolution wait failed for mcp_smoke.txt");
+    REQUIRE(wait_for_get_name_match(svr, "mcp_smoke.txt"));
 
     // 2) list by name (paths_only allowed); tolerate structure variations
     auto listRes = svr.callToolPublic(
@@ -475,6 +548,8 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "SearchAndListTagFiltering", "[smoke][mcpdoco
     REQUIRE(addRed.is_object());
     INFO(addRed.dump());
     REQUIRE_FALSE(addRed.contains("error"));
+    INFO("name resolution wait failed for " << redName);
+    REQUIRE(wait_for_get_name_match(server, redName));
 
     auto addBlue = server.callToolPublic(
         "add", json{{"content", "blue content " + queryToken}, {"name", blueName}});
@@ -482,6 +557,8 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "SearchAndListTagFiltering", "[smoke][mcpdoco
     REQUIRE(addBlue.is_object());
     INFO(addBlue.dump());
     REQUIRE_FALSE(addBlue.contains("error"));
+    INFO("name resolution wait failed for " << blueName);
+    REQUIRE(wait_for_get_name_match(server, blueName));
 
     auto tagRed = server.callToolPublic(
         "update",
@@ -625,6 +702,8 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "SessionStartAloneDoesNotNarrowGrepResults",
     REQUIRE(sessionStart.is_object());
     INFO(sessionStart.dump());
     REQUIRE_FALSE(sessionStart.contains("error"));
+    INFO("grep visibility wait failed for session-start smoke token");
+    REQUIRE(wait_for_grep_match_count(server, token, 2));
 
     auto grepGlobal = server.callToolPublic(
         "grep", json{{"pattern", token}, {"use_session", false}, {"with_filename", true}});
