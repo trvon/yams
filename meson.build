@@ -625,7 +625,6 @@ else
   subdir('src/metadata')
   subdir('third_party/hdbscan-cpp')
   meson.override_dependency('yams_hdbscan_cpp', hdbscan_dep)
-  subdir('src/topology')
   subdir('src/integrity')
   subdir('src/config')
   subdir('src/extraction')
@@ -637,7 +636,9 @@ else
   endif
   subdir('src/indexing')
   subdir('src/daemon/client')
+  subdir('src/embedding_simeon')
   subdir('src/vector')
+  subdir('src/topology')
 
   # Third-party libraries (must come before src/search which depends on symspell)
   subdir('third_party/symspell')

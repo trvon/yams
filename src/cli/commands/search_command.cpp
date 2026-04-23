@@ -18,6 +18,7 @@
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/graph_helpers.h>
 #include <yams/cli/result_renderer.h>
 #include <yams/cli/session_store.h>
 #include <yams/cli/ui_helpers.hpp>
@@ -363,6 +364,13 @@ private:
             doc["relation_count"] = item.relationCount;
         if (!item.relationSummary.empty())
             doc["relations"] = item.relationSummary;
+        if (!item.path.empty()) {
+            auto topRel = extractTopRelation(item.relationSummary);
+            auto hint = buildGraphExploreHint(item.path, topRel, 2);
+            if (!hint.empty()) {
+                doc["graph_explore_hint"] = hint;
+            }
+        }
 
         if (verbose_ &&
             (item.vectorScore || item.keywordScore || item.kgEntityScore || item.structuralScore)) {
@@ -429,6 +437,13 @@ private:
             if (!item.relationSummary.empty()) {
                 std::cout << ui::colorize("  rel: " + item.relationSummary, ui::Ansi::DIM) << "\n";
             }
+            if (showTools_ && !item.path.empty()) {
+                auto topRel = extractTopRelation(item.relationSummary);
+                auto hint = buildGraphExploreHint(item.path, topRel, 2);
+                if (!hint.empty()) {
+                    std::cout << ui::colorize("  hint: " + hint, ui::Ansi::DIM) << "\n";
+                }
+            }
             std::cout << "\n";
         }
     }
@@ -484,6 +499,15 @@ private:
                     std::cout << ui::colorize(relIndent + std::string("rel: ") + v.relationSummary,
                                               ui::Ansi::DIM)
                               << "\n";
+                }
+                if (showTools_ && !v.path.empty() && i == 0) {
+                    auto topRel = extractTopRelation(v.relationSummary);
+                    auto hint = buildGraphExploreHint(v.path, topRel, 2);
+                    if (!hint.empty()) {
+                        const std::string hintIndent = vec.size() > 1 ? "       " : "     ";
+                        std::cout << ui::colorize(hintIndent + "hint: " + hint, ui::Ansi::DIM)
+                                  << "\n";
+                    }
                 }
 
                 if (showTools_ && !hash8.empty() && i == 0) {
@@ -607,6 +631,13 @@ private:
                                       std::to_string(ctx.elapsedMs) + "ms)",
                                   ui::Ansi::DIM)
                   << std::endl;
+        if (!pathsOnly_ && !jsonOutput_ && !deduplicated.empty()) {
+            std::cout << "\n"
+                      << ui::colorize(
+                             "Tip: Explore relationships with `yams graph --name <file> --depth 2`",
+                             ui::Ansi::DIM)
+                      << std::endl;
+        }
         return Result<void>();
     }
 

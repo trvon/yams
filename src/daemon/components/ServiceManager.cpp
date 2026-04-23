@@ -1279,6 +1279,9 @@ void ServiceManager::shutdown() {
     symbolExtractors_.clear();
     cachedQueryConceptExtractor_ = {};
 
+    spdlog::info("[ServiceManager] Phase 8.4.2: Releasing vector index coordinator");
+    vectorIndexCoordinator_.reset();
+
     spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
     initStrand_.reset();
     pluginStrand_.reset();

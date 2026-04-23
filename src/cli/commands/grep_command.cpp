@@ -19,6 +19,7 @@
 #include <unordered_set>
 #include <vector>
 #include <yams/cli/command.h>
+#include <yams/cli/graph_helpers.h>
 #include <yams/cli/session_store.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -492,6 +493,13 @@ public:
                             if (!relationSummary.empty()) {
                                 m["relation_summary"] = relationSummary;
                             }
+                            if (!match.file.empty()) {
+                                auto topRel = extractTopRelation(relationSummary);
+                                auto hint = buildGraphExploreHint(match.file, topRel, 2);
+                                if (!hint.empty()) {
+                                    m["graph_explore_hint"] = hint;
+                                }
+                            }
                             j["matches"].push_back(m);
                         }
                         if (!relationSummaries.empty()) {
@@ -722,6 +730,15 @@ public:
                                               << ui::colorize("[rel: " + relationSummary + "]",
                                                               ui::Ansi::DIM);
                                 }
+                                if (!filename.empty()) {
+                                    auto topRel = extractTopRelation(relationSummary);
+                                    auto hint = buildGraphExploreHint(filename, topRel, 2);
+                                    if (!hint.empty()) {
+                                        std::cout
+                                            << " "
+                                            << ui::colorize("[hint: " + hint + "]", ui::Ansi::DIM);
+                                    }
+                                }
                                 std::cout << std::endl;
 
                                 // Print matches for this file
@@ -785,6 +802,15 @@ public:
                                            std::to_string(semanticCount) + " semantic)";
                             }
                             std::cout << ui::colorize(summary, ui::Ansi::DIM) << std::endl;
+                            if (!resp.matches.empty()) {
+                                std::cout
+                                    << "\n"
+                                    << ui::colorize(
+                                           "Tip: Explore relationships with `yams graph --name "
+                                           "<file> --depth 2`",
+                                           ui::Ansi::DIM)
+                                    << std::endl;
+                            }
                         }
                     }
 
@@ -1520,6 +1546,14 @@ private:
                     summary += " + " + std::to_string(semanticResults.size()) + " semantic";
                 }
                 std::cout << ui::colorize(summary, ui::Ansi::DIM) << std::endl;
+                if (hasRegexMatches || hasSemanticResults) {
+                    std::cout << "\n"
+                              << ui::colorize(
+                                     "Tip: Explore relationships with `yams graph --name <file> "
+                                     "--depth 2`",
+                                     ui::Ansi::DIM)
+                              << std::endl;
+                }
             }
 
             return Result<void>();
@@ -1686,6 +1720,13 @@ private:
         }
         if (!relationSummary.empty()) {
             std::cout << " " << ui::colorize("[rel: " + relationSummary + "]", ui::Ansi::DIM);
+        }
+        if (!filename.empty()) {
+            auto topRel = extractTopRelation(relationSummary);
+            auto hint = buildGraphExploreHint(filename, topRel, 2);
+            if (!hint.empty()) {
+                std::cout << " " << ui::colorize("[hint: " + hint + "]", ui::Ansi::DIM);
+            }
         }
         std::cout << std::endl;
 

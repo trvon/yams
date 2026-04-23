@@ -317,55 +317,76 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
                     }
 
                     auto path = std::filesystem::path(req.path);
-                    auto exec = serviceManager_->getWorkerExecutor();
 
+                    auto getLoadedPaths = [](auto host) -> std::set<std::filesystem::path> {
+                        std::set<std::filesystem::path> paths;
+                        if (host) {
+                            for (const auto& desc : host->listLoaded()) {
+                                // Store both the exact path and parent directory.
+                                paths.insert(std::filesystem::weakly_canonical(desc.path));
+                                if (desc.path.has_parent_path()) {
+                                    paths.insert(
+                                        std::filesystem::weakly_canonical(desc.path.parent_path()));
+                                }
+                            }
+                        }
+                        return paths;
+                    };
+
+                    auto isAlreadyLoaded = [](const std::filesystem::path& p,
+                                              const std::set<std::filesystem::path>& loaded) {
+                        auto canonical = std::filesystem::weakly_canonical(p);
+                        return loaded.count(canonical) > 0;
+                    };
+
+                    auto refreshLoadedPlugins = [sm = serviceManager_]() {
+                        if (sm) {
+                            (void)sm->adoptModelProviderFromHosts();
+                            sm->refreshPluginStatusSnapshot();
+                        }
+                    };
+
+                    const auto abiLoadedPaths = getLoadedPaths(abi);
+                    const auto externalLoadedPaths = getLoadedPaths(external);
+                    const bool skipAbi = isAlreadyLoaded(path, abiLoadedPaths);
+                    const bool skipExternal = isAlreadyLoaded(path, externalLoadedPaths);
+
+                    if (skipAbi && skipExternal) {
+                        spdlog::debug("trust add: path {} already loaded, skipping scan",
+                                      path.string());
+                        co_return SuccessResponse{"ok"};
+                    }
+
+                    if (std::filesystem::is_regular_file(path)) {
+                        auto ext = path.extension().string();
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+                        bool loaded = false;
+                        if (ext == ".py" || ext == ".js") {
+                            if (external && !skipExternal) {
+                                loaded = external->load(path, "").has_value();
+                            }
+                        } else if (abi && !skipAbi) {
+                            loaded = abi->load(path, "").has_value();
+                        }
+
+                        if (!loaded) {
+                            co_return yams::daemon::dispatch::makeErrorResponse(
+                                ErrorCode::InternalError,
+                                "Plugin load failed for: " + path.string());
+                        }
+
+                        refreshLoadedPlugins();
+                        co_return SuccessResponse{"ok"};
+                    }
+
+                    auto exec = serviceManager_->getWorkerExecutor();
                     boost::asio::co_spawn(
                         exec,
-                        [abi, external, path,
-                         sm = serviceManager_]() -> boost::asio::awaitable<void> {
+                        [abi, external, path, skipAbi, skipExternal,
+                         refreshLoadedPlugins =
+                             std::move(refreshLoadedPlugins)]() -> boost::asio::awaitable<void> {
                             try {
-                                // Helper to get paths of already-loaded plugins
-                                auto getLoadedPaths =
-                                    [](auto host) -> std::set<std::filesystem::path> {
-                                    std::set<std::filesystem::path> paths;
-                                    if (host) {
-                                        for (const auto& desc : host->listLoaded()) {
-                                            // Store both the exact path and parent directory
-                                            paths.insert(
-                                                std::filesystem::weakly_canonical(desc.path));
-                                            if (desc.path.has_parent_path()) {
-                                                paths.insert(std::filesystem::weakly_canonical(
-                                                    desc.path.parent_path()));
-                                            }
-                                        }
-                                    }
-                                    return paths;
-                                };
-
-                                // Get paths of currently loaded plugins to skip scanning them
-                                auto abiLoadedPaths = getLoadedPaths(abi);
-                                auto externalLoadedPaths = getLoadedPaths(external);
-
-                                // Check if the path is already loaded (exact match or parent of
-                                // loaded)
-                                auto isAlreadyLoaded =
-                                    [](const std::filesystem::path& p,
-                                       const std::set<std::filesystem::path>& loaded) {
-                                        auto canonical = std::filesystem::weakly_canonical(p);
-                                        return loaded.count(canonical) > 0;
-                                    };
-
-                                // Skip entirely if path is already loaded
-                                bool skipAbi = isAlreadyLoaded(path, abiLoadedPaths);
-                                bool skipExternal = isAlreadyLoaded(path, externalLoadedPaths);
-
-                                if (skipAbi && skipExternal) {
-                                    spdlog::debug(
-                                        "trust add: path {} already loaded, skipping scan",
-                                        path.string());
-                                    co_return;
-                                }
-
                                 auto loadPlugins = [](auto host, const auto& dir) {
                                     if (host) {
                                         if (auto r = host->scanDirectory(dir)) {
@@ -381,25 +402,16 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
                                         loadPlugins(abi, path);
                                     if (!skipExternal)
                                         loadPlugins(external, path);
-                                } else if (std::filesystem::is_regular_file(path)) {
-                                    // Route based on file type
-                                    auto ext = path.extension().string();
-                                    if (ext == ".py" || ext == ".js") {
-                                        if (external && !skipExternal)
-                                            (void)external->load(path, "");
-                                    } else {
-                                        if (abi && !skipAbi)
-                                            (void)abi->load(path, "");
-                                    }
                                 }
 
-                                if (sm) {
-                                    (void)sm->adoptModelProviderFromHosts();
-                                    // Refresh status so newly loaded plugins appear in list
-                                    sm->refreshPluginStatusSnapshot();
-                                }
+                                refreshLoadedPlugins();
+                            } catch (const std::exception& e) {
+                                spdlog::warn("trust add async load failed for {}: {}",
+                                             path.string(), e.what());
                             } catch (...) {
-                                // Handle exceptions silently
+                                spdlog::warn(
+                                    "trust add async load failed for {} with unknown error",
+                                    path.string());
                             }
                             co_return;
                         },

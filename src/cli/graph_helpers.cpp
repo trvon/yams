@@ -43,4 +43,48 @@ std::vector<std::string> build_graph_file_node_candidates(const std::string& nam
     return candidates;
 }
 
+std::string extractTopRelation(const std::string& relationSummary) {
+    if (relationSummary.empty()) {
+        return {};
+    }
+    // Find the first comma or parenthesis to isolate the first relation token.
+    std::size_t endPos = relationSummary.find(',');
+    if (endPos == std::string::npos) {
+        endPos = relationSummary.size();
+    }
+    std::string firstToken = relationSummary.substr(0, endPos);
+    // Trim whitespace
+    auto start = firstToken.find_first_not_of(" \t\n\r");
+    if (start == std::string::npos) {
+        return {};
+    }
+    auto end = firstToken.find_last_not_of(" \t\n\r");
+    std::string trimmed = firstToken.substr(start, end - start + 1);
+    // Strip count in parentheses, e.g. "calls(3)"
+    auto paren = trimmed.find('(');
+    if (paren != std::string::npos) {
+        trimmed = trimmed.substr(0, paren);
+    }
+    // Trim again
+    start = trimmed.find_first_not_of(" \t\n\r");
+    if (start == std::string::npos) {
+        return {};
+    }
+    end = trimmed.find_last_not_of(" \t\n\r");
+    return trimmed.substr(start, end - start + 1);
+}
+
+std::string buildGraphExploreHint(const std::string& filePath, const std::string& topRelation,
+                                  int depth) {
+    if (filePath.empty()) {
+        return {};
+    }
+    std::string cmd = "yams graph --name \"" + filePath + "\"";
+    if (!topRelation.empty()) {
+        cmd += " -r " + topRelation;
+    }
+    cmd += " --depth " + std::to_string(depth);
+    return cmd;
+}
+
 } // namespace yams::cli
