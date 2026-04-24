@@ -491,6 +491,17 @@ struct QualityMetrics {
     std::vector<std::uint64_t> vecTier1TopTextScoreMilli;
     std::vector<std::uint64_t> vecRelaxedPrimaryHitCount;
     std::vector<std::uint64_t> vecRelaxedRetryThresholdMilli;
+    std::vector<std::uint64_t> vecUniqueDocCounts;
+    std::uint64_t vecContributedCount = 0;
+    std::uint64_t topologyWeakRoutingAppliedCount = 0;
+    std::uint64_t topologyWeakRoutingAddedDocsTotal = 0;
+    std::uint64_t topologyWeakRoutingAddedDocsSamples = 0;
+    std::uint64_t topologyRoutingVariantSeedExtensionTotal = 0;
+    std::uint64_t topologyRoutingVariantSeedExtensionSamples = 0;
+    std::vector<std::string> vectorTierSkipReasons;
+    std::vector<std::string> embeddingStatuses;
+    std::vector<std::uint64_t> vectorDbDims;
+    std::vector<std::uint64_t> queryEmbeddingDims;
 };
 
 double computeNdcgFromRankedDocIds(const std::vector<std::string>& rankedDocIds,
@@ -531,6 +542,23 @@ std::uint64_t medianOf(std::vector<std::uint64_t> v) {
         return v[n / 2];
     }
     return (v[n / 2 - 1] + v[n / 2]) / 2;
+}
+
+std::string modeOf(const std::vector<std::string>& values) {
+    if (values.empty()) {
+        return {};
+    }
+    std::unordered_map<std::string, std::size_t> counts;
+    for (const auto& v : values) {
+        ++counts[v];
+    }
+    auto best = counts.begin();
+    for (auto it = counts.begin(); it != counts.end(); ++it) {
+        if (it->second > best->second || (it->second == best->second && it->first < best->first)) {
+            best = it;
+        }
+    }
+    return best->first;
 }
 
 fs::path benchFixtureDir() {
@@ -883,6 +911,41 @@ double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
         } else {
             acc.routedSeedFingerprints.push_back("none");
         }
+        if (auto it = stats.find("topology_weak_query_routing_applied"); it != stats.end()) {
+            acc.topologyWeakRoutingAppliedCount += (it->second == "1") ? 1U : 0U;
+        }
+        if (auto it = stats.find("topology_weak_query_added_docs"); it != stats.end()) {
+            try {
+                acc.topologyWeakRoutingAddedDocsTotal += std::stoull(it->second);
+                ++acc.topologyWeakRoutingAddedDocsSamples;
+            } catch (...) {
+            }
+        }
+        if (auto it = stats.find("topology_routing_variant_seed_extension"); it != stats.end()) {
+            try {
+                acc.topologyRoutingVariantSeedExtensionTotal += std::stoull(it->second);
+                ++acc.topologyRoutingVariantSeedExtensionSamples;
+            } catch (...) {
+            }
+        }
+        if (auto it = stats.find("vector_tier_skip_reason"); it != stats.end()) {
+            acc.vectorTierSkipReasons.push_back(it->second);
+        }
+        if (auto it = stats.find("embedding_status"); it != stats.end()) {
+            acc.embeddingStatuses.push_back(it->second);
+        }
+        if (auto it = stats.find("vector_db_dim"); it != stats.end()) {
+            try {
+                acc.vectorDbDims.push_back(std::stoull(it->second));
+            } catch (...) {
+            }
+        }
+        if (auto it = stats.find("query_embedding_dim"); it != stats.end()) {
+            try {
+                acc.queryEmbeddingDims.push_back(std::stoull(it->second));
+            } catch (...) {
+            }
+        }
 
         // Phase E1 — read per-component hits + stage summary from daemon trace.
         if (auto it = stats.find("fusion_strategy"); it != stats.end()) {
@@ -892,6 +955,8 @@ double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
                 ++acc.fusionStrategyMismatchCount;
             }
         }
+        std::vector<std::string> textIds;
+        std::vector<std::string> vectorIds;
         if (auto it = stats.find("trace_component_hits_json"); it != stats.end()) {
             try {
                 auto componentJson = json::parse(it->second);
@@ -919,18 +984,8 @@ double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
                     }
                     return ids;
                 };
-                auto textIds = extractRanked("text");
-                auto vectorIds = extractRanked("vector");
-                if (!textIds.empty() && !q.relevanceGrades.empty()) {
-                    acc.ndcgAtKTextOnly +=
-                        computeNdcgFromRankedDocIds(textIds, q.relevanceGrades, k);
-                    ++acc.textComponentQueries;
-                }
-                if (!vectorIds.empty() && !q.relevanceGrades.empty()) {
-                    acc.ndcgAtKVectorOnly +=
-                        computeNdcgFromRankedDocIds(vectorIds, q.relevanceGrades, k);
-                    ++acc.vectorComponentQueries;
-                }
+                textIds = extractRanked("text");
+                vectorIds = extractRanked("vector");
             } catch (const std::exception& e) {
                 spdlog::trace("bench: trace_component_hits_json parse failed: {}", e.what());
             }
@@ -944,8 +999,42 @@ double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
                     }
                     return stageJson[name].value("raw_hit_count", std::uint64_t{0});
                 };
+                auto uniqueDocCount = [&](const char* name) -> std::uint64_t {
+                    if (!stageJson.contains(name)) {
+                        return 0;
+                    }
+                    return stageJson[name].value("unique_doc_count", std::uint64_t{0});
+                };
+                auto extractUniqueDocIds = [&](const char* name) {
+                    std::vector<std::string> ids;
+                    if (!stageJson.contains(name) || !stageJson[name].is_object()) {
+                        return ids;
+                    }
+                    const auto& stage = stageJson[name];
+                    if (!stage.contains("unique_doc_ids") || !stage["unique_doc_ids"].is_array()) {
+                        return ids;
+                    }
+                    ids.reserve(stage["unique_doc_ids"].size());
+                    for (const auto& value : stage["unique_doc_ids"]) {
+                        if (value.is_string()) {
+                            ids.push_back(value.get<std::string>());
+                        }
+                    }
+                    return ids;
+                };
                 acc.lexicalPoolSizes.push_back(poolSize("text"));
                 acc.vectorPoolSizes.push_back(poolSize("vector"));
+                acc.vecUniqueDocCounts.push_back(uniqueDocCount("vector"));
+                if (stageJson.contains("vector") &&
+                    stageJson["vector"].value("contributed", false)) {
+                    ++acc.vecContributedCount;
+                }
+                if (textIds.empty()) {
+                    textIds = extractUniqueDocIds("text");
+                }
+                if (vectorIds.empty()) {
+                    vectorIds = extractUniqueDocIds("vector");
+                }
                 if (stageJson.contains("reranker")) {
                     const auto& rr = stageJson["reranker"];
                     if (rr.value("attempted", false)) {
@@ -1002,6 +1091,14 @@ double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
             } catch (const std::exception& e) {
                 spdlog::trace("bench: trace_stage_summary_json parse failed: {}", e.what());
             }
+        }
+        if (!textIds.empty() && !q.relevanceGrades.empty()) {
+            acc.ndcgAtKTextOnly += computeNdcgFromRankedDocIds(textIds, q.relevanceGrades, k);
+            ++acc.textComponentQueries;
+        }
+        if (!vectorIds.empty() && !q.relevanceGrades.empty()) {
+            acc.ndcgAtKVectorOnly += computeNdcgFromRankedDocIds(vectorIds, q.relevanceGrades, k);
+            ++acc.vectorComponentQueries;
         }
         acc.fusionPoolSizes.push_back(static_cast<std::uint64_t>(results.size()));
     }
@@ -1106,8 +1203,8 @@ QualityMetrics evaluate(DaemonClient& client, const Fixture& fx, const std::stri
 }
 
 void setAxisEnv(std::size_t maxClusters, std::size_t maxDocs, float medoidBoost, float bridgeBoost,
-                const char* variant = nullptr) {
-    setenv("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING", "1", 1);
+                const char* variant = nullptr, bool weakRoutingEnabled = true) {
+    setenv("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING", weakRoutingEnabled ? "1" : "0", 1);
     setenv("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", std::to_string(maxClusters).c_str(), 1);
     setenv("YAMS_SEARCH_TOPOLOGY_MAX_DOCS", std::to_string(maxDocs).c_str(), 1);
     std::ostringstream mb, bb;
@@ -1115,8 +1212,8 @@ void setAxisEnv(std::size_t maxClusters, std::size_t maxDocs, float medoidBoost,
     bb << bridgeBoost;
     setenv("YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST", mb.str().c_str(), 1);
     setenv("YAMS_SEARCH_TOPOLOGY_BRIDGE_BOOST", bb.str().c_str(), 1);
-    setenv("YAMS_SEARCH_ADAPTIVE_MIN_TEXT_HITS", "999", 1);
-    setenv("YAMS_SEARCH_ADAPTIVE_MIN_TOP_TEXT_SCORE", "0.99", 1);
+    setenv("YAMS_SEARCH_WEAK_QUERY_MIN_TEXT_HITS", "999", 1);
+    setenv("YAMS_SEARCH_WEAK_QUERY_MIN_TOP_TEXT_SCORE", "0.99", 1);
     setenv("YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "1", 1);
     setenv("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE", "1", 1);
     setenv("YAMS_ENABLE_ENV_OVERRIDES", "1", 1);
@@ -1134,6 +1231,14 @@ DaemonHarnessOptions quietHarnessOptions() {
     opts.autoLoadPlugins = false;
     opts.enableAutoRepair = true;
     opts.isolateState = true;
+    // Phase G: allow benches to share a stable data_dir across daemon spawns
+    // so the topology tuner's persisted MAB state carries over between reps.
+    // Without this, every fresh daemon spawn cold-starts UCB1 and picks the
+    // alphabetically-first arm. Set YAMS_BENCH_DAEMON_DATA_DIR to enable.
+    if (const char* envDataDir = std::getenv("YAMS_BENCH_DAEMON_DATA_DIR");
+        envDataDir != nullptr && *envDataDir != '\0') {
+        opts.dataDir = std::filesystem::path{envDataDir};
+    }
     return opts;
 }
 
@@ -1203,16 +1308,22 @@ struct TopologyConfigOverride {
     std::optional<int> recallExpandPerCluster;
     std::optional<int> rrfK;
     std::optional<std::string> routeScoring;
+    std::optional<bool> weakQueryRoutingEnabled;
     std::optional<std::string> engine;
     std::optional<int> hdbscanMinPoints;
     std::optional<int> hdbscanMinClusterSize;
     std::optional<int> featureSmoothingHops;
+    std::optional<std::string> vectorSearchEngine;
+    std::optional<bool> vec0PhssEnabled;
+    std::optional<int> vec0PhssCandidates;
 
     [[nodiscard]] bool empty() const {
         return !integration.has_value() && !recallExpandPerCluster.has_value() &&
-               !rrfK.has_value() && !routeScoring.has_value() && !engine.has_value() &&
+               !rrfK.has_value() && !routeScoring.has_value() &&
+               !weakQueryRoutingEnabled.has_value() && !engine.has_value() &&
                !hdbscanMinPoints.has_value() && !hdbscanMinClusterSize.has_value() &&
-               !featureSmoothingHops.has_value();
+               !featureSmoothingHops.has_value() && !vectorSearchEngine.has_value() &&
+               !vec0PhssEnabled.has_value() && !vec0PhssCandidates.has_value();
     }
 };
 
@@ -1225,6 +1336,10 @@ fs::path writeTopologyConfigToml(const TopologyConfigOverride& ovr) {
          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".toml");
     std::ofstream out(path);
     out << "[search.topology]\n";
+    if (ovr.weakQueryRoutingEnabled.has_value()) {
+        out << "enable_weak_query_routing = " << (*ovr.weakQueryRoutingEnabled ? "true" : "false")
+            << "\n";
+    }
     if (ovr.integration.has_value()) {
         out << "integration = \"" << *ovr.integration << "\"\n";
     }
@@ -1236,6 +1351,19 @@ fs::path writeTopologyConfigToml(const TopologyConfigOverride& ovr) {
     }
     if (ovr.routeScoring.has_value()) {
         out << "route_scoring = \"" << *ovr.routeScoring << "\"\n";
+    }
+    if (ovr.vectorSearchEngine.has_value() || ovr.vec0PhssEnabled.has_value() ||
+        ovr.vec0PhssCandidates.has_value()) {
+        out << "\n[vector_database]\n";
+        if (ovr.vectorSearchEngine.has_value()) {
+            out << "search_engine = \"" << *ovr.vectorSearchEngine << "\"\n";
+        }
+        if (ovr.vec0PhssEnabled.has_value()) {
+            out << "vec0_phss_enabled = " << (*ovr.vec0PhssEnabled ? "true" : "false") << "\n";
+        }
+        if (ovr.vec0PhssCandidates.has_value()) {
+            out << "vec0_phss_candidates = " << *ovr.vec0PhssCandidates << "\n";
+        }
     }
     if (ovr.engine.has_value() || ovr.hdbscanMinPoints.has_value() ||
         ovr.hdbscanMinClusterSize.has_value() || ovr.featureSmoothingHops.has_value()) {
@@ -1298,7 +1426,24 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
                     float bridgeBoost, const char* variant = nullptr,
                     const FixtureConfig& cfg = FixtureConfig{},
                     const TopologyConfigOverride& topologyConfig = TopologyConfigOverride{}) {
-    setAxisEnv(maxClusters, maxDocs, medoidBoost, bridgeBoost, variant);
+    setAxisEnv(maxClusters, maxDocs, medoidBoost, bridgeBoost, variant,
+               topologyConfig.weakQueryRoutingEnabled.value_or(true));
+    if (topologyConfig.vectorSearchEngine.has_value()) {
+        setenv("YAMS_VECTOR_SEARCH_ENGINE", topologyConfig.vectorSearchEngine->c_str(), 1);
+    } else {
+        unsetenv("YAMS_VECTOR_SEARCH_ENGINE");
+    }
+    if (topologyConfig.vec0PhssEnabled.has_value()) {
+        setenv("YAMS_VECTOR_VEC0_PHSS_ENABLED", *topologyConfig.vec0PhssEnabled ? "1" : "0", 1);
+    } else {
+        unsetenv("YAMS_VECTOR_VEC0_PHSS_ENABLED");
+    }
+    if (topologyConfig.vec0PhssCandidates.has_value()) {
+        setenv("YAMS_VECTOR_VEC0_PHSS_CANDIDATES",
+               std::to_string(*topologyConfig.vec0PhssCandidates).c_str(), 1);
+    } else {
+        unsetenv("YAMS_VECTOR_VEC0_PHSS_CANDIDATES");
+    }
     if (configUsesRealEmbeddings(cfg)) {
         setenv("YAMS_BENCH_INGEST_NO_EMBEDDINGS", "0", 1);
         setenv("YAMS_EMBED_BACKEND", "simeon", 1);
@@ -1499,6 +1644,11 @@ json toCellJson(const CellOutcome& outcome) {
             fraction(outcome.metrics.vecRelaxedRetryAppliedCount);
         j["vector_effective_max_results_median"] = medianOf(outcome.metrics.vecEffectiveMaxResults);
         j["vector_tier2_candidates_size_median"] = medianOf(outcome.metrics.vecTier2CandidatesSize);
+        j["vector_unique_doc_count_median"] = medianOf(outcome.metrics.vecUniqueDocCounts);
+        j["vector_stage_contributed_fraction"] =
+            samples == 0 ? 0.0
+                         : static_cast<double>(outcome.metrics.vecContributedCount) /
+                               static_cast<double>(samples);
         j["vector_tier1_text_hits_median"] = medianOf(outcome.metrics.vecTier1TextHits);
         j["vector_tier1_top_text_score_milli_median"] =
             medianOf(outcome.metrics.vecTier1TopTextScoreMilli);
@@ -1506,6 +1656,25 @@ json toCellJson(const CellOutcome& outcome) {
             medianOf(outcome.metrics.vecRelaxedPrimaryHitCount);
         j["vector_relaxed_retry_threshold_milli_median"] =
             medianOf(outcome.metrics.vecRelaxedRetryThresholdMilli);
+        j["topology_weak_query_routing_applied_fraction"] =
+            samples == 0 ? 0.0
+                         : static_cast<double>(outcome.metrics.topologyWeakRoutingAppliedCount) /
+                               static_cast<double>(samples);
+        j["topology_weak_query_added_docs_mean"] =
+            outcome.metrics.topologyWeakRoutingAddedDocsSamples == 0
+                ? 0.0
+                : static_cast<double>(outcome.metrics.topologyWeakRoutingAddedDocsTotal) /
+                      static_cast<double>(outcome.metrics.topologyWeakRoutingAddedDocsSamples);
+        j["topology_routing_variant_seed_extension_mean"] =
+            outcome.metrics.topologyRoutingVariantSeedExtensionSamples == 0
+                ? 0.0
+                : static_cast<double>(outcome.metrics.topologyRoutingVariantSeedExtensionTotal) /
+                      static_cast<double>(
+                          outcome.metrics.topologyRoutingVariantSeedExtensionSamples);
+        j["vector_tier_skip_reason_mode"] = modeOf(outcome.metrics.vectorTierSkipReasons);
+        j["embedding_status_mode"] = modeOf(outcome.metrics.embeddingStatuses);
+        j["vector_db_dim_median"] = medianOf(outcome.metrics.vectorDbDims);
+        j["query_embedding_dim_median"] = medianOf(outcome.metrics.queryEmbeddingDims);
     } else {
         j[std::string(irm::kIRNdcgAtK)] = -1.0;
         j[std::string(irm::kIRMrrAtK)] = -1.0;
@@ -2040,6 +2209,157 @@ TEST_CASE("[!benchmark][topology-ablation-quality] axis-8 cluster engine sweep",
         };
         record.update(toCellJson(outcome));
         emitRecord(outputPath, record);
+    }
+}
+
+TEST_CASE("[!benchmark][topology-ablation-quality] axis-9 vec0 PHSS topology validation",
+          "[topology-ablation-quality]") {
+    const auto outputPath = resolveOutputPath();
+    constexpr std::size_t kMidClusters = 2;
+    constexpr std::size_t kMidDocs = 64;
+    constexpr float kMidMedoidBoost = 0.05f;
+    constexpr float kMidBridgeBoost = 0.03f;
+
+    struct VectorCell {
+        const char* engine;
+        bool phss;
+        int phssCandidates;
+        const char* label;
+    };
+    const std::vector<VectorCell> vectorGrid = {
+        {"vec0_l2", false, 0, "vec0"},
+        {"vec0_l2", true, 32, "vec0_phss"},
+    };
+    const std::vector<bool> weakRoutingGrid = {false, true};
+    const std::vector<const char*> variantGrid = {"baseline", "vector_seed"};
+    const std::vector<std::string> integrationGrid = {"boost", "recall_expand", "rrf", "both"};
+
+    const std::string tier = std::getenv("YAMS_BENCH_TIER") ? std::getenv("YAMS_BENCH_TIER") : "S";
+
+    FixtureConfig cfg = fixtureConfigFromEnv();
+    cfg.useSimeonEmbeddings = true;
+    if (tier == "XL" || tier == "XXL") {
+        cfg.mode = FixtureMode::Beir;
+        if (const char* raw = std::getenv("YAMS_BENCH_BEIR_DATASET"); !(raw && *raw)) {
+            cfg.beirDataset = (tier == "XL") ? "nfcorpus" : "scifact";
+        }
+        if (cfg.beirCacheDir.empty() || cfg.beirCacheDir.filename().string() != cfg.beirDataset) {
+            if (const char* home = std::getenv("HOME"); home && *home) {
+                cfg.beirCacheDir =
+                    fs::path(home) / ".cache" / "yams" / "benchmarks" / cfg.beirDataset;
+            }
+        }
+    }
+
+    const std::size_t expectedCorpusSize = [&]() -> std::size_t {
+        if (cfg.mode == FixtureMode::Beir) {
+            return 0;
+        }
+        const int perTopic = cfg.corePerTopic + cfg.bridgePerTopic + cfg.tangentialPerTopic + 1;
+        return static_cast<std::size_t>(cfg.topicCount) * static_cast<std::size_t>(perTopic) +
+               static_cast<std::size_t>(cfg.noiseDocs);
+    }();
+
+    const std::string backendFilter = std::getenv("YAMS_BENCH_VEC_BACKEND_FILTER")
+                                          ? std::getenv("YAMS_BENCH_VEC_BACKEND_FILTER")
+                                          : "";
+    const std::string weakFilter = std::getenv("YAMS_BENCH_TOPOLOGY_WEAK_FILTER")
+                                       ? std::getenv("YAMS_BENCH_TOPOLOGY_WEAK_FILTER")
+                                       : "";
+    const std::string variantFilter =
+        std::getenv("YAMS_BENCH_VARIANT_FILTER") ? std::getenv("YAMS_BENCH_VARIANT_FILTER") : "";
+    const std::string integrationFilter = std::getenv("YAMS_BENCH_INTEGRATION_FILTER")
+                                              ? std::getenv("YAMS_BENCH_INTEGRATION_FILTER")
+                                              : "";
+    const int cellCooldownMs = readEnvInt("YAMS_BENCH_VARIANT_COOLDOWN_MS", 0);
+    bool firstEmitted = false;
+
+    for (const auto& backend : vectorGrid) {
+        if (!backendFilter.empty() && backendFilter.find(backend.label) == std::string::npos) {
+            continue;
+        }
+        for (const bool weakRoutingEnabled : weakRoutingGrid) {
+            const std::string weakLabel = weakRoutingEnabled ? "on" : "off";
+            if (!weakFilter.empty() && weakFilter.find(weakLabel) == std::string::npos) {
+                continue;
+            }
+
+            const auto& variants =
+                weakRoutingEnabled ? variantGrid : std::vector<const char*>{"baseline"};
+            for (const char* variant : variants) {
+                if (!variantFilter.empty() && variantFilter.find(variant) == std::string::npos) {
+                    continue;
+                }
+                for (const auto& integration : integrationGrid) {
+                    if (!integrationFilter.empty() &&
+                        integrationFilter.find(integration) == std::string::npos) {
+                        continue;
+                    }
+                    if (firstEmitted && cellCooldownMs > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(cellCooldownMs));
+                    }
+                    firstEmitted = true;
+
+                    setenv("YAMS_SEARCH_SIMILARITY_THRESHOLD", "-1.0", 1);
+                    setenv("YAMS_VECTOR_MAX_RESULTS", "64", 1);
+
+                    TopologyConfigOverride override;
+                    override.integration = integration;
+                    override.weakQueryRoutingEnabled = weakRoutingEnabled;
+                    override.engine = "hdbscan";
+                    override.vectorSearchEngine = std::string{backend.engine};
+                    override.vec0PhssEnabled = backend.phss;
+                    if (backend.phss) {
+                        override.vec0PhssCandidates = backend.phssCandidates;
+                    }
+                    if (integration == "rrf" || integration == "both") {
+                        override.rrfK = 60;
+                    }
+                    if (integration == "recall_expand" || integration == "both") {
+                        override.recallExpandPerCluster = 4;
+                    }
+
+                    auto outcome = runCell(kMidClusters, kMidDocs, kMidMedoidBoost, kMidBridgeBoost,
+                                           variant, cfg, override);
+
+                    unsetenv("YAMS_SEARCH_SIMILARITY_THRESHOLD");
+                    unsetenv("YAMS_VECTOR_MAX_RESULTS");
+
+                    json record = {
+                        {std::string(irm::kIRTestKey), std::string(irm::kIRTestName)},
+                        {std::string(irm::kIRAxisKey), "vec0_phss_topology_validation"},
+                        {std::string(irm::kIRAxisIdKey), 9},
+                        {"tier", tier},
+                        {"fixture_mode", (cfg.mode == FixtureMode::Beir) ? "beir" : "synthetic"},
+                        {"embedding_backend", configUsesRealEmbeddings(cfg) ? "simeon" : "mock"},
+                        {"topic_count", cfg.topicCount},
+                        {"docs_per_topic_core", cfg.corePerTopic},
+                        {"docs_per_topic_bridge", cfg.bridgePerTopic},
+                        {"docs_per_topic_tangent", cfg.tangentialPerTopic},
+                        {"noise_docs", cfg.noiseDocs},
+                        {"corpus_size_expected", expectedCorpusSize},
+                        {"beir_dataset", (cfg.mode == FixtureMode::Beir) ? cfg.beirDataset : ""},
+                        {"vector_search_engine", backend.engine},
+                        {"vector_backend_label", backend.label},
+                        {"vec0_phss_enabled", backend.phss},
+                        {"vec0_phss_candidates", backend.phss ? backend.phssCandidates : 0},
+                        {"weak_query_routing_enabled", weakRoutingEnabled},
+                        {"variant", std::string{variant}},
+                        {"integration_pattern", integration},
+                        {"topology_engine_requested", "hdbscan"},
+                        {"recall_expand_n",
+                         (integration == "recall_expand" || integration == "both") ? 4 : 0},
+                        {"rrf_k", (integration == "rrf" || integration == "both") ? 60 : 0},
+                        {"max_clusters", kMidClusters},
+                        {"max_docs_cap", kMidDocs},
+                        {"medoid_boost", kMidMedoidBoost},
+                        {"bridge_boost", kMidBridgeBoost},
+                    };
+                    record.update(toCellJson(outcome));
+                    emitRecord(outputPath, record);
+                }
+            }
+        }
     }
 }
 

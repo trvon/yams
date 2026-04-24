@@ -31,6 +31,13 @@ Use this file for YAMS repo specifics, local conventions, and repo-scoped safety
 - When a behavior can be selected automatically and safely, prefer that over exposing another user-facing switch.
 - Temporary diagnostics are fine during investigation, but remove bloat once the product behavior is clear.
 
+## Tuning Surfaces
+
+- Tuning lives in typed config, not env vars. New search / topology / daemon knobs go on the relevant config struct (`SearchEngineConfig`, `TopologyConfig`, etc.), with a `[search.topology]` / `[topology]` / `[…]` TOML key resolved through `ConfigResolver` (`include/yams/daemon/components/ConfigResolver.h`).
+- Benches, integration tests, and production callers drive behavior by setting the typed config field directly or by writing a per-test `config.toml` and passing it via `DaemonHarnessOptions::configPath` — never by introducing a fresh `YAMS_*` env var for a tuning knob.
+- Existing `YAMS_SEARCH_TOPOLOGY_*` / `YAMS_EMBED_*` env overlays are a test-only override atop the resolver; keep them working when touching the relevant code, but do not grow the surface.
+- Reaching for `std::getenv` when adding a new tunable is the warning sign — add the field, extend `resolveSearchTopology` (or a sibling resolver), and apply it in the manager.
+
 ## Repo Agent ID
 
 - Canonical format: `opencode-<task-slug>`
