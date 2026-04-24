@@ -1824,84 +1824,6 @@ public:
         useInternalBusPostIngest_.store(en, std::memory_order_relaxed);
     }
 
-    // =========================================================================
-    // PBI-089: Request Queue and IOCoordinator Configuration
-    // =========================================================================
-
-    /// Maximum request queue size (default 4096)
-    /// Environment: YAMS_REQUEST_QUEUE_SIZE
-    static uint32_t requestQueueSize() {
-        uint32_t ov = requestQueueSizeOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = std::getenv("YAMS_REQUEST_QUEUE_SIZE")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 16 && v <= 65536)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 4096;
-    }
-    static void setRequestQueueSize(uint32_t v) {
-        requestQueueSizeOverride_.store(v, std::memory_order_relaxed);
-    }
-
-    /// Queue high watermark percentage (default 80%)
-    /// Environment: YAMS_QUEUE_HIGH_WATERMARK
-    static uint32_t queueHighWatermarkPercent() {
-        uint32_t ov = queueHighWatermarkOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = std::getenv("YAMS_QUEUE_HIGH_WATERMARK")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 10 && v <= 99)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 80;
-    }
-    static void setQueueHighWatermarkPercent(uint32_t v) {
-        queueHighWatermarkOverride_.store(v, std::memory_order_relaxed);
-    }
-
-    /// Queue low watermark percentage (default 20%)
-    /// Environment: YAMS_QUEUE_LOW_WATERMARK
-    static uint32_t queueLowWatermarkPercent() {
-        uint32_t ov = queueLowWatermarkOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = std::getenv("YAMS_QUEUE_LOW_WATERMARK")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 50)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 20;
-    }
-    static void setQueueLowWatermarkPercent(uint32_t v) {
-        queueLowWatermarkOverride_.store(v, std::memory_order_relaxed);
-    }
-
-    /// Request timeout in queue (default 30000ms)
-    static uint32_t requestQueueTimeoutMs() {
-        uint32_t ov = requestQueueTimeoutMsOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        return 30000;
-    }
-    static void setRequestQueueTimeoutMs(uint32_t v) {
-        requestQueueTimeoutMsOverride_.store(v, std::memory_order_relaxed);
-    }
-
     /// Number of dedicated I/O threads (default 10)
     /// Environment: YAMS_IO_THREADS
     static uint32_t ioThreadCount() {
@@ -1988,20 +1910,6 @@ public:
     }
     static void setMaxIdleTimeouts(uint32_t v) {
         maxIdleTimeoutsOverride_.store(v, std::memory_order_relaxed);
-    }
-
-    static uint32_t requestQueueDepth() {
-        return requestQueueDepth_.load(std::memory_order_relaxed);
-    }
-    static void setRequestQueueDepth(uint32_t v) {
-        requestQueueDepth_.store(v, std::memory_order_relaxed);
-    }
-
-    static bool requestQueueBackpressure() {
-        return requestQueueBackpressure_.load(std::memory_order_relaxed);
-    }
-    static void setRequestQueueBackpressure(bool v) {
-        requestQueueBackpressure_.store(v, std::memory_order_relaxed);
     }
 
     static uint32_t checkpointIntervalSeconds() {
@@ -2902,17 +2810,11 @@ private:
     static inline std::atomic<bool> useInternalBusPostIngest_{true};
 
     // PBI-089: Request Queue and IOCoordinator overrides
-    static inline std::atomic<uint32_t> requestQueueSizeOverride_{0};
-    static inline std::atomic<uint32_t> queueHighWatermarkOverride_{0};
-    static inline std::atomic<uint32_t> queueLowWatermarkOverride_{0};
-    static inline std::atomic<uint32_t> requestQueueTimeoutMsOverride_{0};
     static inline std::atomic<uint32_t> ioThreadCountOverride_{0};
     static inline std::atomic<int32_t> connectionLifetimeSecondsOverride_{-1};
     static inline std::atomic<int> enablePriorityQueueOverride_{-1};
     static inline std::atomic<uint32_t> maxIdleTimeoutsOverride_{0};
     static inline std::atomic<uint32_t> streamChunkTimeoutMsOverride_{0};
-    static inline std::atomic<uint32_t> requestQueueDepth_{0};
-    static inline std::atomic<bool> requestQueueBackpressure_{false};
 
     // PBI-090: CheckpointManager overrides
     static inline std::atomic<uint32_t> checkpointIntervalSecondsOverride_{0};

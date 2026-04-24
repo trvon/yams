@@ -575,61 +575,22 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 }
             } catch (...) {
             }
-            // Heal/mirror vector DB readiness from the live handle.
-            // vectorDbReady semantics: true when the DB has rows (serving).
-            // vectorBackendUsable semantics: true when the backend is functional
-            // (initialized + dim known + provider ready), independent of row count —
-            // a fresh daemon with 0 rows can still answer vector queries.
+            // Read vector index / DB readiness from atomics — these are kept
+            // current by VectorSystemManager and VectorIndexCoordinator on state
+            // transitions. Status path never calls into live VDB handles (which
+            // can contend with rebuild mutexes during PQ builds).
             bool vectorBackendUsable = false;
-            if (serviceManager_) {
-                try {
-                    // Use coordinator snapshot for index-readiness to avoid blocking behind
-                    // the rebuild mutex on the hot status path.
-                    if (auto coord = serviceManager_->getVectorIndexCoordinator()) {
-                        const auto tel = coord->snapshot();
-                        res.readinessStates[std::string(readiness::kVectorIndex)] = tel.ready;
-                        if (state_) {
-                            state_->readiness.vectorIndexReady.store(tel.ready,
-                                                                     std::memory_order_relaxed);
-                            state_->readiness.vectorIndexProgress.store(
-                                static_cast<int>(tel.progressPct), std::memory_order_relaxed);
-                        }
-                    }
-                    // Read VDB config (non-blocking metadata); skip getVectorCount().
-                    if (auto vdb = serviceManager_->getVectorDatabase();
-                        vdb && vdb->isInitialized()) {
-                        const auto dim = vdb->getConfig().embedding_dim;
-                        res.vectorIndexEngine =
-                            vector::vectorSearchEngineName(vdb->getConfig().search_engine);
-
-                        // Use state_ atomic (coordinator keeps it current) instead of
-                        // the potentially-blocking getVectorCount().
-                        res.vectorDbReady =
-                            state_ ? state_->readiness.vectorDbReady.load(std::memory_order_relaxed)
-                                   : false;
-                        res.vectorDbInitAttempted = true;
-                        if (dim > 0) {
-                            res.vectorDbDim = static_cast<uint32_t>(dim);
-                        }
-                        const bool providerReady =
-                            state_ &&
-                            state_->readiness.modelProviderReady.load(std::memory_order_relaxed);
-                        vectorBackendUsable =
-                            dispatch::compute_vector_backend_usable(dim > 0, providerReady);
-
-                        if (state_) {
-                            state_->readiness.vectorDbInitAttempted.store(
-                                true, std::memory_order_relaxed);
-                            state_->readiness.vectorDbReady.store(res.vectorDbReady,
-                                                                  std::memory_order_relaxed);
-                            if (dim > 0) {
-                                state_->readiness.vectorDbDim.store(static_cast<uint32_t>(dim),
-                                                                    std::memory_order_relaxed);
-                            }
-                        }
-                    }
-                } catch (...) {
-                }
+            if (state_) {
+                res.readinessStates[std::string(readiness::kVectorIndex)] =
+                    state_->readiness.vectorIndexReady.load(std::memory_order_relaxed);
+                res.vectorDbInitAttempted =
+                    state_->readiness.vectorDbInitAttempted.load(std::memory_order_relaxed);
+                res.vectorDbReady = state_->readiness.vectorDbReady.load(std::memory_order_relaxed);
+                res.vectorDbDim = state_->readiness.vectorDbDim.load(std::memory_order_relaxed);
+                const bool providerReady =
+                    state_->readiness.modelProviderReady.load(std::memory_order_relaxed);
+                vectorBackendUsable =
+                    dispatch::compute_vector_backend_usable(res.vectorDbDim > 0, providerReady);
             }
 
             try {
@@ -684,20 +645,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             }
         }
         if (includeExtendedStatus) {
-            spdlog::debug("[StatusRequest] About to check search engine degradation");
-            try {
-                bool searchDegraded = true;
-                if (serviceManager_) {
-                    spdlog::debug("[StatusRequest] Calling getSearchEngineSnapshot()");
-                    auto engine = serviceManager_->getSearchEngineSnapshot();
-                    spdlog::debug("[StatusRequest] getSearchEngineSnapshot() returned, engine={}",
-                                  static_cast<void*>(engine.get()));
-                    searchDegraded = (engine == nullptr);
-                }
-                res.readinessStates[std::string(readiness::kSearchEngineDegraded)] = searchDegraded;
-            } catch (...) {
-                res.readinessStates[std::string(readiness::kSearchEngineDegraded)] = true;
-            }
+            // Derive search-degraded from the readiness atomic instead of dereferencing
+            // the live engine — the engine shared_ptr read takes SearchEngineManager's
+            // shared_lock which can briefly contend with rebuild completions.
+            const bool searchDegraded =
+                !(state_ && state_->readiness.searchEngineReady.load(std::memory_order_relaxed));
+            res.readinessStates[std::string(readiness::kSearchEngineDegraded)] = searchDegraded;
         }
         // NOTE: Vector diagnostics are now collected via DaemonMetrics background thread
         // and read from the snapshot above (lines 81-92). This avoids blocking the status

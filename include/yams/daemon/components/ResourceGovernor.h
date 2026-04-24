@@ -201,7 +201,7 @@ public:
 
     /// Compute backpressure read-pause delay under current governor pressure state.
     [[nodiscard]] std::uint32_t
-    recommendBackpressureReadPauseMs(std::uint32_t baseMs, bool queueBackpressured) const noexcept;
+    recommendBackpressureReadPauseMs(std::uint32_t baseMs) const noexcept;
 
     // ========================================================================
     // Pressure Response Actions (called based on level transitions)

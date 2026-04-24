@@ -400,6 +400,7 @@ public:
     }
 
     Result<void> checkpointWal() override { return {}; }
+    Result<void> checkpointWalTruncate() override { return {}; }
 
     Result<std::optional<metadata::PathTreeNode>> findPathTreeNode(int64_t,
                                                                    std::string_view) override {

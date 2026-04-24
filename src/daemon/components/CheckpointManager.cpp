@@ -17,6 +17,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <filesystem>
+
 namespace yams::daemon {
 
 CheckpointManager::CheckpointManager(Config config, Dependencies deps)
@@ -203,11 +205,35 @@ bool CheckpointManager::checkpointWal() {
         return true;
     }
 
+    // Path 1b: watermark-triggered TRUNCATE. When yams.db-wal grows beyond
+    // kTruncateWatermarkBytes, switch from PASSIVE to TRUNCATE so the WAL
+    // returns to zero bytes on next checkpoint. Without this, large-corpus
+    // ingest (e.g. 65k+ docs in a single session) can grow the WAL into
+    // tens of GB — query latency collapses because every FTS5 match
+    // traverses the unflushed WAL. PASSIVE can't reclaim pages held by
+    // writers, so at that point TRUNCATE's brief exclusive lock is the
+    // lesser evil.
+    constexpr std::uint64_t kTruncateWatermarkBytes = 1024ULL * 1024ULL * 1024ULL; // 1 GiB
+    bool wantsTruncate = false;
+    if (!config_.data_dir.empty()) {
+        std::error_code ec;
+        const auto walPath = config_.data_dir / "yams.db-wal";
+        const auto walSize = std::filesystem::file_size(walPath, ec);
+        if (!ec && walSize >= kTruncateWatermarkBytes) {
+            wantsTruncate = true;
+            spdlog::info("[CheckpointManager] yams.db-wal is {} MB (>= 1 GiB watermark), "
+                         "escalating to TRUNCATE checkpoint",
+                         walSize / (1024ULL * 1024ULL));
+        }
+    }
+
     try {
-        auto result = deps_.metadataRepository->checkpointWal();
+        auto result = wantsTruncate ? deps_.metadataRepository->checkpointWalTruncate()
+                                    : deps_.metadataRepository->checkpointWal();
         if (result) {
             stats_.wal_checkpoints.fetch_add(1, std::memory_order_relaxed);
-            spdlog::debug("[CheckpointManager] WAL checkpoint (PASSIVE) completed");
+            spdlog::debug("[CheckpointManager] WAL checkpoint ({}) completed",
+                          wantsTruncate ? "TRUNCATE" : "PASSIVE");
             return true;
         }
         spdlog::warn("[CheckpointManager] WAL checkpoint failed: {}", result.error().message);

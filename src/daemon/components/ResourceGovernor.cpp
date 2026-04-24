@@ -851,14 +851,10 @@ std::uint32_t ResourceGovernor::recommendRetryAfterMs(
 }
 
 std::uint32_t
-ResourceGovernor::recommendBackpressureReadPauseMs(std::uint32_t baseMs,
-                                                   bool queueBackpressured) const noexcept {
+ResourceGovernor::recommendBackpressureReadPauseMs(std::uint32_t baseMs) const noexcept {
     std::uint32_t delay = std::max<std::uint32_t>(1u, baseMs);
     std::uint32_t multiplier = 1;
 
-    if (queueBackpressured) {
-        multiplier = std::max<std::uint32_t>(multiplier, 2u);
-    }
     if (!canAdmitWork()) {
         multiplier = std::max<std::uint32_t>(multiplier, 3u);
     }

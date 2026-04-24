@@ -1856,14 +1856,11 @@ private:
             }
             yams::daemon::ClientConfig cfg;
             cfg.socketPath = effectiveSocket;
-            // Outer deadline must exceed one full attempt budget (connect + read
-            // each use the 5s request timeout) plus DaemonClient::status() retry
-            // backoffs (25+50+100ms). At 5s the outer timer frequently fires
-            // before a transient-recover retry can finish, surfacing a spurious
-            // "IPC error" even when the daemon is healthy.
+            // Status handler is non-blocking (cached snapshot, no subsystem calls).
+            // 5s is generous headroom for transient connect/framing issues.
             auto sres = runDaemonClient(
                 cfg, [](yams::daemon::DaemonClient& client) { return client.status(); },
-                std::chrono::seconds(15));
+                std::chrono::seconds(5));
             if (spinner) {
                 spinner->stop();
             }
@@ -1942,8 +1939,10 @@ private:
                     }
                 } catch (...) {
                 }
-                // No bootstrap file available either — fall back to the original message
-                std::cout << "YAMS daemon status unavailable (IPC error)\n";
+                // No bootstrap file either — the daemon is not running or has not
+                // yet written any status. Match the "not running" message emitted
+                // by the pre-flight liveness check above.
+                std::cout << "YAMS daemon is not running\n";
                 return;
             }
 

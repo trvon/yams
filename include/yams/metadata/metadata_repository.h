@@ -456,6 +456,11 @@ public:
                                                            RepairStatus status) = 0;
 
     virtual Result<void> checkpointWal() = 0;
+    // Path 1b: TRUNCATE-mode checkpoint. Takes exclusive access and blocks
+    // readers/writers briefly, but returns the WAL to zero bytes. Use
+    // sparingly — e.g., when WAL growth exceeds a watermark, or at shutdown
+    // when no readers are expected.
+    virtual Result<void> checkpointWalTruncate() = 0;
 
     // Path tree operations (PBI-051 scaffold)
     virtual Result<std::optional<PathTreeNode>> findPathTreeNode(int64_t parentId,
@@ -776,6 +781,7 @@ public:
                                                    RepairStatus status) override;
 
     Result<void> checkpointWal() override;
+    Result<void> checkpointWalTruncate() override;
 
     /**
      * @brief Refresh all idle connections in the pool (PBI-079)

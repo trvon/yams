@@ -5002,6 +5002,22 @@ Result<void> MetadataRepository::checkpointWal() {
     });
 }
 
+// Path 1b: TRUNCATE-mode checkpoint for watermark-triggered or shutdown flushes.
+// Unlike the PASSIVE variant, this takes exclusive access — readers/writers
+// block until the checkpoint finishes. It returns the WAL file to zero bytes.
+// Call sparingly: (a) when WAL size exceeds a watermark (unbounded growth
+// stalls query latency anyway, so a brief block is better than the alternative),
+// (b) at shutdown when no readers are expected.
+Result<void> MetadataRepository::checkpointWalTruncate() {
+    return executeQuery<void>([](Database& db) -> Result<void> {
+        auto result = db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        if (!result) {
+            return result;
+        }
+        return db.execute("PRAGMA optimize");
+    });
+}
+
 void MetadataRepository::refreshAllConnections() {
     pool_.refreshAll();
 }

@@ -172,23 +172,22 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
 
     while (running_.load()) {
         YAMS_ZONE_SCOPED_N("TuningManager::loop");
-        bool idle = false;
         try {
-            idle = tick_once();
+            (void)tick_once();
         } catch (const std::exception& e) {
             spdlog::debug("TuningManager tick error: {}", e.what());
         } catch (...) {
             logIgnoredTuningException("TuningManager tick error");
         }
 
-        // Choose cadence: active mode uses the fast 5ms tick, idle mode backs off
-        // to a much longer interval (default 1000ms) to reduce CPU wake-ups.
-        const uint32_t ms = idle ? TuneAdvisor::idleTickMs() : TuneAdvisor::statusTickMs();
-        timer.expires_after(std::chrono::milliseconds(ms));
+        // Safety-net timer only. Real responsiveness comes from notifyWakeup()
+        // fired by PostIngestQueue watermarks, RepairService, SocketServer,
+        // EmbeddingService, ResourceGovernor pressure transitions, etc.
+        timer.expires_after(std::chrono::milliseconds(TuneAdvisor::idleTickMs()));
 
         boost::system::error_code ec;
         co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-        // operation_aborted means stop() or notifyWakeup() cancelled the idle wait.
+        // operation_aborted means stop() or notifyWakeup() cancelled the wait.
     }
 
     spdlog::debug("TuningManager loop exiting");

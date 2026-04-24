@@ -1015,6 +1015,10 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::buildDecoratedSnapshot(boo
 
     const auto state = loadCachedSnapshotState();
     if (!state.fast) {
+        // First call before the polling loop has published: one synchronous
+        // collect so callers without a running polling loop (tests) see a
+        // fully-populated snapshot. This is bounded — collectSnapshot(false)
+        // reads atomics + lifecycle snapshot, no SQLite or search engine.
         return collectAndPublishSnapshot(detailed);
     }
 
@@ -1025,7 +1029,13 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::buildDecoratedSnapshot(boo
 
     const auto freshness = evaluateSnapshotFreshness(state, now);
     if (freshness.needsSyncRefresh(detailed)) {
-        return collectAndPublishSnapshot(detailed);
+        // Subsequent requests whose cache went stale: return cached (with
+        // stale flag surfaced in the response) and kick off an async refresh
+        // instead of re-collecting on the IPC request thread. This is the
+        // actual starvation path under heavy indexing/repair load where the
+        // polling loop falls behind and inline collect would pile more work
+        // onto the saturated executor.
+        scheduleBackgroundRefresh(detailed);
     }
 
     applySnapshotFreshness(out, freshness);

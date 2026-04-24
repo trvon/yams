@@ -560,12 +560,9 @@ TEST_CASE("Daemon components: ResourceGovernor backpressure policy helpers",
     CHECK(retryOverloaded >= retryBaseline);
     CHECK(retryOverloaded <= 5000);
 
-    const auto pauseIdle = governor.recommendBackpressureReadPauseMs(100, false);
-    const auto pauseBackpressured = governor.recommendBackpressureReadPauseMs(100, true);
+    const auto pauseIdle = governor.recommendBackpressureReadPauseMs(100);
     CHECK(pauseIdle >= 1);
     CHECK(pauseIdle <= 5000);
-    CHECK(pauseBackpressured >= pauseIdle);
-    CHECK(pauseBackpressured <= 5000);
 
     // Leave singleton policy state neutral for subsequent tests.
     governor.reportDbLockContention(0, 1);
