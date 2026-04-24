@@ -292,14 +292,29 @@ worker_threads = 0
 max_memory_gb = 0
 # Log level for daemon background service (trace|debug|info|warn|error)
 log_level = "info"
-# Auto-rebuild vector schema when embedding dimensions change
-auto_rebuild_on_dim_mismatch = true
+# Do not rebuild vector schema automatically when embedding dimensions change.
+# Run an explicit foreground vector/embedding repair after choosing the target dimension.
+auto_rebuild_on_dim_mismatch = false
 # Auto-repair missing/corrupted chunks and embeddings in the background
 auto_repair = true
 # Batch size for auto-repair passes
 auto_repair_batch_size = 16
 # Prefer centralized tuning (TuningManager); set to true only if you need legacy in-loop tuner
 # use_legacy_tuner = false
+
+[daemon.instrumentation]
+# Runtime instrumentation profile.
+#
+# Profiles:
+# - "normal" / "off" : disable automatic instrumentation behavior.
+# - "memory" / "heap" / "malloc" : reduce concurrent startup maintenance so macOS
+#   MallocStackLoggingNoCompact captures the target workload instead of background
+#   repair, lexical, and vector-index rebuild noise.
+profile = "normal"
+# Override the profile defaults only when debugging a specific subsystem.
+# suppress_auto_repair = true
+# suppress_simeon_lexical_build = true
+# suppress_vector_index_build = true
 
 [daemon.graph_prune]
 # Enable graph prune for snapshot-scoped version nodes

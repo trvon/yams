@@ -649,6 +649,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             vectorDeps.serviceFsm = &serviceFsm_;
             vectorDeps.resolvePreferredModel = [this]() { return this->resolvePreferredModel(); };
             vectorDeps.getEmbeddingDimension = [this]() { return this->getEmbeddingDimension(); };
+            vectorDeps.suppressVectorIndexBuild = config_.instrumentation.suppressVectorIndexBuild;
             vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
             spdlog::debug("[ServiceManager] VectorSystemManager created");
 

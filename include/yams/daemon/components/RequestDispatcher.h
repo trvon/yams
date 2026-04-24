@@ -251,9 +251,6 @@ private:
     // Batch request handler (Track B: Communication Overhead Reduction)
     boost::asio::awaitable<Response> handleBatchRequest(const BatchRequest& req);
 
-    // Document repair handler (RepairService)
-    boost::asio::awaitable<Response> handleRepairRequest(const RepairRequest& req);
-
     boost::asio::awaitable<AdmissionGuard>
     acquireBoundedAdmission(std::atomic<uint64_t>& activeCounter,
                             std::atomic<uint64_t>& rejectedCounter, uint32_t limit,

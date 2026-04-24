@@ -132,6 +132,39 @@ inline bool safe_exists(const std::filesystem::path& p) {
     std::error_code ec;
     return std::filesystem::exists(p, ec);
 }
+
+std::string repairOperationName(uint64_t code) {
+    switch (code) {
+        case 1:
+            return "stuck docs";
+        case 2:
+            return "orphans";
+        case 3:
+            return "mime";
+        case 4:
+            return "downloads";
+        case 5:
+            return "path tree";
+        case 6:
+            return "dedupe";
+        case 7:
+            return "chunks";
+        case 8:
+            return "block refs";
+        case 9:
+            return "graph";
+        case 10:
+            return "fts5";
+        case 11:
+            return "embeddings";
+        case 12:
+            return "topology";
+        case 13:
+            return "optimize";
+        default:
+            return "";
+    }
+}
 } // namespace
 
 namespace yams::cli {
@@ -2053,15 +2086,25 @@ private:
             const bool repairInProgress = findCompactCount("repair_in_progress") > 0;
             const uint64_t repairQueue = findCompactCount("repair_queue_depth");
             const uint64_t repairFailed = findCompactCount("repair_failed_operations");
-            Severity repairSev = !repairRunning       ? Severity::Warn
-                                 : (repairFailed > 0) ? Severity::Warn
-                                 : (repairInProgress) ? Severity::Warn
-                                 : (repairQueue > 0)  ? Severity::Warn
-                                                      : Severity::Good;
+            const uint64_t repairCurrentOp = findCompactCount("repair_current_operation_code");
+            const uint64_t repairCurrentElapsedMs =
+                findCompactCount("repair_current_operation_elapsed_ms");
+            Severity repairSev = !repairRunning          ? Severity::Warn
+                                 : (repairFailed > 0)    ? Severity::Warn
+                                 : (repairInProgress)    ? Severity::Warn
+                                 : (repairCurrentOp > 0) ? Severity::Warn
+                                 : (repairQueue > 0)     ? Severity::Warn
+                                                         : Severity::Good;
             std::ostringstream repairText;
             repairText << (repairRunning ? "Running" : "Stopped");
             if (repairInProgress) {
                 repairText << " · RPC active";
+            }
+            if (repairCurrentOp > 0) {
+                repairText << " · " << repairOperationName(repairCurrentOp);
+                if (repairCurrentElapsedMs > 0) {
+                    repairText << " " << format_duration(repairCurrentElapsedMs / 1000);
+                }
             }
             std::ostringstream repairExtra;
             repairExtra << repairQueue << " pending";
@@ -2673,6 +2716,10 @@ private:
                 const uint64_t repairFailed = findPostIngestCount("repair_failed_operations");
                 const uint64_t repairBacklog = findPostIngestCount("repair_total_backlog");
                 const uint64_t repairProcessed = findPostIngestCount("repair_processed");
+                const uint64_t repairCurrentOp =
+                    findPostIngestCount("repair_current_operation_code");
+                const uint64_t repairCurrentElapsedMs =
+                    findPostIngestCount("repair_current_operation_elapsed_ms");
 
                 std::string repairStatus = repairRunning ? "running" : "stopped";
                 Severity repairStatusSev = repairRunning ? Severity::Good : Severity::Warn;
@@ -2680,7 +2727,21 @@ private:
                     repairStatus += " · RPC active";
                     repairStatusSev = Severity::Warn;
                 }
+                if (repairCurrentOp > 0) {
+                    repairStatus += " · " + repairOperationName(repairCurrentOp);
+                    repairStatusSev = Severity::Warn;
+                }
                 repairRows.push_back({"Status", paintStatus(repairStatusSev, repairStatus), ""});
+
+                if (repairCurrentOp > 0) {
+                    std::ostringstream current;
+                    current << repairOperationName(repairCurrentOp);
+                    if (repairCurrentElapsedMs > 0) {
+                        current << " · elapsed " << format_duration(repairCurrentElapsedMs / 1000);
+                    }
+                    repairRows.push_back(
+                        {"Current", paintStatus(Severity::Warn, current.str()), ""});
+                }
 
                 if (repairBacklog > 0) {
                     const double fraction =

@@ -54,6 +54,8 @@ public:
         size_t simeon_pq_train_limit = 4096;
         size_t simeon_pq_rerank_factor = 2;
         uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
+        bool suppress_search_index_builds =
+            false; ///< Profiling mode: avoid vec0/SPQ rebuild allocation churn
     };
 
     SqliteVecBackend();

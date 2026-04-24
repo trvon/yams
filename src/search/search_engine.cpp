@@ -367,6 +367,69 @@ std::vector<ComponentResult> buildTopologyWeakQueryComponentResults(
     return results;
 }
 
+// Phase J: Stage-1 routing-strength gate. Returns max cosine(query_emb, medoid_emb)
+// across all clusters in the latest topology batch. Returns 0.0 if artifacts can't
+// be loaded, no cluster has a medoid embedding, or any input is degenerate.
+// O(n_clusters * embed_dim) per call; caller is expected to gate on a strong
+// threshold so this only runs when the configured all-query routing is enabled.
+float bestMedoidCosineForQuery(
+    const std::vector<float>& queryEmbedding,
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+    const std::shared_ptr<yams::vector::VectorDatabase>& vectorDb) {
+    if (queryEmbedding.empty() || !metadataRepo || !kgStore || !vectorDb) {
+        return 0.0F;
+    }
+    auto metadataIface =
+        std::static_pointer_cast<yams::metadata::IMetadataRepository>(metadataRepo);
+    yams::topology::MetadataKgTopologyArtifactStore store(std::move(metadataIface), kgStore);
+    auto latestResult = store.loadLatest();
+    if (!latestResult || !latestResult.value().has_value()) {
+        return 0.0F;
+    }
+    const auto& batch = *latestResult.value();
+    if (batch.clusters.empty()) {
+        return 0.0F;
+    }
+
+    auto cosine = [](std::span<const float> a, std::span<const float> b) -> float {
+        if (a.size() != b.size() || a.empty()) {
+            return 0.0F;
+        }
+        double dot = 0.0;
+        double na = 0.0;
+        double nb = 0.0;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            const double ai = static_cast<double>(a[i]);
+            const double bi = static_cast<double>(b[i]);
+            dot += ai * bi;
+            na += ai * ai;
+            nb += bi * bi;
+        }
+        if (na <= 0.0 || nb <= 0.0) {
+            return 0.0F;
+        }
+        return static_cast<float>(dot / std::sqrt(na * nb));
+    };
+
+    float best = 0.0F;
+    for (const auto& cluster : batch.clusters) {
+        if (!cluster.medoid.has_value() || cluster.medoid->documentHash.empty()) {
+            continue;
+        }
+        auto recs = vectorDb->getVectorsByDocument(cluster.medoid->documentHash);
+        if (recs.empty() || recs.front().embedding.empty()) {
+            continue;
+        }
+        const float c = cosine(std::span<const float>(queryEmbedding),
+                               std::span<const float>(recs.front().embedding));
+        if (c > best) {
+            best = c;
+        }
+    }
+    return best;
+}
+
 template <typename Work>
 auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& executor)
     -> std::future<decltype(work())> {
@@ -1765,8 +1828,41 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     effectiveEntityVectorMaxResults);
             }
 
-            if (weakTier1Query && !tier1Candidates.empty() &&
-                workingConfig.enableTopologyWeakQueryRouting) {
+            // Phase J: routing fires under two conditions.
+            //  - weak path: weakTier1Query == true (legacy behavior).
+            //  - all-query path: enableTopologyAllQueryRouting && gate passes.
+            // Gate = max cosine(query_emb, cluster_medoid_emb) >= threshold.
+            const bool routingHasSeeds =
+                !tier1Candidates.empty() && workingConfig.enableTopologyWeakQueryRouting;
+            bool routingFire = routingHasSeeds && weakTier1Query;
+            std::string routingPath = "skip";
+            float routingBestMedoidCos = 0.0F;
+            if (routingHasSeeds && weakTier1Query) {
+                routingPath = "weak";
+            }
+            if (routingHasSeeds && !weakTier1Query && workingConfig.enableTopologyAllQueryRouting) {
+                awaitEmbedding();
+                if (queryEmbedding.has_value() && vectorDb_) {
+                    routingBestMedoidCos = bestMedoidCosineForQuery(
+                        queryEmbedding.value(), metadataRepo_, kgStore_, vectorDb_);
+                    if (routingBestMedoidCos >= workingConfig.topologyRoutingMinMedoidCosine) {
+                        routingFire = true;
+                        routingPath = "all";
+                    } else {
+                        routingPath = "gated";
+                    }
+                } else {
+                    routingPath = "gated";
+                }
+            }
+            traceCollector.recordStageCounter(
+                "topology_routing", "best_medoid_cosine_milli",
+                static_cast<int64_t>(std::lround(routingBestMedoidCos * 1000.0F)));
+            response.debugStats["topology_routing_path"] = routingPath;
+            response.debugStats["topology_routing_best_medoid_cos"] =
+                fmt::format("{:.3f}", routingBestMedoidCos);
+
+            if (routingFire) {
                 bool topologyEpochMismatch = false;
                 std::unordered_set<std::string> wideSeeds = tier1Candidates;
                 using V = SearchEngineConfig::TopologyRoutingVariant;
@@ -1894,9 +1990,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                topologyWeakQueryRoutingApplied ||
                                                    !topologyDocResults.empty());
             } else if (workingConfig.enableTopologyWeakQueryRouting) {
-                traceCollector.markStageSkipped("topology_routing", weakTier1Query
-                                                                        ? "no_seed_candidates"
-                                                                        : "strong_tier1_query");
+                std::string skipReason;
+                if (tier1Candidates.empty()) {
+                    skipReason = "no_seed_candidates";
+                } else if (routingPath == "gated") {
+                    skipReason = "all_query_gate_below_threshold";
+                } else {
+                    skipReason = "strong_tier1_query";
+                }
+                traceCollector.markStageSkipped("topology_routing", skipReason);
             }
 
             // F3a: G1 "adaptive vector skip" removed. Vector is a peer retriever — it

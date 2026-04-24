@@ -386,6 +386,18 @@ struct ConfigLatest {
         int connect_timeout_ms = 1000;
         int request_timeout_ms = 5000;
 
+        // Runtime instrumentation profile. profile="auto" activates the
+        // memory profile under macOS MallocStackLogging; profile="memory"
+        // forces it; "normal"/"off" disables automatic behavior.
+        struct Instrumentation {
+            std::string profile = "auto";
+            std::optional<bool> suppress_auto_repair;
+            std::optional<bool> suppress_simeon_lexical_build;
+            std::optional<bool> suppress_vector_index_build;
+            size_t msl_stack_log_warn_mb = 2048;
+            std::optional<size_t> msl_stack_log_warn_bytes;
+        } instrumentation;
+
         // Graph prune policy (snapshot version retention)
         struct GraphPrune {
             bool enabled = false;

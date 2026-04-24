@@ -470,6 +470,8 @@ if catch2_dep.found()
       'unit/daemon/components/request_queue_test.cpp',
       'unit/daemon/components/topology_tuner_catch2_test.cpp',
       'unit/daemon/components/vector_system_manager_test.cpp',
+      'unit/search/topological_quality_catch2_test.cpp',
+      'unit/search/anchor_fusion_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,

@@ -250,6 +250,11 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     }
 
     cfg.embedding_dim = *dim;
+    cfg.suppress_search_index_builds = deps_.suppressVectorIndexBuild;
+    if (cfg.suppress_search_index_builds) {
+        spdlog::warn("[VectorInit] search index build/load suppressed by memory instrumentation "
+                     "profile");
+    }
 
     const auto envTruthy = [](const char* value) -> bool {
         if (!value) {

@@ -1092,6 +1092,12 @@ TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
     state.stats.repairFailedOperations.store(1);
     state.stats.repairIdleTicks.store(99);
     state.stats.repairBusyTicks.store(33);
+    state.stats.repairCurrentOperationCode.store(10);
+    state.stats.repairCurrentOperationStartedMs.store(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count()) -
+        1500);
     DaemonLifecycleFsm lifecycleFsm;
     ServiceManager svc(cfg, state, lifecycleFsm);
     RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
@@ -1117,6 +1123,10 @@ TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
     REQUIRE(status.requestCounts.count(std::string(metrics::kRepairBusyTicks)) > 0);
     REQUIRE(status.requestCounts.count(std::string(metrics::kRepairRunning)) > 0);
     REQUIRE(status.requestCounts.count(std::string(metrics::kRepairInProgress)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairCurrentOperationCode)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairCurrentOperationElapsedMs)) > 0);
+    CHECK(status.requestCounts.at(std::string(metrics::kRepairCurrentOperationCode)) == 10);
+    CHECK(status.requestCounts.at(std::string(metrics::kRepairCurrentOperationElapsedMs)) >= 1);
 }
 
 TEST_CASE("RequestDispatcher: status includes the current request in requestsProcessed",
@@ -1169,100 +1179,6 @@ TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
     auto resp = fut.get();
 
     REQUIRE(std::holds_alternative<StatusResponse>(resp));
-}
-
-TEST_CASE("RequestDispatcher: repair handler surfaces missing service states",
-          "[daemon][repair][dispatcher]") {
-    DaemonConfig cfg;
-    cfg.dataDir = makeTempDir("yams_repair_dispatcher_");
-
-    StubLifecycle lifecycle;
-    StateComponent state;
-    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
-    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
-    DaemonLifecycleFsm lifecycleFsm;
-    ServiceManager svc(cfg, state, lifecycleFsm);
-    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
-
-    RepairRequest repairReq;
-    repairReq.repairOrphans = true;
-    repairReq.dryRun = true;
-
-    SECTION("returns not initialized when ServiceManager is absent") {
-        RequestDispatcher noServiceDispatcher(&lifecycle, nullptr, &state);
-        Request req = repairReq;
-
-        auto resp = dispatchRequest(noServiceDispatcher, req);
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::NotInitialized);
-        CHECK(err.message.find("ServiceManager") != std::string::npos);
-    }
-
-    SECTION("returns not initialized when RepairService is not running") {
-        Request req = repairReq;
-
-        auto resp = dispatchRequest(dispatcher, req);
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::NotInitialized);
-        CHECK(err.message.find("RepairService not running") != std::string::npos);
-        CHECK(state.stats.repairInProgress.load(std::memory_order_relaxed) == false);
-    }
-
-    SECTION("delegates to RepairService and toggles worker metrics") {
-        svc.startRepairService([] { return size_t{0}; });
-        auto repairService = svc.getRepairServiceShared();
-        REQUIRE(repairService != nullptr);
-
-        Request req = repairReq;
-        auto resp = dispatchRequest(dispatcher, req);
-
-        REQUIRE(std::holds_alternative<RepairResponse>(resp));
-        const auto& repairResp = std::get<RepairResponse>(resp);
-        CHECK(repairResp.success);
-        CHECK(repairResp.totalOperations == 1);
-        REQUIRE(repairResp.operationResults.size() == 1);
-        CHECK(repairResp.operationResults.front().operation == "orphans");
-        CHECK_FALSE(repairResp.operationResults.front().message.empty());
-        CHECK(svc.getWorkerPosted() == 1);
-        CHECK(svc.getWorkerCompleted() == 1);
-        CHECK(svc.getWorkerActive() == 0);
-        CHECK(state.stats.repairInProgress.load(std::memory_order_relaxed) == false);
-
-        svc.stopRepairService();
-    }
-
-    SECTION("converts RepairService exceptions into error responses") {
-        auto repo = std::make_shared<StubPruneMetadataRepository>();
-        repo->setThrowOnQuery("repair query exception");
-        svc.__test_setMetadataRepo(repo);
-        svc.startRepairService([] { return size_t{0}; });
-        auto repairService = svc.getRepairServiceShared();
-        REQUIRE(repairService != nullptr);
-
-        RepairRequest throwingReq;
-        throwingReq.repairDownloads = true;
-        Request req = throwingReq;
-
-        auto resp = dispatchRequest(dispatcher, req);
-
-        REQUIRE(std::holds_alternative<RepairResponse>(resp));
-        const auto& repairResp = std::get<RepairResponse>(resp);
-        CHECK_FALSE(repairResp.success);
-        CHECK(repairResp.totalOperations == 0);
-        REQUIRE(repairResp.errors.size() == 1);
-        CHECK(repairResp.errors.front() == "Internal error: repair query exception");
-        CHECK(repairResp.operationResults.empty());
-        CHECK(svc.getWorkerPosted() == 1);
-        CHECK(svc.getWorkerCompleted() == 1);
-        CHECK(svc.getWorkerActive() == 0);
-        CHECK(state.stats.repairInProgress.load(std::memory_order_relaxed) == false);
-
-        svc.stopRepairService();
-    }
 }
 
 TEST_CASE("RequestDispatcher: tree diff handler validates inputs and missing metadata repo",

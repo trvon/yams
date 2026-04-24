@@ -134,7 +134,13 @@ DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
 DEFINE_REQUEST_HANDLER(KgIngestRequest, handleKgIngestRequest);
 DEFINE_REQUEST_HANDLER(MetadataValueCountsRequest, handleMetadataValueCountsRequest);
 DEFINE_REQUEST_HANDLER(BatchRequest, handleBatchRequest);
-DEFINE_REQUEST_HANDLER(RepairRequest, handleRepairRequest);
+template <> struct RequestHandlerTraits<RepairRequest> {
+    static boost::asio::awaitable<Response> handle(RequestDispatcher*, const RepairRequest&) {
+        co_return dispatch::makeErrorResponse(
+            ErrorCode::InvalidArgument,
+            "RepairRequest is streaming-only; use DaemonClient::callRepair or streaming IPC");
+    }
+};
 
 #undef DEFINE_REQUEST_HANDLER
 

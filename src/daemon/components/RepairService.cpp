@@ -51,6 +51,42 @@ namespace {
 
 constexpr size_t kMaxTextToPersistInMetadataBytes = 16 * 1024 * 1024; // 16 MiB (best-effort)
 
+uint64_t steadyNowMillis() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+
+uint64_t repairOperationCode(std::string_view operation) {
+    if (operation == "stuck_docs")
+        return 1;
+    if (operation == "orphans")
+        return 2;
+    if (operation == "mime")
+        return 3;
+    if (operation == "downloads")
+        return 4;
+    if (operation == "path_tree")
+        return 5;
+    if (operation == "dedupe")
+        return 6;
+    if (operation == "chunks")
+        return 7;
+    if (operation == "block_refs")
+        return 8;
+    if (operation == "graph")
+        return 9;
+    if (operation == "fts5")
+        return 10;
+    if (operation == "embeddings")
+        return 11;
+    if (operation == "topology")
+        return 12;
+    if (operation == "optimize")
+        return 13;
+    return 0;
+}
+
 // Check if vector operations are disabled via environment variables
 bool vectorsDisabledByEnv() {
     if (const char* env = std::getenv("YAMS_DISABLE_VECTORS"); env && *env)
@@ -791,6 +827,7 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
         const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
         size_t offset = 0;
         size_t totalEnqueued = 0;
+        bool queueAtCapacity = false;
 
         // Preload all FTS5-indexed rowids once for O(1) lookups in the scan loop.
         std::unordered_set<int64_t> ftsRowIds;
@@ -799,8 +836,20 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
             if (ftsRes)
                 ftsRowIds = std::move(ftsRes.value());
         }
+        std::unordered_set<std::string> embeddedHashes;
+        bool haveEmbeddedSnapshot = false;
+        if (!vectorsDisabled) {
+            auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
+            if (vectorDb) {
+                embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
+                haveEmbeddedSnapshot = true;
+            }
+        }
 
-        while (running_.load(std::memory_order_relaxed)) {
+        while (running_.load(std::memory_order_relaxed) && !queueAtCapacity) {
+            if (!maintenanceAllowed()) {
+                break;
+            }
             metadata::DocumentQueryOptions opts;
             opts.limit = static_cast<int>(batchSize);
             opts.offset = static_cast<int>(offset);
@@ -822,8 +871,12 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
 
                     bool missingEmb = false;
                     if (!vectorsDisabled) {
-                        auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(d.sha256Hash);
-                        missingEmb = !hasEmbedRes || !hasEmbedRes.value();
+                        if (haveEmbeddedSnapshot) {
+                            missingEmb = embeddedHashes.find(d.sha256Hash) == embeddedHashes.end();
+                        } else {
+                            auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(d.sha256Hash);
+                            missingEmb = !hasEmbedRes || !hasEmbedRes.value();
+                        }
                     }
                     bool missingFts =
                         (!d.contentExtracted) &&
@@ -837,6 +890,10 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
                     }
 
                     if (missingEmb || missingFts) {
+                        if (pendingDocuments_.size() >= cfg_.maxPendingRepairs) {
+                            queueAtCapacity = true;
+                            break;
+                        }
                         if (pendingSet_.find(d.sha256Hash) == pendingSet_.end()) {
                             pendingSet_.insert(d.sha256Hash);
                             pendingDocuments_.push(d.sha256Hash);
@@ -1036,41 +1093,15 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
                 storedDim = vectorDb->getConfig().embedding_dim;
 
             if (modelDim > 0 && storedDim > 0 && modelDim != storedDim) {
-                if (cfg_.autoRebuildOnDimMismatch) {
-                    static std::atomic<bool> dimMismatchLogged{false};
-                    if (!dimMismatchLogged.exchange(true)) {
-                        spdlog::warn("RepairService: dim mismatch (model={} db={}); "
-                                     "requesting VectorIndexCoordinator rebuild",
-                                     modelDim, storedDim);
-                    }
-                    if (coordinator_) {
-                        // Coalescing rebuild — the coordinator handles beginBulkLoad / finalize.
-                        // Fire-and-forget; the background loop picks up missing embeddings on
-                        // the next tick after the rebuild completes.
-                        coordinator_->fireRebuild(yams::daemon::RebuildReason::DimensionMismatch);
-                    }
-                    // Also recreate the tables with the new dimension so embeddings can be stored.
-                    if (vectorDb) {
-                        try {
-                            const auto dbPath = vectorDb->getConfig().database_path;
-                            yams::vector::SqliteVecBackend backend;
-                            auto initRes = backend.initialize(dbPath);
-                            if (initRes) {
-                                auto dropRes = backend.dropTables();
-                                if (dropRes) {
-                                    auto createRes = backend.createTables(modelDim);
-                                    if (createRes)
-                                        ConfigResolver::writeVectorSentinel(cfg_.dataDir, modelDim,
-                                                                            "vec0", 1);
-                                }
-                            }
-                            backend.close();
-                        } catch (...) {
-                        }
-                    }
-                } else {
-                    result.missingEmbeddings.clear();
+                static std::atomic<bool> dimMismatchLogged{false};
+                if (!dimMismatchLogged.exchange(true)) {
+                    spdlog::warn("RepairService: dim mismatch (model={} db={}); "
+                                 "skipping automatic vector-table rebuild. Run an explicit "
+                                 "foreground vector/embedding repair after choosing the target "
+                                 "dimension.",
+                                 modelDim, storedDim);
                 }
+                result.missingEmbeddings.clear();
             }
         }
     }
@@ -1089,6 +1120,22 @@ void RepairService::updateProgressPct() {
     state_->stats.repairProcessed.store(done, std::memory_order_relaxed);
     int pct = static_cast<int>(std::min<std::uint64_t>(100, (done * 100) / tot));
     state_->readiness.vectorIndexProgress.store(pct, std::memory_order_relaxed);
+}
+
+void RepairService::beginRepairOperation(std::string_view operation) {
+    if (!state_)
+        return;
+    state_->stats.repairCurrentOperationCode.store(repairOperationCode(operation),
+                                                   std::memory_order_relaxed);
+    state_->stats.repairCurrentOperationStartedMs.store(steadyNowMillis(),
+                                                        std::memory_order_relaxed);
+}
+
+void RepairService::endRepairOperation() {
+    if (!state_)
+        return;
+    state_->stats.repairCurrentOperationCode.store(0, std::memory_order_relaxed);
+    state_->stats.repairCurrentOperationStartedMs.store(0, std::memory_order_relaxed);
 }
 
 // ============================================================================
@@ -1127,6 +1174,7 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
                 statsFlag->store(false, std::memory_order_relaxed);
             }
             if (self) {
+                self->endRepairOperation();
                 std::lock_guard<std::mutex> lk(self->activeRepairMutex_);
                 if (self->activeRepairExecutions_ > 0) {
                     --self->activeRepairExecutions_;
@@ -1167,7 +1215,9 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
             ev.message = "Starting " + name + "...";
             progress(ev);
         }
+        beginRepairOperation(name);
         auto result = fn();
+        endRepairOperation();
         results.push_back(result);
         response.totalOperations++;
         response.totalSucceeded += result.succeeded;
@@ -1307,6 +1357,7 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
                 statsFlag->store(false, std::memory_order_relaxed);
             }
             if (self) {
+                self->endRepairOperation();
                 std::lock_guard<std::mutex> lk(self->activeRepairMutex_);
                 if (self->activeRepairExecutions_ > 0) {
                     --self->activeRepairExecutions_;
@@ -1347,7 +1398,9 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
             ev.message = "Starting " + name + "...";
             progress(ev);
         }
+        beginRepairOperation(name);
         auto result = fn();
+        endRepairOperation();
         results.push_back(result);
         response.totalOperations++;
         response.totalSucceeded += result.succeeded;
@@ -1388,7 +1441,9 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
             ev.message = "Starting " + name + "...";
             progress(ev);
         }
+        beginRepairOperation(name);
         auto result = co_await fn();
+        endRepairOperation();
         results.push_back(result);
         response.totalOperations++;
         response.totalSucceeded += result.succeeded;
@@ -2962,24 +3017,6 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
         return result;
     }
 
-    auto docs = metadata::queryDocumentsByPattern(*meta, "%");
-    if (!docs) {
-        result.message = "Failed to enumerate: " + docs.error().message;
-        return result;
-    }
-
-    // Reset ghost-success documents (Success but no content row)
-    for (const auto& d : docs.value()) {
-        if (d.extractionStatus != metadata::ExtractionStatus::Success)
-            continue;
-        auto contentRes = meta->getContent(d.id);
-        if (contentRes && !contentRes.value().has_value()) {
-            (void)meta->updateDocumentExtractionStatus(d.id, false,
-                                                       metadata::ExtractionStatus::Pending,
-                                                       "Missing content row; reset by repair");
-        }
-    }
-
     static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
     const auto& customExtractors =
         ctx_.getContentExtractors ? ctx_.getContentExtractors() : kEmptyExtractors;
@@ -2993,122 +3030,187 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
             ftsRowIds = std::move(ftsResult.value());
     }
 
-    result.processed = docs.value().size();
-    const size_t totalDocs = docs.value().size();
-    size_t docIdx = 0;
+    const RepairBudget budget{std::max<std::size_t>(1, cfg_.maxBatch),
+                              std::chrono::milliseconds(250)};
+    std::int64_t cursorDocumentId = 0;
+    std::size_t docsSeen = 0;
+    bool finished = false;
 
-    // Emit an initial progress event so the client knows how many documents
-    // to expect and doesn't appear to hang on large stores.
+    // Cursor pagination avoids materializing the full corpus and gives the daemon
+    // regular scheduling/progress boundaries during large FTS5 repairs.
     if (progress) {
         RepairEvent ev;
         ev.phase = "repairing";
         ev.operation = "fts5";
         ev.processed = 0;
-        ev.total = totalDocs;
-        ev.message = "Rebuilding FTS5 index (" + std::to_string(totalDocs) + " documents)";
+        ev.total = 0;
+        ev.message =
+            "Rebuilding FTS5 index in slices (batch=" + std::to_string(budget.maxDocuments) + ")";
         progress(ev);
     }
 
-    for (const auto& d : docs.value()) {
-        ++docIdx;
+    while (!finished) {
+        RepairSlice slice;
+        slice.cursorDocumentId = cursorDocumentId;
 
-        // Emit progress frequently so the streaming layer has events to
-        // send (prevents client read timeouts during large rebuilds).
-        // Using a small interval (25) keeps the client alive and gives
-        // users visible feedback on long operations.
-        if (progress && docIdx % 25 == 0) {
-            RepairEvent ev;
-            ev.phase = "repairing";
-            ev.operation = "fts5";
-            ev.processed = docIdx;
-            ev.total = totalDocs;
-            ev.succeeded = result.succeeded;
-            ev.failed = result.failed;
-            ev.skipped = result.skipped;
-            ev.message = "Rebuilding FTS5 index (" + std::to_string(docIdx) + "/" +
-                         std::to_string(totalDocs) + ")";
-            progress(ev);
-        }
+        while (!slice.exhausted(budget)) {
+            metadata::DocumentQueryOptions opts;
+            opts.idGreaterThan = cursorDocumentId;
+            opts.orderByIdAsc = true;
+            const auto remaining = budget.maxDocuments > slice.processed
+                                       ? budget.maxDocuments - slice.processed
+                                       : std::size_t{1};
+            opts.limit = static_cast<int>(std::min<std::size_t>(remaining, 1024));
 
-        const std::string extension = normalizedRepairExtension(d);
+            auto docs = meta->queryDocuments(opts);
+            if (!docs) {
+                result.message = "Failed to enumerate after document id " +
+                                 std::to_string(cursorDocumentId) + ": " + docs.error().message;
+                result.failed++;
+                return result;
+            }
+            if (docs.value().empty()) {
+                finished = true;
+                break;
+            }
 
-        // Re-detect MIME for unhelpful or clearly wrong types
-        std::string effectiveMime = d.mimeType;
-        if (shouldRedetectMime(d)) {
-            effectiveMime = bestEffortMimeForDocument(d, store);
-            auto updated = d;
-            updated.mimeType = effectiveMime;
-            (void)meta->updateDocument(updated);
-        }
+            for (const auto& d : docs.value()) {
+                cursorDocumentId = std::max(cursorDocumentId, d.id);
+                slice.cursorDocumentId = cursorDocumentId;
+                ++slice.processed;
+                ++docsSeen;
+                ++result.processed;
 
-        if (dryRun) {
-            result.skipped++;
-            continue;
-        }
+                // Emit progress frequently so the streaming layer has events to send
+                // (prevents client read timeouts during large rebuilds).
+                if (progress && docsSeen % 25 == 0) {
+                    RepairEvent ev;
+                    ev.phase = "repairing";
+                    ev.operation = "fts5";
+                    ev.processed = docsSeen;
+                    ev.total = 0;
+                    ev.succeeded = result.succeeded;
+                    ev.failed = result.failed;
+                    ev.skipped = result.skipped;
+                    ev.message = "Rebuilding FTS5 index (scanned " + std::to_string(docsSeen) + ")";
+                    progress(ev);
+                }
 
-        // Incremental mode: skip documents that already have successful extraction
-        // with a valid content row AND a matching FTS5 index entry. The ghost-success
-        // loop above already reset any documents that claim Success but lack content,
-        // so remaining Success docs have content — but the FTS5 index may still be
-        // missing (e.g. after corruption or interrupted rebuild).
-        // Use --force to unconditionally rebuild everything.
-        if (!force && d.extractionStatus == metadata::ExtractionStatus::Success) {
-            auto contentRes = meta->getContent(d.id);
-            if (contentRes && contentRes.value().has_value()) {
-                if (ftsRowIds.count(d.id)) {
+                auto extractionStatus = d.extractionStatus;
+                bool successHasContent = false;
+                if (extractionStatus == metadata::ExtractionStatus::Success) {
+                    auto contentRes = meta->getContent(d.id);
+                    successHasContent = contentRes && contentRes.value().has_value();
+                    if (!successHasContent) {
+                        (void)meta->updateDocumentExtractionStatus(
+                            d.id, false, metadata::ExtractionStatus::Pending,
+                            "Missing content row; reset by repair");
+                        extractionStatus = metadata::ExtractionStatus::Pending;
+                    }
+                }
+
+                const std::string extension = normalizedRepairExtension(d);
+
+                // Re-detect MIME for unhelpful or clearly wrong types.
+                std::string effectiveMime = d.mimeType;
+                if (shouldRedetectMime(d)) {
+                    effectiveMime = bestEffortMimeForDocument(d, store);
+                    auto updated = d;
+                    updated.mimeType = effectiveMime;
+                    (void)meta->updateDocument(updated);
+                }
+
+                if (dryRun) {
                     result.skipped++;
                     continue;
                 }
-            }
-        }
 
-        try {
-            auto extractedOpt = yams::extraction::util::extractDocumentText(
-                store, d.sha256Hash, effectiveMime, extension, customExtractors);
-            if (extractedOpt && !extractedOpt->empty()) {
-                (void)meta->updateDocumentExtractionStatus(
-                    d.id, false, metadata::ExtractionStatus::Pending, "repair fts5 processing");
-
-                metadata::DocumentContent content;
-                content.documentId = d.id;
-                if (extractedOpt->size() > kMaxTextToPersistInMetadataBytes) {
-                    content.contentText = extractedOpt->substr(0, kMaxTextToPersistInMetadataBytes);
-                } else {
-                    content.contentText = *extractedOpt;
+                // Incremental mode: skip documents that already have successful extraction
+                // with a valid content row AND a matching FTS5 index entry. Use --force to
+                // unconditionally rebuild everything.
+                if (!force && extractionStatus == metadata::ExtractionStatus::Success &&
+                    successHasContent && ftsRowIds.count(d.id)) {
+                    result.skipped++;
+                    continue;
                 }
-                content.extractionMethod = "repair";
-                auto contentResult = meta->insertContent(content);
 
-                // Cap text for FTS5 indexing too — SQLite cannot bind strings > ~2 GB
-                // and very large documents cause "string or blob too big" errors.
-                const auto& textForIndex = (extractedOpt->size() > kMaxTextToPersistInMetadataBytes)
-                                               ? content.contentText
-                                               : *extractedOpt;
-                auto ir = meta->indexDocumentContent(d.id, d.fileName, textForIndex, effectiveMime);
+                try {
+                    auto extractedOpt = yams::extraction::util::extractDocumentText(
+                        store, d.sha256Hash, effectiveMime, extension, customExtractors);
+                    if (extractedOpt && !extractedOpt->empty()) {
+                        (void)meta->updateDocumentExtractionStatus(
+                            d.id, false, metadata::ExtractionStatus::Pending,
+                            "repair fts5 processing");
 
-                if (ir && contentResult) {
-                    (void)meta->updateDocumentExtractionStatus(d.id, true,
-                                                               metadata::ExtractionStatus::Success);
-                    result.succeeded++;
-                } else {
-                    static const std::string kUnknownFailure = "unknown";
-                    const std::string& failMsg = !contentResult
-                                                     ? contentResult.error().message
-                                                     : (!ir ? ir.error().message : kUnknownFailure);
+                        metadata::DocumentContent content;
+                        content.documentId = d.id;
+                        if (extractedOpt->size() > kMaxTextToPersistInMetadataBytes) {
+                            content.contentText =
+                                extractedOpt->substr(0, kMaxTextToPersistInMetadataBytes);
+                        } else {
+                            content.contentText = *extractedOpt;
+                        }
+                        content.extractionMethod = "repair";
+                        auto contentResult = meta->insertContent(content);
+
+                        // Cap text for FTS5 indexing too — SQLite cannot bind strings > ~2 GB
+                        // and very large documents cause "string or blob too big" errors.
+                        const auto& textForIndex =
+                            (extractedOpt->size() > kMaxTextToPersistInMetadataBytes)
+                                ? content.contentText
+                                : *extractedOpt;
+                        auto ir = meta->indexDocumentContent(d.id, d.fileName, textForIndex,
+                                                             effectiveMime);
+
+                        if (ir && contentResult) {
+                            (void)meta->updateDocumentExtractionStatus(
+                                d.id, true, metadata::ExtractionStatus::Success);
+                            result.succeeded++;
+                        } else {
+                            static const std::string kUnknownFailure = "unknown";
+                            const std::string& failMsg =
+                                !contentResult ? contentResult.error().message
+                                               : (!ir ? ir.error().message : kUnknownFailure);
+                            (void)meta->updateDocumentExtractionStatus(
+                                d.id, false, metadata::ExtractionStatus::Failed, failMsg);
+                            result.failed++;
+                        }
+                    } else {
+                        (void)meta->updateDocumentExtractionStatus(
+                            d.id, false, metadata::ExtractionStatus::Skipped,
+                            "No extractable text");
+                        result.skipped++;
+                    }
+                } catch (const std::exception& e) {
                     (void)meta->updateDocumentExtractionStatus(
-                        d.id, false, metadata::ExtractionStatus::Failed, failMsg);
+                        d.id, false, metadata::ExtractionStatus::Failed, e.what());
                     result.failed++;
                 }
-            } else {
-                (void)meta->updateDocumentExtractionStatus(
-                    d.id, false, metadata::ExtractionStatus::Skipped, "No extractable text");
-                result.skipped++;
+
+                if (slice.exhausted(budget))
+                    break;
             }
-        } catch (const std::exception& e) {
-            (void)meta->updateDocumentExtractionStatus(
-                d.id, false, metadata::ExtractionStatus::Failed, e.what());
-            result.failed++;
+
+            if (docs.value().size() < static_cast<std::size_t>(opts.limit)) {
+                finished = true;
+                break;
+            }
         }
+
+        if (progress && slice.processed > 0) {
+            RepairEvent ev;
+            ev.phase = "repairing";
+            ev.operation = "fts5";
+            ev.processed = docsSeen;
+            ev.total = 0;
+            ev.succeeded = result.succeeded;
+            ev.failed = result.failed;
+            ev.skipped = result.skipped;
+            ev.message = "Completed FTS5 repair slice through document id " +
+                         std::to_string(slice.cursorDocumentId);
+            progress(ev);
+        }
+        std::this_thread::yield();
     }
 
     result.message = "FTS5 rebuild: " + std::to_string(result.succeeded) + " ok, " +

@@ -3131,7 +3131,9 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 }
             }
 
-            if (options.orderByNameAsc) {
+            if (options.orderByIdAsc) {
+                sql += " ORDER BY documents.id ASC";
+            } else if (options.orderByNameAsc) {
                 sql += " ORDER BY file_name ASC";
             } else if (options.orderByIndexedDesc) {
                 sql += " ORDER BY indexed_time DESC";

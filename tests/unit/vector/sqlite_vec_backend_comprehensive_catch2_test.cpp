@@ -102,6 +102,21 @@ struct SqliteVecBackendFixture {
     static inline int tempCounter = 0;
 };
 
+int countRows(sqlite3* db, const char* table) {
+    std::string sql = "SELECT COUNT(*) FROM ";
+    sql += table;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return -1;
+    }
+    int count = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        count = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return count;
+}
+
 } // namespace
 
 // =============================================================================
@@ -585,6 +600,36 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend Simeon PQ search eng
     REQUIRE(searchResult.has_value());
     REQUIRE(searchResult.value().size() == 5);
     CHECK(searchResult.value()[0].chunk_id == "chunk_spq_basic_0");
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend suppresses Simeon PQ rebuilds for memory instrumentation",
+                 "[vector][backend][index][spq-suppressed][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.suppress_search_index_builds = true;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    for (int i = 0; i < 12; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        REQUIRE(backend.insertVector(createVectorRecord("spq_suppressed_" + std::to_string(i), emb))
+                    .has_value());
+    }
+
+    REQUIRE(backend.buildIndex().has_value());
+    REQUIRE(backend.persistIndex().has_value());
+    CHECK(countRows(backend.getDbHandle(), "simeon_pq_meta") == 0);
+    CHECK(countRows(backend.getDbHandle(), "simeon_pq_codes") == 0);
+
+    auto query = createEmbedding(64, 1.0f);
+    auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+    REQUIRE(searchResult.has_value());
+    CHECK(searchResult.value().empty());
+    CHECK(countRows(backend.getDbHandle(), "simeon_pq_meta") == 0);
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture,

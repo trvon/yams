@@ -257,6 +257,8 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
     setVal(metrics::kRepairInProgress, snap.repairInProgress ? 1 : 0);
     setVal(metrics::kRepairQueueDepth, snap.repairQueueDepth);
     setVal(metrics::kRepairFailedOperations, snap.repairFailedOperations);
+    setVal(metrics::kRepairCurrentOperationCode, snap.repairCurrentOperationCode);
+    setVal(metrics::kRepairCurrentOperationElapsedMs, snap.repairCurrentOperationElapsedMs);
     setVal(metrics::kTopologyRebuildRunning, snap.topologyRebuildRunning ? 1 : 0);
     setVal(metrics::kTopologyDirtyDocuments, static_cast<size_t>(snap.topologyDirtyDocuments));
     setVal(metrics::kTopologyLastDurationMs, static_cast<size_t>(snap.topologyLastDurationMs));
@@ -308,6 +310,8 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         setVal(metrics::kRepairProcessed, snap.repairProcessed);
         setVal(metrics::kRepairRunning, snap.repairRunning ? 1 : 0);
         setVal(metrics::kRepairInProgress, snap.repairInProgress ? 1 : 0);
+        setVal(metrics::kRepairCurrentOperationCode, snap.repairCurrentOperationCode);
+        setVal(metrics::kRepairCurrentOperationElapsedMs, snap.repairCurrentOperationElapsedMs);
         setVal(metrics::kTopologyLastSuccessAgeMs,
                static_cast<size_t>(snap.topologyLastSuccessAgeMs));
         setVal(metrics::kTopologyRebuildLagMs, static_cast<size_t>(snap.topologyRebuildLagMs));
@@ -847,6 +851,21 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
                     res.requestCounts[std::string(metrics::kRepairProcessed)] =
                         state_->stats.repairProcessed.load(std::memory_order_relaxed);
+                    const auto opCode =
+                        state_->stats.repairCurrentOperationCode.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairCurrentOperationCode)] = opCode;
+                    uint64_t elapsedMs = 0;
+                    const auto startedMs = state_->stats.repairCurrentOperationStartedMs.load(
+                        std::memory_order_relaxed);
+                    if (opCode > 0 && startedMs > 0) {
+                        const auto nowMs = static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
+                        elapsedMs = nowMs > startedMs ? nowMs - startedMs : 0;
+                    }
+                    res.requestCounts[std::string(metrics::kRepairCurrentOperationElapsedMs)] =
+                        elapsedMs;
                     res.requestCounts[std::string(metrics::kRepairRunning)] = repairRunning ? 1 : 0;
                     res.requestCounts[std::string(metrics::kRepairInProgress)] =
                         state_->stats.repairInProgress.load(std::memory_order_relaxed) ? 1 : 0;

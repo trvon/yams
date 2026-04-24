@@ -443,7 +443,7 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"plugin_dir_strict", "false"},
               {"use_legacy_tuner", "false"},
               {"auto_repair_batch_size", "16"},
-              {"auto_rebuild_on_dim_mismatch", "true"},
+              {"auto_rebuild_on_dim_mismatch", "false"},
               {"socket_path", "/tmp/yams-daemon.sock"},
               {"pid_file", "/tmp/yams-daemon.pid"},
               {"worker_threads", "0"},
@@ -451,6 +451,8 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"connect_timeout_ms", "1000"},
               {"request_timeout_ms", "5000"},
               {"log_level", "info"}}},
+
+            {"daemon.instrumentation", {{"profile", "auto"}, {"msl_stack_log_warn_mb", "2048"}}},
 
             {"tuning",
              {{"profile", "balanced"},
@@ -752,6 +754,7 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "downloader.proxy",
                                              "mcp_server",
                                              "daemon",
+                                             "daemon.instrumentation",
                                              "daemon.models",
                                              "daemon.resource_pool",
                                              "daemon.client",
@@ -939,6 +942,28 @@ Result<void> ConfigMigrator::validateLatestConfig(const fs::path& configPath) {
         if (comp.find("lzma_level") != comp.end()) {
             if (!validateRange(comp.at("lzma_level"), 0, 9)) {
                 return Error{ErrorCode::InvalidData, "Invalid lzma_level (must be 0-9)"};
+            }
+        }
+    }
+
+    // Check daemon instrumentation profile and warning threshold.
+    if (config.find("daemon.instrumentation") != config.end()) {
+        const auto& instr = config.at("daemon.instrumentation");
+        if (instr.find("profile") != instr.end()) {
+            std::string profile = instr.at("profile");
+            std::transform(profile.begin(), profile.end(), profile.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const std::set<std::string> allowedProfiles = {
+                "auto", "memory", "msl", "normal", "off", "memory_instrumentation"};
+            if (allowedProfiles.find(profile) == allowedProfiles.end()) {
+                return Error{ErrorCode::InvalidData, "Invalid daemon.instrumentation.profile "
+                                                     "(must be auto, memory, msl, normal, or off)"};
+            }
+        }
+        if (instr.find("msl_stack_log_warn_mb") != instr.end()) {
+            if (!validateRange(instr.at("msl_stack_log_warn_mb"), 0, 1048576)) {
+                return Error{ErrorCode::InvalidData,
+                             "Invalid daemon.instrumentation.msl_stack_log_warn_mb"};
             }
         }
     }

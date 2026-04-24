@@ -84,6 +84,7 @@ struct VectorDatabaseConfig {
     size_t simeon_pq_train_limit = 4096;
     size_t simeon_pq_rerank_factor = 2;
     uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
+    bool suppress_search_index_builds = false;
     bool enable_turboquant_storage = false;
     uint8_t turboquant_bits = 4;
     uint64_t turboquant_seed = 42;

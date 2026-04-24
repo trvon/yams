@@ -59,7 +59,7 @@ struct DaemonConfig {
     bool enableAutoRepair = true;
     bool useMockModelProvider = false;
     size_t autoRepairBatchSize = 32;
-    bool autoRebuildOnDimMismatch = true;
+    bool autoRebuildOnDimMismatch = false;
     size_t maxPendingRepairs = 1000;
     // Embedded one-shot clients (sandboxed CLIs, Codex) should avoid startup maintenance that can
     // outlive the command and make teardown expensive. Request handlers may still perform explicit

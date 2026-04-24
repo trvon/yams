@@ -14,6 +14,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
@@ -112,7 +113,7 @@ public:
         std::uint32_t maintenanceTokens{1};
         bool allowDegraded{true};
         std::uint32_t maxActiveDuringDegraded{1};
-        bool autoRebuildOnDimMismatch{true};
+        bool autoRebuildOnDimMismatch{false};
         std::int32_t maxRetries{3};
         std::chrono::seconds stalledThreshold{3600}; // 1 hour
         std::size_t maxPendingRepairs{1000};
@@ -129,6 +130,26 @@ public:
     };
 
     using ProgressFn = std::function<void(const RepairEvent&)>;
+
+    struct RepairBudget {
+        std::size_t maxDocuments{16};
+        std::chrono::milliseconds maxWallTime{250};
+    };
+
+    struct RepairSlice {
+        std::int64_t cursorDocumentId{0};
+        std::size_t processed{0};
+        std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+
+        bool exhausted(const RepairBudget& budget) const noexcept {
+            if (budget.maxDocuments > 0 && processed >= budget.maxDocuments)
+                return true;
+            if (budget.maxWallTime.count() > 0 &&
+                std::chrono::steady_clock::now() - started >= budget.maxWallTime)
+                return true;
+            return false;
+        }
+    };
 
     RepairService(ServiceManager* services, StateComponent* state,
                   std::function<size_t()> activeConnFn, Config cfg);
@@ -292,6 +313,8 @@ private:
 
     // ── Progress helper ──
     void updateProgressPct();
+    void beginRepairOperation(std::string_view operation);
+    void endRepairOperation();
 
     // ── Members ──
     RepairServiceContext ctx_;

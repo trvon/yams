@@ -1605,6 +1605,10 @@ FROM vectors WHERE level = ?
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
+        if (config_.suppress_search_index_builds) {
+            spdlog::warn("[VectorIndex] buildIndex suppressed by memory instrumentation profile");
+            return Result<void>{};
+        }
 
         const auto start = std::chrono::steady_clock::now();
         if (usesVec0SearchEngine()) {
@@ -1638,6 +1642,11 @@ FROM vectors WHERE level = ?
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        if (config_.suppress_search_index_builds) {
+            spdlog::warn(
+                "[VectorIndex] prepareSearchIndex suppressed by memory instrumentation profile");
+            return Result<void>{};
         }
 
         if (usesVec0SearchEngine()) {
@@ -1693,18 +1702,28 @@ FROM vectors WHERE level = ?
 
         if (usesVec0SearchEngine()) {
             if (!vec0_dirty_dims_.empty()) {
-                auto rebuild = rebuildVec0IndicesUnlocked();
-                if (!rebuild) {
-                    return rebuild;
+                if (config_.suppress_search_index_builds) {
+                    spdlog::warn(
+                        "[vec0] optimize rebuild suppressed by memory instrumentation profile");
+                } else {
+                    auto rebuild = rebuildVec0IndicesUnlocked();
+                    if (!rebuild) {
+                        return rebuild;
+                    }
                 }
             }
             return Result<void>{};
         }
         if (usesSimeonPqSearchEngine()) {
             if (!simeon_pq_dirty_dims_.empty()) {
-                auto rebuild = rebuildSimeonPqIndicesUnlocked();
-                if (!rebuild) {
-                    return rebuild;
+                if (config_.suppress_search_index_builds) {
+                    spdlog::warn(
+                        "[SPQ] optimize rebuild suppressed by memory instrumentation profile");
+                } else {
+                    auto rebuild = rebuildSimeonPqIndicesUnlocked();
+                    if (!rebuild) {
+                        return rebuild;
+                    }
                 }
             }
             for (size_t dim : simeon_pq_ready_dims_) {
@@ -1728,18 +1747,28 @@ FROM vectors WHERE level = ?
 
         if (usesVec0SearchEngine()) {
             if (!vec0_dirty_dims_.empty()) {
-                auto rebuild = rebuildVec0IndicesUnlocked();
-                if (!rebuild) {
-                    return rebuild;
+                if (config_.suppress_search_index_builds) {
+                    spdlog::warn(
+                        "[vec0] persistIndex rebuild suppressed by memory instrumentation profile");
+                } else {
+                    auto rebuild = rebuildVec0IndicesUnlocked();
+                    if (!rebuild) {
+                        return rebuild;
+                    }
                 }
             }
             return checkpointWalUnlocked();
         }
         if (usesSimeonPqSearchEngine()) {
             if (!simeon_pq_dirty_dims_.empty()) {
-                auto rebuild = rebuildSimeonPqIndicesUnlocked();
-                if (!rebuild) {
-                    return rebuild;
+                if (config_.suppress_search_index_builds) {
+                    spdlog::warn(
+                        "[SPQ] persistIndex rebuild suppressed by memory instrumentation profile");
+                } else {
+                    auto rebuild = rebuildSimeonPqIndicesUnlocked();
+                    if (!rebuild) {
+                        return rebuild;
+                    }
                 }
             }
             for (size_t dim : simeon_pq_ready_dims_) {
@@ -2820,6 +2849,13 @@ private:
         if (vec0_ready_dims_.contains(dim) && !vec0_dirty_dims_.contains(dim)) {
             return Result<void>{};
         }
+        if (config_.suppress_search_index_builds) {
+            if (vec0_ready_dims_.contains(dim)) {
+                return Result<void>{};
+            }
+            return Error{ErrorCode::InvalidOperation,
+                         "vec0 search index build suppressed by memory instrumentation profile"};
+        }
         return rebuildVec0IndicesUnlocked(dim);
     }
 
@@ -3043,6 +3079,17 @@ private:
     Result<void> ensureSimeonPqReadyUnlocked(size_t dim) {
         if (simeon_pq_ready_dims_.contains(dim) && !simeon_pq_dirty_dims_.contains(dim) &&
             simeon_pq_indices_.contains(dim)) {
+            return Result<void>{};
+        }
+        if (config_.suppress_search_index_builds) {
+            if (simeon_pq_indices_.contains(dim)) {
+                return Result<void>{};
+            }
+            if (!simeon_pq_dirty_dims_.contains(dim) && loadPersistedSimeonPqDimUnlocked(dim)) {
+                return Result<void>{};
+            }
+            spdlog::debug("[SPQ] ensure ready skipped: build suppressed by memory instrumentation "
+                          "profile");
             return Result<void>{};
         }
         if (!simeon_pq_dirty_dims_.contains(dim) && loadPersistedSimeonPqDimUnlocked(dim)) {

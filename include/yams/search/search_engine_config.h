@@ -102,6 +102,12 @@ struct SearchEngineConfig {
     float topologyMedoidBoost = 0.05f;
     float topologyBridgeBoost = 0.03f;
 
+    // Phase J: hierarchical recall expansion. When enabled, topology routing
+    // fires on ALL queries (not just weak-Tier1 queries), gated by routing
+    // strength = max cosine(query_emb, cluster_medoid_emb). Off by default.
+    bool enableTopologyAllQueryRouting = false;
+    float topologyRoutingMinMedoidCosine = 0.40f;
+
     // Phase I: anchor-affinity fusion leg.
     // Per-doc anchor_score = cosine(query, medoid_of_cluster(doc)) mapped [-1,1] -> [0,1].
     // Off by default until measured; treated as a third fusion leg (Source::Anchor) when on.

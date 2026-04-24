@@ -933,6 +933,18 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
         out.repairBusyTicks = state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
         out.repairTotalBacklog = state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
         out.repairProcessed = state_->stats.repairProcessed.load(std::memory_order_relaxed);
+        out.repairCurrentOperationCode =
+            state_->stats.repairCurrentOperationCode.load(std::memory_order_relaxed);
+        const auto repairStartedMs =
+            state_->stats.repairCurrentOperationStartedMs.load(std::memory_order_relaxed);
+        if (out.repairCurrentOperationCode > 0 && repairStartedMs > 0) {
+            const auto nowMs =
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now().time_since_epoch())
+                                               .count());
+            out.repairCurrentOperationElapsedMs =
+                nowMs > repairStartedMs ? nowMs - repairStartedMs : 0;
+        }
         if (services_) {
             try {
                 out.workerActive = services_->getWorkerActive();
@@ -1083,6 +1095,18 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         out.repairBusyTicks = state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
         out.repairTotalBacklog = state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
         out.repairProcessed = state_->stats.repairProcessed.load(std::memory_order_relaxed);
+        out.repairCurrentOperationCode =
+            state_->stats.repairCurrentOperationCode.load(std::memory_order_relaxed);
+        const auto repairStartedMs =
+            state_->stats.repairCurrentOperationStartedMs.load(std::memory_order_relaxed);
+        if (out.repairCurrentOperationCode > 0 && repairStartedMs > 0) {
+            const auto nowMs =
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now().time_since_epoch())
+                                               .count());
+            out.repairCurrentOperationElapsedMs =
+                nowMs > repairStartedMs ? nowMs - repairStartedMs : 0;
+        }
         if (services_) {
             auto topology = services_->getTopologyTelemetrySnapshot();
             out.topologyRebuildRunning = topology.rebuildRunning;

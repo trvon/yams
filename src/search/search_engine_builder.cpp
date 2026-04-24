@@ -608,6 +608,16 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine topology weak-query routing {} via env",
                          cfg.enableTopologyWeakQueryRouting ? "enabled" : "disabled");
         }
+        if (auto topologyAllRouting = getEnvBool("YAMS_SEARCH_ENABLE_TOPOLOGY_ALL_QUERY_ROUTING")) {
+            cfg.enableTopologyAllQueryRouting = *topologyAllRouting;
+            spdlog::info("SearchEngine topology all-query routing {} via env",
+                         cfg.enableTopologyAllQueryRouting ? "enabled" : "disabled");
+        }
+        if (auto routingMinCos = getEnvFloat("YAMS_SEARCH_TOPOLOGY_ROUTING_MIN_MEDOID_COSINE")) {
+            cfg.topologyRoutingMinMedoidCosine = std::clamp(*routingMinCos, 0.0f, 1.0f);
+            spdlog::info("SearchEngine topologyRoutingMinMedoidCosine overridden to {:.3f} via env",
+                         cfg.topologyRoutingMinMedoidCosine);
+        }
         if (auto topologyMaxClusters = getEnvInt("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS")) {
             cfg.topologyWeakQueryMaxClusters =
                 static_cast<size_t>(std::max(0, *topologyMaxClusters));

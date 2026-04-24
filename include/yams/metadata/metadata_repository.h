@@ -164,8 +164,12 @@ struct DocumentQueryOptions {
     std::optional<int64_t> indexedAfter;
     std::optional<int64_t> indexedBefore;
     std::optional<int64_t> changedSince;
+    /// Cursor pagination helper for long-running maintenance scans.
+    /// When set, only documents with id > value are returned.
+    std::optional<int64_t> idGreaterThan;
     int limit{0};
     int offset{0};
+    bool orderByIdAsc{false};
     bool orderByNameAsc{false};
     bool orderByIndexedDesc{false};
     bool pathsOnly{false};
