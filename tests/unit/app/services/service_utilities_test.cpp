@@ -6,6 +6,7 @@
 #include "../../../common/env_compat.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/app/services/list_input_resolver.hpp>
+#include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/unistd.h>
@@ -153,6 +154,42 @@ TEST_CASE("Service Utils - Path Normalization", "[utils][service][paths]") {
         CHECK_FALSE(result.hasWildcards);
         CHECK(result.normalized == "-");
     }
+}
+
+TEST_CASE("Path projection gives paths-only responses one shared contract",
+          "[utils][service][paths-only]") {
+    SearchResponse resp;
+    std::vector<SearchItem> items;
+
+    SearchItem first;
+    first.path = "/tmp/a.cpp";
+    first.fileName = "a.cpp";
+    items.push_back(first);
+
+    SearchItem duplicate = first;
+    items.push_back(duplicate);
+
+    SearchItem fallback;
+    fallback.fileName = "b.cpp";
+    items.push_back(fallback);
+
+    path_projection::assignPathsOnly(resp, items, 10, [](const SearchItem& item) {
+        return path_projection::displayPath(item.path, item.fileName);
+    });
+
+    REQUIRE(resp.paths.size() == 2);
+    CHECK(resp.paths[0] == "/tmp/a.cpp");
+    CHECK(resp.paths[1] == "b.cpp");
+    CHECK(resp.total == resp.paths.size());
+    CHECK(resp.results.empty());
+
+    SearchResponse fuzzy;
+    fuzzy.paths = {"/tmp/a.cpp", "/tmp/c.cpp"};
+    path_projection::mergePathsOnly(resp, fuzzy, 2);
+    REQUIRE(resp.paths.size() == 2);
+    CHECK(resp.paths[0] == "/tmp/a.cpp");
+    CHECK(resp.paths[1] == "b.cpp");
+    CHECK(resp.total == 2);
 }
 
 TEST_CASE("List input resolver classifies wildcards and directories", "[utils][service][list]") {

@@ -2314,6 +2314,10 @@ private:
                     const uint64_t allocUs = count("status_diag_allocator_sample_us");
                     const uint64_t logBytes = count("status_diag_msl_stack_log_bytes");
                     const uint64_t logFiles = count("status_diag_msl_stack_log_files");
+                    uint64_t logWarnBytes = count("status_diag_msl_stack_log_warn_bytes");
+                    if (logWarnBytes == 0) {
+                        logWarnBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+                    }
                     if (mslEnabled || sampleUs || allocUs || logBytes || logFiles) {
                         std::ostringstream value;
                         bool first = true;
@@ -2333,7 +2337,12 @@ private:
                             append("stack_logs=" + std::to_string(logBytes / (1024ULL * 1024ULL)) +
                                    " MB/" + std::to_string(logFiles) + " files");
                         }
-                        resourceRows.push_back({"Memory Diagnostics", value.str(), ""});
+                        const bool logPressure = logBytes >= logWarnBytes && logWarnBytes > 0;
+                        resourceRows.push_back(
+                            {"Memory Diagnostics",
+                             paintStatus(logPressure ? Severity::Warn : Severity::Good,
+                                         value.str()),
+                             logPressure ? "restart after profiling; use memory profile" : ""});
                     }
                 }
                 resourceRows.push_back({"Pools",

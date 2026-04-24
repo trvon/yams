@@ -159,6 +159,16 @@ public:
         vectorDb_ = std::move(vdb);
     }
 
+    /**
+     * @brief Suppress buildIndex/persistIndex work while preserving inserts and telemetry.
+     *
+     * Used by memory instrumentation profiles so daemon startup can be measured without
+     * concurrent SPQ/PQ rebuild allocation churn.
+     */
+    void setBuildsSuppressed(bool suppressed) noexcept {
+        buildsSuppressed_.store(suppressed, std::memory_order_relaxed);
+    }
+
 #ifdef YAMS_TESTING
     uint32_t testing_pendingReasons() const noexcept {
         return pendingReasons_.load(std::memory_order_relaxed);
@@ -213,6 +223,7 @@ private:
     // even if the strand dispatch hasn't fully transferred the calling coroutine.
     std::atomic<bool> rebuildInFlight_{false};
     std::atomic<uint64_t> rebuildEpoch_{0};
+    std::atomic<bool> buildsSuppressed_{false};
 
     // Waiters registered by requestRebuild; drained when epoch advances.
     using RebuildCompletion = std::function<void(Result<void>)>;

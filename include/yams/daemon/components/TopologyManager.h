@@ -56,6 +56,13 @@ public:
         double giantClusterRatio{0.0};
         double clusterSizeGini{0.0};
         double avgIntraEdgeWeight{0.0};
+        // Phase H-TDA wiring fix: H_0 persistence computed on the cluster
+        // centroids produced by this rebuild (not on raw doc embeddings).
+        // Varies per arm because each clustering produces a different
+        // centroid cloud. 0 means no valid centroids (e.g. one giant cluster
+        // or all singletons → no MST edges between centroids).
+        double clusterCentroidPersistence{0.0};
+        std::size_t clusterCentroidCount{0};
         std::string cellIdentity;
         std::vector<std::string> issues;
     };

@@ -447,6 +447,40 @@ TEST_CASE("GrepService - Output Modes", "[grep][service][modes]") {
     GrepFixture fixture;
     fixture.addDocument("a.txt", "programming content\n");
 
+    SECTION("Paths-only and file-set projections are deterministic") {
+        fixture.addDocument("c.txt", "needle content c\n");
+        fixture.addDocument("b.txt", "needle content b\n");
+        fixture.addDocument("z.txt", "haystack only\n");
+
+        GrepRequest req;
+        req.pattern = "needle";
+        req.regexOnly = true;
+        req.pathsOnly = true;
+
+        auto res = fixture.grep(req);
+
+        REQUIRE(res);
+        const std::vector<std::string> expectedWith = {
+            std::filesystem::weakly_canonical(fixture.tmpDir_ / "b.txt").string(),
+            std::filesystem::weakly_canonical(fixture.tmpDir_ / "c.txt").string(),
+        };
+        CHECK(res.value().filesWith == expectedWith);
+        CHECK(res.value().pathsOnly == expectedWith);
+
+        GrepRequest withoutReq;
+        withoutReq.pattern = "needle";
+        withoutReq.regexOnly = true;
+        withoutReq.filesWithoutMatch = true;
+        auto withoutRes = fixture.grep(withoutReq);
+
+        REQUIRE(withoutRes);
+        const std::vector<std::string> expectedWithout = {
+            std::filesystem::weakly_canonical(fixture.tmpDir_ / "a.txt").string(),
+            std::filesystem::weakly_canonical(fixture.tmpDir_ / "z.txt").string(),
+        };
+        CHECK(withoutRes.value().filesWithout == expectedWithout);
+    }
+
     SECTION("Count mode allows semantic suggestions") {
 // Skip semantic search on Windows - ONNX initialization hangs
 #ifdef _WIN32

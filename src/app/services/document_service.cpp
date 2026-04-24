@@ -7,6 +7,7 @@
 #include <spdlog/spdlog.h>
 #include <yams/api/content_store.h>
 #include <yams/app/services/graph_query_service.hpp>
+#include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/service_utils.hpp>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_utils.h>
@@ -1649,6 +1650,7 @@ public:
         const bool wantsHydration = wantsSnippets || wantsMetadata;
         if (req.pathsOnly || (forceHot && !wantsHydration)) {
             out.documents.reserve(page.size());
+            std::unordered_set<std::string> seenPaths;
             for (const auto& d : page) {
                 DocumentEntry e;
                 e.name = d.fileName;
@@ -1663,7 +1665,15 @@ public:
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
                 e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
+                if (req.pathsOnly) {
+                    path_projection::appendUniquePath(
+                        out.paths, seenPaths, path_projection::displayPath(e.path, e.fileName),
+                        req.limit > 0 ? static_cast<std::size_t>(req.limit) : 0);
+                }
                 out.documents.push_back(std::move(e));
+            }
+            if (req.pathsOnly) {
+                out.count = out.paths.size();
             }
             return out;
         }

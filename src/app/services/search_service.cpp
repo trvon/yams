@@ -5,6 +5,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/enhanced_search_executor.h>
+#include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/detection/file_type_detector.h>
@@ -999,7 +1000,7 @@ public:
                     }
                 }
                 resp.paths = std::move(filteredPaths);
-                resp.total = resp.paths.size();
+                path_projection::finalizePathsOnly(resp);
             } else {
                 std::vector<SearchItem> filtered;
                 filtered.reserve(resp.results.size());
@@ -1554,13 +1555,9 @@ private:
                 return lhs.second > rhs.second;
             });
 
-            const std::size_t effectiveLimit = req.limit > 0 ? req.limit : rankedPaths.size();
-            const std::size_t count = std::min(effectiveLimit, rankedPaths.size());
-            resp.paths.reserve(count);
-            for (std::size_t i = 0; i < count; ++i) {
-                resp.paths.push_back(rankedPaths[i].first);
-            }
-            resp.total = resp.paths.size();
+            path_projection::assignPathsOnly(
+                resp, rankedPaths, req.limit,
+                [](const auto& rankedPath) -> const std::string& { return rankedPath.first; });
         } else {
             std::sort(resp.results.begin(), resp.results.end(),
                       [](const SearchItem& lhs, const SearchItem& rhs) {
@@ -1609,6 +1606,7 @@ private:
         resp.type = "hash";
         resp.usedHybrid = false;
         const auto recentLexicalDeltaHashes = buildRecentLexicalDeltaSet(ctx_);
+        std::unordered_set<std::string> seenPaths;
 
         const std::size_t fetchLimit = std::max<std::size_t>(req.limit * 4, 32);
         auto docsResult = co_await retryMetadataOp(
@@ -1682,7 +1680,9 @@ private:
             }
 
             if (req.pathsOnly) {
-                resp.paths.push_back(doc.filePath);
+                path_projection::appendUniquePath(
+                    resp.paths, seenPaths, path_projection::displayPath(doc.filePath, doc.fileName),
+                    req.limit);
             } else {
                 SearchItem it;
                 it.id = doc.id;
@@ -1703,12 +1703,17 @@ private:
                 resp.results.push_back(std::move(it));
             }
 
-            if ((req.pathsOnly ? resp.paths.size() : resp.results.size()) >= req.limit)
+            if (req.limit > 0 &&
+                (req.pathsOnly ? resp.paths.size() : resp.results.size()) >= req.limit)
                 break;
         }
 
         annotateRecentLexicalDeltaHits(resp, recentLexicalDeltaHashes);
-        resp.total = req.pathsOnly ? resp.paths.size() : resp.results.size();
+        if (req.pathsOnly) {
+            path_projection::finalizePathsOnly(resp);
+        } else {
+            resp.total = resp.results.size();
+        }
         resp.wasHashSearch = true;
         resp.detectedHashQuery = rawPrefix;
         co_return resp;
@@ -1976,15 +1981,9 @@ private:
         }
 
         if (req.pathsOnly) {
-            const size_t effectiveLimit = req.limit > 0 ? req.limit : candidates.size();
-            for (const auto* r : candidates) {
-                if (resp.paths.size() >= effectiveLimit)
-                    break;
-                if (!r->document.filePath.empty()) {
-                    resp.paths.push_back(r->document.filePath);
-                }
-            }
-            resp.total = resp.paths.size();
+            path_projection::assignPathsOnly(resp, candidates, req.limit, [](const auto* r) {
+                return path_projection::displayPath(r->document.filePath, r->document.fileName);
+            });
             return resp;
         }
 
@@ -2288,6 +2287,7 @@ private:
                 SearchResponse resp;
                 resp.type = "metadata";
                 resp.usedHybrid = false;
+                std::unordered_set<std::string> seenPaths;
 
                 const size_t effectiveLimit =
                     req.limit > 0 ? req.limit : metadataDocsResult.value().size();
@@ -2300,7 +2300,10 @@ private:
                         if (resp.paths.size() >= effectiveLimit) {
                             break;
                         }
-                        resp.paths.push_back(!doc.filePath.empty() ? doc.filePath : doc.fileName);
+                        path_projection::appendUniquePath(
+                            resp.paths, seenPaths,
+                            path_projection::displayPath(doc.filePath, doc.fileName),
+                            effectiveLimit);
                         continue;
                     }
 
@@ -2331,8 +2334,10 @@ private:
                     resp.results.push_back(std::move(item));
                 }
 
-                resp.total = req.pathsOnly ? resp.paths.size() : resp.results.size();
-                if (!req.pathsOnly) {
+                if (req.pathsOnly) {
+                    path_projection::finalizePathsOnly(resp);
+                } else {
+                    resp.total = resp.results.size();
                     applyExtensionFacets(resp);
                 }
                 return resp;
@@ -2468,15 +2473,11 @@ private:
             resp.usedHybrid = false;
 
             if (searchReq.pathsOnly) {
-                const size_t effectiveLimit =
-                    searchReq.limit > 0 ? searchReq.limit : res.results.size();
-                for (const auto& item : res.results) {
-                    if (resp.paths.size() >= effectiveLimit)
-                        break;
-                    const auto& d = item.document;
-                    resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                }
-                resp.total = resp.paths.size();
+                path_projection::assignPathsOnly(
+                    resp, res.results, searchReq.limit, [](const auto& item) {
+                        const auto& d = item.document;
+                        return path_projection::displayPath(d.filePath, d.fileName);
+                    });
                 return resp;
             }
 
@@ -2541,15 +2542,11 @@ private:
             resp.usedHybrid = false;
 
             if (searchReq.pathsOnly) {
-                const size_t effectiveLimit =
-                    searchReq.limit > 0 ? searchReq.limit : res.results.size();
-                for (const auto& item : res.results) {
-                    if (resp.paths.size() >= effectiveLimit)
-                        break;
-                    const auto& d = item.document;
-                    resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
-                }
-                resp.total = resp.paths.size();
+                path_projection::assignPathsOnly(
+                    resp, res.results, searchReq.limit, [](const auto& item) {
+                        const auto& d = item.document;
+                        return path_projection::displayPath(d.filePath, d.fileName);
+                    });
                 return resp;
             }
 
@@ -2623,16 +2620,7 @@ private:
             std::max(combined.executionTimeMs, fuzzyResults.value().executionTimeMs);
 
         if (req.pathsOnly) {
-            std::unordered_set<std::string> seen(combined.paths.begin(), combined.paths.end());
-            for (const auto& path : fuzzyResults.value().paths) {
-                if (seen.insert(path).second) {
-                    combined.paths.push_back(path);
-                }
-            }
-            if (req.limit > 0 && combined.paths.size() > req.limit) {
-                combined.paths.resize(req.limit);
-            }
-            combined.total = combined.paths.size();
+            path_projection::mergePathsOnly(combined, fuzzyResults.value(), req.limit);
             return combined;
         }
 

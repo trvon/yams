@@ -520,6 +520,11 @@ public:
                                     getCount("status_diag_msl_stack_log_bytes");
                                 const uint64_t logFiles =
                                     getCount("status_diag_msl_stack_log_files");
+                                uint64_t logWarnBytes =
+                                    getCount("status_diag_msl_stack_log_warn_bytes");
+                                if (logWarnBytes == 0) {
+                                    logWarnBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+                                }
                                 if (mslEnabled || sampleUs || allocUs || logBytes || logFiles) {
                                     std::ostringstream diag;
                                     bool first = true;
@@ -544,7 +549,15 @@ public:
                                                std::to_string(logBytes / (1024ULL * 1024ULL)) +
                                                " MB/" + std::to_string(logFiles) + " files");
                                     }
-                                    resources.push_back({"Memory Diagnostics", diag.str(), ""});
+                                    const bool logPressure =
+                                        logBytes >= logWarnBytes && logWarnBytes > 0;
+                                    resources.push_back(
+                                        {"Memory Diagnostics",
+                                         severity_text(logPressure ? Severity::Warn
+                                                                   : Severity::Good,
+                                                       diag.str(), true),
+                                         logPressure ? "restart after profiling; use memory profile"
+                                                     : ""});
                                 }
                             }
                             resources.push_back({"Pools",

@@ -102,6 +102,15 @@ struct SearchEngineConfig {
     float topologyMedoidBoost = 0.05f;
     float topologyBridgeBoost = 0.03f;
 
+    // Phase I: anchor-affinity fusion leg.
+    // Per-doc anchor_score = cosine(query, medoid_of_cluster(doc)) mapped [-1,1] -> [0,1].
+    // Off by default until measured; treated as a third fusion leg (Source::Anchor) when on.
+    bool enableAnchorFusion = false;
+    float anchorWeight = 0.20f;
+    bool anchorPhssGateEnabled = true;
+    float anchorPhssMinConfidence = 0.30f;
+    size_t anchorTopK = 32;
+
     enum class TopologyRoutingVariant {
         Baseline,
         VectorSeed,

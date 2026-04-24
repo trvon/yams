@@ -22,6 +22,7 @@ public:
         bool enableAutoRepair{false};
         bool autoLoadPlugins{false};
         bool enableModelProvider{false};
+        bool oneShot{false};
         int initTimeoutSeconds{120};
     };
 

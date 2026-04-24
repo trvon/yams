@@ -464,6 +464,11 @@ std::filesystem::path resolveDataDirCached() {
 
 namespace {
 
+bool running_under_codex_client() {
+    return (std::getenv("CODEX_CI") != nullptr) || (std::getenv("CODEX_THREAD_ID") != nullptr) ||
+           (std::getenv("CODEX_SANDBOX") != nullptr);
+}
+
 Result<std::shared_ptr<EmbeddedServiceHost>> ensure_embedded_host(daemon::ClientConfig& config) {
     if (config.dataDir.empty()) {
         config.dataDir = resolveDataDirCached();
@@ -474,6 +479,7 @@ Result<std::shared_ptr<EmbeddedServiceHost>> ensure_embedded_host(daemon::Client
     options.enableAutoRepair = false;
     options.autoLoadPlugins = false;
     options.enableModelProvider = false;
+    options.oneShot = running_under_codex_client();
 
     return EmbeddedServiceHost::getOrCreate(options);
 }

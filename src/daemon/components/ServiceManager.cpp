@@ -657,6 +657,8 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 workCoordinator_->getExecutor(),
                 nullptr, // VectorDatabase wired below after DB init
                 &state_);
+            vectorIndexCoordinator_->setBuildsSuppressed(
+                config_.instrumentation.suppressVectorIndexBuild);
             spdlog::debug("[ServiceManager] VectorIndexCoordinator created");
 
             // Create DatabaseManager
@@ -1591,7 +1593,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     int build_timeout = 30000; // 30s timeout
                     auto result = co_await searchEngineManager_.buildEngine(
                         getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
-                        reason, build_timeout, getWorkerExecutor());
+                        reason, build_timeout, getWorkerExecutor(),
+                        !config_.instrumentation.suppressSimeonLexicalBuild);
 
                     if (result.has_value()) {
                         state_.readiness.searchEngineReady.store(true);
@@ -2166,17 +2169,24 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 if (auto vdb = getVectorDatabase()) {
                     vectorIndexCoordinator_->setVectorDatabase(vdb);
                 }
-                // Async: load or build the initial index (sets vectorIndexReady).
-                boost::asio::co_spawn(
-                    workCoordinator_->getExecutor(),
-                    [coord = vectorIndexCoordinator_]() -> boost::asio::awaitable<void> {
-                        auto res = co_await coord->initialBuildIfNeeded();
-                        if (!res) {
-                            spdlog::warn("[ServiceManager] initialBuildIfNeeded failed: {}",
-                                         res.error().message);
-                        }
-                    },
-                    boost::asio::detached);
+                // Async: load or build the initial index (sets vectorIndexReady). Embedded
+                // one-shot clients avoid opportunistic background rebuilds because the process is
+                // about to exit and teardown otherwise waits on this worker.
+                if (!config_.embeddedOneShot && !config_.instrumentation.suppressVectorIndexBuild) {
+                    boost::asio::co_spawn(
+                        workCoordinator_->getExecutor(),
+                        [coord = vectorIndexCoordinator_]() -> boost::asio::awaitable<void> {
+                            auto res = co_await coord->initialBuildIfNeeded();
+                            if (!res) {
+                                spdlog::warn("[ServiceManager] initialBuildIfNeeded failed: {}",
+                                             res.error().message);
+                            }
+                        },
+                        boost::asio::detached);
+                } else if (config_.instrumentation.suppressVectorIndexBuild) {
+                    spdlog::warn("[ServiceManager] Vector index initial build suppressed by memory "
+                                 "instrumentation profile");
+                }
             }
             // Log vector count from database
             if (auto vectorDatabase = getVectorDatabase()) {
@@ -2185,33 +2195,40 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     spdlog::info("[VectorInit] Found {} vectors in database", dbVectorCount);
                 }
 
-                if (auto metadataRepo = getMetadataRepo()) {
-                    auto embeddedHashes = vectorDatabase->getEmbeddedDocumentHashes();
-                    const auto metadataEmbeddedCount =
-                        static_cast<int64_t>(metadataRepo->getCachedEmbeddedCount());
-                    const auto actualEmbeddedCount = static_cast<int64_t>(embeddedHashes.size());
-                    if (metadataEmbeddedCount != actualEmbeddedCount) {
-                        spdlog::warn("[Embeddings] Metadata/vector status mismatch: "
-                                     "documents_embedded={} vector_docs={}. Reconciling "
-                                     "document_embeddings_status from vector rows.",
-                                     metadataEmbeddedCount, actualEmbeddedCount);
-                        std::vector<std::string> reconciledHashes;
-                        reconciledHashes.reserve(embeddedHashes.size());
-                        for (const auto& hash : embeddedHashes) {
-                            reconciledHashes.push_back(hash);
-                        }
-                        auto reconcileResult =
-                            metadataRepo->reconcileDocumentEmbeddingStatusByHashes(
-                                reconciledHashes);
-                        if (!reconcileResult) {
-                            spdlog::warn("[Embeddings] Failed to reconcile embedded-doc status "
-                                         "from vector rows: {}",
-                                         reconcileResult.error().message);
-                        } else {
-                            spdlog::info("[Embeddings] Reconciled embedded-doc status: {} -> {}",
+                if (!config_.embeddedOneShot) {
+                    if (auto metadataRepo = getMetadataRepo()) {
+                        auto embeddedHashes = vectorDatabase->getEmbeddedDocumentHashes();
+                        const auto metadataEmbeddedCount =
+                            static_cast<int64_t>(metadataRepo->getCachedEmbeddedCount());
+                        const auto actualEmbeddedCount =
+                            static_cast<int64_t>(embeddedHashes.size());
+                        if (metadataEmbeddedCount != actualEmbeddedCount) {
+                            spdlog::warn("[Embeddings] Metadata/vector status mismatch: "
+                                         "documents_embedded={} vector_docs={}. Reconciling "
+                                         "document_embeddings_status from vector rows.",
                                          metadataEmbeddedCount, actualEmbeddedCount);
+                            std::vector<std::string> reconciledHashes;
+                            reconciledHashes.reserve(embeddedHashes.size());
+                            for (const auto& hash : embeddedHashes) {
+                                reconciledHashes.push_back(hash);
+                            }
+                            auto reconcileResult =
+                                metadataRepo->reconcileDocumentEmbeddingStatusByHashes(
+                                    reconciledHashes);
+                            if (!reconcileResult) {
+                                spdlog::warn("[Embeddings] Failed to reconcile embedded-doc status "
+                                             "from vector rows: {}",
+                                             reconcileResult.error().message);
+                            } else {
+                                spdlog::info(
+                                    "[Embeddings] Reconciled embedded-doc status: {} -> {}",
+                                    metadataEmbeddedCount, actualEmbeddedCount);
+                            }
                         }
                     }
+                } else {
+                    spdlog::debug("[Embeddings] Skipping startup metadata/vector reconciliation "
+                                  "for embedded one-shot host");
                 }
 
                 if (auto modelProvider = loadModelProvider();
@@ -2356,7 +2373,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         auto buildResult = co_await searchEngineManager_.buildEngine(
             getMetadataRepo(), getKgStore(), getVectorDatabase(), embGen, "initial", build_timeout,
-            getWorkerExecutor());
+            getWorkerExecutor(), !config_.instrumentation.suppressSimeonLexicalBuild);
 
         if (buildResult.has_value()) {
             const auto& built = buildResult.value();
@@ -2928,7 +2945,8 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
             getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
-            "rebuild_enabled", build_timeout, getWorkerExecutor());
+            "rebuild_enabled", build_timeout, getWorkerExecutor(),
+            !config_.instrumentation.suppressSimeonLexicalBuild);
 
         if (rebuildResult.has_value()) {
             const auto& rebuilt = rebuildResult.value();
@@ -3034,7 +3052,8 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
                 getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen), "rebuild",
-                build_timeout, getWorkerExecutor());
+                build_timeout, getWorkerExecutor(),
+                !config_.instrumentation.suppressSimeonLexicalBuild);
 
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();
@@ -3447,6 +3466,11 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
 }
 
 void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
+    if (config_.instrumentation.suppressAutoRepair) {
+        spdlog::warn(
+            "[RepairServiceHost] auto repair suppressed by memory instrumentation profile");
+        return;
+    }
     RepairServiceHost::Config rcfg;
     rcfg.enable = true;
     rcfg.dataDir = resolvedDataDir_;

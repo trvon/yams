@@ -936,3 +936,62 @@ reranker_backend = "ONNX"
         CHECK(*policy.backend == "onnx");
     }
 }
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveInstrumentationPolicy applies memory profile",
+                 "[daemon][components][config][instrumentation][catch2]") {
+    SECTION("auto profile activates when MallocStackLoggingNoCompact is present") {
+        auto configPath = writeToml("instrumentation_auto.toml", R"(
+[daemon]
+log_level = "info"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        EnvGuard msl("MallocStackLoggingNoCompact", "1");
+        EnvGuard mslCompact("MallocStackLogging", "0");
+
+        auto policy = ConfigResolver::resolveInstrumentationPolicy();
+        CHECK(policy.profile == "auto");
+        CHECK(policy.memoryProfileActive);
+        CHECK(policy.suppressAutoRepair);
+        CHECK(policy.suppressSimeonLexicalBuild);
+        CHECK(policy.suppressVectorIndexBuild);
+    }
+
+    SECTION("normal profile disables auto MSL suppression") {
+        auto configPath = writeToml("instrumentation_normal.toml", R"(
+[daemon.instrumentation]
+profile = "normal"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        EnvGuard msl("MallocStackLoggingNoCompact", "1");
+
+        auto policy = ConfigResolver::resolveInstrumentationPolicy();
+        CHECK(policy.profile == "normal");
+        CHECK_FALSE(policy.memoryProfileActive);
+        CHECK_FALSE(policy.suppressAutoRepair);
+        CHECK_FALSE(policy.suppressSimeonLexicalBuild);
+        CHECK_FALSE(policy.suppressVectorIndexBuild);
+    }
+
+    SECTION("memory profile supports explicit overrides and stack-log threshold") {
+        auto configPath = writeToml("instrumentation_memory.toml", R"(
+[daemon.instrumentation]
+profile = "memory"
+suppress_auto_repair = false
+suppress_simeon_lexical_build = true
+suppress_vector_index_build = true
+msl_stack_log_warn_mb = 1536
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        EnvGuard msl("MallocStackLogging", "0");
+        EnvGuard mslCompact("MallocStackLoggingNoCompact", "0");
+
+        auto policy = ConfigResolver::resolveInstrumentationPolicy();
+        CHECK(policy.profile == "memory");
+        CHECK(policy.memoryProfileActive);
+        CHECK_FALSE(policy.suppressAutoRepair);
+        CHECK(policy.suppressSimeonLexicalBuild);
+        CHECK(policy.suppressVectorIndexBuild);
+        CHECK(policy.mslStackLogWarnBytes == 1536ULL * 1024ULL * 1024ULL);
+    }
+}

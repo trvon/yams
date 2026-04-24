@@ -981,6 +981,19 @@ int main(int argc, char* argv[]) {
             yams::daemon::YamsDaemon::PathType::LogFile);
     }
 
+    {
+        const auto policy = yams::daemon::ConfigResolver::resolveInstrumentationPolicy(config);
+        config.instrumentation.profile = policy.profile;
+        config.instrumentation.memoryProfileActive = policy.memoryProfileActive;
+        config.instrumentation.suppressAutoRepair = policy.suppressAutoRepair;
+        config.instrumentation.suppressSimeonLexicalBuild = policy.suppressSimeonLexicalBuild;
+        config.instrumentation.suppressVectorIndexBuild = policy.suppressVectorIndexBuild;
+        config.instrumentation.mslStackLogWarnBytes = policy.mslStackLogWarnBytes;
+        if (config.instrumentation.suppressAutoRepair) {
+            config.enableAutoRepair = false;
+        }
+    }
+
     // Create log directory if needed
     try {
         yams::common::ensureDirectories(config.logFile.parent_path());
@@ -1031,6 +1044,16 @@ int main(int argc, char* argv[]) {
         spdlog::set_level(spdlog::level::warn);
     } else if (config.logLevel == "error") {
         spdlog::set_level(spdlog::level::err);
+    }
+
+    if (config.instrumentation.memoryProfileActive) {
+        spdlog::warn("Memory instrumentation profile active: suppress_auto_repair={} "
+                     "suppress_simeon_lexical_build={} suppress_vector_index_build={} "
+                     "msl_stack_log_warn_mb={}",
+                     config.instrumentation.suppressAutoRepair,
+                     config.instrumentation.suppressSimeonLexicalBuild,
+                     config.instrumentation.suppressVectorIndexBuild,
+                     config.instrumentation.mslStackLogWarnBytes / (1024ULL * 1024ULL));
     }
 
     // Configure FSM metrics based on log level

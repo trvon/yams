@@ -629,6 +629,30 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine topologyBridgeBoost overridden to {:.3f} via env",
                          cfg.topologyBridgeBoost);
         }
+        if (auto anchorEnabled = getEnvBool("YAMS_SEARCH_ENABLE_ANCHOR_FUSION")) {
+            cfg.enableAnchorFusion = *anchorEnabled;
+            spdlog::info("SearchEngine enableAnchorFusion {} via env",
+                         cfg.enableAnchorFusion ? "enabled" : "disabled");
+        }
+        if (auto anchorWeight = getEnvFloat("YAMS_SEARCH_ANCHOR_WEIGHT")) {
+            cfg.anchorWeight = std::max(0.0f, *anchorWeight);
+            spdlog::info("SearchEngine anchorWeight overridden to {:.3f} via env",
+                         cfg.anchorWeight);
+        }
+        if (auto anchorPhssGate = getEnvBool("YAMS_SEARCH_ANCHOR_PHSS_GATE")) {
+            cfg.anchorPhssGateEnabled = *anchorPhssGate;
+            spdlog::info("SearchEngine anchorPhssGateEnabled {} via env",
+                         cfg.anchorPhssGateEnabled ? "enabled" : "disabled");
+        }
+        if (auto anchorPhssMin = getEnvFloat("YAMS_SEARCH_ANCHOR_PHSS_MIN_CONFIDENCE")) {
+            cfg.anchorPhssMinConfidence = std::clamp(*anchorPhssMin, 0.0f, 1.0f);
+            spdlog::info("SearchEngine anchorPhssMinConfidence overridden to {:.3f} via env",
+                         cfg.anchorPhssMinConfidence);
+        }
+        if (auto anchorTopK = getEnvInt("YAMS_SEARCH_ANCHOR_TOP_K")) {
+            cfg.anchorTopK = static_cast<size_t>(std::max(1, *anchorTopK));
+            spdlog::info("SearchEngine anchorTopK overridden to {} via env", cfg.anchorTopK);
+        }
         if (auto routedBase = getEnvFloat("YAMS_SEARCH_TOPOLOGY_ROUTED_BASE_MULTIPLIER")) {
             cfg.topologyRoutedBaseMultiplier = std::max(0.0f, *routedBase);
             spdlog::info("SearchEngine topologyRoutedBaseMultiplier overridden to {:.3f} via env",

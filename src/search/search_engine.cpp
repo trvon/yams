@@ -4,6 +4,7 @@
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
 #include <yams/core/cpp23_features.hpp>
+#include <yams/search/anchor_fusion.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -649,6 +650,7 @@ collectGraphSeedDocs(const std::vector<ComponentResult>& componentResults, size_
             case ComponentResult::Source::Metadata:
                 sourceBoost = 0.60f;
                 break;
+            case ComponentResult::Source::Anchor:
             case ComponentResult::Source::Unknown:
                 sourceBoost = 0.50f;
                 break;
@@ -2559,6 +2561,151 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             "graph_vector: merged graph terms={} raw_hits={} added={} replaced={} in {}us",
             graphTerms.size(), graphVectorRawHitCount, graphVectorAddedNewCount,
             graphVectorReplacedBaseCount, mvDuration);
+    }
+
+    // Phase I: anchor-affinity fusion leg. Per-doc anchor_score = cosine(query,
+    // medoid_of_cluster(doc)). Off by default; opt-in via SearchEngineConfig::enableAnchorFusion.
+    if (workingConfig.enableAnchorFusion && queryEmbedding.has_value() && vectorDb_ &&
+        metadataRepo_ && kgStore_ && !allComponentResults.empty()) {
+        const auto anchorStart = std::chrono::steady_clock::now();
+        traceCollector.markStageAttempted("anchor_fusion");
+
+        std::unordered_set<std::string> candidateHashes;
+        candidateHashes.reserve(allComponentResults.size());
+        for (const auto& comp : allComponentResults) {
+            if (!comp.documentHash.empty()) {
+                candidateHashes.insert(comp.documentHash);
+            }
+        }
+
+        std::size_t anchorEmittedCount = 0;
+        float anchorPhssConfidence = 1.0f;
+        bool anchorPhssGated = false;
+
+        if (!candidateHashes.empty()) {
+            auto metadataIface =
+                std::static_pointer_cast<yams::metadata::IMetadataRepository>(metadataRepo_);
+            yams::topology::MetadataKgTopologyArtifactStore artStore(std::move(metadataIface),
+                                                                     kgStore_);
+            auto latestArtifacts = artStore.loadLatest();
+            if (latestArtifacts && latestArtifacts.value().has_value()) {
+                const auto& batch = *latestArtifacts.value();
+                std::vector<std::string> candidateList(candidateHashes.begin(),
+                                                       candidateHashes.end());
+                auto memberships = artStore.loadMemberships(candidateList);
+                std::unordered_map<std::string, std::string> docToMedoid;
+                if (memberships) {
+                    std::unordered_map<std::string, const yams::topology::ClusterArtifact*>
+                        clusterById;
+                    clusterById.reserve(batch.clusters.size());
+                    for (const auto& cl : batch.clusters) {
+                        clusterById.emplace(cl.clusterId, &cl);
+                    }
+                    docToMedoid.reserve(memberships.value().size());
+                    for (const auto& m : memberships.value()) {
+                        auto cit = clusterById.find(m.clusterId);
+                        if (cit != clusterById.end() && cit->second->medoid.has_value() &&
+                            !cit->second->medoid->documentHash.empty()) {
+                            docToMedoid.emplace(m.documentHash, cit->second->medoid->documentHash);
+                        }
+                    }
+                }
+
+                std::unordered_map<std::string, std::vector<float>> medoidEmbCache;
+                medoidEmbCache.reserve(docToMedoid.size());
+                for (const auto& [_, medoidHash] : docToMedoid) {
+                    if (medoidEmbCache.contains(medoidHash)) {
+                        continue;
+                    }
+                    auto recs = vectorDb_->getVectorsByDocument(medoidHash);
+                    if (!recs.empty() && !recs.front().embedding.empty()) {
+                        medoidEmbCache.emplace(medoidHash, recs.front().embedding);
+                    }
+                }
+
+                std::vector<yams::search::AnchorCandidate> anchorCands;
+                anchorCands.reserve(candidateHashes.size());
+                for (const auto& hash : candidateHashes) {
+                    auto mit = docToMedoid.find(hash);
+                    if (mit == docToMedoid.end()) {
+                        anchorCands.push_back({hash, {}});
+                        continue;
+                    }
+                    auto eit = medoidEmbCache.find(mit->second);
+                    if (eit == medoidEmbCache.end()) {
+                        anchorCands.push_back({hash, {}});
+                        continue;
+                    }
+                    anchorCands.push_back({hash, eit->second});
+                }
+
+                auto scores = yams::search::computeAnchorScores(
+                    std::span<const float>(queryEmbedding.value()),
+                    std::span<const yams::search::AnchorCandidate>(anchorCands));
+
+                if (workingConfig.anchorPhssGateEnabled) {
+                    std::vector<std::vector<float>> topKEmbs;
+                    const std::size_t topK =
+                        std::min<std::size_t>(workingConfig.anchorTopK, candidateHashes.size());
+                    topKEmbs.reserve(topK);
+                    std::size_t taken = 0;
+                    for (const auto& hash : candidateHashes) {
+                        if (taken >= topK) {
+                            break;
+                        }
+                        auto recs = vectorDb_->getVectorsByDocument(hash);
+                        if (!recs.empty() && !recs.front().embedding.empty()) {
+                            topKEmbs.push_back(recs.front().embedding);
+                            ++taken;
+                        }
+                    }
+                    anchorPhssConfidence = yams::search::phssQueryConfidence(
+                        std::span<const float>(queryEmbedding.value()),
+                        std::span<const std::vector<float>>(topKEmbs));
+                }
+
+                if (anchorPhssConfidence >= workingConfig.anchorPhssMinConfidence) {
+                    std::vector<std::pair<std::string, float>> anchorScored;
+                    anchorScored.reserve(scores.size());
+                    for (const auto& [hash, raw] : scores) {
+                        if (raw <= 0.0f) {
+                            continue;
+                        }
+                        anchorScored.emplace_back(hash, raw * anchorPhssConfidence);
+                    }
+                    std::sort(anchorScored.begin(), anchorScored.end(),
+                              [](const auto& a, const auto& b) { return a.second > b.second; });
+                    std::size_t rank = 0;
+                    for (const auto& [hash, score] : anchorScored) {
+                        ComponentResult cr;
+                        cr.documentHash = hash;
+                        cr.score = score;
+                        cr.source = ComponentResult::Source::Anchor;
+                        cr.rank = rank++;
+                        allComponentResults.push_back(std::move(cr));
+                    }
+                    anchorEmittedCount = anchorScored.size();
+                    if (anchorEmittedCount > 0) {
+                        contributing.push_back("anchor_fusion");
+                    }
+                } else {
+                    anchorPhssGated = true;
+                }
+            }
+        }
+
+        const auto anchorEnd = std::chrono::steady_clock::now();
+        const auto anchorDurationUs =
+            std::chrono::duration_cast<std::chrono::microseconds>(anchorEnd - anchorStart).count();
+        componentTiming["anchor_fusion"] = anchorDurationUs;
+        response.debugStats["anchor_fusion_emitted"] = std::to_string(anchorEmittedCount);
+        response.debugStats["anchor_phss_confidence"] = fmt::format("{:.3f}", anchorPhssConfidence);
+        response.debugStats["anchor_phss_gated"] = anchorPhssGated ? "1" : "0";
+        traceCollector.recordStageCounter("anchor_fusion", "emitted",
+                                          static_cast<int64_t>(anchorEmittedCount));
+        traceCollector.recordStageCounter(
+            "anchor_fusion", "phss_confidence_milli",
+            static_cast<int64_t>(std::lround(anchorPhssConfidence * 1000.0f)));
     }
 
     YAMS_PLOT("component_results_count", static_cast<int64_t>(allComponentResults.size()));

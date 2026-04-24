@@ -1558,6 +1558,12 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             out.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
             out.diagnosticCounters = std::move(memSample.diagnosticCounters);
         }
+        if (services_) {
+            const auto warnBytes = services_->getConfig().instrumentation.mslStackLogWarnBytes;
+            if (warnBytes > 0) {
+                out.diagnosticCounters["msl_stack_log_warn_bytes"] = warnBytes;
+            }
+        }
 #if defined(TRACY_ENABLE)
         TracyPlot("daemon.mem.mb", out.memoryUsageMb);
         TracyPlot("daemon.cpu.pct", out.cpuUsagePercent);

@@ -1086,6 +1086,92 @@ ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
     return policy;
 }
 
+ConfigResolver::InstrumentationPolicy ConfigResolver::resolveInstrumentationPolicy() {
+    return resolveInstrumentationPolicy(DaemonConfig{});
+}
+
+ConfigResolver::InstrumentationPolicy
+ConfigResolver::resolveInstrumentationPolicy(const DaemonConfig& config) {
+    InstrumentationPolicy policy;
+
+    auto normalize = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    };
+    auto readBool = [](const std::map<std::string, std::string>& kv,
+                       const char* key) -> std::optional<bool> {
+        auto it = kv.find(key);
+        if (it == kv.end()) {
+            return std::nullopt;
+        }
+        return parseTomlBool(it->second);
+    };
+    auto readU64 = [](const std::map<std::string, std::string>& kv,
+                      const char* key) -> std::optional<std::uint64_t> {
+        auto it = kv.find(key);
+        if (it == kv.end()) {
+            return std::nullopt;
+        }
+        try {
+            return static_cast<std::uint64_t>(std::stoull(it->second));
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    };
+
+    std::optional<bool> suppressAutoRepair;
+    std::optional<bool> suppressSimeonLexicalBuild;
+    std::optional<bool> suppressVectorIndexBuild;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath =
+            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("daemon.instrumentation.profile");
+                it != kv.end() && !it->second.empty()) {
+                policy.profile = normalize(it->second);
+            }
+            suppressAutoRepair = readBool(kv, "daemon.instrumentation.suppress_auto_repair");
+            suppressSimeonLexicalBuild =
+                readBool(kv, "daemon.instrumentation.suppress_simeon_lexical_build");
+            suppressVectorIndexBuild =
+                readBool(kv, "daemon.instrumentation.suppress_vector_index_build");
+            if (auto warnMb = readU64(kv, "daemon.instrumentation.msl_stack_log_warn_mb")) {
+                policy.mslStackLogWarnBytes = *warnMb * 1024ULL * 1024ULL;
+            }
+            if (auto warnBytes = readU64(kv, "daemon.instrumentation.msl_stack_log_warn_bytes")) {
+                policy.mslStackLogWarnBytes = *warnBytes;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for instrumentation policy: {}", e.what());
+    }
+
+    const bool mslActive = envTruthy(std::getenv("MallocStackLogging")) ||
+                           envTruthy(std::getenv("MallocStackLoggingNoCompact"));
+    if (policy.profile.empty()) {
+        policy.profile = "auto";
+    }
+    policy.profile = normalize(policy.profile);
+    if (policy.profile == "msl") {
+        policy.profile = "memory";
+    }
+
+    policy.memoryProfileActive = policy.profile == "memory" ||
+                                 policy.profile == "memory_instrumentation" ||
+                                 (policy.profile == "auto" && mslActive);
+
+    const bool defaultSuppress = policy.memoryProfileActive;
+    policy.suppressAutoRepair = suppressAutoRepair.value_or(defaultSuppress);
+    policy.suppressSimeonLexicalBuild = suppressSimeonLexicalBuild.value_or(defaultSuppress);
+    policy.suppressVectorIndexBuild = suppressVectorIndexBuild.value_or(defaultSuppress);
+
+    return policy;
+}
+
 ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
     PostIngestCaps caps;
 

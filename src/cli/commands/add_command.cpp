@@ -459,10 +459,11 @@ public:
                     }
                 }
 
-                if (daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
-                    daemonSpinner.pause();
-                    co_return executeWithServices();
-                }
+                // In sandboxed/embedded environments (Codex, CI, restricted IPC), the daemon
+                // plan may intentionally resolve to InProcess. Keep the daemon request path in
+                // that case instead of falling back to local services: the service path performs
+                // full CLI storage initialization (including KG integrity checks) and can take
+                // tens of seconds on large stores before a single-file add even reaches ingestion.
 
                 auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
                 if (!sanitizedTagsRes)
@@ -615,6 +616,9 @@ public:
                     // local storage initialization (40+ seconds) for no benefit.
                 };
 
+                const bool forceSyncForInProcess =
+                    daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess;
+
                 // Create a shared client and ingestion service for all adds
                 auto sharedClientCfg = yams::daemon::ClientConfig{};
                 sharedClientCfg = daemonPlan.config;
@@ -635,7 +639,12 @@ public:
                         aopts.mimeType = sanitizedMimeType;
                     aopts.disableAutoMime = disableAutoMime_;
                     aopts.noEmbeddings = noEmbeddings_;
-                    aopts.waitForProcessing = waitForProcessing_;
+                    // In-process fallback is a one-shot daemon hosted by this CLI process.  If
+                    // single-file adds are merely accepted into the async ingest queue, process
+                    // teardown can clear PostIngestQueue before the queued task reaches indexing.
+                    // Force the dispatcher's synchronous single-file path so the command returns
+                    // only after the document is stored.
+                    aopts.waitForProcessing = waitForProcessing_ || forceSyncForInProcess;
                     aopts.waitTimeoutSeconds = waitTimeoutSeconds_;
                     if (cli_->hasExplicitDataDir())
                         aopts.explicitDataDir = cli_->getDataPath();

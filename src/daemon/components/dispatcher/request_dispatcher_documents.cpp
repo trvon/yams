@@ -1491,9 +1491,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             }
             const auto& serviceResp = result.value();
             // Special handling: when pathsOnly is requested, the app-level GrepService
-            // intentionally omits per-file match details and instead populates filesWith.
-            // Map those paths into lightweight GrepMatch entries so daemon clients (and tests)
-            // can observe results via the standard matches field.
+            // intentionally omits per-file match details and instead populates the shared
+            // pathsOnly projection. Map those paths into lightweight GrepMatch entries so daemon
+            // clients (and tests) can observe results via the standard matches field.
             if (serviceReq.pathsOnly) {
                 GrepResponse response;
                 response.filesSearched = serviceResp.filesSearched;
@@ -1506,7 +1506,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
                 response.filesWith = serviceResp.filesWith;
                 response.filesWithout = serviceResp.filesWithout;
                 response.pathsOnly = serviceResp.pathsOnly;
-                for (const auto& path : serviceResp.filesWith) {
+                for (const auto& path : serviceResp.pathsOnly) {
                     GrepMatch dm;
                     dm.file = path;
                     dm.lineNumber = 0;

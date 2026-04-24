@@ -86,6 +86,10 @@ std::vector<TopologyArm> defaultArmGrid(std::size_t corpusDocCount) {
     // ConnectedComponents has no per-engine knobs today; one arm only.
     arms.push_back(TopologyArm{/*id=*/"connected", /*engine=*/"connected", 0, 0, 0});
 
+    // Phase H Louvain modularity-greedy clustering on reciprocal-edge graph.
+    // No per-engine knobs; reads minEdgeScore + reciprocalOnly from shared config.
+    arms.push_back(TopologyArm{/*id=*/"louvain", /*engine=*/"louvain", 0, 0, 0});
+
     const std::size_t logN = logBaseTwoCeil(corpusDocCount);
     const std::size_t sqrtN = sqrtSize(corpusDocCount);
 

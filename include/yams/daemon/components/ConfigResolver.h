@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -121,6 +122,15 @@ public:
 
     struct RerankerBackendPolicy {
         std::optional<std::string> backend;
+    };
+
+    struct InstrumentationPolicy {
+        std::string profile{"auto"};
+        bool memoryProfileActive{false};
+        bool suppressAutoRepair{false};
+        bool suppressSimeonLexicalBuild{false};
+        bool suppressVectorIndexBuild{false};
+        std::uint64_t mslStackLogWarnBytes{2ULL * 1024ULL * 1024ULL * 1024ULL};
     };
 
     ConfigResolver() = delete; // Static-only class
@@ -398,6 +408,16 @@ public:
      */
     static RerankerBackendPolicy resolveRerankerBackendPolicy();
     static RerankerBackendPolicy resolveRerankerBackendPolicy(const DaemonConfig& config);
+
+    /**
+     * @brief Resolve runtime instrumentation profile from [daemon.instrumentation].
+     *
+     * profile = "auto" (default) activates the memory profile when macOS
+     * MallocStackLogging is active. profile = "memory" forces it; "normal"/"off"
+     * disables it. Per-action suppression keys override profile defaults.
+     */
+    static InstrumentationPolicy resolveInstrumentationPolicy();
+    static InstrumentationPolicy resolveInstrumentationPolicy(const DaemonConfig& config);
 
     /**
      * @brief Resolve post-ingest concurrency caps from config file.

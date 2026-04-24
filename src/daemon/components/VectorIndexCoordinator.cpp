@@ -5,10 +5,10 @@
 
 #include <spdlog/spdlog.h>
 
-#include <boost/asio/dispatch.hpp>
-#include <boost/asio/post.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/dispatch.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
@@ -151,13 +151,18 @@ void VectorIndexCoordinator::doFinalizeOnStrand() {
             spdlog::warn("[VectorIndexCoordinator] finalizeBulkLoad failed: {}",
                          vdb->getLastError());
         }
-        try {
-            vdb->buildIndex();
-            vdb->persistIndex();
-        } catch (const std::exception& e) {
-            spdlog::warn("[VectorIndexCoordinator] index build/persist failed: {}", e.what());
-        } catch (...) {
-            spdlog::warn("[VectorIndexCoordinator] index build/persist failed (unknown)");
+        if (buildsSuppressed_.load(std::memory_order_relaxed)) {
+            spdlog::warn("[VectorIndexCoordinator] index build/persist suppressed by memory "
+                         "instrumentation profile");
+        } else {
+            try {
+                vdb->buildIndex();
+                vdb->persistIndex();
+            } catch (const std::exception& e) {
+                spdlog::warn("[VectorIndexCoordinator] index build/persist failed: {}", e.what());
+            } catch (...) {
+                spdlog::warn("[VectorIndexCoordinator] index build/persist failed (unknown)");
+            }
         }
     }
 
@@ -239,14 +244,20 @@ void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
     {
         auto vdb = getVdbLocked(vdbMutex_, vectorDb_);
         if (vdb) {
-            try {
-                vdb->buildIndex();
-                vdb->persistIndex();
-            } catch (const std::exception& e) {
-                spdlog::warn("[VectorIndexCoordinator] doRebuild build/persist failed: {}",
-                             e.what());
-            } catch (...) {
-                spdlog::warn("[VectorIndexCoordinator] doRebuild build/persist failed (unknown)");
+            if (buildsSuppressed_.load(std::memory_order_relaxed)) {
+                spdlog::warn("[VectorIndexCoordinator] rebuild suppressed by memory "
+                             "instrumentation profile");
+            } else {
+                try {
+                    vdb->buildIndex();
+                    vdb->persistIndex();
+                } catch (const std::exception& e) {
+                    spdlog::warn("[VectorIndexCoordinator] doRebuild build/persist failed: {}",
+                                 e.what());
+                } catch (...) {
+                    spdlog::warn(
+                        "[VectorIndexCoordinator] doRebuild build/persist failed (unknown)");
+                }
             }
         }
     }
@@ -289,6 +300,12 @@ void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
 
 boost::asio::awaitable<Result<void>> VectorIndexCoordinator::initialBuildIfNeeded() {
     co_await boost::asio::dispatch(strand_, boost::asio::use_awaitable);
+
+    if (buildsSuppressed_.load(std::memory_order_relaxed)) {
+        spdlog::warn("[VectorIndexCoordinator] initial build/load suppressed by memory "
+                     "instrumentation profile");
+        co_return Result<void>{};
+    }
 
     auto vdb = getVdbLocked(vdbMutex_, vectorDb_);
     if (!vdb || !vdb->isInitialized()) {

@@ -329,62 +329,24 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
                              stats.giantClusterRatio, stats.clusterSizeGini,
                              stats.avgIntraEdgeWeight);
             } else {
-                // Phase H-TDA: compute H_0 persistence on a sample of post-rebuild
-                // embeddings and feed it to the tuner alongside geometric stats.
-                double persistence = 0.0;
-                double scale = 1.0;
-                try {
-                    if (auto vdb = deps_.getVectorDatabase(); vdb) {
-                        auto allDocVecs = vdb->getDocumentLevelVectorsAll();
-                        const std::size_t total = allDocVecs.size();
-                        const std::size_t sampleSize =
-                            std::min(total, tuner_->config().persistenceSampleSize);
-                        if (sampleSize >= 2) {
-                            // Deterministic subsample seeded by snapshot id hash for
-                            // reproducibility across reps with the same fixture.
-                            std::uint64_t seed = std::hash<std::string>{}(stats.snapshotId);
-                            auto picked =
-                                yams::search::deterministicSubsample(total, sampleSize, seed);
-                            // Materialize embeddings into a flat row-major buffer.
-                            std::vector<std::vector<float>> rows;
-                            rows.reserve(picked.size());
-                            std::size_t idx = 0;
-                            for (auto it = allDocVecs.begin();
-                                 it != allDocVecs.end() && idx < picked.size(); ++it, ++idx) {
-                                // We want picked[idx]-th element by iteration order.
-                                // Re-iterate to match index — simpler since map order
-                                // is stable.
-                            }
-                            std::size_t pos = 0;
-                            std::size_t pickIdx = 0;
-                            for (const auto& [hash, vec] : allDocVecs) {
-                                if (pickIdx >= picked.size())
-                                    break;
-                                if (pos == picked[pickIdx]) {
-                                    rows.push_back(vec.embedding);
-                                    ++pickIdx;
-                                }
-                                ++pos;
-                            }
-                            persistence = yams::search::computePersistenceH0(rows);
-                            // Scale: upper bound of H_0 total persistence under
-                            // percentile-normalized formula is (n-1).
-                            scale = static_cast<double>(rows.size() > 1 ? rows.size() - 1 : 1);
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::debug("[TopologyManager] persistence computation failed: {}", e.what());
-                }
+                // Phase H-TDA wiring fix: persistence now comes from the per-arm
+                // cluster centroids computed inside runRebuild (not from a
+                // sample of raw doc embeddings, which was corpus-constant).
+                const double persistence = stats.clusterCentroidPersistence;
+                const double scale = stats.clusterCentroidCount > 1
+                                         ? static_cast<double>(stats.clusterCentroidCount - 1)
+                                         : 1.0;
                 tuner_->observeRebuildStatsWithPersistence(tunerCurrentArmId_, stats, persistence,
                                                            scale);
                 const double geometric = computeIntrinsicReward(stats, tuner_->config().weights);
                 const char* modeStr =
                     (rewardMode == TunerRewardMode::Persistence) ? "persistence" : "hybrid";
                 spdlog::info("[TopologyManager] tuner observed arm '{}' mode={} "
-                             "geometric={:.4f} persistence={:.4f} scale={:.1f} "
+                             "geometric={:.4f} persistence={:.4f} scale={:.1f} centroids={} "
                              "(singleton={:.3f} giant={:.3f})",
                              tunerCurrentArmId_, modeStr, geometric, persistence, scale,
-                             stats.singletonRatio, stats.giantClusterRatio);
+                             stats.clusterCentroidCount, stats.singletonRatio,
+                             stats.giantClusterRatio);
             }
             tunerCurrentArmId_.clear();
         }
@@ -601,6 +563,55 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         }
         stats.avgIntraEdgeWeight =
             cohesionCount > 0 ? cohesionSum / static_cast<double>(cohesionCount) : 0.0;
+
+        // Phase H-TDA wiring fix: compute H_0 persistence on cluster
+        // centroids. Each cluster's centroid is the mean of its members'
+        // embeddings; the resulting centroid cloud varies per arm because
+        // the clustering does. Skip clusters with < 2 members (singletons
+        // would give a centroid == the doc itself, biasing toward dispersed
+        // shapes regardless of arm).
+        try {
+            std::vector<std::vector<float>> centroids;
+            centroids.reserve(artifacts.clusters.size());
+            for (const auto& cluster : artifacts.clusters) {
+                if (cluster.memberDocumentHashes.size() < 2) {
+                    continue;
+                }
+                std::vector<float> centroid;
+                std::size_t accumCount = 0;
+                for (const auto& hash : cluster.memberDocumentHashes) {
+                    auto recs = vectorDb->getVectorsByDocument(hash);
+                    if (recs.empty()) {
+                        continue;
+                    }
+                    const auto& emb = recs.front().embedding;
+                    if (emb.empty()) {
+                        continue;
+                    }
+                    if (centroid.empty()) {
+                        centroid.assign(emb.size(), 0.0F);
+                    } else if (centroid.size() != emb.size()) {
+                        continue;
+                    }
+                    for (std::size_t i = 0; i < emb.size(); ++i) {
+                        centroid[i] += emb[i];
+                    }
+                    ++accumCount;
+                }
+                if (accumCount > 0 && !centroid.empty()) {
+                    for (auto& v : centroid) {
+                        v /= static_cast<float>(accumCount);
+                    }
+                    centroids.push_back(std::move(centroid));
+                }
+            }
+            stats.clusterCentroidCount = centroids.size();
+            if (centroids.size() >= 2) {
+                stats.clusterCentroidPersistence = yams::search::computePersistenceH0(centroids);
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("[TopologyManager] centroid persistence failed: {}", e.what());
+        }
     }
 
     const auto processed = static_cast<std::uint64_t>(extractionStats.documentsReturned);

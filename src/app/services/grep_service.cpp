@@ -2,6 +2,7 @@
 #include <yams/app/services/grep_mode_tls.h>
 #include <yams/app/services/grep_regex.hpp>
 #include <yams/app/services/literal_extractor.hpp>
+#include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/simd_newline_scanner.hpp>
 #include <yams/common/utf8_utils.h>
@@ -1470,8 +1471,14 @@ public:
         response.results = std::move(outResults);
         response.filesWith = std::vector<std::string>(filesWith.begin(), filesWith.end());
         response.filesWithout = std::vector<std::string>(filesWithout.begin(), filesWithout.end());
+        std::sort(response.filesWith.begin(), response.filesWith.end());
+        std::sort(response.filesWithout.begin(), response.filesWithout.end());
         if (req.pathsOnly) {
-            response.pathsOnly = req.invert ? response.filesWithout : response.filesWith;
+            const auto& source = req.invert ? response.filesWithout : response.filesWith;
+            std::unordered_set<std::string> seen;
+            for (const auto& path : source) {
+                path_projection::appendUniquePath(response.pathsOnly, seen, path);
+            }
         }
         spdlog::debug("[GrepService] filesWith={} filesWithout={} results={} pathsOnly={} "
                       "totalMatches={}",

@@ -1,5 +1,5 @@
-#include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
@@ -163,7 +163,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                                  std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
                                  std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
                                  const std::string& reason, int timeoutMs,
-                                 const boost::asio::any_io_executor& workerExecutor) {
+                                 const boost::asio::any_io_executor& workerExecutor,
+                                 bool enableSimeonLexicalBuild) {
     auto ex = co_await boost::asio::this_coro::executor;
 
     // Enable vector search only when vector database is provided
@@ -211,7 +212,10 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     {
         const auto backend = ConfigResolver::resolveEmbeddingBackend();
         const auto bm25Policy = ConfigResolver::resolveSimeonBm25Policy();
-        if (backend == "simeon" && bm25Policy.enabled.value_or(true)) {
+        if (!enableSimeonLexicalBuild) {
+            spdlog::warn("[simeon-lexical] async BM25 build suppressed by memory "
+                         "instrumentation profile");
+        } else if (backend == "simeon" && bm25Policy.enabled.value_or(true)) {
             yams::search::SimeonLexicalBackend::Config lexicalCfg;
             if (bm25Policy.variant && *bm25Policy.variant == "atire") {
                 lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;

@@ -28,6 +28,7 @@ struct ComponentResult {
         Tag,
         Metadata,
         Symbol,
+        Anchor,
         Unknown
     } source = Source::Unknown;
     size_t rank = 0;
@@ -57,6 +58,8 @@ inline constexpr const char* componentSourceToString(ComponentResult::Source sou
             return "metadata";
         case ComponentResult::Source::Symbol:
             return "symbol";
+        case ComponentResult::Source::Anchor:
+            return "anchor";
         case ComponentResult::Source::Unknown:
             return "unknown";
     }
@@ -84,6 +87,8 @@ inline float componentSourceWeight(const SearchEngineConfig& config,
             return config.tagWeight;
         case ComponentResult::Source::Metadata:
             return config.metadataWeight;
+        case ComponentResult::Source::Anchor:
+            return config.anchorWeight;
         case ComponentResult::Source::Symbol:
         case ComponentResult::Source::Unknown:
             return 0.0f;
@@ -127,6 +132,8 @@ inline double componentSourceScoreInResult(const SearchResult& r,
             return r.tagScore.value_or(0.0);
         case ComponentResult::Source::Symbol:
             return r.symbolScore.value_or(0.0);
+        case ComponentResult::Source::Anchor:
+            return r.anchorScore.value_or(0.0);
         case ComponentResult::Source::Unknown:
             return 0.0;
     }

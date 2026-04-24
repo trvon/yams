@@ -459,4 +459,163 @@ Result<TopologyArtifactBatch> HDBSCANTopologyEngine::updateArtifacts(
     return buildArtifacts(changedDocuments, config);
 }
 
+// ============================================================================
+// LouvainTopologyEngine — Phase H alternative cluster engine
+// ============================================================================
+
+namespace {
+
+// Single-pass Louvain Phase 1: greedy node-move modularity optimization.
+// adjacency[i] is a list of (neighbor_index, edge_weight) for node i.
+// Returns assignment[i] = community id (compact integers starting at 0).
+std::vector<std::int64_t>
+runLouvain(std::span<const TopologyDocumentInput> documents,
+           const std::vector<std::vector<std::pair<std::size_t, float>>>& adjacency,
+           std::size_t maxIterations = 10) {
+    const std::size_t n = documents.size();
+    std::vector<std::int64_t> assignment(n, 0);
+    if (n == 0) {
+        return assignment;
+    }
+    // Each node starts in its own community.
+    std::iota(assignment.begin(), assignment.end(), std::int64_t{0});
+
+    // Per-node weighted degree (sum of incident edge weights).
+    std::vector<double> nodeDegree(n, 0.0);
+    double totalWeight = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        for (const auto& [j, w] : adjacency[i]) {
+            nodeDegree[i] += static_cast<double>(w);
+        }
+        totalWeight += nodeDegree[i];
+    }
+    // 2m in modularity formulas = totalWeight (each edge counted from both ends).
+    const double twoM = totalWeight;
+    if (twoM <= 0.0) {
+        // No edges → every node is its own community. Standard Louvain
+        // convention: collapse all isolated nodes into one community to
+        // produce a usable batch. We return the per-node assignment as-is;
+        // downstream `buildBatchFromAssignment` will produce singleton clusters
+        // which the persistence-aware reward correctly penalizes.
+        return assignment;
+    }
+
+    // Per-community weighted degree (Σ_tot in modularity formulas).
+    std::vector<double> commDegree(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        commDegree[assignment[i]] = nodeDegree[i];
+    }
+
+    auto computeDeltaQ = [&](std::size_t node, std::int64_t targetComm,
+                             double weightToTarget) -> double {
+        const double k = nodeDegree[node];
+        const double sigmaTot = commDegree[targetComm];
+        // ΔQ = [k_i_in / m] - [Σ_tot * k_i / (2m²)]
+        // Simplified for greedy comparison: use raw modularity gain.
+        return weightToTarget / twoM - (sigmaTot * k) / (twoM * twoM);
+    };
+
+    bool improved = true;
+    std::size_t iter = 0;
+    while (improved && iter < maxIterations) {
+        improved = false;
+        ++iter;
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::int64_t fromComm = assignment[i];
+            const double k = nodeDegree[i];
+
+            // Aggregate weights from node i to each neighboring community
+            // (including its current community).
+            std::unordered_map<std::int64_t, double> weightToComm;
+            for (const auto& [j, w] : adjacency[i]) {
+                weightToComm[assignment[j]] += static_cast<double>(w);
+            }
+            const double weightToFrom = weightToComm[fromComm];
+
+            // Removing i from its current community: delta of -computeDeltaQ
+            // (without i's self-edge contribution). For modularity-greedy we
+            // compare net gain when moving to each candidate.
+            std::int64_t bestComm = fromComm;
+            double bestGain = 0.0;
+            // Tentatively remove i from fromComm.
+            commDegree[fromComm] -= k;
+            for (const auto& [candComm, weightToCand] : weightToComm) {
+                if (candComm == fromComm) {
+                    continue;
+                }
+                const double gain = computeDeltaQ(i, candComm, weightToCand) -
+                                    (-computeDeltaQ(i, fromComm, weightToFrom));
+                if (gain > bestGain) {
+                    bestGain = gain;
+                    bestComm = candComm;
+                }
+            }
+            // Apply best move (or restore i to fromComm).
+            assignment[i] = bestComm;
+            commDegree[bestComm] += k;
+            if (bestComm != fromComm) {
+                improved = true;
+            }
+        }
+    }
+
+    // Compact community IDs into [0, k) so downstream iteration is clean.
+    std::unordered_map<std::int64_t, std::int64_t> remap;
+    std::int64_t next = 0;
+    for (auto& a : assignment) {
+        auto [it, inserted] = remap.emplace(a, next);
+        if (inserted) {
+            ++next;
+        }
+        a = it->second;
+    }
+    return assignment;
+}
+
+} // namespace
+
+Result<TopologyArtifactBatch>
+LouvainTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> documents,
+                                      const TopologyBuildConfig& config) {
+    const auto ts = nowStamps();
+    if (documents.empty()) {
+        TopologyArtifactBatch batch;
+        batch.snapshotId = makeSnapshotId(ts.unixMillis);
+        batch.algorithm = "louvain_v1";
+        batch.inputKind = config.inputKind;
+        batch.generatedAtUnixSeconds = ts.unixSeconds;
+        return batch;
+    }
+
+    std::unordered_map<std::string, std::size_t> indexByHash;
+    indexByHash.reserve(documents.size());
+    for (std::size_t i = 0; i < documents.size(); ++i) {
+        if (!documents[i].documentHash.empty()) {
+            indexByHash[documents[i].documentHash] = i;
+        }
+    }
+    auto pairWeights = buildPairWeights(documents, indexByHash, config);
+    auto adjacency = makeAdjacency(documents.size(), pairWeights);
+    auto assignment = runLouvain(documents, adjacency);
+    auto batch = buildBatchFromAssignment(documents, assignment, pairWeights, "louvain_v1", ts);
+    batch.inputKind = config.inputKind;
+    return batch;
+}
+
+Result<TopologyDirtyRegion>
+LouvainTopologyEngine::defineDirtyRegion(const TopologyArtifactBatch&,
+                                         std::span<const TopologyDocumentInput> changedDocuments,
+                                         const TopologyBuildConfig&) const {
+    return defaultDirtyRegion(changedDocuments);
+}
+
+Result<TopologyArtifactBatch> LouvainTopologyEngine::updateArtifacts(
+    const TopologyArtifactBatch&, std::span<const TopologyDocumentInput> changedDocuments,
+    const TopologyBuildConfig& config, TopologyUpdateStats* stats) {
+    if (stats != nullptr) {
+        stats->fallbackFullRebuilds = 1;
+    }
+    return buildArtifacts(changedDocuments, config);
+}
+
 } // namespace yams::topology
