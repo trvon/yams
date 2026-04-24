@@ -55,6 +55,14 @@ struct DaemonHarnessOptions {
     // When set, the harness uses this existing path (e.g. a real corpus)
     // and skips cleanup of the data dir on destruction.
     std::optional<std::filesystem::path> dataDir = std::nullopt;
+    // Optional fixture content to seed `dataDir` with. When both are set
+    // and `dataDir` exists but is empty (or doesn't exist), the harness
+    // recursively copies the fixture's contents into `dataDir` before
+    // starting the daemon. If `dataDir` is non-empty, no copy is performed
+    // (lets subsequent spawns reuse the seeded scratch dir, preserving
+    // tuner state / topology artifacts across runs). Useful for benches
+    // that want a writable scratch seeded from a frozen fixture.
+    std::optional<std::filesystem::path> cloneFixtureFrom = std::nullopt;
     // Optional explicit config.toml path for daemon startup.
     // When set, the harness points daemon config resolution at this file.
     std::optional<std::filesystem::path> configPath = std::nullopt;
@@ -78,9 +86,39 @@ public:
         if (options_.dataDir) {
             data_ = *options_.dataDir;
             externalDataDir_ = true; // skip cleanup of external data
+            fs::create_directories(data_);
         } else {
             data_ = root_ / "data";
             fs::create_directories(data_);
+        }
+
+        // Seed scratch from a fixture when requested AND the scratch is empty.
+        // Subsequent spawns reuse the existing content (preserves tuner state,
+        // topology artifacts, etc. across reps).
+        if (options_.cloneFixtureFrom) {
+            std::error_code ec;
+            const auto& src = *options_.cloneFixtureFrom;
+            bool dataDirEmpty = true;
+            if (fs::exists(data_)) {
+                for (auto it = fs::directory_iterator(data_, ec);
+                     !ec && it != fs::directory_iterator(); ++it) {
+                    dataDirEmpty = false;
+                    break;
+                }
+            }
+            if (dataDirEmpty && fs::exists(src, ec)) {
+                fs::copy(src, data_,
+                         fs::copy_options::recursive | fs::copy_options::copy_symlinks |
+                             fs::copy_options::skip_existing,
+                         ec);
+                if (ec) {
+                    spdlog::warn("[DaemonHarness] cloneFixtureFrom copy failed: {} ({} -> {})",
+                                 ec.message(), src.string(), data_.string());
+                } else {
+                    spdlog::info("[DaemonHarness] seeded {} from fixture {}", data_.string(),
+                                 src.string());
+                }
+            }
         }
         // Use platform-appropriate temp path for socket
         // On Windows, AF_UNIX sockets work but need a valid Windows path

@@ -5,6 +5,7 @@
 #endif
 #if !defined(YAMS_WASI)
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/graph_helpers.h>
 #endif
 #if !defined(YAMS_WASI)
 #include <yams/compression/compression_header.h>
@@ -326,34 +327,6 @@ static std::string sanitizeName(std::string s) {
     return s;
 }
 
-static std::string formatRelationCounts(const std::unordered_map<std::string, std::size_t>& counts,
-                                        std::size_t topLimit = 3) {
-    if (counts.empty()) {
-        return "-";
-    }
-
-    std::vector<std::pair<std::string, std::size_t>> sorted(counts.begin(), counts.end());
-    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
-        if (a.second != b.second) {
-            return a.second > b.second;
-        }
-        return a.first < b.first;
-    });
-
-    const std::size_t shown = std::min(topLimit, sorted.size());
-    std::string out;
-    for (std::size_t i = 0; i < shown; ++i) {
-        if (!out.empty()) {
-            out += ", ";
-        }
-        out += sorted[i].first + "(" + std::to_string(sorted[i].second) + ")";
-    }
-    if (sorted.size() > shown) {
-        out += ", +" + std::to_string(sorted.size() - shown) + " more";
-    }
-    return out;
-}
-
 static std::unordered_map<int64_t, std::string>
 buildTraversalRelationHints(const yams::daemon::GraphQueryResponse& resp) {
     std::unordered_map<int64_t, std::string> hints;
@@ -402,11 +375,11 @@ buildTraversalRelationHints(const yams::daemon::GraphQueryResponse& resp) {
     hints.reserve(resp.connectedNodes.size());
     for (const auto& node : resp.connectedNodes) {
         if (auto it = preferred.find(node.nodeId); it != preferred.end() && !it->second.empty()) {
-            hints[node.nodeId] = formatRelationCounts(it->second);
+            hints[node.nodeId] = yams::cli::formatRelationCounts(it->second);
             continue;
         }
         if (auto it = fallback.find(node.nodeId); it != fallback.end() && !it->second.empty()) {
-            hints[node.nodeId] = formatRelationCounts(it->second);
+            hints[node.nodeId] = yams::cli::formatRelationCounts(it->second);
             continue;
         }
         hints[node.nodeId] = "-";

@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -142,6 +143,8 @@ private:
     bool scopeToCwd_{false};
     std::string cwdOverride_;
     std::string extension_;
+    std::string language_;
+    bool liveFallback_{true};
 
     bool shouldShowSpinner() const {
         bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
@@ -256,8 +259,22 @@ public:
                       "Scope grep to current working directory (adds CWD as path prefix filter)");
         cmd->add_option("--ext,--extension", extension_,
                         "Filter by file extension (e.g., .cpp or cpp)");
+        cmd->add_option("--lang", language_,
+                        "Language preset for extensions (currently: cpp => .cpp,.cc,.cxx,.h,.hpp)");
+        cmd->add_flag("--live", liveFallback_,
+                      "Use live working-tree fallback when indexed grep returns no results");
+        cmd->add_flag(
+            "--no-live",
+            [this](bool v) {
+                if (v)
+                    liveFallback_ = false;
+            },
+            "Disable live working-tree fallback for indexed no-hit results");
 
         cmd->callback([this, cmd]() {
+            if (cmd->count("--no-live") == 0) {
+                liveFallback_ = true;
+            }
             auto extras = cmd->remaining();
             if (!extras.empty()) {
                 if (pattern_.empty() && paths_.empty()) {
@@ -416,6 +433,9 @@ public:
 
                 // Map all CLI options to daemon protocol
                 dreq.includePatterns = parseCommaSeparated(includePatterns_);
+                auto langPatterns = languageIncludePatterns();
+                dreq.includePatterns.insert(dreq.includePatterns.end(), langPatterns.begin(),
+                                            langPatterns.end());
                 if (!extension_.empty()) {
                     std::string ext = extension_;
                     if (ext.front() != '.')
@@ -457,8 +477,17 @@ public:
 
                 bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
 
-                auto render = [&,
-                               jsonMode](const yams::daemon::GrepResponse& resp) -> Result<void> {
+                auto render =
+                    [&, jsonMode](const yams::daemon::GrepResponse& rawResp) -> Result<void> {
+                    auto liveResp = buildLiveFallbackResponse(rawResp);
+                    const auto& resp = liveResp.has_value() ? *liveResp : rawResp;
+                    if (liveResp.has_value() && !jsonMode && !pathsOnly_ && !filesOnly_ &&
+                        !countOnly_) {
+                        std::cerr << ui::colorize("Indexed grep returned no results; using live "
+                                                  "working-tree fallback.",
+                                                  ui::Ansi::DIM)
+                                  << std::endl;
+                    }
                     std::set<std::string> relationFiles;
                     for (const auto& match : resp.matches) {
                         if (!match.file.empty()) {
@@ -554,7 +583,7 @@ public:
 
                         if (files.empty()) {
                             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                            printLiteralTextHint();
+                            printNoResultsDiagnostics(resp.filesSearched);
                         } else {
                             for (const auto& file : files) {
                                 auto itR = hasRegex.find(file);
@@ -606,7 +635,7 @@ public:
 
                         if (fileCounts.empty() && semanticOnly.empty()) {
                             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                            printLiteralTextHint();
+                            printNoResultsDiagnostics(resp.filesSearched);
                         } else {
                             for (const auto& [file, count] : fileCounts) {
                                 if (showFilename_ || fileCounts.size() > 1) {
@@ -644,7 +673,7 @@ public:
                     } else {
                         if (resp.matches.empty()) {
                             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                            printLiteralTextHint();
+                            printNoResultsDiagnostics(resp.filesSearched);
                             return Result<void>();
                         }
 
@@ -911,9 +940,18 @@ private:
         return std::count(content.begin(), content.end(), '\n') + 1;
     }
 
-    // Helper to suggest -F flag when pattern has regex special chars
+    bool patternLooksIntentionallyRegex() const {
+        return pattern_.find('|') != std::string::npos ||
+               pattern_.find(".*") != std::string::npos ||
+               pattern_.find(".+") != std::string::npos ||
+               pattern_.find("\\d") != std::string::npos ||
+               pattern_.find("\\s") != std::string::npos ||
+               pattern_.find("\\w") != std::string::npos ||
+               (!pattern_.empty() && (pattern_.front() == '^' || pattern_.back() == '$'));
+    }
+
+    // Helper to explain regex/literal mode without over-claiming that the user made a mistake.
     void printLiteralTextHint() const {
-        // Check if pattern contains common regex special characters
         if (!literalText_ && !pattern_.empty()) {
             const std::string regexSpecialChars = "()[]{}.*+?\\^$|";
             bool hasSpecialChars = false;
@@ -925,15 +963,62 @@ private:
             }
 
             if (hasSpecialChars) {
-                std::cerr << "\nTip: Your pattern contains regex special characters.\n"
-                          << "     If you want to search for the literal text, use the -F flag:\n"
-                          << "     yams grep -F \"" << pattern_ << "\"";
+                if (patternLooksIntentionallyRegex()) {
+                    std::cerr << "\nTip: Pattern was interpreted as a regular expression.\n"
+                              << "     If you intended literal text instead, retry with -F:\n";
+                } else {
+                    std::cerr << "\nTip: Pattern contains characters that are special in regex.\n"
+                              << "     If you intended literal text, retry with -F:\n";
+                }
+                std::cerr << "     yams grep -F \"" << pattern_ << "\"";
                 if (!includePatterns_.empty()) {
                     std::cerr << " --include=\"" << includePatterns_ << "\"";
                 }
                 std::cerr << "\n";
             }
         }
+    }
+
+    void printNoResultsDiagnostics(std::optional<uint64_t> filesSearched = std::nullopt) const {
+        yams::daemon::GrepResponse empty;
+        if (auto live = buildLiveFallbackResponse(empty); live && !live->matches.empty()) {
+            std::cerr << ui::colorize(
+                             "Indexed grep returned no results; live working-tree fallback found:",
+                             ui::Ansi::DIM)
+                      << "\n";
+            std::size_t shown = 0;
+            for (const auto& match : live->matches) {
+                if (shown++ >= 20) {
+                    std::cerr << ui::colorize("  ... live results truncated", ui::Ansi::DIM)
+                              << "\n";
+                    break;
+                }
+                std::cout << ui::colorize(match.file, ui::Ansi::MAGENTA);
+                if (showLineNumbers_) {
+                    std::cout << ":"
+                              << ui::colorize(std::to_string(match.lineNumber), ui::Ansi::CYAN);
+                }
+                std::cout << ": " << formatSnippet(sanitizeForDisplay(match.line)) << "\n";
+            }
+            return;
+        }
+        printLiteralTextHint();
+        if (jsonOutput_ || pathsOnly_ || filesOnly_ || countOnly_) {
+            return;
+        }
+        std::cerr << "\nDiagnostics:\n";
+        if (filesSearched.has_value()) {
+            std::cerr << "  indexed_files_searched=" << *filesSearched << "\n";
+            if (*filesSearched == 0) {
+                std::cerr << "  No indexed files matched the requested scope/filters.\n";
+            }
+        } else {
+            std::cerr << "  indexed_files_searched=unknown (local fallback path)\n";
+        }
+        std::cerr << "  If you expected current-worktree hits, the YAMS index may be stale or the "
+                     "scope may be too narrow.\n"
+                  << "  Try: yams status; yams grep --lang cpp \"" << pattern_
+                  << "\" --cwd .; yams add . -r --include \"*.cpp,*.h,*.hpp\".\n";
     }
 
     std::unordered_map<std::string, std::string>
@@ -1027,6 +1112,217 @@ private:
             }
         }
         return result;
+    }
+
+    std::vector<std::string> languageExtensions() const {
+        auto lang = language_;
+        std::transform(lang.begin(), lang.end(), lang.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (lang.empty()) {
+            return {};
+        }
+        if (lang == "cpp" || lang == "c++" || lang == "cxx") {
+            return {".cpp", ".cc", ".cxx", ".h", ".hh", ".hpp", ".hxx"};
+        }
+        return {};
+    }
+
+    std::vector<std::string> languageIncludePatterns() const {
+        std::vector<std::string> patterns;
+        for (const auto& ext : languageExtensions()) {
+            patterns.push_back(std::string("**/*") + ext);
+        }
+        return patterns;
+    }
+
+    bool pathMatchesLiveFilters(const std::filesystem::path& path) const {
+        if (!extension_.empty()) {
+            std::string ext = extension_;
+            if (ext.front() != '.') {
+                ext.insert(ext.begin(), '.');
+            }
+            if (path.extension() != ext) {
+                return false;
+            }
+        }
+        auto langExts = languageExtensions();
+        if (!langExts.empty()) {
+            const auto pathExt = path.extension().string();
+            if (std::find(langExts.begin(), langExts.end(), pathExt) == langExts.end()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool isSimpleExactPattern() const {
+        if (pattern_.empty()) {
+            return false;
+        }
+        return std::all_of(pattern_.begin(), pattern_.end(), [](unsigned char c) {
+            return std::isalnum(c) || c == '_' || c == ':' || c == '~';
+        });
+    }
+
+    std::filesystem::path liveFallbackRoot() const {
+        if (!cwdOverride_.empty()) {
+            return std::filesystem::path(cwdOverride_);
+        }
+        if (!paths_.empty() && paths_.size() == 1 &&
+            std::filesystem::is_directory(paths_.front())) {
+            return std::filesystem::path(paths_.front());
+        }
+        std::error_code ec;
+        auto cwd = std::filesystem::current_path(ec);
+        return ec ? std::filesystem::path{"."} : cwd;
+    }
+
+    bool lineMatchesLivePattern(const std::string& line,
+                                const std::optional<std::regex>& regex) const {
+        if (literalText_ || isSimpleExactPattern()) {
+            auto haystack = line;
+            auto needle = pattern_;
+            if (ignoreCase_) {
+                std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                std::transform(needle.begin(), needle.end(), needle.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            }
+            auto pos = haystack.find(needle);
+            if (pos == std::string::npos) {
+                return invertMatch_;
+            }
+            if (wholeWord_) {
+                auto isWord = [](char c) {
+                    auto u = static_cast<unsigned char>(c);
+                    return std::isalnum(u) || c == '_';
+                };
+                const bool leftOk = pos == 0 || !isWord(haystack[pos - 1]);
+                const auto end = pos + needle.size();
+                const bool rightOk = end >= haystack.size() || !isWord(haystack[end]);
+                return invertMatch_ ? !(leftOk && rightOk) : (leftOk && rightOk);
+            }
+            return !invertMatch_;
+        }
+        if (!regex.has_value()) {
+            return false;
+        }
+        const bool matched = std::regex_search(line, *regex);
+        return invertMatch_ ? !matched : matched;
+    }
+
+    std::optional<yams::daemon::GrepResponse>
+    buildLiveFallbackResponse(const yams::daemon::GrepResponse& indexedResp) const {
+        if (!indexedResp.matches.empty() || filesWithoutMatch_ || jsonOutput_) {
+            return std::nullopt;
+        }
+        if (!liveFallback_) {
+            return std::nullopt;
+        }
+        if (!isSimpleExactPattern()) {
+            return std::nullopt;
+        }
+
+        const auto root = liveFallbackRoot();
+        std::error_code ec;
+        if (!std::filesystem::exists(root, ec)) {
+            return std::nullopt;
+        }
+
+        std::optional<std::regex> regex;
+        if (!literalText_) {
+            auto flags = std::regex::ECMAScript;
+            if (ignoreCase_) {
+                flags |= std::regex::icase;
+            }
+            try {
+                regex.emplace(pattern_, flags);
+            } catch (...) {
+                return std::nullopt;
+            }
+        }
+
+        yams::daemon::GrepResponse live;
+        live.queryInfo = "live-working-tree-fallback";
+        live.filesSearched = 0;
+        constexpr std::size_t kMaxFiles = 50000;
+        constexpr std::size_t kMaxMatches = 200;
+
+        auto scanFile = [&](const std::filesystem::path& file) {
+            if (live.matches.size() >= kMaxMatches || !pathMatchesLiveFilters(file)) {
+                return;
+            }
+            std::ifstream in(file);
+            if (!in) {
+                return;
+            }
+            ++live.filesSearched;
+            std::string line;
+            std::size_t lineNo = 0;
+            bool fileHadMatch = false;
+            while (std::getline(in, line)) {
+                ++lineNo;
+                if (!lineMatchesLivePattern(line, regex)) {
+                    continue;
+                }
+                yams::daemon::GrepMatch match;
+                match.file = file.lexically_normal().generic_string();
+                match.lineNumber = lineNo;
+                match.line = line;
+                match.matchType = "live";
+                match.confidence = 1.0;
+                live.matches.push_back(std::move(match));
+                fileHadMatch = true;
+                if (maxCount_ > 0 && live.matches.size() >= kMaxMatches) {
+                    break;
+                }
+            }
+            if (fileHadMatch) {
+                live.filesWith.push_back(file.lexically_normal().generic_string());
+            }
+        };
+
+        if (std::filesystem::is_regular_file(root, ec)) {
+            scanFile(root);
+        } else {
+            std::size_t filesSeen = 0;
+            for (std::filesystem::recursive_directory_iterator
+                     it(root, std::filesystem::directory_options::skip_permission_denied, ec),
+                 end;
+                 it != end && !ec && filesSeen < kMaxFiles && live.matches.size() < kMaxMatches;
+                 it.increment(ec)) {
+                if (it->is_directory(ec)) {
+                    const auto name = it->path().filename().string();
+                    if (name == ".git" || name == "build" || name == "node_modules" ||
+                        name == ".cache") {
+                        it.disable_recursion_pending();
+                    }
+                    continue;
+                }
+                if (!it->is_regular_file(ec)) {
+                    continue;
+                }
+                if (!pathMatchesLiveFilters(it->path())) {
+                    continue;
+                }
+                ++filesSeen;
+                scanFile(it->path());
+            }
+        }
+
+        if (live.matches.empty()) {
+            return std::nullopt;
+        }
+        live.totalMatches = live.matches.size();
+        live.regexMatches = live.matches.size();
+        if (pathsOnly_ || filesOnly_) {
+            std::set<std::string> unique;
+            for (const auto& match : live.matches) {
+                unique.insert(match.file);
+            }
+            live.pathsOnly.assign(unique.begin(), unique.end());
+        }
+        return live;
     }
 
     Result<void> executeLocal() {
@@ -1394,7 +1690,7 @@ private:
 
             if (files.empty()) {
                 std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                printLiteralTextHint();
+                printNoResultsDiagnostics();
             } else {
                 for (const auto& file : files) {
                     auto itc = semOnlyConf.find(file);
@@ -1531,7 +1827,7 @@ private:
 
             if (!hasRegexMatches && !hasSemanticResults) {
                 std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                printLiteralTextHint();
+                printNoResultsDiagnostics();
             } else {
                 // Summary line
                 size_t totalMatches = 0;

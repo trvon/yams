@@ -45,6 +45,43 @@ TEST_CASE("resolve_transport_mode auto honors daemon-process guard", "[daemon][s
     CHECK(yams::daemon::resolve_transport_mode(cfg) == ClientTransportMode::Socket);
 }
 
+TEST_CASE("resolve_transport_mode defaults to in-process in Codex sandbox",
+          "[daemon][sandbox][codex]") {
+    ClientConfig cfg;
+    cfg.transportMode = ClientTransportMode::Auto;
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar configEnv("YAMS_CONFIG", std::nullopt);
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar codexCi("CODEX_CI", std::string("1"));
+
+    CHECK(yams::daemon::resolve_transport_mode(cfg) == ClientTransportMode::InProcess);
+}
+
+TEST_CASE("resolve_transport_mode Codex detection does not override explicit socket",
+          "[daemon][sandbox][codex]") {
+    ClientConfig cfg;
+    cfg.transportMode = ClientTransportMode::Auto;
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("false"));
+    yams::test::ScopedEnvVar codexCi("CODEX_CI", std::string("1"));
+
+    CHECK(yams::daemon::resolve_transport_mode(cfg) == ClientTransportMode::Socket);
+}
+
+TEST_CASE("resolve_transport_mode Codex detection honors daemon-process guard",
+          "[daemon][sandbox][codex]") {
+    ClientConfig cfg;
+    cfg.transportMode = ClientTransportMode::Auto;
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar configEnv("YAMS_CONFIG", std::nullopt);
+    yams::test::ScopedEnvVar codexCi("CODEX_CI", std::string("1"));
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::string("1"));
+
+    CHECK(yams::daemon::resolve_transport_mode(cfg) == ClientTransportMode::Socket);
+}
+
 TEST_CASE("resolve_transport_mode auto falls back to in-process when socket missing",
           "[daemon][sandbox]") {
     ClientConfig cfg;

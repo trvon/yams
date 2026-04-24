@@ -365,6 +365,22 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             if (tunerPolicy.rewardDeltaIntraEdge) {
                 tcfg.weights.deltaIntraEdge = *tunerPolicy.rewardDeltaIntraEdge;
             }
+            // Phase H-TDA: reward mode (geometric / persistence / hybrid).
+            if (tunerPolicy.rewardMode) {
+                std::string mode = *tunerPolicy.rewardMode;
+                std::transform(mode.begin(), mode.end(), mode.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                if (mode == "persistence") {
+                    tcfg.rewardMode = TunerRewardMode::Persistence;
+                } else if (mode == "hybrid") {
+                    tcfg.rewardMode = TunerRewardMode::Hybrid;
+                } else {
+                    tcfg.rewardMode = TunerRewardMode::Geometric;
+                }
+            }
+            if (tunerPolicy.persistenceSampleSize) {
+                tcfg.persistenceSampleSize = *tunerPolicy.persistenceSampleSize;
+            }
             // Persist MAB state under data_dir so arm-pull history survives
             // daemon restarts. Without this, UCB1 always picks the alphabetically
             // first arm on each fresh daemon spawn (no pulls, infinite UCB).

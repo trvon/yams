@@ -78,6 +78,11 @@ public:
         std::optional<double> rewardBetaGiantCluster;
         std::optional<double> rewardGammaGiniDeviation;
         std::optional<double> rewardDeltaIntraEdge;
+        // Phase H-TDA: reward mode. "geometric" (default) | "persistence" | "hybrid"
+        std::optional<std::string> rewardMode;
+        // Sample size for persistence computation (default 512). Higher → more
+        // stable signal but O(n^2) cost growth.
+        std::optional<std::size_t> persistenceSampleSize;
     };
 
     struct PostIngestCaps {

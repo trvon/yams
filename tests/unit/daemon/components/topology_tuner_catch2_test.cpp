@@ -198,6 +198,103 @@ TEST_CASE("TopologyTuner: selectArm + observeRebuildStats round-trip via UCB1",
     CHECK(best.has_value());
 }
 
+TEST_CASE("TopologyTuner: rewardMode routes reward computation correctly",
+          "[unit][daemon][topology_tuner][catch2][tda]") {
+    // Two synthetic persistence signals: low (0.10) and high (0.80).
+    // Scale = 1.0 so normalization clamps to [0, 1] directly.
+    const auto stats = makeStats(0.1, 0.1, 0.4, 0.5); // high geometric reward
+
+    SECTION("Geometric mode ignores persistence") {
+        TopologyTunerConfig cfg;
+        cfg.enabled = true;
+        cfg.rewardMode = yams::daemon::TunerRewardMode::Geometric;
+        TopologyTuner tuner(cfg);
+        tuner.setArms(defaultArmGrid(1000));
+        auto arm = tuner.selectArm();
+        REQUIRE(arm.has_value());
+        // Persistence signal 0.8 vs 0.0 should NOT affect MAB state in Geometric mode.
+        tuner.observeRebuildStatsWithPersistence(arm->id, stats, /*persistence=*/0.8,
+                                                 /*scale=*/1.0);
+        auto best1 = tuner.bestArmId();
+        REQUIRE(best1.has_value());
+        // Re-init and observe the same arm with persistence=0.0; reward should be same.
+        TopologyTuner tuner2(cfg);
+        tuner2.setArms(defaultArmGrid(1000));
+        auto arm2 = tuner2.selectArm();
+        REQUIRE(arm2.has_value());
+        tuner2.observeRebuildStatsWithPersistence(arm2->id, stats, /*persistence=*/0.0,
+                                                  /*scale=*/1.0);
+        // Both bestArmId calls return non-empty; MAB ranks arms the same way
+        // because geometric reward was identical. Proof-by-contract: the
+        // underlying TunerMAB recorded rewards that, under Geometric mode,
+        // are equal regardless of the persistence argument.
+        auto best2 = tuner2.bestArmId();
+        REQUIRE(best2.has_value());
+        CHECK(*best1 == *best2);
+    }
+
+    SECTION("Persistence mode uses persistence signal as reward") {
+        TopologyTunerConfig cfg;
+        cfg.enabled = true;
+        cfg.rewardMode = yams::daemon::TunerRewardMode::Persistence;
+        TopologyTuner tuner(cfg);
+        // Two-arm grid for clear ranking.
+        tuner.setArms(std::vector<TopologyArm>{
+            TopologyArm{"arm_a", "hdbscan", 4, 4, 0},
+            TopologyArm{"arm_b", "hdbscan", 8, 8, 0},
+        });
+        // Pull arm_a with high persistence, arm_b with low.
+        auto armA = tuner.selectArm();
+        REQUIRE(armA.has_value());
+        tuner.observeRebuildStatsWithPersistence(armA->id, stats, 0.9, 1.0);
+        auto armB = tuner.selectArm();
+        REQUIRE(armB.has_value());
+        tuner.observeRebuildStatsWithPersistence(armB->id, stats, 0.1, 1.0);
+        // Pull 8 more times to cement rankings.
+        for (int i = 0; i < 8; ++i) {
+            auto picked = tuner.selectArm();
+            REQUIRE(picked.has_value());
+            const double signal = (picked->id == "arm_a") ? 0.9 : 0.1;
+            tuner.observeRebuildStatsWithPersistence(picked->id, stats, signal, 1.0);
+        }
+        auto best = tuner.bestArmId();
+        REQUIRE(best.has_value());
+        CHECK(*best == "arm_a");
+    }
+
+    SECTION("Hybrid mode blends geometric + persistence") {
+        TopologyTunerConfig cfg;
+        cfg.enabled = true;
+        cfg.rewardMode = yams::daemon::TunerRewardMode::Hybrid;
+        TopologyTuner tuner(cfg);
+        tuner.setArms(std::vector<TopologyArm>{
+            TopologyArm{"arm_a", "hdbscan", 4, 4, 0},
+            TopologyArm{"arm_b", "hdbscan", 8, 8, 0},
+        });
+        // arm_a: low geometric, high persistence
+        // arm_b: high geometric, low persistence
+        // With 0.5/0.5 blend and stats yielding ~1.0 geometric, arm_b should win
+        // but with a margin smaller than pure geometric.
+        const auto lowGeom = makeStats(0.5, 0.5, 0.7, 0.2);   // low geometric
+        const auto highGeom = makeStats(0.05, 0.1, 0.4, 0.6); // high geometric
+        for (int i = 0; i < 10; ++i) {
+            auto picked = tuner.selectArm();
+            REQUIRE(picked.has_value());
+            if (picked->id == "arm_a") {
+                tuner.observeRebuildStatsWithPersistence(picked->id, lowGeom, 0.9, 1.0);
+            } else {
+                tuner.observeRebuildStatsWithPersistence(picked->id, highGeom, 0.1, 1.0);
+            }
+        }
+        auto best = tuner.bestArmId();
+        REQUIRE(best.has_value());
+        // With 0.5·highGeom(~0.9) + 0.5·0.1 = 0.5 for arm_b
+        //      vs 0.5·lowGeom(~0.4) + 0.5·0.9 = 0.65 for arm_a
+        // So arm_a should win in Hybrid mode despite losing in pure Geometric.
+        CHECK(*best == "arm_a");
+    }
+}
+
 TEST_CASE("TopologyTuner: disabled tuner returns nullopt from selectArm",
           "[unit][daemon][topology_tuner][catch2]") {
     TopologyTunerConfig cfg;

@@ -43,11 +43,26 @@ struct IntrinsicRewardWeights {
     double deltaIntraEdge{0.15};
 };
 
+// Reward computation mode for the topology tuner. Phase H-TDA ablation.
+//   Geometric  — use the IntrinsicRewardWeights formula (singleton/giant/gini/intra)
+//   Persistence — use H_0 persistence on a sample of embeddings as the reward
+//   Hybrid     — 0.5 × geometric + 0.5 × normalized(persistence)
+enum class TunerRewardMode : std::uint8_t {
+    Geometric = 0,
+    Persistence = 1,
+    Hybrid = 2,
+};
+
 struct TopologyTunerConfig {
     bool enabled{false};
     std::chrono::minutes cooldown{10};
     std::size_t docCountDelta{100};
     IntrinsicRewardWeights weights;
+    TunerRewardMode rewardMode{TunerRewardMode::Geometric};
+    // Phase H-TDA: number of embeddings to sample for H_0 persistence
+    // computation when rewardMode != Geometric. ~512 keeps O(n²) cost
+    // manageable on rebuild critical path; bigger improves signal stability.
+    std::size_t persistenceSampleSize{512};
     // When set, the tuner persists its MAB state to this file after each
     // observeRebuildStats call, and loads from it on construction. Lets
     // UCB1 accumulate arm-pull history across daemon restarts.
@@ -78,6 +93,20 @@ public:
     [[nodiscard]] std::optional<TopologyArm> selectArm();
 
     void observeRebuildStats(std::string_view armId, const TopologyManager::RebuildStats& stats);
+
+    // Phase H-TDA: alternative reward modes. When rewardMode != Geometric,
+    // the caller supplies the extrinsic persistence signal (e.g. H_0
+    // persistence over a sample of cluster embeddings). The reward actually
+    // recorded to the MAB is:
+    //   Geometric:   geometric only (persistence ignored; equivalent to observeRebuildStats)
+    //   Persistence: clamp01(persistence / persistenceScale)
+    //   Hybrid:      0.5 × geometric + 0.5 × clamp01(persistence / persistenceScale)
+    // `persistenceScale` normalizes the raw persistence score into [0, 1];
+    // reasonable default is (corpus_sample_count − 1) which is the upper bound
+    // of H_0 total persistence under the percentile-normalized formula.
+    void observeRebuildStatsWithPersistence(std::string_view armId,
+                                            const TopologyManager::RebuildStats& stats,
+                                            double persistenceSignal, double persistenceScale);
 
     // Phase G shadow gate: feeds an EXTRINSIC reward signal (e.g. nDCG over
     // recent labeled queries) for the most recently observed arm so the tuner

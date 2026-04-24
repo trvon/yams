@@ -1239,6 +1239,16 @@ DaemonHarnessOptions quietHarnessOptions() {
         envDataDir != nullptr && *envDataDir != '\0') {
         opts.dataDir = std::filesystem::path{envDataDir};
     }
+    // Phase G+: when both YAMS_BENCH_DAEMON_DATA_DIR and YAMS_BENCH_DAEMON_FIXTURE_CLONE
+    // are set, DaemonHarness clones the fixture's contents into the data_dir
+    // on first spawn (when data_dir is empty) and reuses on later spawns.
+    // Lets bench reps share a writable scratch seeded from a frozen fixture —
+    // tuner state + topology artifacts persist; corpus reads from the seeded
+    // copy, not the read-only fixture.
+    if (const char* envClone = std::getenv("YAMS_BENCH_DAEMON_FIXTURE_CLONE");
+        envClone != nullptr && *envClone != '\0') {
+        opts.cloneFixtureFrom = std::filesystem::path{envClone};
+    }
     return opts;
 }
 

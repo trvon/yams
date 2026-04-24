@@ -10,6 +10,7 @@
 #include <yams/daemon/components/TopologyTuner.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/topological_quality.h>
 #include <yams/vector/vector_database.h>
 
 #include <yams/topology/topology_baseline.h>
@@ -318,12 +319,73 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - startedAt)
                         .count())};
-            tuner_->observeRebuildStats(tunerCurrentArmId_, stats);
-            const double reward = computeIntrinsicReward(stats, tuner_->config().weights);
-            spdlog::info("[TopologyManager] tuner observed arm '{}' reward={:.4f} "
-                         "(singleton={:.3f} giant={:.3f} gini={:.3f} intra={:.3f})",
-                         tunerCurrentArmId_, reward, stats.singletonRatio, stats.giantClusterRatio,
-                         stats.clusterSizeGini, stats.avgIntraEdgeWeight);
+            const auto rewardMode = tuner_->config().rewardMode;
+            if (rewardMode == TunerRewardMode::Geometric) {
+                tuner_->observeRebuildStats(tunerCurrentArmId_, stats);
+                const double reward = computeIntrinsicReward(stats, tuner_->config().weights);
+                spdlog::info("[TopologyManager] tuner observed arm '{}' reward={:.4f} "
+                             "(singleton={:.3f} giant={:.3f} gini={:.3f} intra={:.3f})",
+                             tunerCurrentArmId_, reward, stats.singletonRatio,
+                             stats.giantClusterRatio, stats.clusterSizeGini,
+                             stats.avgIntraEdgeWeight);
+            } else {
+                // Phase H-TDA: compute H_0 persistence on a sample of post-rebuild
+                // embeddings and feed it to the tuner alongside geometric stats.
+                double persistence = 0.0;
+                double scale = 1.0;
+                try {
+                    if (auto vdb = deps_.getVectorDatabase(); vdb) {
+                        auto allDocVecs = vdb->getDocumentLevelVectorsAll();
+                        const std::size_t total = allDocVecs.size();
+                        const std::size_t sampleSize =
+                            std::min(total, tuner_->config().persistenceSampleSize);
+                        if (sampleSize >= 2) {
+                            // Deterministic subsample seeded by snapshot id hash for
+                            // reproducibility across reps with the same fixture.
+                            std::uint64_t seed = std::hash<std::string>{}(stats.snapshotId);
+                            auto picked =
+                                yams::search::deterministicSubsample(total, sampleSize, seed);
+                            // Materialize embeddings into a flat row-major buffer.
+                            std::vector<std::vector<float>> rows;
+                            rows.reserve(picked.size());
+                            std::size_t idx = 0;
+                            for (auto it = allDocVecs.begin();
+                                 it != allDocVecs.end() && idx < picked.size(); ++it, ++idx) {
+                                // We want picked[idx]-th element by iteration order.
+                                // Re-iterate to match index — simpler since map order
+                                // is stable.
+                            }
+                            std::size_t pos = 0;
+                            std::size_t pickIdx = 0;
+                            for (const auto& [hash, vec] : allDocVecs) {
+                                if (pickIdx >= picked.size())
+                                    break;
+                                if (pos == picked[pickIdx]) {
+                                    rows.push_back(vec.embedding);
+                                    ++pickIdx;
+                                }
+                                ++pos;
+                            }
+                            persistence = yams::search::computePersistenceH0(rows);
+                            // Scale: upper bound of H_0 total persistence under
+                            // percentile-normalized formula is (n-1).
+                            scale = static_cast<double>(rows.size() > 1 ? rows.size() - 1 : 1);
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::debug("[TopologyManager] persistence computation failed: {}", e.what());
+                }
+                tuner_->observeRebuildStatsWithPersistence(tunerCurrentArmId_, stats, persistence,
+                                                           scale);
+                const double geometric = computeIntrinsicReward(stats, tuner_->config().weights);
+                const char* modeStr =
+                    (rewardMode == TunerRewardMode::Persistence) ? "persistence" : "hybrid";
+                spdlog::info("[TopologyManager] tuner observed arm '{}' mode={} "
+                             "geometric={:.4f} persistence={:.4f} scale={:.1f} "
+                             "(singleton={:.3f} giant={:.3f})",
+                             tunerCurrentArmId_, modeStr, geometric, persistence, scale,
+                             stats.singletonRatio, stats.giantClusterRatio);
+            }
             tunerCurrentArmId_.clear();
         }
     }

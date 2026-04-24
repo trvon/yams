@@ -165,6 +165,51 @@ std::optional<TopologyArm> TopologyTuner::selectArm() {
     return arms_[*idx];
 }
 
+void TopologyTuner::observeRebuildStatsWithPersistence(std::string_view armId,
+                                                       const TopologyManager::RebuildStats& stats,
+                                                       double persistenceSignal,
+                                                       double persistenceScale) {
+    std::optional<std::filesystem::path> persistPath;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (arms_.empty()) {
+            return;
+        }
+        auto it = std::find_if(arms_.begin(), arms_.end(),
+                               [&](const TopologyArm& arm) { return arm.id == armId; });
+        if (it == arms_.end()) {
+            return;
+        }
+        const auto idx = static_cast<std::size_t>(std::distance(arms_.begin(), it));
+        const double geometric = computeIntrinsicReward(stats, cfg_.weights);
+        const double persistenceNorm =
+            (persistenceScale > 0.0) ? std::clamp(persistenceSignal / persistenceScale, 0.0, 1.0)
+                                     : 0.0;
+        double reward = geometric;
+        switch (cfg_.rewardMode) {
+            case TunerRewardMode::Geometric:
+                reward = geometric;
+                break;
+            case TunerRewardMode::Persistence:
+                reward = persistenceNorm;
+                break;
+            case TunerRewardMode::Hybrid:
+                reward = 0.5 * geometric + 0.5 * persistenceNorm;
+                break;
+        }
+        mab_.recordReward(idx, reward, yams::search::TunerMAB::RewardSource::Proxy);
+        lastIntrinsicReward_ = reward;
+        haveLastIntrinsic_ = true;
+        persistPath = cfg_.statePath;
+    }
+    if (persistPath) {
+        if (auto r = saveState(*persistPath); !r) {
+            spdlog::debug("[TopologyTuner] failed to persist state to {}: {}",
+                          persistPath->string(), r.error().message);
+        }
+    }
+}
+
 void TopologyTuner::observeRebuildStats(std::string_view armId,
                                         const TopologyManager::RebuildStats& stats) {
     std::optional<std::filesystem::path> persistPath;

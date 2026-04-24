@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -270,6 +272,100 @@ private:
         }
         if (!node.properties.empty()) {
             out["properties"] = parsePropertiesField(node.properties);
+        }
+        return out;
+    }
+
+    struct GraphSearchGroup {
+        std::string key;
+        std::string label;
+        std::string path;
+        std::vector<const yams::daemon::GraphNode*> nodes;
+        std::set<std::string> types;
+        bool generatedOrCache{false};
+    };
+
+    static bool isGeneratedOrCachePath(std::string_view path) {
+        return path.find("/.cache/") != std::string_view::npos ||
+               path.find("/build/") != std::string_view::npos ||
+               path.find("/public/search/") != std::string_view::npos ||
+               path.find("/node_modules/") != std::string_view::npos ||
+               path.find("/third_party/") != std::string_view::npos ||
+               path.find("/.git/") != std::string_view::npos;
+    }
+
+    static std::string canonicalGraphSearchPath(const yams::daemon::GraphNode& node) {
+        auto path = displayNodePath(node);
+        if (path.empty()) {
+            path = node.label;
+        }
+        if (path.empty()) {
+            return {};
+        }
+        try {
+            auto derived = yams::metadata::computePathDerivedValues(path);
+            if (!derived.normalizedPath.empty()) {
+                return derived.normalizedPath;
+            }
+        } catch (...) {
+            // Best effort only; fall back to the raw label/path.
+        }
+        return std::filesystem::path(path).lexically_normal().generic_string();
+    }
+
+    static std::vector<GraphSearchGroup>
+    buildCanonicalGraphSearchGroups(const std::vector<yams::daemon::GraphNode>& nodes) {
+        std::map<std::string, GraphSearchGroup> byKey;
+        for (const auto& node : nodes) {
+            auto key = canonicalGraphSearchPath(node);
+            if (key.empty()) {
+                key = node.nodeKey.empty() ? std::to_string(node.nodeId) : node.nodeKey;
+            }
+            auto& group = byKey[key];
+            if (group.key.empty()) {
+                group.key = key;
+                group.path = displayNodePath(node);
+                if (group.path.empty() && key.find('/') != std::string::npos) {
+                    group.path = key;
+                }
+                group.label = group.path.empty() ? node.label : group.path;
+                group.generatedOrCache = isGeneratedOrCachePath(key) ||
+                                         isGeneratedOrCachePath(group.path) ||
+                                         isGeneratedOrCachePath(node.label);
+            }
+            group.nodes.push_back(&node);
+            if (!node.type.empty()) {
+                group.types.insert(node.type);
+            }
+        }
+
+        std::vector<GraphSearchGroup> groups;
+        groups.reserve(byKey.size());
+        for (auto& [_, group] : byKey) {
+            groups.push_back(std::move(group));
+        }
+        return groups;
+    }
+
+    json makeGraphSearchGroupJson(const GraphSearchGroup& group,
+                                  const std::filesystem::path& cwd) const {
+        json out;
+        out["key"] = group.key;
+        out["label"] = group.label.find('/') == std::string::npos
+                           ? group.label
+                           : projectPathForDisplay(group.label, cwd);
+        if (!group.path.empty()) {
+            out["path"] = group.path;
+        }
+        out["nodeCount"] = group.nodes.size();
+        out["generatedOrCache"] = group.generatedOrCache;
+        out["types"] = json::array();
+        for (const auto& type : group.types) {
+            out["types"].push_back(type);
+        }
+        out["nodeIds"] = json::array();
+        for (const auto* node : group.nodes) {
+            out["nodeIds"].push_back(node->nodeId);
         }
         return out;
     }
@@ -872,35 +968,6 @@ private:
         return Result<void>();
     }
 
-    static std::string
-    formatRelationCounts(const std::unordered_map<std::string, std::size_t>& counts,
-                         std::size_t topLimit = 3) {
-        if (counts.empty()) {
-            return "-";
-        }
-
-        std::vector<std::pair<std::string, std::size_t>> sorted(counts.begin(), counts.end());
-        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
-            if (a.second != b.second) {
-                return a.second > b.second;
-            }
-            return a.first < b.first;
-        });
-
-        const std::size_t shown = std::min(topLimit, sorted.size());
-        std::string out;
-        for (std::size_t i = 0; i < shown; ++i) {
-            if (!out.empty()) {
-                out += ", ";
-            }
-            out += sorted[i].first + "(" + std::to_string(sorted[i].second) + ")";
-        }
-        if (sorted.size() > shown) {
-            out += ", +" + std::to_string(sorted.size() - shown) + " more";
-        }
-        return out;
-    }
-
     static std::unordered_map<int64_t, std::string>
     buildTraversalRelationHints(const yams::daemon::GraphQueryResponse& resp) {
         std::unordered_map<int64_t, std::string> hints;
@@ -1141,6 +1208,9 @@ private:
             co_return Result<void>();
         }
 
+        const auto cwd = std::filesystem::current_path();
+        const auto canonicalGroups = buildCanonicalGraphSearchGroups(resp.connectedNodes);
+
         if (wantsJsonOutput()) {
             json out;
             out["pattern"] = searchPattern_;
@@ -1154,6 +1224,11 @@ private:
                 jsonNodes.push_back(makeGraphNodeJson(node));
             }
             out["nodes"] = jsonNodes;
+            json groups = json::array();
+            for (const auto& group : canonicalGroups) {
+                groups.push_back(makeGraphSearchGroupJson(group, cwd));
+            }
+            out["canonicalGroups"] = groups;
             std::cout << out.dump(2) << "\n";
         } else {
             std::cout << yams::cli::ui::section_header("Search: " + searchPattern_) << "\n\n";
@@ -1161,18 +1236,57 @@ private:
             std::string summary = "Found " + yams::cli::ui::format_number(resp.totalNodesFound) +
                                   " matching node" + (resp.totalNodesFound != 1 ? "s" : "");
             std::cout << yams::cli::ui::status_info(summary) << "\n";
-            std::cout << "Showing: " << resp.connectedNodes.size() << " (offset " << offset_
-                      << ", limit " << limit_ << ")\n\n";
+            std::vector<const GraphSearchGroup*> visibleGroups;
+            visibleGroups.reserve(canonicalGroups.size());
+            std::size_t hiddenGroups = 0;
+            for (const auto& group : canonicalGroups) {
+                if (group.generatedOrCache) {
+                    ++hiddenGroups;
+                    continue;
+                }
+                visibleGroups.push_back(&group);
+            }
+            if (visibleGroups.empty()) {
+                for (const auto& group : canonicalGroups) {
+                    visibleGroups.push_back(&group);
+                }
+                hiddenGroups = 0;
+            }
+
+            std::cout << "Showing: " << visibleGroups.size() << " canonical group"
+                      << (visibleGroups.size() != 1 ? "s" : "") << " from "
+                      << resp.connectedNodes.size() << " node"
+                      << (resp.connectedNodes.size() != 1 ? "s" : "") << " (offset " << offset_
+                      << ", limit " << limit_ << ")";
+            if (hiddenGroups > 0) {
+                std::cout << " · hidden generated/cache groups: " << hiddenGroups;
+            }
+            std::cout << "\n\n";
 
             if (!resp.connectedNodes.empty()) {
                 yams::cli::ui::Table table;
-                table.headers = {"ID", "TYPE", "LABEL", "KEY"};
+                table.headers = {"NODES", "TYPES", "LABEL", "KEY"};
                 table.has_header = true;
 
-                for (const auto& node : resp.connectedNodes) {
-                    table.add_row({std::to_string(node.nodeId), node.type.empty() ? "-" : node.type,
-                                   yams::cli::ui::truncate_to_width(node.label, 35),
-                                   yams::cli::ui::truncate_to_width(node.nodeKey, 40)});
+                for (const auto* group : visibleGroups) {
+                    std::string types;
+                    for (const auto& type : group->types) {
+                        if (!types.empty()) {
+                            types += ",";
+                        }
+                        types += type;
+                    }
+                    if (types.empty()) {
+                        types = "-";
+                    }
+                    table.add_row({std::to_string(group->nodes.size()),
+                                   yams::cli::ui::truncate_to_width(types, 22),
+                                   yams::cli::ui::truncate_to_width(
+                                       group->label.find('/') == std::string::npos
+                                           ? group->label
+                                           : projectPathForDisplay(group->label, cwd),
+                                       55),
+                                   yams::cli::ui::truncate_to_width(group->key, 48)});
                 }
                 yams::cli::ui::render_table(std::cout, table);
             }
@@ -1397,6 +1511,12 @@ private:
             return std::filesystem::path(node.nodeKey.substr(13));
         }
         if (node.nodeKey.rfind("path:", 0) == 0) {
+            // Historical path nodes use path:<timestamp>Z:<absolute-path>. Prefer the delimiter
+            // after the timestamp; a simple second-colon split truncates paths at HH:MM.
+            auto timestampEnd = node.nodeKey.find("Z:", 5);
+            if (timestampEnd != std::string::npos && timestampEnd + 2 < node.nodeKey.size()) {
+                return std::filesystem::path(node.nodeKey.substr(timestampEnd + 2));
+            }
             auto secondColon = node.nodeKey.find(':', 5);
             if (secondColon != std::string::npos && secondColon + 1 < node.nodeKey.size()) {
                 return std::filesystem::path(node.nodeKey.substr(secondColon + 1));

@@ -866,6 +866,17 @@ ConfigResolver::TopologyTunerPolicy ConfigResolver::resolveTopologyTunerPolicy()
         if (auto it = kv.find("topology.tuner.reward.delta_intra_edge"); it != kv.end()) {
             policy.rewardDeltaIntraEdge = parseDouble(it->second);
         }
+        if (auto it = kv.find("topology.tuner.reward_mode"); it != kv.end()) {
+            if (!it->second.empty()) {
+                policy.rewardMode = it->second;
+            }
+        }
+        if (auto it = kv.find("topology.tuner.persistence_sample_size"); it != kv.end()) {
+            try {
+                policy.persistenceSampleSize = static_cast<std::size_t>(std::stoul(it->second));
+            } catch (const std::exception&) {
+            }
+        }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology tuner policy: {}", e.what());
     }

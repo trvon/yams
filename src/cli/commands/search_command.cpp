@@ -818,6 +818,110 @@ private:
         return out;
     }
 
+    std::vector<std::string> parsedFilterTags() const {
+        std::vector<std::string> tags;
+        if (filterTags_.empty()) {
+            return tags;
+        }
+        std::stringstream ss(filterTags_);
+        std::string tag;
+        while (std::getline(ss, tag, ',')) {
+            auto s = trim(tag);
+            if (!s.empty()) {
+                tags.push_back(std::move(s));
+            }
+        }
+        return tags;
+    }
+
+    yams::daemon::SearchRequest
+    makeDaemonSearchRequest(const std::vector<std::string>& includeGlobsExpanded) const {
+        yams::daemon::SearchRequest dreq;
+        dreq.query = yams::common::sanitizeUtf8(query_);
+        if (dreq.query != query_) {
+            spdlog::debug("Search query contained invalid UTF-8; sanitized for IPC transmission");
+        }
+
+        // Request one extra result to account for potential client-side de-duplication.
+        dreq.limit = static_cast<size_t>(limit_) + 1;
+        dreq.fuzzy = fuzzySearch_;
+        dreq.literalText = literalText_;
+        dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
+        dreq.pathsOnly = false; // Always fetch full results; pathsOnly is a CLI display option.
+        dreq.searchType = searchType_;
+        dreq.jsonOutput = jsonOutput_;
+        dreq.showHash = showHash_;
+        dreq.verbose = verbose_;
+        dreq.showLineNumbers = showLineNumbers_;
+        dreq.symbolRank = symbolRank_;
+
+        if (!includeGlobsExpanded.empty()) {
+            dreq.pathPatterns = includeGlobsExpanded;
+            spdlog::debug("[CLI] Setting {} path patterns for search", includeGlobsExpanded.size());
+        } else if (!pathFilter_.empty()) {
+            dreq.pathPattern = pathFilter_;
+            dreq.pathPatterns.push_back(pathFilter_);
+            spdlog::debug("[CLI] Using pathFilter fallback, set pathPatterns with 1 element");
+        }
+
+        dreq.tags = parsedFilterTags();
+        if (!dreq.tags.empty()) {
+            dreq.matchAllTags = matchAllTags_;
+        }
+        dreq.extension = extension_;
+        dreq.mimeType = mimeType_;
+        dreq.fileType = fileType_;
+        dreq.textOnly = textOnly_;
+        dreq.binaryOnly = binaryOnly_;
+        dreq.createdAfter = createdAfter_;
+        dreq.createdBefore = createdBefore_;
+        dreq.modifiedAfter = modifiedAfter_;
+        dreq.modifiedBefore = modifiedBefore_;
+        dreq.indexedAfter = indexedAfter_;
+        dreq.indexedBefore = indexedBefore_;
+        dreq.globalSearch = noSession_;
+        dreq.useSession = !noSession_;
+        if (!noSession_ && sessionOverride_) {
+            dreq.sessionName = *sessionOverride_;
+        }
+        return dreq;
+    }
+
+    yams::app::services::SearchRequest makeAppSearchRequest() const {
+        yams::app::services::SearchRequest sreq;
+        sreq.query = query_;
+        sreq.limit = limit_;
+        sreq.fuzzy = fuzzySearch_;
+        sreq.similarity = minSimilarity_;
+        sreq.hash = hashQuery_;
+        sreq.type = searchType_;
+        sreq.verbose = verbose_;
+        sreq.literalText = literalText_;
+        sreq.showHash = showHash_;
+        sreq.pathsOnly = pathsOnly_;
+        sreq.showLineNumbers = showLineNumbers_;
+        sreq.beforeContext = static_cast<int>(beforeContext_);
+        sreq.afterContext = static_cast<int>(afterContext_);
+        sreq.context = static_cast<int>(context_);
+        sreq.pathPattern = pathFilter_;
+        sreq.extension = extension_;
+        sreq.mimeType = mimeType_;
+        sreq.fileType = fileType_;
+        sreq.textOnly = textOnly_;
+        sreq.binaryOnly = binaryOnly_;
+        sreq.createdAfter = createdAfter_;
+        sreq.createdBefore = createdBefore_;
+        sreq.modifiedAfter = modifiedAfter_;
+        sreq.modifiedBefore = modifiedBefore_;
+        sreq.indexedAfter = indexedAfter_;
+        sreq.indexedBefore = indexedBefore_;
+        sreq.tags = parsedFilterTags();
+        if (!sreq.tags.empty()) {
+            sreq.matchAllTags = matchAllTags_;
+        }
+        return sreq;
+    }
+
     static bool matchAnyGlob(const std::string& path, const std::vector<std::string>& globs) {
         if (globs.empty())
             return true;
@@ -1282,65 +1386,7 @@ public:
                 client.setStreamingEnabled(clientConfig.enableChunkedResponses);
             }
 
-            // Create search request
-            yams::daemon::SearchRequest dreq;
-            // Sanitize query to ensure valid UTF-8 (required by Protocol Buffer)
-            dreq.query = yams::common::sanitizeUtf8(query_);
-            if (dreq.query != query_) {
-                spdlog::debug(
-                    "Search query contained invalid UTF-8; sanitized for IPC transmission");
-            }
-            // Request one extra result to account for potential deduplication
-            dreq.limit = static_cast<size_t>(limit_) + 1;
-            dreq.fuzzy = fuzzySearch_; // honor explicit CLI flag; fallback logic will retry
-            dreq.literalText = literalText_;
-            dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
-            dreq.pathsOnly = false; // Always fetch full results; pathsOnly is a CLI display option
-            dreq.searchType = searchType_;
-            dreq.jsonOutput = jsonOutput_;
-            dreq.showHash = showHash_;
-            dreq.verbose = verbose_;
-            dreq.showLineNumbers = showLineNumbers_;
-            dreq.symbolRank = symbolRank_;
-            // Engine-level filters
-            if (!includeGlobsExpanded.empty()) {
-                dreq.pathPatterns =
-                    includeGlobsExpanded; // Send all patterns for server-side filtering
-                spdlog::debug("[CLI] Setting {} path patterns for search",
-                              includeGlobsExpanded.size());
-            } else if (!pathFilter_.empty()) {
-                dreq.pathPattern = pathFilter_;           // Legacy single pattern fallback
-                dreq.pathPatterns.push_back(pathFilter_); // ALSO populate the vector
-                spdlog::debug("[CLI] Using pathFilter fallback, set pathPatterns with 1 element");
-            }
-            if (!filterTags_.empty()) {
-                std::stringstream ss(filterTags_);
-                std::string tag;
-                while (std::getline(ss, tag, ',')) {
-                    // trim
-                    auto s = trim(tag);
-                    if (!s.empty())
-                        dreq.tags.push_back(s);
-                }
-                dreq.matchAllTags = matchAllTags_;
-            }
-            dreq.extension = extension_;
-            dreq.mimeType = mimeType_;
-            dreq.fileType = fileType_;
-            dreq.textOnly = textOnly_;
-            dreq.binaryOnly = binaryOnly_;
-            dreq.createdAfter = createdAfter_;
-            dreq.createdBefore = createdBefore_;
-            dreq.modifiedAfter = modifiedAfter_;
-            dreq.modifiedBefore = modifiedBefore_;
-            dreq.indexedAfter = indexedAfter_;
-            dreq.indexedBefore = indexedBefore_;
-
-            dreq.globalSearch = noSession_;
-            dreq.useSession = !noSession_;
-            if (!noSession_ && sessionOverride_) {
-                dreq.sessionName = *sessionOverride_;
-            }
+            auto dreq = makeDaemonSearchRequest(includeGlobsExpanded);
 
             std::shared_ptr<ui::SpinnerRunner> spinner =
                 shouldShowSpinner() ? std::make_shared<ui::SpinnerRunner>() : nullptr;
@@ -1372,47 +1418,7 @@ public:
                     return Error{ErrorCode::NotInitialized, "Failed to create search service"};
                 }
 
-                // Map CLI arguments to service request
-                app::services::SearchRequest sreq;
-                sreq.query = query_;
-                sreq.limit = limit_;
-                sreq.fuzzy = fuzzySearch_;
-                sreq.similarity = minSimilarity_;
-                sreq.hash = hashQuery_;
-                sreq.type = searchType_;
-                sreq.verbose = verbose_;
-                sreq.literalText = literalText_;
-                sreq.showHash = showHash_;
-                sreq.pathsOnly = pathsOnly_;
-                sreq.showLineNumbers = showLineNumbers_;
-                sreq.beforeContext = static_cast<int>(beforeContext_);
-                sreq.afterContext = static_cast<int>(afterContext_);
-                sreq.context = static_cast<int>(context_);
-                sreq.pathPattern = pathFilter_;
-                sreq.extension = extension_;
-                sreq.mimeType = mimeType_;
-                sreq.fileType = fileType_;
-                sreq.textOnly = textOnly_;
-                sreq.binaryOnly = binaryOnly_;
-                sreq.createdAfter = createdAfter_;
-                sreq.createdBefore = createdBefore_;
-                sreq.modifiedAfter = modifiedAfter_;
-                sreq.modifiedBefore = modifiedBefore_;
-                sreq.indexedAfter = indexedAfter_;
-                sreq.indexedBefore = indexedBefore_;
-
-                // Parse tags from comma-separated string
-                if (!filterTags_.empty()) {
-                    std::stringstream ss(filterTags_);
-                    std::string tag;
-                    while (std::getline(ss, tag, ',')) {
-                        yams::config::trim(tag);
-                        if (!tag.empty()) {
-                            sreq.tags.push_back(tag);
-                        }
-                    }
-                    sreq.matchAllTags = matchAllTags_;
-                }
+                auto sreq = makeAppSearchRequest();
 
                 std::promise<Result<app::services::SearchResponse>> prom;
                 std::promise<void> localDone;
@@ -1732,43 +1738,7 @@ public:
             if (auto appContext = cli_->getAppContext()) {
                 auto searchService = app::services::makeSearchService(*appContext);
                 if (searchService) {
-                    app::services::SearchRequest sreq;
-                    sreq.query = query_;
-                    sreq.limit = limit_;
-                    sreq.fuzzy = fuzzySearch_;
-                    sreq.similarity = minSimilarity_;
-                    sreq.hash = hashQuery_;
-                    sreq.type = searchType_;
-                    sreq.verbose = verbose_;
-                    sreq.literalText = literalText_;
-                    sreq.showHash = showHash_;
-                    sreq.pathsOnly = pathsOnly_;
-                    sreq.showLineNumbers = showLineNumbers_;
-                    sreq.beforeContext = static_cast<int>(beforeContext_);
-                    sreq.afterContext = static_cast<int>(afterContext_);
-                    sreq.context = static_cast<int>(context_);
-                    sreq.pathPattern = pathFilter_;
-                    sreq.extension = extension_;
-                    sreq.mimeType = mimeType_;
-                    sreq.fileType = fileType_;
-                    sreq.textOnly = textOnly_;
-                    sreq.binaryOnly = binaryOnly_;
-                    sreq.createdAfter = createdAfter_;
-                    sreq.createdBefore = createdBefore_;
-                    sreq.modifiedAfter = modifiedAfter_;
-                    sreq.modifiedBefore = modifiedBefore_;
-                    sreq.indexedAfter = indexedAfter_;
-                    sreq.indexedBefore = indexedBefore_;
-                    if (!filterTags_.empty()) {
-                        std::stringstream ss(filterTags_);
-                        std::string tag;
-                        while (std::getline(ss, tag, ',')) {
-                            yams::config::trim(tag);
-                            if (!tag.empty())
-                                sreq.tags.push_back(tag);
-                        }
-                        sreq.matchAllTags = matchAllTags_;
-                    }
+                    auto sreq = makeAppSearchRequest();
                     auto local = co_await searchService->search(sreq);
                     stopSpinner();
                     if (!local)
@@ -1818,51 +1788,7 @@ public:
             yams::cli::build_cli_daemon_client_config(getExecutor(), explicitDataDir, daemonOpts);
 
         // Request + render
-        yams::daemon::SearchRequest dreq;
-        // Sanitize query to ensure valid UTF-8 (required by Protocol Buffer)
-        dreq.query = yams::common::sanitizeUtf8(query_);
-        if (dreq.query != query_) {
-            spdlog::debug("Search query contained invalid UTF-8; sanitized for IPC transmission");
-        }
-        // Request one extra result to account for potential deduplication
-        dreq.limit = static_cast<size_t>(limit_) + 1;
-        dreq.fuzzy = fuzzySearch_;
-        dreq.literalText = literalText_;
-        dreq.similarity = (minSimilarity_ > 0.0f) ? static_cast<double>(minSimilarity_) : 0.7;
-        dreq.pathsOnly = false; // Always fetch full results; pathsOnly is a CLI display option
-        dreq.searchType = searchType_;
-        dreq.jsonOutput = jsonOutput_;
-        dreq.showHash = showHash_;
-        dreq.verbose = verbose_;
-        dreq.showLineNumbers = showLineNumbers_;
-        // Engine-level filters
-        dreq.pathPattern = pathFilter_;
-        if (!includeGlobsExpanded.empty()) {
-            dreq.pathPatterns = includeGlobsExpanded; // Send all patterns for server-side filtering
-        } else if (!pathFilter_.empty()) {
-            dreq.pathPatterns.push_back(pathFilter_); // Fallback for single pattern
-        }
-        if (!filterTags_.empty()) {
-            std::stringstream ss(filterTags_);
-            std::string tag;
-            while (std::getline(ss, tag, ',')) {
-                auto s = trim(tag);
-                if (!s.empty())
-                    dreq.tags.push_back(s);
-            }
-            dreq.matchAllTags = matchAllTags_;
-        }
-        dreq.extension = extension_;
-        dreq.mimeType = mimeType_;
-        dreq.fileType = fileType_;
-        dreq.textOnly = textOnly_;
-        dreq.binaryOnly = binaryOnly_;
-        dreq.createdAfter = createdAfter_;
-        dreq.createdBefore = createdBefore_;
-        dreq.modifiedAfter = modifiedAfter_;
-        dreq.modifiedBefore = modifiedBefore_;
-        dreq.indexedAfter = indexedAfter_;
-        dreq.indexedBefore = indexedBefore_;
+        auto dreq = makeDaemonSearchRequest(includeGlobsExpanded);
 
         auto render = [&](const yams::daemon::SearchResponse& resp) -> Result<void> {
             const auto renderStart = std::chrono::steady_clock::now();
@@ -1976,33 +1902,7 @@ public:
                     if (auto appContext = cli_->getAppContext()) {
                         auto searchService = app::services::makeSearchService(*appContext);
                         if (searchService) {
-                            app::services::SearchRequest sreq;
-                            sreq.query = query_;
-                            sreq.limit = limit_;
-                            sreq.fuzzy = fuzzySearch_;
-                            sreq.similarity = minSimilarity_;
-                            sreq.hash = hashQuery_;
-                            sreq.type = searchType_;
-                            sreq.verbose = verbose_;
-                            sreq.literalText = literalText_;
-                            sreq.showHash = showHash_;
-                            sreq.pathsOnly = pathsOnly_;
-                            sreq.showLineNumbers = showLineNumbers_;
-                            sreq.beforeContext = static_cast<int>(beforeContext_);
-                            sreq.afterContext = static_cast<int>(afterContext_);
-                            sreq.context = static_cast<int>(context_);
-                            sreq.pathPattern = pathFilter_;
-                            sreq.extension = extension_;
-                            sreq.mimeType = mimeType_;
-                            sreq.fileType = fileType_;
-                            sreq.textOnly = textOnly_;
-                            sreq.binaryOnly = binaryOnly_;
-                            sreq.createdAfter = createdAfter_;
-                            sreq.createdBefore = createdBefore_;
-                            sreq.modifiedAfter = modifiedAfter_;
-                            sreq.modifiedBefore = modifiedBefore_;
-                            sreq.indexedAfter = indexedAfter_;
-                            sreq.indexedBefore = indexedBefore_;
+                            auto sreq = makeAppSearchRequest();
                             auto local = co_await searchService->search(sreq);
                             if (local) {
                                 yams::daemon::SearchResponse out;
