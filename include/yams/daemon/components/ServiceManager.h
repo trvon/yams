@@ -62,6 +62,7 @@
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/profiling.h>
+#include <yams/search/search_engine.h>
 #include <yams/search/search_execution_context.h>
 #include <yams/vector/vector_database.h>
 #include <yams/wal/wal_manager.h>
@@ -280,6 +281,13 @@ public:
         snapshot.kgReady = snapshot.lexicalReady && snapshot.postIngestQueued == 0 &&
                            snapshot.postIngestInFlight == 0;
         snapshot.topologyReady = snapshot.kgReady && !snapshot.awaitingDrain;
+        if (auto* engine = searchEngineManager_.getCachedEngine()) {
+            const auto lexical = engine->getSimeonLexicalStatus();
+            snapshot.simeonLexicalConfigured = lexical.configured;
+            snapshot.simeonLexicalReady = lexical.ready;
+            snapshot.simeonLexicalBuilding = lexical.building;
+            snapshot.simeonFragmentGeometryReady = lexical.fragmentGeometryReady;
+        }
         return snapshot;
     }
     std::vector<std::string> getRecentLexicalDeltaHashes() const {

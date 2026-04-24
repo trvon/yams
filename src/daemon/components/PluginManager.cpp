@@ -667,6 +667,18 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
     }
 
     try {
+        if (modelProvider_ && modelProvider_->isAvailable()) {
+            const bool preferredMatches = preferredName.empty() ||
+                                          preferredName == adoptedProviderPluginName_ ||
+                                          preferredName == modelProvider_->getProviderName();
+            if (preferredMatches) {
+                spdlog::info("[PluginManager] Reusing adopted model provider: {}",
+                             adoptedProviderPluginName_);
+                refreshStatusSnapshot();
+                return Result<bool>(true);
+            }
+        }
+
         auto loaded = getActivePluginHost()->listLoaded();
 
         auto pathFor = [&](const std::string& name) -> std::string {

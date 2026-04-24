@@ -889,6 +889,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             {readiness::kVectorDbInitAttempted, false},
             {readiness::kVectorDbReady, false},
             {readiness::kVectorDbDim, false},
+            {readiness::kSearchEngineLexicalEnhancementConfigured, false},
+            {readiness::kSearchEngineLexicalEnhancementReady, false},
+            {readiness::kSearchEngineLexicalEnhancementBuilding, false},
+            {readiness::kSearchEngineFragmentGeometryReady, false},
         };
         for (const auto& [key, value] : defaultReadiness) {
             auto it = res.readinessStates.find(std::string(key));
@@ -911,6 +915,31 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                                         vectorBackendUsable);
             res.readinessStates.emplace(std::string(readiness::kSearchEngineHybridUsable),
                                         lexicalReady && vectorBackendUsable);
+        }
+
+        if (serviceManager_) {
+            try {
+                const auto freshness = serviceManager_->getIndexFreshnessSnapshot();
+                res.readinessStates[std::string(
+                    readiness::kSearchEngineLexicalEnhancementConfigured)] =
+                    freshness.simeonLexicalConfigured;
+                res.readinessStates[std::string(readiness::kSearchEngineLexicalEnhancementReady)] =
+                    freshness.simeonLexicalReady;
+                res.readinessStates[std::string(
+                    readiness::kSearchEngineLexicalEnhancementBuilding)] =
+                    freshness.simeonLexicalBuilding;
+                res.readinessStates[std::string(readiness::kSearchEngineFragmentGeometryReady)] =
+                    freshness.simeonFragmentGeometryReady;
+                res.requestCounts["status_search_engine_lexical_enhancement_configured"] =
+                    freshness.simeonLexicalConfigured ? 1u : 0u;
+                res.requestCounts["status_search_engine_lexical_enhancement_ready"] =
+                    freshness.simeonLexicalReady ? 1u : 0u;
+                res.requestCounts["status_search_engine_lexical_enhancement_building"] =
+                    freshness.simeonLexicalBuilding ? 1u : 0u;
+                res.requestCounts["status_search_engine_fragment_geometry_ready"] =
+                    freshness.simeonFragmentGeometryReady ? 1u : 0u;
+            } catch (...) {
+            }
         }
 
         // Proto status transport still omits several newer structured fields.
@@ -1151,63 +1180,47 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 response.additionalStats[std::string(metrics::kDbReadPoolFailedAcquisitions)] =
                     std::to_string(snap->dbReadPoolFailedAcquisitions);
 
-                // Compute storage/db sizes (best-effort, inexpensive on request)
-                try {
-                    namespace fs = std::filesystem;
-                    if (!snap->contentStoreRoot.empty()) {
-                        fs::path storageRoot{snap->contentStoreRoot};
-                        fs::path dataRoot = storageRoot.parent_path();
+                const auto vectorDbBytes = snap->vectorDbSizeBytes > 0
+                                               ? static_cast<std::uint64_t>(snap->vectorDbSizeBytes)
+                                               : snap->vectorPhysicalBytes;
+                const auto vectorIndexBytes = snap->vectorPhysicalBytes > vectorDbBytes
+                                                  ? snap->vectorPhysicalBytes - vectorDbBytes
+                                                  : 0ULL;
+                response.additionalStats["storage_objects_bytes"] =
+                    std::to_string(snap->casPhysicalBytes);
+                response.additionalStats["storage_objects_files"] =
+                    std::to_string(snap->storeObjects);
+                response.additionalStats["storage_refs_db_bytes"] =
+                    std::to_string(snap->metadataPhysicalBytes);
+                response.additionalStats["db_bytes"] = std::to_string(snap->metadataPhysicalBytes);
+                response.additionalStats["vectors_db_bytes"] = std::to_string(vectorDbBytes);
+                response.additionalStats["vector_index_bytes"] = std::to_string(vectorIndexBytes);
+                response.additionalStats["storage_total_bytes"] =
+                    std::to_string(snap->physicalTotalBytes);
 
-                        auto fileSize = [](const fs::path& p) -> uint64_t {
-                            std::error_code ec;
-                            auto sz = fs::file_size(p, ec);
-                            return ec ? 0ull : static_cast<uint64_t>(sz);
-                        };
-                        auto dirSize = [&](const fs::path& p, uint64_t& countOut) -> uint64_t {
-                            uint64_t total = 0;
-                            uint64_t cnt = 0;
-                            std::error_code ec;
-                            if (fs::exists(p, ec)) {
-                                for (auto it = fs::recursive_directory_iterator(p, ec);
-                                     !ec && it != fs::recursive_directory_iterator(); ++it) {
-                                    if (it->is_regular_file(ec)) {
-                                        total += fileSize(it->path());
-                                        ++cnt;
-                                    }
-                                }
-                            }
-                            countOut = cnt;
-                            return total;
-                        };
-
-                        // Objects directory
-                        uint64_t objFiles = 0;
-                        uint64_t objBytes = dirSize(storageRoot / "objects", objFiles);
-                        response.additionalStats["storage_objects_bytes"] =
-                            std::to_string(objBytes);
-                        response.additionalStats["storage_objects_files"] =
-                            std::to_string(objFiles);
-
-                        // Refs database (if present)
-                        uint64_t refsBytes = fileSize(storageRoot / "refs.db");
-                        response.additionalStats["storage_refs_db_bytes"] =
-                            std::to_string(refsBytes);
-
-                        // Main DB and vector DB/index
-                        uint64_t dbBytes = fileSize(dataRoot / "yams.db");
-                        response.additionalStats["db_bytes"] = std::to_string(dbBytes);
-                        uint64_t vecDbBytes = fileSize(dataRoot / "vectors.db");
-                        response.additionalStats["vectors_db_bytes"] = std::to_string(vecDbBytes);
-                        uint64_t vecIndexBytes = fileSize(dataRoot / "vector_index.bin");
-                        response.additionalStats["vector_index_bytes"] =
-                            std::to_string(vecIndexBytes);
-
-                        // Aggregate storage usage (objects + refs)
-                        uint64_t storageTotal = objBytes + refsBytes;
-                        response.additionalStats["storage_total_bytes"] =
-                            std::to_string(storageTotal);
+                if (serviceManager_) {
+                    const auto freshness = serviceManager_->getIndexFreshnessSnapshot();
+                    response.additionalStats["search_engine_lexical_enhancement_configured"] =
+                        freshness.simeonLexicalConfigured ? "1" : "0";
+                    response.additionalStats["search_engine_lexical_enhancement_ready"] =
+                        freshness.simeonLexicalReady ? "1" : "0";
+                    response.additionalStats["search_engine_lexical_enhancement_building"] =
+                        freshness.simeonLexicalBuilding ? "1" : "0";
+                    response.additionalStats["search_engine_fragment_geometry_ready"] =
+                        freshness.simeonFragmentGeometryReady ? "1" : "0";
+                    if (!freshness.simeonLexicalConfigured) {
+                        response.additionalStats["search_engine_lexical_enhancement_state"] =
+                            "disabled";
+                    } else if (freshness.simeonLexicalBuilding) {
+                        response.additionalStats["search_engine_lexical_enhancement_state"] =
+                            "building";
+                    } else if (freshness.simeonLexicalReady) {
+                        response.additionalStats["search_engine_lexical_enhancement_state"] =
+                            "ready";
+                    } else {
+                        response.additionalStats["search_engine_lexical_enhancement_state"] =
+                            "skipped";
                     }
-                } catch (...) {
                 }
             }
         } catch (...) {

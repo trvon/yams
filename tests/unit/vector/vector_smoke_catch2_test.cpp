@@ -143,7 +143,7 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with Simeon 
     rec.start_offset = 0;
     rec.end_offset = 27;
     REQUIRE(db.insertVector(rec));
-    REQUIRE(db.prepareSearchIndex());
+    REQUIRE(db.buildIndex());
 
     VectorSearchParams params;
     params.k = 1;

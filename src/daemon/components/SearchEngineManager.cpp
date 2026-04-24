@@ -226,6 +226,33 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             if (bm25Policy.maxCorpusDocs) {
                 lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
             }
+            if (bm25Policy.maxCorpusBytes) {
+                lexicalCfg.max_corpus_bytes = *bm25Policy.maxCorpusBytes;
+            }
+            if (bm25Policy.buildDocChunkBytes) {
+                lexicalCfg.build_doc_chunk_bytes = *bm25Policy.buildDocChunkBytes;
+            }
+            if (bm25Policy.buildDocMaxChunks) {
+                lexicalCfg.build_doc_max_chunks = *bm25Policy.buildDocMaxChunks;
+            }
+            if (bm25Policy.fragmentGeometryEnabled) {
+                lexicalCfg.fragment_geometry_enabled = *bm25Policy.fragmentGeometryEnabled;
+            }
+            if (bm25Policy.fragmentGeometryMaxDocs) {
+                lexicalCfg.fragment_geometry_max_docs = *bm25Policy.fragmentGeometryMaxDocs;
+            }
+            if (bm25Policy.fragmentGeometryMaxCorpusBytes) {
+                lexicalCfg.fragment_geometry_max_corpus_bytes =
+                    *bm25Policy.fragmentGeometryMaxCorpusBytes;
+            }
+            if (bm25Policy.fragmentGeometryPmiSampleDocs) {
+                lexicalCfg.fragment_geometry_pmi_sample_docs =
+                    *bm25Policy.fragmentGeometryPmiSampleDocs;
+            }
+            if (bm25Policy.fragmentGeometryPmiSampleBytes) {
+                lexicalCfg.fragment_geometry_pmi_sample_bytes =
+                    *bm25Policy.fragmentGeometryPmiSampleBytes;
+            }
             // Router: default DISABLED. Simeon's own three-corpus BEIR
             // eval (docs/research/benchmarks.md) shows SAB-smooth alone is
             // within ≤1.8 nDCG@10 points of the dual-build router while

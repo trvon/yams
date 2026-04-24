@@ -1658,10 +1658,23 @@ FROM vectors WHERE level = ?
         }
         if (usesSimeonPqSearchEngine()) {
             auto dims = queryVectorDimsUnlocked();
+            if (dims.empty()) {
+                return Result<void>{};
+            }
             for (size_t dim : dims) {
-                auto ready = ensureSimeonPqReadyUnlocked(dim);
-                if (!ready) {
-                    return ready;
+                if (simeon_pq_ready_dims_.contains(dim) && !simeon_pq_dirty_dims_.contains(dim) &&
+                    simeon_pq_indices_.contains(dim)) {
+                    continue;
+                }
+                if (simeon_pq_dirty_dims_.contains(dim)) {
+                    return Error{ErrorCode::InvalidState, "Simeon PQ index for dim " +
+                                                              std::to_string(dim) +
+                                                              " is dirty and requires rebuild"};
+                }
+                if (!loadPersistedSimeonPqDimUnlocked(dim)) {
+                    return Error{ErrorCode::NotFound,
+                                 "No reusable persisted Simeon PQ index for dim " +
+                                     std::to_string(dim)};
                 }
             }
             return Result<void>{};
@@ -1682,12 +1695,15 @@ FROM vectors WHERE level = ?
         }
         if (usesSimeonPqSearchEngine()) {
             auto dims = queryVectorDimsUnlocked();
+            if (dims.empty()) {
+                return Result<bool>(false);
+            }
             for (size_t dim : dims) {
-                if (hasReusablePersistedSimeonPqUnlocked(dim)) {
-                    return Result<bool>(true);
+                if (!hasReusablePersistedSimeonPqUnlocked(dim)) {
+                    return Result<bool>(false);
                 }
             }
-            return Result<bool>(false);
+            return Result<bool>(true);
         }
 
         return Result<bool>(false);

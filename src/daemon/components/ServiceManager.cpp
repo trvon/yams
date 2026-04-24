@@ -1438,7 +1438,8 @@ void ServiceManager::shutdown() {
 
 // Best-effort: write bootstrap status JSON so CLI can show progress before IPC is ready
 static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
-                                     const yams::daemon::StateComponent& state) {
+                                     const yams::daemon::StateComponent& state,
+                                     const yams::daemon::ServiceManager* serviceManager = nullptr) {
     try {
         namespace fs = std::filesystem;
         fs::path dir = yams::daemon::YamsDaemon::getXDGRuntimeDir();
@@ -1469,6 +1470,26 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
             state.readiness.vectorDbInitAttempted.load();
         rd[std::string(readiness::kVectorDbReady)] = state.readiness.vectorDbReady.load();
         rd[std::string(readiness::kVectorDbDim)] = state.readiness.vectorDbDim.load();
+        if (serviceManager) {
+            const auto freshness = serviceManager->getIndexFreshnessSnapshot();
+            rd[std::string(readiness::kSearchEngineLexicalEnhancementConfigured)] =
+                freshness.simeonLexicalConfigured;
+            rd[std::string(readiness::kSearchEngineLexicalEnhancementReady)] =
+                freshness.simeonLexicalReady;
+            rd[std::string(readiness::kSearchEngineLexicalEnhancementBuilding)] =
+                freshness.simeonLexicalBuilding;
+            rd[std::string(readiness::kSearchEngineFragmentGeometryReady)] =
+                freshness.simeonFragmentGeometryReady;
+            if (!freshness.simeonLexicalConfigured) {
+                j["search_engine_lexical_enhancement_state"] = "disabled";
+            } else if (freshness.simeonLexicalBuilding) {
+                j["search_engine_lexical_enhancement_state"] = "building";
+            } else if (freshness.simeonLexicalReady) {
+                j["search_engine_lexical_enhancement_state"] = "ready";
+            } else {
+                j["search_engine_lexical_enhancement_state"] = "skipped";
+            }
+        }
         j["readiness"] = std::move(rd);
         nlohmann::json pr;
         pr[std::string(readiness::kSearchEngine)] = state.readiness.searchProgress.load();
@@ -1553,7 +1574,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Phase: Vector DB Init (skipped pre-plugins).");
     spdlog::debug("ServiceManager(co): Initializing daemon resources");
     spdlog::default_logger()->flush(); // Flush before potentially crashing
-    writeBootstrapStatusFile(config_, state_);
+    writeBootstrapStatusFile(config_, state_, this);
     spdlog::debug("ServiceManager(co): writeBootstrapStatusFile done");
     spdlog::default_logger()->flush();
 
@@ -1636,7 +1657,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             state_.readiness.pluginsReady = true;
         }
     }
-    writeBootstrapStatusFile(config_, state_);
+    writeBootstrapStatusFile(config_, state_, this);
 
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
@@ -1711,7 +1732,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()));
             }
             state_.readiness.contentStoreReady = true;
-            writeBootstrapStatusFile(config_, state_);
+            writeBootstrapStatusFile(config_, state_, this);
         } else {
             spdlog::warn("ContentStore initialization failed: {}", storeRes.error().message);
             try {
@@ -1758,7 +1779,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             co_return co_await co_openDatabase(dbPath, open_timeout, token);
         },
         state_.initDurationsMs);
-    writeBootstrapStatusFile(config_, state_);
+    writeBootstrapStatusFile(config_, state_, this);
     spdlog::info("[ServiceManager] Phase: Database Opened.");
     if (db_ok) {
         try {
@@ -1796,7 +1817,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         if (!poolsOk) {
             spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
         }
-        writeBootstrapStatusFile(config_, state_);
+        writeBootstrapStatusFile(config_, state_, this);
     }
     spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
 
@@ -2045,7 +2066,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Vector search uses VectorDatabase directly. VectorSystemManager determines readiness
     // after preparing any persisted or rebuilt HNSW structures.
     if (getVectorDatabase()) {
-        writeBootstrapStatusFile(config_, state_);
+        writeBootstrapStatusFile(config_, state_, this);
     }
     spdlog::info("[ServiceManager] Phase: Vector search uses VectorDatabase directly.");
 
@@ -2075,25 +2096,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (loadResult) {
                 spdlog::info("ServiceManager: Autoloaded {} plugins.", loadResult.value());
             }
-            auto adoptResult = co_await init::await_with_retry<bool>(
-                [&]() -> boost::asio::awaitable<yams::Result<bool>> {
-                    // Wrap synchronous adoption in an awaitable
-                    co_return adoptModelProviderFromHosts();
-                },
-                /*attempts=*/3,
-                /*backoff*/ [](int n) { return n == 1 ? 100 : 300; });
-            // Log result uniformly
-            if (adoptResult) {
+            auto modelProvider = loadModelProvider();
+            if (modelProvider && modelProvider->isAvailable()) {
                 spdlog::info("[InitStep] adopt_model_provider: ok");
-            } else {
-                spdlog::warn("[InitStep] adopt_model_provider: failed: {}",
-                             adoptResult.error().message);
-            }
-            if (adoptResult && adoptResult.value()) {
                 spdlog::info("ServiceManager: Adopted model provider from plugins.");
                 spdlog::info(
                     "ServiceManager: Model provider ready, embeddings will be generated on-demand");
             } else {
+                spdlog::warn("[InitStep] adopt_model_provider: failed: no provider after autoload");
                 spdlog::warn("ServiceManager: No model provider adopted from plugins.");
                 state_.readiness.modelProviderReady.store(false, std::memory_order_release);
                 if (config_.enableModelProvider && config_.modelProviderRequired) {
@@ -2105,32 +2115,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     spdlog::warn("ServiceManager: continuing startup without model provider "
                                  "(degraded mode; embeddings unavailable)");
                 }
-            }
-            auto extractorResult = init::step<size_t>(
-                "adopt_extractors", [&]() { return adoptContentExtractorsFromHosts(); });
-            if (extractorResult) {
-                spdlog::info("ServiceManager: Adopted {} content extractors from plugins.",
-                             extractorResult.value());
-                // Note: Binary extraction via Ghidra is provided by the yams_ghidra plugin
-                // which implements content_extractor_v1 and is adopted above
-            }
-
-            // Respect config flag plugins.symbol_extraction.enable (default: true)
-            bool enableSymbols = ConfigResolver::isSymbolExtractionEnabled(config_);
-            if (enableSymbols) {
-                auto symRes = init::step<size_t>(
-                    "adopt_symbol_extractors", [&]() { return adoptSymbolExtractorsFromHosts(); });
-                if (symRes) {
-                    spdlog::info("ServiceManager: Adopted {} symbol extractors.", symRes.value());
-                }
-            } else {
-                spdlog::info("ServiceManager: symbol extractor plugins disabled by config");
-            }
-
-            auto entityRes = init::step<size_t>("adopt_entity_extractors",
-                                                [&]() { return adoptEntityExtractorsFromHosts(); });
-            if (entityRes) {
-                spdlog::info("ServiceManager: Adopted {} entity extractors.", entityRes.value());
             }
         }
         // If autoload is disabled but model provider is enabled, try the in-process
@@ -2286,14 +2270,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Build SearchEngine with timeout
     try {
         state_.readiness.searchProgress = 10;
-        writeBootstrapStatusFile(config_, state_);
+        writeBootstrapStatusFile(config_, state_, this);
         if (getMetadataRepo()) {
             state_.readiness.searchProgress = 40;
-            writeBootstrapStatusFile(config_, state_);
+            writeBootstrapStatusFile(config_, state_, this);
         }
         if (getVectorDatabase()) {
             state_.readiness.searchProgress = 70;
-            writeBootstrapStatusFile(config_, state_);
+            writeBootstrapStatusFile(config_, state_, this);
         }
         int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
 
@@ -2399,7 +2383,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 }
             }
 
-            writeBootstrapStatusFile(config_, state_);
+            writeBootstrapStatusFile(config_, state_, this);
 
             spdlog::info("SearchEngine initialized and published to AppContext (docs={})",
                          state_.readiness.searchEngineDocCount.load());
@@ -2428,7 +2412,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 lifecycleFsm_.setSubsystemDegraded("search", true, reason);
             } catch (...) {
             }
-            writeBootstrapStatusFile(config_, state_);
+            writeBootstrapStatusFile(config_, state_, this);
             spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded: {}",
                          reason);
             try {
@@ -2889,19 +2873,8 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
     if (result) {
         spdlog::info("ServiceManager: Autoloaded {} plugins via PluginManager", result.value());
 
-        // Adopt model provider from PluginManager's hosts
-        auto adopted = adoptModelProviderFromHosts();
-        if (adopted && adopted.value()) {
-            spdlog::info("[ServiceManager] Model provider adopted after autoload");
-        }
-
-        // Adopt extractors
-        (void)adoptContentExtractorsFromHosts();
-        (void)adoptSymbolExtractorsFromHosts();
-        (void)adoptEntityExtractorsFromHosts();
-
         refreshPluginStatusSnapshot();
-        writeBootstrapStatusFile(config_, state_);
+        writeBootstrapStatusFile(config_, state_, this);
     }
 
     co_return result;
@@ -3079,7 +3052,7 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                     }
                 }
 
-                writeBootstrapStatusFile(config_, state_);
+                writeBootstrapStatusFile(config_, state_, this);
 
                 spdlog::info("[Rebuild] done ok: vector scoring enabled (docs={})",
                              state_.readiness.searchEngineDocCount.load());

@@ -74,6 +74,16 @@ public:
         Variant variant = Variant::SabSmooth;
         float subword_gamma = 5.0f;
         std::size_t max_corpus_docs = 200'000;
+        // Hard cap on raw corpus text bytes scanned into the in-memory simeon
+        // lexical build. When exceeded, yams stays on FTS5-only instead of
+        // attempting an unbounded in-memory lexical index build.
+        std::size_t max_corpus_bytes = 128ULL * 1024ULL * 1024ULL;
+        // Chunk very large documents into a small number of evenly spaced
+        // windows before feeding them into the in-memory simeon lexical
+        // enhancement stack. This bounds char-ngram / fragment build pressure
+        // without affecting the FTS5 full-text index.
+        std::size_t build_doc_chunk_bytes = 16ULL * 1024ULL;
+        std::size_t build_doc_max_chunks = 4;
         bool router_enabled = false;
         RouterPreset router_preset{};
 
@@ -84,6 +94,15 @@ public:
         // preflight; below those thresholds yams falls back to plain BM25.
         bool fragment_geometry_enabled = true;
         std::size_t fragment_geometry_min_corpus_docs = 1000;
+        // Fragment geometry is bounded separately from the lexical build. The
+        // builder keeps only a bounded PMI sample in memory, then streams a
+        // second pass to build fragment vectors/doc signatures for at most the
+        // first `fragment_geometry_max_docs` docs and `fragment_geometry_max_corpus_bytes`
+        // bytes. Remaining docs stay lexical-only.
+        std::size_t fragment_geometry_max_docs = 20'000;
+        std::size_t fragment_geometry_max_corpus_bytes = 64ULL * 1024ULL * 1024ULL;
+        std::size_t fragment_geometry_pmi_sample_docs = 8192;
+        std::size_t fragment_geometry_pmi_sample_bytes = 32ULL * 1024ULL * 1024ULL;
         std::uint32_t fragment_build_top_sentences = 6;
         std::uint32_t fragment_build_signature_terms = 8;
         simeon::FragmentGeometryConfig fragment_geometry_config{};
@@ -102,6 +121,7 @@ public:
     Result<void> buildAsync(std::shared_ptr<metadata::MetadataRepository> repo);
 
     bool ready() const noexcept { return ready_.load(std::memory_order_acquire); }
+    bool building() const noexcept { return building_.load(std::memory_order_acquire); }
     std::size_t doc_count() const noexcept { return doc_count_; }
     const Config& config() const noexcept { return cfg_; }
     bool fragmentGeometryReady() const noexcept {

@@ -314,15 +314,8 @@ boost::asio::awaitable<Result<void>> VectorIndexCoordinator::initialBuildIfNeede
 
     try {
         const auto rows = vdb->getVectorCount();
-        if (rows > 0 && !vdb->hasReusablePersistedSearchIndex()) {
-            // Rows exist but no persisted HNSW — trigger a rebuild.
-            co_return co_await requestRebuild(RebuildReason::InitialBuild);
-        } else if (rows > 0) {
-            // Index exists: load it.
-            if (!vdb->prepareSearchIndex()) {
-                spdlog::warn("[VectorIndexCoordinator] prepareSearchIndex failed: {}",
-                             vdb->getLastError());
-            } else {
+        if (rows > 0) {
+            if (vdb->prepareSearchIndex()) {
                 if (state_) {
                     state_->readiness.vectorIndexReady.store(true, std::memory_order_relaxed);
                     state_->readiness.vectorIndexProgress.store(100, std::memory_order_relaxed);
@@ -334,6 +327,12 @@ boost::asio::awaitable<Result<void>> VectorIndexCoordinator::initialBuildIfNeede
                 t.progressPct = 100;
                 t.activeBulkScopes = activeBulkScopes_.load(std::memory_order_relaxed);
                 publishTelemetry(t);
+            } else {
+                spdlog::warn(
+                    "[VectorIndexCoordinator] prepareSearchIndex failed: {} - falling back "
+                    "to rebuild",
+                    vdb->getLastError());
+                co_return co_await requestRebuild(RebuildReason::InitialBuild);
             }
         }
     } catch (const std::exception& ex) {

@@ -286,6 +286,14 @@ constexpr std::string_view kSearchEngineBuildReasonDegraded = "search_engine_bui
 constexpr std::string_view kSearchEngineLexicalReady = "search_engine_lexical";
 constexpr std::string_view kSearchEngineVectorUsable = "search_engine_vector_usable";
 constexpr std::string_view kSearchEngineHybridUsable = "search_engine_hybrid_usable";
+constexpr std::string_view kSearchEngineLexicalEnhancementConfigured =
+    "search_engine_lexical_enhancement_configured";
+constexpr std::string_view kSearchEngineLexicalEnhancementReady =
+    "search_engine_lexical_enhancement_ready";
+constexpr std::string_view kSearchEngineLexicalEnhancementBuilding =
+    "search_engine_lexical_enhancement_building";
+constexpr std::string_view kSearchEngineFragmentGeometryReady =
+    "search_engine_fragment_geometry_ready";
 
 } // namespace yams::daemon::readiness
 

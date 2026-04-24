@@ -52,4 +52,8 @@ TEST_CASE("vector backend usable: key constants remain distinct", "[daemon][read
     REQUIRE(readiness::kVectorDbReady != readiness::kSearchEngineVectorUsable);
     REQUIRE(readiness::kSearchEngineVectorUsable != readiness::kSearchEngineHybridUsable);
     REQUIRE(readiness::kSearchEngineVectorUsable != readiness::kSearchEngineLexicalReady);
+    REQUIRE(readiness::kSearchEngineLexicalEnhancementConfigured !=
+            readiness::kSearchEngineLexicalEnhancementReady);
+    REQUIRE(readiness::kSearchEngineLexicalEnhancementReady !=
+            readiness::kSearchEngineLexicalEnhancementBuilding);
 }

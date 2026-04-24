@@ -170,8 +170,12 @@ public:
 
     std::shared_ptr<vector::EmbeddingGenerator>
     getEmbeddingGenerator(const std::string& /*modelName*/) override {
+        std::lock_guard<std::mutex> lock(mu_);
         if (!backend_)
             return nullptr;
+        if (embeddingGenerator_) {
+            return embeddingGenerator_;
+        }
         vector::EmbeddingConfig cfg;
         cfg.backend = vector::EmbeddingConfig::Backend::Simeon;
         cfg.embedding_dim = embeddingDim_;
@@ -181,7 +185,8 @@ public:
         auto gen = std::make_shared<vector::EmbeddingGenerator>(std::move(freshBackend), cfg);
         if (!gen->initialize())
             return nullptr;
-        return gen;
+        embeddingGenerator_ = gen;
+        return embeddingGenerator_;
     }
 
     std::string getProviderName() const override { return "Simeon"; }
@@ -197,6 +202,7 @@ public:
             backend_->shutdown();
             backend_.reset();
         }
+        embeddingGenerator_.reset();
         loaded_.clear();
     }
 
@@ -205,6 +211,7 @@ private:
 
     mutable std::mutex mu_;
     std::unique_ptr<vector::IEmbeddingBackend> backend_;
+    std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_;
     std::size_t embeddingDim_{384};
     std::unordered_set<std::string> loaded_;
     std::chrono::system_clock::time_point loadTime_{};

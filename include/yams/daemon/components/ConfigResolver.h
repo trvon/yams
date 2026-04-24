@@ -112,6 +112,14 @@ public:
         std::optional<std::string> variant;
         std::optional<float> subwordGamma;
         std::optional<std::size_t> maxCorpusDocs;
+        std::optional<std::size_t> maxCorpusBytes;
+        std::optional<std::size_t> buildDocChunkBytes;
+        std::optional<std::size_t> buildDocMaxChunks;
+        std::optional<bool> fragmentGeometryEnabled;
+        std::optional<std::size_t> fragmentGeometryMaxDocs;
+        std::optional<std::size_t> fragmentGeometryMaxCorpusBytes;
+        std::optional<std::size_t> fragmentGeometryPmiSampleDocs;
+        std::optional<std::size_t> fragmentGeometryPmiSampleBytes;
         // Per-query router over {Atire, SabSmooth}. When enabled, the
         // backend builds both indexes and dispatches via simeon::QueryRouter
         // using `routerPreset`. Recognized presets: "passE_scq0_clar3"

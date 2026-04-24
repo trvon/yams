@@ -1019,6 +1019,27 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
                 policy.subwordGamma = parseTomlFloat(it->second);
             if (auto it = kv.find("embeddings.simeon.bm25.max_corpus_docs"); it != kv.end())
                 policy.maxCorpusDocs = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.max_corpus_bytes"); it != kv.end())
+                policy.maxCorpusBytes = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.build_doc_chunk_bytes"); it != kv.end())
+                policy.buildDocChunkBytes = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.build_doc_max_chunks"); it != kv.end())
+                policy.buildDocMaxChunks = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.enabled");
+                it != kv.end())
+                policy.fragmentGeometryEnabled = parseTomlBool(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.max_docs");
+                it != kv.end())
+                policy.fragmentGeometryMaxDocs = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.max_corpus_bytes");
+                it != kv.end())
+                policy.fragmentGeometryMaxCorpusBytes = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.pmi_sample_docs");
+                it != kv.end())
+                policy.fragmentGeometryPmiSampleDocs = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.pmi_sample_bytes");
+                it != kv.end())
+                policy.fragmentGeometryPmiSampleBytes = parseTomlSize(it->second);
             if (auto it = kv.find("embeddings.simeon.bm25.router.enabled"); it != kv.end())
                 policy.routerEnabled = parseTomlBool(it->second);
             if (auto it = kv.find("embeddings.simeon.bm25.router.preset");
@@ -1040,6 +1061,52 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
     if (const char* raw = std::getenv("YAMS_SIMEON_BM25_MAX_CORPUS_DOCS")) {
         try {
             policy.maxCorpusDocs = static_cast<std::size_t>(std::stoul(raw));
+        } catch (const std::exception&) {
+        }
+    }
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_MAX_CORPUS_BYTES")) {
+        try {
+            policy.maxCorpusBytes = static_cast<std::size_t>(std::stoull(raw));
+        } catch (const std::exception&) {
+        }
+    }
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_BUILD_DOC_CHUNK_BYTES")) {
+        try {
+            policy.buildDocChunkBytes = static_cast<std::size_t>(std::stoull(raw));
+        } catch (const std::exception&) {
+        }
+    }
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_BUILD_DOC_MAX_CHUNKS")) {
+        try {
+            policy.buildDocMaxChunks = static_cast<std::size_t>(std::stoull(raw));
+        } catch (const std::exception&) {
+        }
+    }
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_ENABLED")) {
+        if (auto b = parseTomlBool(std::string(raw)))
+            policy.fragmentGeometryEnabled = b;
+    }
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_DOCS")) {
+        try {
+            policy.fragmentGeometryMaxDocs = static_cast<std::size_t>(std::stoull(raw));
+        } catch (const std::exception&) {
+        }
+    }
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_CORPUS_BYTES")) {
+        try {
+            policy.fragmentGeometryMaxCorpusBytes = static_cast<std::size_t>(std::stoull(raw));
+        } catch (const std::exception&) {
+        }
+    }
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_DOCS")) {
+        try {
+            policy.fragmentGeometryPmiSampleDocs = static_cast<std::size_t>(std::stoull(raw));
+        } catch (const std::exception&) {
+        }
+    }
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_BYTES")) {
+        try {
+            policy.fragmentGeometryPmiSampleBytes = static_cast<std::size_t>(std::stoull(raw));
         } catch (const std::exception&) {
         }
     }

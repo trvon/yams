@@ -4,10 +4,10 @@
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
 #include <yams/core/cpp23_features.hpp>
-#include <yams/search/anchor_fusion.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/anchor_fusion.h>
 #include <yams/search/graph_expansion.h>
 #include <yams/search/kg_scorer.h>
 #include <yams/search/kg_scorer_simple.h>
@@ -885,6 +885,19 @@ public:
     }
 
     std::shared_ptr<SearchTuner> getSearchTuner() const { return tuner_; }
+
+    SearchEngine::SimeonLexicalStatus getSimeonLexicalStatus() const {
+        SearchEngine::SimeonLexicalStatus status;
+        if (!simeonLexical_) {
+            return status;
+        }
+        status.configured = true;
+        status.ready = simeonLexical_->ready();
+        status.building = simeonLexical_->building();
+        status.fragmentGeometryReady = simeonLexical_->fragmentGeometryReady();
+        status.docCount = simeonLexical_->doc_count();
+        return status;
+    }
 
 private:
     Result<SearchResponse> searchInternal(const std::string& query, const SearchParams& params);
@@ -5007,6 +5020,10 @@ void SearchEngine::setSearchTuner(std::shared_ptr<SearchTuner> tuner) {
 
 std::shared_ptr<SearchTuner> SearchEngine::getSearchTuner() const {
     return pImpl_->getSearchTuner();
+}
+
+SearchEngine::SimeonLexicalStatus SearchEngine::getSimeonLexicalStatus() const {
+    return pImpl_->getSimeonLexicalStatus();
 }
 
 // Factory function

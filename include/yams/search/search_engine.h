@@ -29,6 +29,14 @@ class SimeonLexicalBackend;
 
 class SearchEngine {
 public:
+    struct SimeonLexicalStatus {
+        bool configured{false};
+        bool ready{false};
+        bool building{false};
+        bool fragmentGeometryReady{false};
+        std::size_t docCount{0};
+    };
+
     explicit SearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
                           std::shared_ptr<vector::VectorDatabase> vectorDb,
                           std::shared_ptr<vector::EmbeddingGenerator> embeddingGen,
@@ -83,6 +91,7 @@ public:
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner);
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend);
     std::shared_ptr<SearchTuner> getSearchTuner() const;
+    SimeonLexicalStatus getSimeonLexicalStatus() const;
 
 private:
     class Impl;

@@ -83,6 +83,17 @@ bool waitReady(const SimeonLexicalBackend& backend, std::chrono::milliseconds ti
     return backend.ready();
 }
 
+bool waitNotBuilding(const SimeonLexicalBackend& backend, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!backend.building()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return !backend.building();
+}
+
 } // namespace
 
 TEST_CASE("SimeonLexicalBackend default config uses SabSmooth", "[search][simeon][catch2]") {
@@ -90,11 +101,18 @@ TEST_CASE("SimeonLexicalBackend default config uses SabSmooth", "[search][simeon
     CHECK(cfg.variant == SimeonLexicalBackend::Variant::SabSmooth);
     CHECK(cfg.subword_gamma == 5.0f);
     CHECK(cfg.max_corpus_docs == 200'000u);
+    CHECK(cfg.max_corpus_bytes == 128ULL * 1024ULL * 1024ULL);
+    CHECK(cfg.build_doc_chunk_bytes == 16ULL * 1024ULL);
+    CHECK(cfg.build_doc_max_chunks == 4u);
     CHECK(cfg.fragment_geometry_enabled);
     CHECK(cfg.fragment_geometry_min_corpus_docs == 1000u);
+    CHECK(cfg.fragment_geometry_max_docs == 20'000u);
+    CHECK(cfg.fragment_geometry_max_corpus_bytes == 64ULL * 1024ULL * 1024ULL);
+    CHECK(cfg.fragment_geometry_pmi_sample_docs == 8192u);
+    CHECK(cfg.fragment_geometry_pmi_sample_bytes == 32ULL * 1024ULL * 1024ULL);
     CHECK(cfg.fragment_geometry_config.use_phss);
     CHECK(cfg.fragment_geometry_config.phss_config.criterion ==
-          simeon::PhssConfig::Criterion::LargestGap);
+          simeon::PhssConfig::Criterion::LargestGapApprox);
 }
 
 TEST_CASE("SimeonLexicalBackend buildAsync flips ready on small corpus",
@@ -112,6 +130,39 @@ TEST_CASE("SimeonLexicalBackend buildAsync flips ready on small corpus",
     REQUIRE(build.has_value());
     REQUIRE(waitReady(backend, std::chrono::seconds(5)));
     CHECK(backend.doc_count() == 3u);
+}
+
+TEST_CASE("SimeonLexicalBackend skips build when corpus text budget is exceeded",
+          "[search][simeon][catch2]") {
+    auto corpus = makeCorpus({
+        {"hash_a", "alpha beta gamma delta"},
+        {"hash_b", "beta gamma epsilon zeta"},
+        {"hash_c", "omega sigma tau upsilon"},
+    });
+
+    SimeonLexicalBackend::Config cfg;
+    cfg.max_corpus_bytes = 16;
+    SimeonLexicalBackend backend(cfg);
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitNotBuilding(backend, std::chrono::seconds(5)));
+    CHECK_FALSE(backend.ready());
+    CHECK(backend.doc_count() == 0u);
+}
+
+TEST_CASE("SimeonLexicalBackend chunks oversized docs before applying corpus byte budget",
+          "[search][simeon][catch2]") {
+    std::string large(4096, 'x');
+    auto corpus = makeCorpus({{{"hash_big", large}}});
+
+    SimeonLexicalBackend::Config cfg;
+    cfg.max_corpus_bytes = 512;
+    cfg.build_doc_chunk_bytes = 128;
+    cfg.build_doc_max_chunks = 2;
+    cfg.fragment_geometry_enabled = false;
+    SimeonLexicalBackend backend(cfg);
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(5)));
+    CHECK(backend.doc_count() == 1u);
 }
 
 TEST_CASE("SimeonLexicalBackend score returns one float per candidate",
