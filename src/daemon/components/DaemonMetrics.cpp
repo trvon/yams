@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -62,26 +64,80 @@ namespace {
 struct MemoryUsageSample {
     double memoryUsageMb{0.0};
     std::map<std::string, std::uint64_t> breakdownBytes;
+    std::map<std::string, std::uint64_t> diagnosticCounters;
 };
+
+bool envFlagEnabled(const char* name) {
+    const char* env = std::getenv(name);
+    if (!env || *env == '\0') {
+        return false;
+    }
+    const std::string_view value{env};
+    return value != "0" && value != "false" && value != "FALSE" && value != "off" && value != "OFF";
+}
 
 bool allocatorBreakdownEnabled() {
 #ifdef YAMS_TESTING
-    if (const char* env = std::getenv("YAMS_STATUS_ALLOCATOR_BREAKDOWN")) {
-        return std::string_view(env) == "1" || std::string_view(env) == "true" ||
-               std::string_view(env) == "on";
-    }
-    return false;
+    return envFlagEnabled("YAMS_STATUS_ALLOCATOR_BREAKDOWN");
 #else
-    static const bool enabled = []() {
-        if (const char* env = std::getenv("YAMS_STATUS_ALLOCATOR_BREAKDOWN")) {
-            return std::string_view(env) == "1" || std::string_view(env) == "true" ||
-                   std::string_view(env) == "on";
-        }
-        return false;
-    }();
+    static const bool enabled = envFlagEnabled("YAMS_STATUS_ALLOCATOR_BREAKDOWN");
     return enabled;
 #endif
 }
+
+bool mallocStackLoggingEnabled() {
+#ifdef YAMS_TESTING
+    return envFlagEnabled("MallocStackLogging") || envFlagEnabled("MallocStackLoggingNoCompact");
+#else
+    static const bool enabled =
+        envFlagEnabled("MallocStackLogging") || envFlagEnabled("MallocStackLoggingNoCompact");
+    return enabled;
+#endif
+}
+
+bool mallocStackLoggingNoCompactEnabled() {
+#ifdef YAMS_TESTING
+    return envFlagEnabled("MallocStackLoggingNoCompact");
+#else
+    static const bool enabled = envFlagEnabled("MallocStackLoggingNoCompact");
+    return enabled;
+#endif
+}
+
+#if defined(__APPLE__)
+std::pair<std::uint64_t, std::uint64_t> sampleMallocStackLogFootprint() {
+    namespace fs = std::filesystem;
+    std::uint64_t bytes = 0;
+    std::uint64_t files = 0;
+    std::error_code ec;
+    const auto pid = static_cast<long long>(::getpid());
+    const auto prefix = std::string{"stack-logs."} + std::to_string(pid) + ".";
+
+    fs::path dir{"/private/tmp"};
+    if (!fs::exists(dir, ec)) {
+        dir = fs::temp_directory_path(ec);
+    }
+    if (dir.empty() || ec) {
+        return {0, 0};
+    }
+
+    for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        const auto name = it->path().filename().string();
+        if (name.rfind(prefix, 0) != 0) {
+            continue;
+        }
+        ++files;
+        if (it->is_regular_file(ec)) {
+            bytes += it->file_size(ec);
+            if (ec) {
+                ec.clear();
+            }
+        }
+    }
+    return {bytes, files};
+}
+#endif
 
 // Read Proportional Set Size (PSS) in kB from smaps_rollup when available (Linux), else 0.
 static std::uint64_t readPssKb() {
@@ -144,6 +200,7 @@ static std::uint64_t readRssKb() {
 
 static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown) {
     MemoryUsageSample sample;
+    const auto sampleStart = std::chrono::steady_clock::now();
 
     const std::uint64_t pss_kb = readPssKb();
     const std::uint64_t rss_kb = readRssKb();
@@ -158,6 +215,15 @@ static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown) {
     }
 
 #if defined(__APPLE__)
+    const bool mslEnabled = mallocStackLoggingEnabled();
+    const bool mslNoCompact = mallocStackLoggingNoCompactEnabled();
+    if (mslEnabled) {
+        sample.diagnosticCounters["msl_enabled"] = 1;
+    }
+    if (mslNoCompact) {
+        sample.diagnosticCounters["msl_no_compact_enabled"] = 1;
+    }
+
     task_vm_info_data_t info{};
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) ==
@@ -190,6 +256,7 @@ static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown) {
     }
 
     if (includeAllocatorBreakdown) {
+        const auto allocatorStart = std::chrono::steady_clock::now();
         malloc_statistics_t mallocStats{};
         if (auto* defaultZone = malloc_default_zone(); defaultZone != nullptr) {
             malloc_zone_statistics(defaultZone, &mallocStats);
@@ -206,9 +273,28 @@ static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown) {
                 sample.breakdownBytes["malloc_blocks_in_use"] = mallocStats.blocks_in_use;
             }
         }
+        sample.diagnosticCounters["allocator_sample_us"] =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - allocatorStart)
+                                           .count());
+    }
+
+    if (mslEnabled) {
+        const auto mslStart = std::chrono::steady_clock::now();
+        const auto [stackLogBytes, stackLogFiles] = sampleMallocStackLogFootprint();
+        sample.diagnosticCounters["msl_stack_log_bytes"] = stackLogBytes;
+        sample.diagnosticCounters["msl_stack_log_files"] = stackLogFiles;
+        sample.diagnosticCounters["msl_stack_log_sample_us"] =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - mslStart)
+                                           .count());
     }
 #endif
 
+    sample.diagnosticCounters["memory_sample_us"] =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - sampleStart)
+                                       .count());
     return sample;
 }
 
@@ -448,12 +534,15 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             // Poll CPU and memory here, and cache the results.
             {
                 double cpu = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
-                auto memSample = sampleMemoryUsage(false);
+                const bool includeAllocatorBreakdown =
+                    allocatorBreakdownEnabled() || mallocStackLoggingEnabled();
+                auto memSample = sampleMemoryUsage(includeAllocatorBreakdown);
 
                 std::unique_lock lock(cacheMutex_);
                 cached_.cpuUsagePercent = cpu;
                 cached_.memoryUsageMb = memSample.memoryUsageMb;
                 cached_.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
+                cached_.diagnosticCounters = std::move(memSample.diagnosticCounters);
             }
 
             // Update expensive DB counts in background (separate from snapshot cache)
@@ -1458,12 +1547,16 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             out.memoryUsageMb = cached_.memoryUsageMb;
             out.cpuUsagePercent = cached_.cpuUsagePercent;
             out.memoryBreakdownBytes = cached_.memoryBreakdownBytes;
+            out.diagnosticCounters = cached_.diagnosticCounters;
             needMemoryFallback = (out.memoryUsageMb <= 0.0 && out.memoryBreakdownBytes.empty());
         }
         if (needMemoryFallback) {
-            auto memSample = sampleMemoryUsage(detailed && allocatorBreakdownEnabled());
+            const bool includeAllocatorBreakdown =
+                (detailed && allocatorBreakdownEnabled()) || mallocStackLoggingEnabled();
+            auto memSample = sampleMemoryUsage(includeAllocatorBreakdown);
             out.memoryUsageMb = memSample.memoryUsageMb;
             out.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
+            out.diagnosticCounters = std::move(memSample.diagnosticCounters);
         }
 #if defined(TRACY_ENABLE)
         TracyPlot("daemon.mem.mb", out.memoryUsageMb);

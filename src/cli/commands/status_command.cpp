@@ -157,6 +157,18 @@ public:
                                     j["memory"] = std::move(mem);
                                 }
                             }
+                            {
+                                nlohmann::json diag = nlohmann::json::object();
+                                for (const auto& [key, value] : s.requestCounts) {
+                                    static const std::string prefix{"status_diag_"};
+                                    if (key.rfind(prefix, 0) == 0) {
+                                        diag[key.substr(prefix.size())] = value;
+                                    }
+                                }
+                                if (!diag.empty()) {
+                                    j["diagnostics"] = std::move(diag);
+                                }
+                            }
                             if (s.retryAfterMs > 0)
                                 j["retryAfterMs"] = s.retryAfterMs;
                             j["statusSnapshotAgeMs"] = snapshotAgeMs;
@@ -497,6 +509,42 @@ public:
                                 appendMb("malloc", mallocBytes);
                                 if (!first) {
                                     resources.push_back({"Memory Detail", memDetail.str(), ""});
+                                }
+                            }
+                            {
+                                const uint64_t mslEnabled = getCount("status_diag_msl_enabled");
+                                const uint64_t sampleUs = getCount("status_diag_memory_sample_us");
+                                const uint64_t allocUs =
+                                    getCount("status_diag_allocator_sample_us");
+                                const uint64_t logBytes =
+                                    getCount("status_diag_msl_stack_log_bytes");
+                                const uint64_t logFiles =
+                                    getCount("status_diag_msl_stack_log_files");
+                                if (mslEnabled || sampleUs || allocUs || logBytes || logFiles) {
+                                    std::ostringstream diag;
+                                    bool first = true;
+                                    auto append = [&](std::string_view text) {
+                                        if (!first) {
+                                            diag << " · ";
+                                        }
+                                        first = false;
+                                        diag << text;
+                                    };
+                                    if (mslEnabled) {
+                                        append("MSL on");
+                                    }
+                                    if (sampleUs) {
+                                        append("mem_probe=" + std::to_string(sampleUs) + "µs");
+                                    }
+                                    if (allocUs) {
+                                        append("alloc_probe=" + std::to_string(allocUs) + "µs");
+                                    }
+                                    if (logFiles || logBytes) {
+                                        append("stack_logs=" +
+                                               std::to_string(logBytes / (1024ULL * 1024ULL)) +
+                                               " MB/" + std::to_string(logFiles) + " files");
+                                    }
+                                    resources.push_back({"Memory Diagnostics", diag.str(), ""});
                                 }
                             }
                             resources.push_back({"Pools",

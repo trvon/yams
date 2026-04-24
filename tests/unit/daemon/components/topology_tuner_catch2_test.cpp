@@ -263,6 +263,197 @@ TEST_CASE("TopologyTuner: loadState on missing path returns FileNotFound",
     CHECK_FALSE(result.has_value());
 }
 
+TEST_CASE("TopologyTuner: rebuildArmGridForCorpusSize is no-op when ids match",
+          "[unit][daemon][topology_tuner][catch2]") {
+    TopologyTunerConfig cfg;
+    cfg.enabled = true;
+    TopologyTuner tuner(cfg);
+    tuner.setArms(defaultArmGrid(5000));
+    const auto initialCount = tuner.arms().size();
+
+    // Same corpus size → no-op
+    CHECK_FALSE(tuner.rebuildArmGridForCorpusSize(5000));
+    CHECK(tuner.arms().size() == initialCount);
+
+    // Substantially different corpus size → grid changes (cluster sizes scale)
+    const bool changed = tuner.rebuildArmGridForCorpusSize(50000);
+    if (changed) {
+        // Grid was rebuilt — at least one arm id should differ
+        bool anyDiff = false;
+        auto post = tuner.arms();
+        if (post.size() == initialCount) {
+            for (std::size_t i = 0; i < post.size(); ++i) {
+                if (post[i].id != defaultArmGrid(5000)[i].id) {
+                    anyDiff = true;
+                    break;
+                }
+            }
+        } else {
+            anyDiff = true;
+        }
+        CHECK(anyDiff);
+    }
+}
+
+TEST_CASE("TopologyTuner: UCB1 explores arms then converges to highest reward",
+          "[unit][daemon][topology_tuner][catch2]") {
+    // Build a tiny 3-arm bandit with deterministic synthetic rewards. Goal:
+    // verify that after a burn-in of pulls, bestArmId matches the arm that
+    // received consistently higher reward observations. This proves the
+    // bandit isn't degenerate (always-first-arm) when reward signals differ.
+    TopologyTunerConfig cfg;
+    cfg.enabled = true;
+    TopologyTuner tuner(cfg);
+
+    std::vector<TopologyArm> arms = {
+        TopologyArm{"arm_low", "hdbscan", 4, 4, 0},
+        TopologyArm{"arm_mid", "hdbscan", 8, 8, 0},
+        TopologyArm{"arm_high", "hdbscan", 16, 16, 0},
+    };
+    tuner.setArms(arms);
+
+    // Synthetic rewards per arm: arm_high gives the best clusterings.
+    auto statsForArm = [](const std::string& id) {
+        if (id == "arm_high") {
+            return makeStats(/*singleton=*/0.05, /*giant=*/0.10, /*gini=*/0.4, /*intra=*/0.7);
+        }
+        if (id == "arm_mid") {
+            return makeStats(/*singleton=*/0.20, /*giant=*/0.30, /*gini=*/0.5, /*intra=*/0.4);
+        }
+        return makeStats(/*singleton=*/0.50, /*giant=*/0.60, /*gini=*/0.7, /*intra=*/0.2);
+    };
+
+    // Pull 30 times — UCB1 should explore each arm a few times, then exploit
+    // arm_high. Without sufficient pulls, exploration dominates.
+    for (int i = 0; i < 30; ++i) {
+        auto picked = tuner.selectArm();
+        REQUIRE(picked.has_value());
+        tuner.observeRebuildStats(picked->id, statsForArm(picked->id));
+    }
+
+    auto best = tuner.bestArmId();
+    REQUIRE(best.has_value());
+    CHECK(*best == "arm_high");
+}
+
+TEST_CASE("TopologyTuner: shadow-divergence detects intrinsic-up + extrinsic-down trend",
+          "[unit][daemon][topology_tuner][catch2]") {
+    TopologyTunerConfig cfg;
+    cfg.enabled = true;
+    TopologyTuner tuner(cfg);
+    tuner.setArms(defaultArmGrid(1000));
+
+    // Pre-condition: no warnings yet.
+    CHECK(tuner.divergenceWarningCount() == 0u);
+
+    // Three pulls each with monotonically improving intrinsic reward (lower
+    // singleton/giant) but monotonically worsening synthetic extrinsic signal.
+    auto pullAndShadow = [&](double singleton, double giant, double intra, double extrinsicSignal) {
+        auto picked = tuner.selectArm();
+        REQUIRE(picked.has_value());
+        auto stats = makeStats(singleton, giant, /*gini=*/0.4, intra);
+        tuner.observeRebuildStats(picked->id, stats);
+        tuner.observeShadowExtrinsic(extrinsicSignal);
+    };
+
+    // Intrinsic improves: 0.30 → 0.35 → 0.40
+    // Extrinsic drops: 0.55 → 0.52 → 0.45 (>0.02 cumulative drop)
+    pullAndShadow(/*sing=*/0.5, /*giant=*/0.5, /*intra=*/0.3, /*ext=*/0.55);
+    pullAndShadow(/*sing=*/0.4, /*giant=*/0.4, /*intra=*/0.4, /*ext=*/0.52);
+    pullAndShadow(/*sing=*/0.3, /*giant=*/0.3, /*intra=*/0.5, /*ext=*/0.45);
+
+    CHECK(tuner.divergenceWarningCount() >= 1u);
+}
+
+TEST_CASE("TopologyTuner: shadow-divergence does NOT trigger when both signals agree",
+          "[unit][daemon][topology_tuner][catch2]") {
+    TopologyTunerConfig cfg;
+    cfg.enabled = true;
+    TopologyTuner tuner(cfg);
+    tuner.setArms(defaultArmGrid(1000));
+
+    auto pullAndShadow = [&](double singleton, double giant, double intra, double extrinsicSignal) {
+        auto picked = tuner.selectArm();
+        REQUIRE(picked.has_value());
+        auto stats = makeStats(singleton, giant, /*gini=*/0.4, intra);
+        tuner.observeRebuildStats(picked->id, stats);
+        tuner.observeShadowExtrinsic(extrinsicSignal);
+    };
+
+    // Both signals improve in lockstep — no divergence.
+    pullAndShadow(0.5, 0.5, 0.3, 0.40);
+    pullAndShadow(0.4, 0.4, 0.4, 0.50);
+    pullAndShadow(0.3, 0.3, 0.5, 0.55);
+
+    CHECK(tuner.divergenceWarningCount() == 0u);
+}
+
+TEST_CASE("TopologyTuner: cross-restart persistence preserves UCB1 convergence",
+          "[unit][daemon][topology_tuner][catch2]") {
+    // Simulates the daemon-restart pattern: tuner A pulls + observes some
+    // arms, persists; tuner B loads the same state and continues pulling.
+    // By the end, the bandit should converge on the synthetic best arm
+    // even though no single tuner instance saw all 30 pulls.
+    namespace fs = std::filesystem;
+    auto tmpDir = fs::temp_directory_path() /
+                  ("yams_topology_tuner_xrestart_" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(tmpDir);
+    const auto statePath = tmpDir / "tuner_state.json";
+
+    std::vector<TopologyArm> arms = {
+        TopologyArm{"arm_low", "hdbscan", 4, 4, 0},
+        TopologyArm{"arm_mid", "hdbscan", 8, 8, 0},
+        TopologyArm{"arm_high", "hdbscan", 16, 16, 0},
+    };
+    auto statsForArm = [](const std::string& id) {
+        if (id == "arm_high") {
+            return makeStats(/*singleton=*/0.05, /*giant=*/0.10, /*gini=*/0.4, /*intra=*/0.7);
+        }
+        if (id == "arm_mid") {
+            return makeStats(/*singleton=*/0.20, /*giant=*/0.30, /*gini=*/0.5, /*intra=*/0.4);
+        }
+        return makeStats(/*singleton=*/0.50, /*giant=*/0.60, /*gini=*/0.7, /*intra=*/0.2);
+    };
+
+    // Session 1: 10 pulls, persist via auto-save.
+    {
+        TopologyTunerConfig cfg;
+        cfg.enabled = true;
+        cfg.statePath = statePath;
+        TopologyTuner tuner(cfg);
+        tuner.setArms(arms);
+        for (int i = 0; i < 10; ++i) {
+            auto picked = tuner.selectArm();
+            REQUIRE(picked.has_value());
+            tuner.observeRebuildStats(picked->id, statsForArm(picked->id));
+        }
+        REQUIRE(fs::exists(statePath));
+    }
+
+    // Session 2 (simulating daemon restart): load state, continue 20 pulls.
+    {
+        TopologyTunerConfig cfg;
+        cfg.enabled = true;
+        cfg.statePath = statePath;
+        TopologyTuner tuner(cfg);
+        tuner.setArms(arms);
+        auto loaded = tuner.loadState(statePath);
+        REQUIRE(loaded.has_value());
+        for (int i = 0; i < 20; ++i) {
+            auto picked = tuner.selectArm();
+            REQUIRE(picked.has_value());
+            tuner.observeRebuildStats(picked->id, statsForArm(picked->id));
+        }
+        auto best = tuner.bestArmId();
+        REQUIRE(best.has_value());
+        CHECK(*best == "arm_high");
+    }
+
+    std::error_code ec;
+    fs::remove_all(tmpDir, ec);
+}
+
 TEST_CASE("TopologyTuner: auto-save fires when statePath is configured",
           "[unit][daemon][topology_tuner][catch2]") {
     namespace fs = std::filesystem;

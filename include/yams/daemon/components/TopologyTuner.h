@@ -68,9 +68,30 @@ public:
 
     void setArms(std::vector<TopologyArm> arms);
 
+    // Rebuild the arm grid for a new corpus size. If the resulting grid has
+    // the same arm IDs as the current one, this is a no-op (preserves MAB
+    // state). Otherwise, MAB state is reset (existing arm rewards are dropped
+    // because the underlying parameter values changed). Returns true if the
+    // grid was actually rebuilt.
+    bool rebuildArmGridForCorpusSize(std::size_t corpusDocCount);
+
     [[nodiscard]] std::optional<TopologyArm> selectArm();
 
     void observeRebuildStats(std::string_view armId, const TopologyManager::RebuildStats& stats);
+
+    // Phase G shadow gate: feeds an EXTRINSIC reward signal (e.g. nDCG over
+    // recent labeled queries) for the most recently observed arm so the tuner
+    // can detect when its intrinsic preference diverges from retrieval quality.
+    // Maintains a sliding window of (intrinsic, extrinsic) deltas; logs a
+    // warning when intrinsic improves while extrinsic drops by >0.02 across
+    // 3 consecutive observations. Observability only — bandit still optimizes
+    // intrinsic reward.
+    void observeShadowExtrinsic(double extrinsicSignal);
+
+    [[nodiscard]] std::size_t divergenceWarningCount() const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return divergenceWarningCount_;
+    }
 
     [[nodiscard]] bool canPullArm(std::chrono::steady_clock::time_point now,
                                   std::chrono::steady_clock::time_point lastPullTime,
@@ -94,6 +115,16 @@ private:
     TopologyTunerConfig cfg_;
     std::vector<TopologyArm> arms_;
     yams::search::TunerMAB mab_;
+
+    // Shadow-divergence tracking: ring buffer of (intrinsic, extrinsic) pairs
+    // keyed by arm pull. Window size is hardcoded at 3 (3 consecutive
+    // observations of intrinsic-up + extrinsic-down trips the warning).
+    static constexpr std::size_t kDivergenceWindow = 3;
+    static constexpr double kDivergenceExtrinsicDropThreshold = 0.02;
+    std::vector<std::pair<double, double>> shadowHistory_;
+    double lastIntrinsicReward_{0.0};
+    bool haveLastIntrinsic_{false};
+    std::size_t divergenceWarningCount_{0};
 };
 
 } // namespace yams::daemon

@@ -132,6 +132,27 @@ void TopologyTuner::setArms(std::vector<TopologyArm> arms) {
     mab_.setArms(std::move(mabArms));
 }
 
+bool TopologyTuner::rebuildArmGridForCorpusSize(std::size_t corpusDocCount) {
+    auto fresh = defaultArmGrid(corpusDocCount);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (fresh.size() == arms_.size()) {
+            bool sameIds = true;
+            for (std::size_t i = 0; i < fresh.size(); ++i) {
+                if (fresh[i].id != arms_[i].id) {
+                    sameIds = false;
+                    break;
+                }
+            }
+            if (sameIds) {
+                return false;
+            }
+        }
+    }
+    setArms(std::move(fresh));
+    return true;
+}
+
 std::optional<TopologyArm> TopologyTuner::selectArm() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!cfg_.enabled || arms_.empty()) {
@@ -160,6 +181,8 @@ void TopologyTuner::observeRebuildStats(std::string_view armId,
         const auto idx = static_cast<std::size_t>(std::distance(arms_.begin(), it));
         const double reward = computeIntrinsicReward(stats, cfg_.weights);
         mab_.recordReward(idx, reward, yams::search::TunerMAB::RewardSource::Proxy);
+        lastIntrinsicReward_ = reward;
+        haveLastIntrinsic_ = true;
         persistPath = cfg_.statePath;
     }
     if (persistPath) {
@@ -167,6 +190,45 @@ void TopologyTuner::observeRebuildStats(std::string_view armId,
             spdlog::debug("[TopologyTuner] failed to persist state to {}: {}",
                           persistPath->string(), r.error().message);
         }
+    }
+}
+
+void TopologyTuner::observeShadowExtrinsic(double extrinsicSignal) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!haveLastIntrinsic_) {
+        return;
+    }
+    shadowHistory_.emplace_back(lastIntrinsicReward_, extrinsicSignal);
+    if (shadowHistory_.size() > kDivergenceWindow) {
+        shadowHistory_.erase(
+            shadowHistory_.begin(),
+            shadowHistory_.begin() +
+                static_cast<std::ptrdiff_t>(shadowHistory_.size() - kDivergenceWindow));
+    }
+    if (shadowHistory_.size() < kDivergenceWindow) {
+        return;
+    }
+    // Trigger when across the window: intrinsic monotonically up AND
+    // extrinsic monotonically down by >threshold cumulatively.
+    bool intrinsicMonoUp = true;
+    bool extrinsicMonoDown = true;
+    for (std::size_t i = 1; i < shadowHistory_.size(); ++i) {
+        if (shadowHistory_[i].first < shadowHistory_[i - 1].first) {
+            intrinsicMonoUp = false;
+        }
+        if (shadowHistory_[i].second > shadowHistory_[i - 1].second) {
+            extrinsicMonoDown = false;
+        }
+    }
+    const double extrinsicDrop = shadowHistory_.front().second - shadowHistory_.back().second;
+    if (intrinsicMonoUp && extrinsicMonoDown && extrinsicDrop > kDivergenceExtrinsicDropThreshold) {
+        ++divergenceWarningCount_;
+        spdlog::warn("[TopologyTuner] intrinsic-vs-extrinsic divergence detected "
+                     "(window={} intrinsic_delta={:.4f} extrinsic_drop={:.4f}); "
+                     "intrinsic reward favors arms whose retrieval quality is "
+                     "degrading. Consider re-tuning reward weights.",
+                     kDivergenceWindow, shadowHistory_.back().first - shadowHistory_.front().first,
+                     extrinsicDrop);
     }
 }
 

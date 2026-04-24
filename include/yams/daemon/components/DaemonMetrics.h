@@ -53,6 +53,9 @@ struct MetricsSnapshot {
     // Optional memory breakdown (bytes) for deeper diagnostics
     // Keys: rss_bytes, pss_bytes (if available), provider_bytes, vector_index_bytes
     std::map<std::string, std::uint64_t> memoryBreakdownBytes;
+    // Low-cost instrumentation counters for memory probes and allocator debug modes.
+    // Keys use units in the suffix (for example, memory_sample_us, msl_stack_log_bytes).
+    std::map<std::string, std::uint64_t> diagnosticCounters;
 
     // FSM/MUX
     uint64_t fsmTransitions{0};

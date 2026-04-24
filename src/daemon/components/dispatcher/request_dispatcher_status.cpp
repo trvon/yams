@@ -475,6 +475,9 @@ void populateStatusFromSnapshot(StatusResponse& res, const MetricsSnapshot& snap
     for (const auto& [key, value] : snap.memoryBreakdownBytes) {
         res.requestCounts[std::string{"status_mem_"} + key] = static_cast<size_t>(value);
     }
+    for (const auto& [key, value] : snap.diagnosticCounters) {
+        res.requestCounts[std::string{"status_diag_"} + key] = static_cast<size_t>(value);
+    }
 }
 
 } // namespace

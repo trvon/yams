@@ -2304,6 +2304,38 @@ private:
                      paintStatus(status.memoryUsageMb > 4096 ? Severity::Warn : Severity::Good,
                                  std::to_string(static_cast<int>(status.memoryUsageMb)) + " MB"),
                      ""});
+                {
+                    auto count = [&](std::string_view key) -> uint64_t {
+                        auto it = status.requestCounts.find(std::string(key));
+                        return it != status.requestCounts.end() ? it->second : 0ULL;
+                    };
+                    const uint64_t mslEnabled = count("status_diag_msl_enabled");
+                    const uint64_t sampleUs = count("status_diag_memory_sample_us");
+                    const uint64_t allocUs = count("status_diag_allocator_sample_us");
+                    const uint64_t logBytes = count("status_diag_msl_stack_log_bytes");
+                    const uint64_t logFiles = count("status_diag_msl_stack_log_files");
+                    if (mslEnabled || sampleUs || allocUs || logBytes || logFiles) {
+                        std::ostringstream value;
+                        bool first = true;
+                        auto append = [&](std::string_view part) {
+                            if (!first)
+                                value << " · ";
+                            first = false;
+                            value << part;
+                        };
+                        if (mslEnabled)
+                            append("MSL on");
+                        if (sampleUs)
+                            append("mem_probe=" + std::to_string(sampleUs) + "µs");
+                        if (allocUs)
+                            append("alloc_probe=" + std::to_string(allocUs) + "µs");
+                        if (logBytes || logFiles) {
+                            append("stack_logs=" + std::to_string(logBytes / (1024ULL * 1024ULL)) +
+                                   " MB/" + std::to_string(logFiles) + " files");
+                        }
+                        resourceRows.push_back({"Memory Diagnostics", value.str(), ""});
+                    }
+                }
                 resourceRows.push_back({"Pools",
                                         std::to_string(status.ipcPoolSize) + " ipc · " +
                                             std::to_string(status.ioPoolSize) + " io",

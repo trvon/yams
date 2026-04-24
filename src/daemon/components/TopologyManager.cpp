@@ -216,6 +216,15 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
         if (tuner_ && tuner_->config().enabled) {
             const auto now = std::chrono::steady_clock::now();
             const std::size_t curDocCount = documentHashes.size();
+            // Rebuild arm grid against current corpus size so cluster-size
+            // candidates (log2(n), sqrt(n), 0.05·n) stay meaningful as the
+            // corpus grows. No-op when the new grid's arm ids match the
+            // current set — preserves MAB state across non-trivial rebuilds.
+            if (curDocCount > 0 && tuner_->rebuildArmGridForCorpusSize(curDocCount)) {
+                spdlog::info("[TopologyManager] tuner arm grid resized for "
+                             "corpus={} → {} arms",
+                             curDocCount, tuner_->arms().size());
+            }
             if (tuner_->canPullArm(now, tunerLastPullTime_, tunerLastDuration_, curDocCount,
                                    tunerLastPullDocCount_)) {
                 if (auto arm = tuner_->selectArm()) {
