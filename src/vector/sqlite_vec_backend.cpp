@@ -693,7 +693,7 @@ public:
         // Enable WAL mode for better concurrency
         sqlite3_exec(db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
-        sqlite3_exec(db_, "PRAGMA cache_size=-64000", nullptr, nullptr, nullptr); // 64MB cache
+        sqlite3_exec(db_, "PRAGMA cache_size=-2048", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA temp_store=MEMORY", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA mmap_size=268435456", nullptr, nullptr, nullptr); // 256MB
 
@@ -1432,6 +1432,7 @@ FROM vectors WHERE level = ?
                 results.emplace(std::move(hash), std::move(record));
             }
         }
+        lock.unlock();
         sqlite3_finalize(stmt);
 
         return results;
@@ -1465,15 +1466,6 @@ FROM vectors WHERE level = ?
                          std::string{"prepare forEachDocumentLevelVector: "} + sqlite3_errmsg(db_)};
         }
 
-        struct FinalizeGuard {
-            sqlite3_stmt* stmt{nullptr};
-            ~FinalizeGuard() {
-                if (stmt) {
-                    sqlite3_finalize(stmt);
-                }
-            }
-        } finalize{stmt};
-
         sqlite3_bind_int(stmt, 1, static_cast<int>(EmbeddingLevel::DOCUMENT));
 
         size_t delivered = 0;
@@ -1488,6 +1480,8 @@ FROM vectors WHERE level = ?
             }
         }
 
+        lock.unlock();
+        sqlite3_finalize(stmt);
         return delivered;
     }
 
@@ -2216,6 +2210,7 @@ public:
             results.push_back(parseEntityVectorRow(stmt));
         }
 
+        lock.unlock();
         sqlite3_finalize(stmt);
         return results;
     }
@@ -2285,6 +2280,7 @@ public:
             }
         }
 
+        lock.unlock();
         sqlite3_finalize(stmt);
 
         // Sort by similarity descending

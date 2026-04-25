@@ -840,6 +840,9 @@ yams::Result<void> ServiceManager::initialize() {
             ipcCfg.min_size = 4;
         }
         ipcCfg.max_size = TuneAdvisor::poolMaxSizeIpc();
+        if (ipcCfg.max_size < ipcCfg.min_size) {
+            ipcCfg.max_size = ipcCfg.min_size;
+        }
         ipcCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ipcCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ipcCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
@@ -850,12 +853,14 @@ yams::Result<void> ServiceManager::initialize() {
         if (ioCfg.min_size < 2) {
             ioCfg.min_size = 2;
         }
-        // Bound IO max by both configured max and a dynamic cap from CPU budget
         try {
             auto dynCap = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
             ioCfg.max_size = std::min(TuneAdvisor::poolMaxSizeIpcIo(), dynCap);
         } catch (...) {
             ioCfg.max_size = TuneAdvisor::poolMaxSizeIpcIo();
+        }
+        if (ioCfg.max_size < ioCfg.min_size) {
+            ioCfg.max_size = ioCfg.min_size;
         }
         ioCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
