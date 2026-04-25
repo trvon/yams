@@ -51,7 +51,7 @@ build/profiling/tools/yams-cli/yams add large_corpus/ --recursive
 
 ### Key Areas to Profile
 
-For **PBI-080 Hierarchical Search**:
+For **hierarchical search**:
 - `twoStageVectorSearch()` total overhead
 - Document grouping (hash map operations)
 - Hierarchical boosting calculation

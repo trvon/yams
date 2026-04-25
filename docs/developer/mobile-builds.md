@@ -5,16 +5,18 @@ embedded by higher-level app shells such as Flutter, not to host inference itsel
 
 ## Current CI Lane
 
-The dedicated workflow is [mobile-artifacts.yml](/Users/trevon/work/apps/yams-app/yams/.github/workflows/mobile-artifacts.yml).
+This page documents the mobile library lane and its expected packaging shape. A dedicated
+`mobile-artifacts.yml` workflow is not currently tracked in this repository, so treat the workflow
+details below as the lane contract to re-enable rather than as an active CI guarantee.
 
-Current CI guarantees:
+The lane should guarantee:
 
 - Build `libyams_mobile` with `YAMS_ENABLE_MOBILE_BINDINGS=true`
 - Keep the mobile lane library-only by disabling plugin, CLI, and MCP targets
 - Compile the Catch2 mobile ABI and daemon protocol suites
 - Run the mobile ABI suite and daemon protocol suite
 - Verify that the shared library exports every `YAMS_MOBILE_API` symbol declared in
-  [mobile_bindings.h](/Users/trevon/work/apps/yams-app/yams/include/yams/api/mobile_bindings.h)
+  [mobile_bindings.h](../../include/yams/api/mobile_bindings.h)
 - Package a downloadable artifact containing:
   - `lib/` with the built shared library
   - `include/yams/api/mobile_bindings.h`
@@ -26,12 +28,12 @@ Current artifact platforms:
 - `linux-x86_64`
 - `macos-arm64`
 
-The reusable CI entrypoints are:
+Expected reusable CI entrypoints when the lane is enabled:
 
-- [build_mobile_lane.sh](/Users/trevon/work/apps/yams-app/yams/scripts/ci/build_mobile_lane.sh)
-- [run_mobile_lane.sh](/Users/trevon/work/apps/yams-app/yams/scripts/ci/run_mobile_lane.sh)
-- [resolve_mobile_target.sh](/Users/trevon/work/apps/yams-app/yams/scripts/ci/resolve_mobile_target.sh)
-- [check_mobile_profiles.sh](/Users/trevon/work/apps/yams-app/yams/scripts/ci/check_mobile_profiles.sh)
+- `scripts/ci/build_mobile_lane.sh`
+- `scripts/ci/run_mobile_lane.sh`
+- `scripts/ci/resolve_mobile_target.sh`
+- `scripts/ci/check_mobile_profiles.sh`
 
 ## Target Matrix
 
@@ -49,8 +51,8 @@ build directories:
 | `android-arm64` | `conan/profiles/host-android-clang-arm64` | `build/mobile-android-arm64` | `.aar` `arm64-v8a` slice |
 | `android-x86_64` | `conan/profiles/host-android-clang-x86_64` | `build/mobile-android-x86_64` | `.aar` `x86_64` slice |
 
-CI now validates all of those profiles with Conan, even though only the host-native targets are
-built in the current workflow.
+The lane should validate all of those profiles with Conan, even if only the host-native targets are
+built in a given workflow run.
 
 For platform targets, the shared build entrypoint now forwards machine-local toolchain paths into
 Conan automatically:
@@ -63,7 +65,7 @@ Conan automatically:
 - Cross-builds also resolve `protoc` from the build machine instead of the target protobuf package,
   so daemon IPC code generation no longer tries to execute Android/iOS binaries on the host
 
-Manual workflow dispatch can now also attempt full platform packaging:
+Manual workflow dispatch should be able to attempt full platform packaging:
 
 - `package_ios=true` builds `ios-device-arm64` and `ios-sim-arm64`, then assembles
   `YamsMobile.xcframework`
@@ -120,7 +122,7 @@ This lane is intentionally narrow. It validates the current corpus ABI and artif
 without pretending the repo already ships native iOS/Android SDK bundles.
 
 The wrapper boundary is documented in
-[packaging/mobile/README.md](/Users/trevon/work/apps/yams-app/yams/packaging/mobile/README.md).
+`packaging/mobile/README.md`.
 
 The next packaging layers should be built on top of this lane:
 
@@ -136,13 +138,13 @@ Flutter repo owns Dart bindings, platform plugin glue, and UX.
 Initial packaging helpers now exist for the wrapper layer:
 
 - iOS cross-build + `.xcframework` orchestration:
-  [build_ios_xcframework.sh](/Users/trevon/work/apps/yams-app/yams/scripts/ci/build_ios_xcframework.sh)
+  `scripts/ci/build_ios_xcframework.sh`
 - iOS `.xcframework` assembly:
-  [package_ios_xcframework.sh](/Users/trevon/work/apps/yams-app/yams/scripts/ci/package_ios_xcframework.sh)
+  `scripts/ci/package_ios_xcframework.sh`
 - Android cross-build + `.aar` orchestration:
-  [build_android_aar.sh](/Users/trevon/work/apps/yams-app/yams/scripts/ci/build_android_aar.sh)
+  `scripts/ci/build_android_aar.sh`
 - Android `.aar` assembly:
-  [package_android_aar.sh](/Users/trevon/work/apps/yams-app/yams/scripts/ci/package_android_aar.sh)
+  `scripts/ci/package_android_aar.sh`
 
 The repo now has orchestration scripts for the actual iOS/Android target builds, but those still
 depend on platform SDK availability in CI or on the local machine.

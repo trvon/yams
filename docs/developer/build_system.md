@@ -195,10 +195,9 @@ Cache `~/.conan` + optionally `build/`.
 | Link errors after dep change | Delete `builddir` and reconfigure from scratch |
 | Tests undiscovered | Use `meson test -C builddir --list`; ensure `enable-tests=true` |
 | Slow incremental builds | Enable ccache or check Unity build settings |
-| qpdf: "recompile with -fPIC" | `conan remove 'qpdf/*' -c` then re-setup |
 | Clang: "cannot find -lstdc++" | Install libstdc++ or use `YAMS_COMPILER=gcc` |
 | Windows: Boost build failures | Install v143 toolset via VS Installer, clean Boost cache |
-| Windows: Missing recipes | Export qpdf and onnxruntime recipes (see [Developer Setup](setup.md)) |
+| Windows: Missing ONNX Runtime recipe | Export the local onnxruntime recipe (see [Developer Setup](setup.md)) |
 
 ## 11. Conventions
 
@@ -206,13 +205,13 @@ Out-of-source only. Keep portable optimized builds on `debugoptimized` + `b_ndeb
 
 ## 12. Test Organization (Active Improvement)
 
-**Current State**: Test names and suites have some inconsistencies (e.g., `unit_isolated_*` tests in bench suite, PBI numbers in names).
+**Current State**: Test names and suites have some inconsistencies (e.g., `unit_isolated_*` tests in bench suite, milestone numbers in names).
 
-**In Progress**: PBI-064 is standardizing test organization with:
+**In Progress**: test organization standardization is standardizing test organization with:
 - Semantic naming: `<component>_<aspect>_<variant>`
 - Hierarchical suites: `<category>[+<tag>]`
 - Clear categorization: unit/integration/bench/acceptance
-- Removal of temporal coupling (no PBI numbers in test names)
+- Removal of temporal coupling (no milestone numbers in test names)
 
 See the repository issues/PRs for the current plan and status.
 
@@ -236,5 +235,5 @@ meson test -C builddir --list
 **Revision notes**:
 - Migrated from CMake to Meson as primary build system
 - Added comprehensive test organization documentation
-- Linked to PBI-064 for ongoing test standardization
+- Linked to ongoing test standardization
 - Simplified ONNX configuration

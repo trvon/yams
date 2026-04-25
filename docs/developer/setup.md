@@ -258,10 +258,9 @@ yams daemon log | grep -i "execution provider"
 | Missing native file | Re-run Conan install |
 | Link errors after dep change | Delete builddir and reconfigure |
 | Tests not found | Ensure `-Dbuild-tests=true` and recompile |
-| qpdf: "recompile with -fPIC" | `conan remove 'qpdf/*' -c` then re-setup |
 | Clang: "cannot find -lstdc++" | Install libstdc++ or use `YAMS_COMPILER=gcc` |
 | Windows: Boost build failures | Install v143 toolset, clean cache |
-| Windows: Missing recipes | Export qpdf and onnxruntime recipes |
+| Windows: Missing ONNX Runtime recipe | Export the local onnxruntime recipe |
 
 ## First-run tuning
 
@@ -270,9 +269,8 @@ and does not adapt until it has evidence. Run `yams tune` interactively to
 label a few top-K results from your own corpus; labels persist to
 `<data_dir>/relevance_labels.jsonl` and feed the tuner's reward signal.
 
-See [docs/guides/interactive-tuning.md](../guides/interactive-tuning.md) for
-the walkthrough and [docs/cli/tune.md](../cli/tune.md) for the command
-reference. `yams doctor tune` remains as a deprecated alias.
+See the user-guide CLI reference for the current command surface.
+`yams doctor tune` remains as a deprecated alias.
 
 ## Notes
 

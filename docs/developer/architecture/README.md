@@ -6,13 +6,12 @@ This index points to architecture references that mirror the live implementation
 
 - Daemon and services — lifecycle, IPC, plugin hosting
   - [Architecture: Daemon and Services](../../architecture/daemon_architecture.md)
-  - Plan: Daemon Simplification V2 (FSM-first) (link removed; file is outside docs)
 - Plugin pipeline — manifest parsing, trust, runtime loaders
   - [Architecture: Plugin and Content Extraction](../../architecture/plugin_architecture.md)
 - Search pipeline — ingestion, ranking, hybrid fusion
-  - (TBD) Search System overview (link removed; page not present in docs)
+  - [CLI search and grep reference](../../user_guide/cli.md)
 - Vector subsystem — embedding providers, storage, repair routines
-  - (TBD) Vector Search overview (link removed; page not present in docs)
+  - [Embeddings guide](../../user_guide/embeddings.md)
 
 ## Supporting Design Notes
 
@@ -24,13 +23,11 @@ This index points to architecture references that mirror the live implementation
 ## API References
 
 - [API Overview](../../api/README.md)
-- HTTP API topical docs and OpenAPI spec are not published in this docs site yet.
 - [MCP Tools](../../api/mcp_tools.md)
 
 ## Operations and Performance Guides
 
 - [Admin: Operations](../../admin/operations.md)
-- Deployment/Monitoring/Backup pages are not published in this docs site yet.
 - [Performance Report](../../benchmarks/performance_report.md)
 
 ## Contribution Workflow

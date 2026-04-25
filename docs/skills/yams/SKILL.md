@@ -2,7 +2,7 @@
 name: yams
 description: Code indexing, semantic search, and knowledge graph for project memory
 license: GPL-3.0
-compatibility: claude-code, opencode
+compatibility: opencode
 metadata:
   tools: cli, mcp
   categories: search, indexing, memory, knowledge-graph
@@ -35,19 +35,17 @@ yams graph --search "pattern"  # Search nodes by label
 
 # Agent storage
 yams list --format json        # Scriptable list output
-yams list --show-metadata      # Include metadata for PBI tracking
-yams list --metadata-values pbi  # Unique PBI values with counts
+yams list --show-metadata      # Include metadata for work item
 ```
 
 ## Agent Memory Workflow
 
-**YAMS is the single source of truth for agent memory and PBI tracking.**
+**YAMS is the single source of truth for agent memory and work item.**
 
-### Required Metadata (PBI Tracking)
+### Required Metadata (Task Tracking)
 
 Attach metadata to every `yams add`.
 
-- `pbi` - PBI identifier (e.g., `PBI-043`)
 - `task` - short task slug (e.g., `list-json-refresh`)
 - `phase` - `start` | `checkpoint` | `complete`
 - `owner` - agent or author
@@ -63,7 +61,7 @@ yams add . -r --include "*.ts,*.tsx,*.js"
 yams add . -r --include "*.py" --exclude "venv/**,__pycache__/**"
 
 # Index with metadata for tracking
-yams add src/ -r --metadata "pbi=PBI-043,task=list-json-refresh,phase=checkpoint,owner=codex,source=code"
+yams add src/ -r --metadata "task=list-json-refresh,phase=checkpoint,owner=codex,source=code"
 ```
 
 ### Auto-Index with Watch
@@ -131,14 +129,11 @@ yams search "API endpoint" --ext ts
 
 ```bash
 # Force metadata/FTS path for structured metadata
-yams search "pbi=PBI-043" --type keyword --limit 10
+yams search "task=example-task" --type keyword --limit 10
 
-# Unique PBI selection (avoid collisions)
-# 1) Check exact PBI
-yams search "pbi=PBI-002" --type keyword --limit 20
-# 2) List all used PBI values with counts
-yams list --metadata-values pbi
-# 3) Choose the next unused PBI-### and continue
+# Unique task selection (avoid collisions)
+yams search "task=example-task" --type keyword --limit 20
+# 2) List all used task values with counts
 
 # Tag filters (tags are stored as metadata keys: tag:<name>)
 yams search "plan" --type keyword --tags plan --limit 10
@@ -152,10 +147,10 @@ yams search "tagged logic" --type keyword --tags plan --limit 20
 ```bash
 # Index documentation
 curl -s "https://docs.example.com/api" | yams add - --name "api-docs.md" \
-  --metadata "pbi=PBI-043,task=docs-cache,phase=checkpoint,owner=codex,source=research"
+  --metadata "task=docs-cache,phase=checkpoint,owner=codex,source=research"
 
 # Store with metadata
-yams add notes.md --metadata "pbi=PBI-043,task=research-auth,phase=checkpoint,owner=codex,source=research"
+yams add notes.md --metadata "task=research-auth,phase=checkpoint,owner=codex,source=research"
 ```
 
 ### Store Decisions
@@ -173,7 +168,7 @@ JWT with RS256, 15min expiry, refresh tokens.
 ### Rationale
 Stateless, scalable, industry standard.
 " | yams add - --name "decision-jwt-auth.md" \
-  --metadata "pbi=PBI-043,task=auth-decision,phase=checkpoint,owner=codex,source=decision"
+  --metadata "task=auth-decision,phase=checkpoint,owner=codex,source=decision"
 ```
 
 ### Retrieve Knowledge
@@ -184,7 +179,7 @@ yams search "authentication decision"
 
 # Find by metadata (JSON list is the source of truth)
 yams list --format json --show-metadata \
-  | jq '.documents[] | select(.metadata.pbi=="PBI-043")'
+  | jq '.documents[] | select(.metadata.task=="example-task")'
 
 # Metadata + tags are separate in JSON output
 yams list --format json --show-metadata \

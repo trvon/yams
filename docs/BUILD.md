@@ -116,10 +116,9 @@ meson setup build/release \
 meson compile -C build/release
 ```
 
-Windows requires local Conan recipes once:
+Windows requires the local ONNX Runtime Conan recipe once:
 
 ```pwsh
-conan export conan/qpdf --name=qpdf --version=11.9.0
 conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
 conan install . -of build\release -pr:h conan/profiles/host-windows-msvc -pr:b default `
   -s build_type=Release --build=missing
@@ -141,10 +140,9 @@ meson test -C build/debug --print-errorlogs
 
 | Symptom                                  | Fix                                                            |
 |------------------------------------------|----------------------------------------------------------------|
-| `qpdf: recompile with -fPIC`             | `conan remove 'qpdf/*' -c && ./setup.sh Release`               |
 | Clang: `cannot find -lstdc++`            | `sudo apt install libstdc++-13-dev` or `YAMS_COMPILER=gcc ./setup.sh Release` |
 | Windows Boost build failures (VS 2025)   | Install v143 toolset, `conan remove 'boost/*' -c`, rerun setup |
-| Windows: missing qpdf/onnxruntime recipes| `conan export conan/qpdf …`, `conan export conan/onnxruntime …`|
+| Windows: missing onnxruntime recipe      | `conan export conan/onnxruntime --name=onnxruntime --version=1.23.0` |
 | Missing system packages                  | `pkg-config --list-all \| grep -E "(sqlite\|openssl\|protobuf)"` |
 
 ## Advanced

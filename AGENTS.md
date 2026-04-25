@@ -1,6 +1,6 @@
 ---
 description: YAMS-first repo agent supplement for Codex (engineering + bug-bounty)
-argument-hint: [TASK=<description>] [MODE=<engineering|bug-bounty>] [PBI=<pbi-id>] [PHASE=<start|checkpoint|complete>]
+argument-hint: [TASK=<description>] [MODE=<engineering|bug-bounty>] [PHASE=<start|checkpoint|complete>]
 ---
 
 # AGENTS.md (Repo Supplement)
@@ -55,7 +55,6 @@ Attach to every `yams add`:
 Recommended in this repo:
 
 - `mode`: `engineering|bug-bounty`
-- `pbi`: PBI id if applicable
 - `agent_id`: `opencode-<task-slug>`
 - `status`: `open|blocked|done`
 
@@ -207,7 +206,6 @@ Always ask before:
 ```text
 TASK: $TASK
 MODE: $MODE
-PBI: $PBI
 PHASE: $PHASE
 AGENT: opencode-$TASK
 

@@ -103,7 +103,6 @@ class YamsConan(ConanFile):
         self.requires("boost/1.85.0")
 
         if self.options.build_tests:  # type: ignore
-            self.requires("gtest/1.15.0")
             # Catch2 must be a regular requirement so Meson dependency()
             # can resolve catch2/catch2-with-main via generated deps.
             self.requires("catch2/3.5.2")

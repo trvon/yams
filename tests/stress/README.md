@@ -295,5 +295,5 @@ When adding new stress tests:
 ## See Also
 
 - [Main test README](../README.md)
-- [Benchmark documentation](../benchmarks/README.md)
+- [Benchmark documentation](../../docs/benchmarks/README.md)
 - [Test helpers](../common/)

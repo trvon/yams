@@ -675,9 +675,20 @@ void DaemonMetrics::stopPolling() {
         }
     });
 
-    // Wait for the polling loop to finish
-    std::unique_lock<std::mutex> lk(pollingMutex_);
-    pollingCv_.wait(lk, [this]() { return pollingStopped_; });
+    {
+        std::unique_lock<std::mutex> lk(pollingMutex_);
+        pollingCv_.wait(lk, [this]() { return pollingStopped_; });
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const bool anyInFlight = physicalWalkInFlight_.load(std::memory_order_acquire) ||
+                                 detailedCollectInFlight_.load(std::memory_order_acquire) ||
+                                 storeStatsCollectInFlight_.load(std::memory_order_acquire);
+        if (!anyInFlight)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {

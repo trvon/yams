@@ -397,7 +397,6 @@ $conanArgs += @('-c', 'tools.env.virtualenv:powershell=True')
 if (-not $SystemDeps) {
     # Export custom Conan recipes before install (must happen before conan install)
     Write-Host '--- Exporting custom Conan recipes... ---'
-    # qpdf export removed - PDF plugin will be updated in separate PBI
 
     if (Test-Path 'conan/onnxruntime/conanfile.py') {
         Write-Host 'Exporting onnxruntime/1.23.0 from conan/onnxruntime/'

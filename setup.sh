@@ -481,7 +481,6 @@ fi
 
 if [[ "${USE_SYSTEM_DEPS}" != "true" ]]; then
   echo "--- Exporting custom Conan recipes... ---"
-  # qpdf export removed - PDF plugin will be updated in separate PBI
 
   # Export custom onnxruntime recipe if it exists
   if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
