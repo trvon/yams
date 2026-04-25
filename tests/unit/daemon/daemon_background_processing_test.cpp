@@ -163,6 +163,17 @@ public:
         return it->second;
     }
 
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                       std::size_t maxBytes) override {
+        auto r = retrieveBytes(hash);
+        if (!r)
+            return r;
+        auto& v = r.value();
+        if (v.size() > maxBytes)
+            v.resize(maxBytes);
+        return r;
+    }
+
     Result<api::IContentStore::RawContent> retrieveRaw(const std::string& hash) override {
         auto bytes = retrieveBytes(hash);
         if (!bytes) {

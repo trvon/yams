@@ -490,6 +490,10 @@ TEST_CASE("DocumentService - Error Handling", "[document][service][errors]") {
             Result<std::vector<std::byte>> retrieveBytes(const std::string&) override {
                 return ErrorCode::NotImplemented;
             }
+            Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string&,
+                                                               std::size_t) override {
+                return ErrorCode::NotImplemented;
+            }
             Result<RawContent> retrieveRaw(const std::string&) override {
                 return ErrorCode::NotImplemented;
             }

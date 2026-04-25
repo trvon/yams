@@ -154,9 +154,9 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
     }
 
     const auto build_start = std::chrono::steady_clock::now();
-    auto prep = backend.prepareSearchIndex();
-    if (!prep) {
-        throw std::runtime_error(prep.error().message);
+    auto build = backend.buildIndex();
+    if (!build) {
+        throw std::runtime_error(build.error().message);
     }
     const auto build_end = std::chrono::steady_clock::now();
 

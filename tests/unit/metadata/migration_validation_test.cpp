@@ -192,13 +192,18 @@ TEST_CASE("All migrations execute successfully", "[catch2][unit][metadata][migra
         REQUIRE(actual_version > 0); // Sanity check: should have at least one migration
     }
 
-    SECTION("Migration version is at least v28 (feedback events schema)") {
-        // This ensures we haven't regressed and lost the feedback_events schema
+    SECTION("Migration version is at least v33 (audit-fix metadata composite indexes)") {
+        // Floor checks that all expected schema is present:
+        //   v28: feedback_events
+        //   v31: semantic_duplicate_groups
+        //   v32: idx_kg_edges_uq (audit fix B — addEdgesUnique INSERT OR IGNORE)
+        //   v33: idx_metadata_doc_key + idx_kg_doc_entities_doc_extractor
+        //        (audit fixes M2 + M4)
         auto result = fixture.applyAllMigrations();
         REQUIRE(result);
 
         int version = result.value();
-        REQUIRE(version >= 28);
+        REQUIRE(version >= 33);
 
         INFO("Current migration version: " << version);
     }
