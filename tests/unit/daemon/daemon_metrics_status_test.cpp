@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
@@ -543,6 +544,17 @@ public:
             return Error{ErrorCode::NotFound, "content not found"};
         }
         return it->second;
+    }
+
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                       std::size_t maxBytes) override {
+        auto bytes = retrieveBytes(hash);
+        if (!bytes) {
+            return bytes.error();
+        }
+        const auto prefixSize = std::min(maxBytes, bytes.value().size());
+        bytes.value().resize(prefixSize);
+        return bytes;
     }
 
     Result<api::IContentStore::RawContent> retrieveRaw(const std::string& hash) override {

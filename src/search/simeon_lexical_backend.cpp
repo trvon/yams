@@ -10,10 +10,10 @@
 #include <simeon/simeon.hpp>
 
 #if defined(__APPLE__)
-#include <malloc/malloc.h>
 #include <mach/mach.h>
 #include <mach/mach_init.h>
 #include <mach/task_info.h>
+#include <malloc/malloc.h>
 #elif defined(__GLIBC__)
 #include <malloc.h>
 #include <sys/resource.h>
@@ -225,9 +225,9 @@ ChunkedEnhancementText buildEnhancementText(std::string_view text,
 
 SimeonLexicalBackend::SimeonLexicalBackend(Config cfg) : cfg_(cfg) {}
 SimeonLexicalBackend::~SimeonLexicalBackend() {
-    // Ensure the detached build thread cannot outlive this instance. jthread's
-    // destructor requests stop and joins; the build thread is expected to honor
-    // stop_token at its cancellation checkpoints and return without publishing.
+    // Ensure the detached build thread cannot outlive this instance. Native
+    // jthread requests stop and joins; compat fallback auto-joins and exposes
+    // a no-op stop token on libcs that lack std::jthread.
     if (build_thread_.joinable()) {
         build_thread_.request_stop();
         build_thread_.join();
@@ -244,12 +244,13 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
     }
 
     // If a previous build thread finished and was never reaped, join it now to
-    // keep jthread's invariants clean before we start a new one.
+    // keep jthread-compatible invariants clean before we start a new one.
     if (build_thread_.joinable()) {
         build_thread_.join();
     }
 
-    build_thread_ = std::jthread([this, repo = std::move(repo)](std::stop_token stop) mutable {
+    build_thread_ = yams::compat::jthread([this, repo = std::move(repo)](
+                                              yams::compat::stop_token stop) mutable {
         const auto t0 = std::chrono::steady_clock::now();
 
         auto idsResult = repo->getAllFts5IndexedDocumentIds();

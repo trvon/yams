@@ -119,6 +119,10 @@ public:
         return Error{ErrorCode::NotFound, "retrieveBytes disabled for test"};
     }
 
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string&, std::size_t) override {
+        return Error{ErrorCode::NotFound, "retrieveBytesPrefix disabled for test"};
+    }
+
     Result<RawContent> retrieveRaw(const std::string& hash) override {
         return inner_->retrieveRaw(hash);
     }

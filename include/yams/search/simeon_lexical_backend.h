@@ -1,5 +1,6 @@
 #pragma once
 
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 
 #include <simeon/fragment_geometry.hpp>
@@ -162,10 +163,10 @@ private:
     std::atomic<bool> ready_{false};
     std::atomic<bool> building_{false};
 
-    // Owning handle for the background build. jthread's destructor requests
-    // stop and joins, guaranteeing the thread never outlives this instance
-    // (which would be a use-after-free on the captured `this` pointer).
-    std::jthread build_thread_;
+    // Owning handle for the background build. compat::jthread uses native
+    // std::jthread where available and falls back to an auto-joining
+    // std::thread on libc++/SDK combinations that do not expose jthread.
+    yams::compat::jthread build_thread_;
 
     // Populated by the background build thread; published once ready_ is
     // stored with release order.

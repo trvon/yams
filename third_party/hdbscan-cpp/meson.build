@@ -14,20 +14,22 @@ hdbscan_sources = files(
 
 hdbscan_inc = include_directories('HDBSCAN-CPP', is_system: true)
 
+hdbscan_warning_args = cpp.get_supported_arguments([
+  '-Wno-unused-parameter',
+  '-Wno-unused-variable',
+  '-Wno-unused-but-set-variable',
+  '-Wno-sign-compare',
+  '-Wno-reorder',
+  '-Wno-shadow',
+  '-Wno-deprecated-declarations',
+])
+
 hdbscan_lib = static_library(
   'yams_hdbscan_cpp',
   hdbscan_sources,
   include_directories: hdbscan_inc,
   install: false,
-  cpp_args: [
-    '-Wno-unused-parameter',
-    '-Wno-unused-variable',
-    '-Wno-unused-but-set-variable',
-    '-Wno-sign-compare',
-    '-Wno-reorder',
-    '-Wno-shadow',
-    '-Wno-deprecated-declarations',
-  ],
+  cpp_args: hdbscan_warning_args,
 )
 
 hdbscan_dep = declare_dependency(
