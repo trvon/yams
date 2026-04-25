@@ -1227,7 +1227,7 @@ public:
                                                 document_hash, candidate_hashes, metadata_filters);
             }
 
-            {
+            if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureVec0ReadyUnlocked(query_dim);
@@ -1250,7 +1250,9 @@ public:
                                                 document_hash, candidate_hashes, metadata_filters);
             }
 
-            {
+            if (!simeon_pq_ready_dims_.contains(query_dim) ||
+                simeon_pq_dirty_dims_.contains(query_dim) ||
+                !simeon_pq_indices_.contains(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureSimeonPqReadyUnlocked(query_dim);
@@ -1291,7 +1293,7 @@ public:
         }
 
         if (usesVec0SearchEngine()) {
-            {
+            if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureVec0ReadyUnlocked(query_dim);
@@ -1315,7 +1317,9 @@ public:
         }
 
         if (usesSimeonPqSearchEngine()) {
-            {
+            if (!simeon_pq_ready_dims_.contains(query_dim) ||
+                simeon_pq_dirty_dims_.contains(query_dim) ||
+                !simeon_pq_indices_.contains(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureSimeonPqReadyUnlocked(query_dim);

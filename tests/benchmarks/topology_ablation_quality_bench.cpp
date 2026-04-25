@@ -64,6 +64,7 @@ struct LabeledQuery {
     std::string query;
     std::set<std::string> relevantFiles;
     std::map<std::string, int> relevanceGrades;
+    std::string dataset;
 };
 
 struct DocSpec {
@@ -168,6 +169,7 @@ struct FixtureConfig {
     int tangentialPerTopic = 3;
     int noiseDocs = 12;
     std::string beirDataset = "nfcorpus";
+    std::vector<std::string> beirDatasets;
     fs::path beirCacheDir;
     int beirMaxQueries = 0;
     bool useSimeonEmbeddings = false;
@@ -210,6 +212,26 @@ FixtureConfig fixtureConfigFromEnv() {
     cfg.noiseDocs = readEnvInt("YAMS_BENCH_NOISE_DOCS", cfg.noiseDocs);
     if (const char* raw = std::getenv("YAMS_BENCH_BEIR_DATASET"); raw && *raw) {
         cfg.beirDataset = raw;
+    }
+    if (const char* raw = std::getenv("YAMS_BENCH_BEIR_DATASETS"); raw && *raw) {
+        std::string list(raw);
+        std::string token;
+        for (char c : list) {
+            if (c == ',' || c == ' ') {
+                if (!token.empty()) {
+                    cfg.beirDatasets.push_back(token);
+                    token.clear();
+                }
+            } else {
+                token.push_back(c);
+            }
+        }
+        if (!token.empty()) {
+            cfg.beirDatasets.push_back(token);
+        }
+        if (!cfg.beirDatasets.empty()) {
+            cfg.mode = FixtureMode::Beir;
+        }
     }
     if (const char* raw = std::getenv("YAMS_BENCH_BEIR_CACHE_DIR"); raw && *raw) {
         cfg.beirCacheDir = raw;
@@ -438,6 +460,99 @@ yams::Result<Fixture> buildBeirFixture(const fs::path& root, const FixtureConfig
     return fx;
 }
 
+yams::Result<Fixture> buildBeirCombinedFixture(const fs::path& root, const FixtureConfig& cfg) {
+    Fixture fx;
+    fx.corpusDir = root / "corpus";
+    fs::create_directories(fx.corpusDir);
+
+    if (cfg.beirDatasets.empty()) {
+        return yams::Error{yams::ErrorCode::InvalidArgument, "beirDatasets is empty"};
+    }
+
+    std::unordered_set<std::string> usedFilenames;
+
+    for (const auto& dataset : cfg.beirDatasets) {
+        fs::path cacheDir;
+        if (const char* home = std::getenv("HOME"); home && *home) {
+            cacheDir = fs::path(home) / ".cache" / "yams" / "benchmarks" / dataset;
+        }
+        auto loaded = yams::bench::loadBEIRDataset(dataset, cacheDir);
+        if (!loaded) {
+            spdlog::warn("BEIR combined: failed to load {}: {}", dataset, loaded.error().message);
+            return loaded.error();
+        }
+        const auto& ds = loaded.value();
+
+        std::unordered_map<std::string, std::string> docIdToFilename;
+        docIdToFilename.reserve(ds.documents.size());
+        for (const auto& [docId, doc] : ds.documents) {
+            std::string base = dataset + "__" + sanitizeBeirId(docId);
+            std::string fn = base + ".txt";
+            int suffix = 1;
+            while (usedFilenames.count(fn) > 0) {
+                fn = base + "_" + std::to_string(suffix++) + ".txt";
+            }
+            usedFilenames.insert(fn);
+            std::string content;
+            if (!doc.title.empty()) {
+                content = doc.title;
+                content.append("\n\n");
+            }
+            content.append(doc.text);
+            std::ofstream(fx.corpusDir / fn) << content;
+            fx.docs.push_back({fn, std::move(content), dataset, 0});
+            docIdToFilename.emplace(docId, std::move(fn));
+        }
+
+        std::vector<std::string> queryIds;
+        queryIds.reserve(ds.queries.size());
+        for (const auto& [qid, _] : ds.queries) {
+            if (ds.qrels.find(qid) != ds.qrels.end()) {
+                queryIds.push_back(qid);
+            }
+        }
+        if (cfg.beirMaxQueries > 0 && static_cast<int>(queryIds.size()) > cfg.beirMaxQueries) {
+            queryIds.resize(static_cast<std::size_t>(cfg.beirMaxQueries));
+        }
+
+        std::size_t addedQueries = 0;
+        for (const auto& qid : queryIds) {
+            const auto qIt = ds.queries.find(qid);
+            if (qIt == ds.queries.end()) {
+                continue;
+            }
+            LabeledQuery q;
+            q.query = qIt->second.text;
+            q.dataset = dataset;
+            auto range = ds.qrels.equal_range(qid);
+            bool hasRelevant = false;
+            for (auto it = range.first; it != range.second; ++it) {
+                const auto& [docId, grade] = it->second;
+                if (grade <= 0) {
+                    continue;
+                }
+                auto fnIt = docIdToFilename.find(docId);
+                if (fnIt == docIdToFilename.end()) {
+                    continue;
+                }
+                q.relevantFiles.insert(fnIt->second);
+                q.relevanceGrades[fnIt->second] = grade;
+                hasRelevant = true;
+            }
+            if (hasRelevant) {
+                fx.queries.push_back(std::move(q));
+                ++addedQueries;
+            }
+        }
+        spdlog::info("BEIR combined: {} -> {} docs, {} queries with qrels", dataset,
+                     ds.documents.size(), addedQueries);
+    }
+
+    spdlog::info("BEIR combined fixture total: {} docs, {} queries across {} datasets",
+                 fx.docs.size(), fx.queries.size(), cfg.beirDatasets.size());
+    return fx;
+}
+
 double computeDCG(const std::vector<int>& grades, int k) {
     double dcg = 0.0;
     const int bound = std::min(k, static_cast<int>(grades.size()));
@@ -502,6 +617,9 @@ struct QualityMetrics {
     std::vector<std::string> embeddingStatuses;
     std::vector<std::uint64_t> vectorDbDims;
     std::vector<std::uint64_t> queryEmbeddingDims;
+
+    std::map<std::string, double> ndcgAtKByDataset;
+    std::map<std::string, int> numQueriesByDataset;
 };
 
 double computeNdcgFromRankedDocIds(const std::vector<std::string>& rankedDocIds,
@@ -569,7 +687,20 @@ fs::path benchFixtureDir() {
 }
 
 std::string fixtureKey(const FixtureConfig& cfg) {
-    std::string corpus = cfg.mode == FixtureMode::Beir ? cfg.beirDataset : "synthetic";
+    std::string corpus;
+    if (cfg.mode == FixtureMode::Beir) {
+        if (!cfg.beirDatasets.empty()) {
+            corpus = "combined";
+            for (const auto& ds : cfg.beirDatasets) {
+                corpus += "-";
+                corpus += ds;
+            }
+        } else {
+            corpus = cfg.beirDataset;
+        }
+    } else {
+        corpus = "synthetic";
+    }
     std::string backend = configUsesRealEmbeddings(cfg) ? "simeon" : "mock";
     return corpus + "_" + backend;
 }
@@ -1150,7 +1281,12 @@ double evaluateAtK(DaemonClient& client, const LabeledQuery& q, int k,
         }
         double dcg = computeDCG(retrievedGrades, k);
         double idcg = computeIDCG(allGrades, k);
-        acc.ndcgAtK += (idcg > 0.0) ? dcg / idcg : 0.0;
+        const double ndcg = (idcg > 0.0) ? dcg / idcg : 0.0;
+        acc.ndcgAtK += ndcg;
+        if (!q.dataset.empty()) {
+            acc.ndcgAtKByDataset[q.dataset] += ndcg;
+            acc.numQueriesByDataset[q.dataset] += 1;
+        }
     }
     return recallHere;
 }
@@ -1179,6 +1315,12 @@ QualityMetrics evaluate(DaemonClient& client, const Fixture& fx, const std::stri
     }
     if (m.vectorComponentQueries > 0) {
         m.ndcgAtKVectorOnly /= m.vectorComponentQueries;
+    }
+    for (auto& [ds, sum] : m.ndcgAtKByDataset) {
+        const auto qit = m.numQueriesByDataset.find(ds);
+        if (qit != m.numQueriesByDataset.end() && qit->second > 0) {
+            sum /= qit->second;
+        }
     }
     if (!m.tier1FingerprintJoined.empty()) {
         const auto& joined = m.tier1FingerprintJoined;
@@ -1496,7 +1638,9 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
 
         Fixture fx;
         if (cfg.mode == FixtureMode::Beir) {
-            auto fxRes = buildBeirFixture(harness.rootDir(), cfg);
+            auto fxRes = !cfg.beirDatasets.empty()
+                             ? buildBeirCombinedFixture(harness.rootDir(), cfg)
+                             : buildBeirFixture(harness.rootDir(), cfg);
             if (!fxRes) {
                 spdlog::warn("BEIR fixture build failed: {}", fxRes.error().message);
                 outcome.fixtureStatus = "missing";
@@ -2142,13 +2286,16 @@ TEST_CASE("[!benchmark][topology-ablation-quality] axis-8 cluster engine sweep",
     if (tier == "XL" || tier == "XXL") {
         cfg.mode = FixtureMode::Beir;
         cfg.useSimeonEmbeddings = true;
-        if (const char* raw = std::getenv("YAMS_BENCH_BEIR_DATASET"); !(raw && *raw)) {
-            cfg.beirDataset = (tier == "XL") ? "nfcorpus" : "scifact";
-        }
-        if (cfg.beirCacheDir.empty() || cfg.beirCacheDir.filename().string() != cfg.beirDataset) {
-            if (const char* home = std::getenv("HOME"); home && *home) {
-                cfg.beirCacheDir =
-                    fs::path(home) / ".cache" / "yams" / "benchmarks" / cfg.beirDataset;
+        if (cfg.beirDatasets.empty()) {
+            if (const char* raw = std::getenv("YAMS_BENCH_BEIR_DATASET"); !(raw && *raw)) {
+                cfg.beirDataset = (tier == "XL") ? "nfcorpus" : "scifact";
+            }
+            if (cfg.beirCacheDir.empty() ||
+                cfg.beirCacheDir.filename().string() != cfg.beirDataset) {
+                if (const char* home = std::getenv("HOME"); home && *home) {
+                    cfg.beirCacheDir =
+                        fs::path(home) / ".cache" / "yams" / "benchmarks" / cfg.beirDataset;
+                }
             }
         }
     } else if (tier == "L+") {
@@ -2218,6 +2365,15 @@ TEST_CASE("[!benchmark][topology-ablation-quality] axis-8 cluster engine sweep",
             {"feature_smoothing_hops", (cell.engine == "hdbscan") ? featureSmoothingHops : 0},
         };
         record.update(toCellJson(outcome));
+        if (!cfg.beirDatasets.empty()) {
+            record["beir_datasets"] = cfg.beirDatasets;
+            for (const auto& [ds, ndcg] : outcome.metrics.ndcgAtKByDataset) {
+                record["ndcg_at_k_dataset_" + ds] = ndcg;
+            }
+            for (const auto& [ds, n] : outcome.metrics.numQueriesByDataset) {
+                record["num_queries_dataset_" + ds] = n;
+            }
+        }
         emitRecord(outputPath, record);
     }
 }
