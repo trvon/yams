@@ -314,13 +314,6 @@ public:
 
     // Embedding batch tuning knobs (used by vector::EmbeddingService)
     static double embedSafety() { return embedSafety_.load(std::memory_order_relaxed); }
-    static void setEmbedSafety(double v) {
-        if (v < 0.5)
-            v = 0.5;
-        if (v > 0.95)
-            v = 0.95;
-        embedSafety_.store(v, std::memory_order_relaxed);
-    }
     static std::size_t embedDocCap() {
         std::size_t ov = embedDocCap_.load(std::memory_order_relaxed);
         if (ov != 0)
@@ -351,11 +344,7 @@ public:
             return static_cast<std::size_t>(*envValue);
         return 0;
     }
-    static void setEmbedJobDocCap(std::size_t v) {
-        embedJobDocCap_.store(v, std::memory_order_relaxed);
-    }
     static unsigned embedPauseMs() { return embedPauseMs_.load(std::memory_order_relaxed); }
-    static void setEmbedPauseMs(unsigned v) { embedPauseMs_.store(v, std::memory_order_relaxed); }
 
     // Chunk size for IPC streaming (bytes). Default 512 KiB.
     static uint32_t chunkSize() {
@@ -1037,10 +1026,6 @@ public:
         }
         return 4;
     }
-    static void setPostIngestRpcMaxPerBatch(uint32_t v) {
-        postIngestRpcMaxPerBatchOverride_.store(v, std::memory_order_relaxed);
-    }
-
     // Post-ingest batching size. Env override: YAMS_POST_INGEST_BATCH_SIZE
     // Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
     // Dynamically scales down when DB lock contention is detected.
@@ -1103,10 +1088,6 @@ public:
         }
         return def;
     }
-    static void setIpcTimeoutMs(uint32_t ms) {
-        ipcTimeoutMsOverride_.store(ms, std::memory_order_relaxed);
-    }
-
     // Timeout for streaming chunk production (ms). When nonzero, a streaming
     // response will be failed with a Timeout error if next_chunk() exceeds this
     // limit. Default 30000ms; env: YAMS_STREAM_CHUNK_TIMEOUT_MS. Range clamp
@@ -1126,9 +1107,6 @@ public:
             }
         }
         return def;
-    }
-    static void setStreamChunkTimeoutMs(uint32_t ms) {
-        streamChunkTimeoutMsOverride_.store(ms, std::memory_order_relaxed);
     }
     // -------- New centralized tuning getters (env-driven) --------
     // Backpressure read pause when receiver is backpressured (ms). Default 10.
@@ -1404,9 +1382,6 @@ public:
         }
         return def;
     }
-    static void setPoolLowWatermarkPercent(uint32_t v) {
-        poolLowWatermarkPctOverride_.store(v, std::memory_order_relaxed);
-    }
     static uint32_t poolHighWatermarkPercent() {
         uint32_t ov = poolHighWatermarkPctOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
@@ -1423,10 +1398,6 @@ public:
         }
         return def;
     }
-    static void setPoolHighWatermarkPercent(uint32_t v) {
-        poolHighWatermarkPctOverride_.store(v, std::memory_order_relaxed);
-    }
-
     // -------- Connection slot dynamic sizing (PBI-085) --------
     // Minimum connection slots (floor for dynamic resizing). Default 256.
     // Environment: YAMS_CONN_SLOTS_MIN (range 1..1024)
@@ -1519,10 +1490,6 @@ public:
 
         return static_cast<uint32_t>(computed);
     }
-    static void setConnectionSlotsTarget(uint32_t v) {
-        connectionSlotsTargetOverride_.store(v, std::memory_order_relaxed);
-    }
-
     static uint32_t searchConcurrencyLimit() {
         uint32_t ov = searchConcurrencyOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
@@ -1538,10 +1505,6 @@ public:
         }
         return defaultReadPathCapacityModel(hardwareConcurrency()).searchConcurrencyLimit;
     }
-    static void setSearchConcurrencyLimit(uint32_t v) {
-        searchConcurrencyOverride_.store(v, std::memory_order_relaxed);
-    }
-
     static uint32_t readPoolMaxConnections(uint32_t configuredMax) {
         return defaultReadPoolMaxConnectionsForHw(hardwareConcurrency(), configuredMax);
     }
@@ -1742,10 +1705,6 @@ public:
         }
         return 32;
     }
-    static void setIngestBacklogPerWorker(uint32_t v) {
-        ingestBacklogPerWorkerOverride_.store(v == 0 ? 1 : v, std::memory_order_relaxed);
-    }
-
     // Internal Event Bus toggles (config-driven)
     static bool useInternalBusForRepair() {
         return useInternalBusRepair_.load(std::memory_order_relaxed);
@@ -1777,10 +1736,6 @@ public:
         }
         return 10;
     }
-    static void setIoThreadCount(uint32_t v) {
-        ioThreadCountOverride_.store(v, std::memory_order_relaxed);
-    }
-
     /// Main-socket absolute connection lifetime in seconds (default 300).
     /// 0 disables lifetime-based forced close.
     /// Environment: YAMS_CONNECTION_LIFETIME_S
@@ -1825,10 +1780,6 @@ public:
         }
         return true;
     }
-    static void setEnablePriorityQueue(bool en) {
-        enablePriorityQueueOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
-    }
-
     static uint32_t maxIdleTimeouts() {
         uint32_t ov = maxIdleTimeoutsOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
@@ -1844,10 +1795,6 @@ public:
         }
         return 12;
     }
-    static void setMaxIdleTimeouts(uint32_t v) {
-        maxIdleTimeoutsOverride_.store(v, std::memory_order_relaxed);
-    }
-
     static uint32_t checkpointIntervalSeconds() {
         uint32_t ov = checkpointIntervalSecondsOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
@@ -1863,10 +1810,6 @@ public:
         }
         return 300;
     }
-    static void setCheckpointIntervalSeconds(uint32_t v) {
-        checkpointIntervalSecondsOverride_.store(v, std::memory_order_relaxed);
-    }
-
     static uint32_t checkpointInsertThreshold() {
         uint32_t ov = checkpointInsertThresholdOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
@@ -1882,10 +1825,6 @@ public:
         }
         return 1000;
     }
-    static void setCheckpointInsertThreshold(uint32_t v) {
-        checkpointInsertThresholdOverride_.store(v, std::memory_order_relaxed);
-    }
-
     static bool enableHotzoneCheckpoint() {
         int ov = enableHotzoneCheckpointOverride_.load(std::memory_order_relaxed);
         if (ov >= 0)
@@ -1900,10 +1839,6 @@ public:
         }
         return false;
     }
-    static void setEnableHotzoneCheckpoint(bool en) {
-        enableHotzoneCheckpointOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
-    }
-
     // =========================================================================
     // PBI-05a: PostIngestQueue Dynamic Concurrency Scaling
     // =========================================================================
@@ -3050,10 +2985,6 @@ public:
         }
         return 500;
     }
-    static void setModelEvictionCooldownMs(uint32_t ms) {
-        modelEvictionCooldownMsOverride_.store(ms, std::memory_order_relaxed);
-    }
-
     // =========================================================================
     // Gradient Limiter Configuration (Netflix Gradient2 Algorithm)
     // =========================================================================

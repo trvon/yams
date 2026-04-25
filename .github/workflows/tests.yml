@@ -60,6 +60,18 @@ jobs:
             BASE="HEAD^"
           fi
 
+          # Push events can report a `before` SHA that is no longer reachable
+          # after a force-push/rewrite. In that case, fall back to the checked
+          # out parent instead of failing before cppcheck runs.
+          if [[ -n "$BASE" ]] && ! git rev-parse --verify "${BASE}^{commit}" >/dev/null 2>&1; then
+            echo "Diff base '$BASE' is not available in this checkout; falling back to HEAD^."
+            if git rev-parse HEAD^ >/dev/null 2>&1; then
+              BASE="HEAD^"
+            else
+              BASE=""
+            fi
+          fi
+
           if [[ -n "$BASE" ]]; then
             scripts/check-quality.sh --profile ci --format human --parallel --diff-base "$BASE"
           else

@@ -570,4 +570,4 @@ TEST_CASE("Component processing", "[component][process]") {
 ---
 
 **Document maintained by:** YAMS Testing Infrastructure  
-**Questions/Updates:** Create issue in PBI-068
+**Questions/Updates:** Create issue in the relevant tracking issue

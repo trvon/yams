@@ -93,7 +93,6 @@ class AbiPluginLoader;
 class ExternalPluginHost;
 class IModelProvider;
 class RetrievalSessionManager;
-class WorkerPool;
 class TuningManager;
 class CheckpointManager;
 class VectorIndexCoordinator;
@@ -170,11 +169,8 @@ public:
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
         return vectorSystemManager_ ? vectorSystemManager_->getVectorDatabase() : nullptr;
     }
-    std::shared_ptr<WorkerPool> getWorkerPool() const { return nullptr; }
     WorkCoordinator* getWorkCoordinator() const { return workCoordinator_.get(); }
     boost::asio::any_io_executor getCliExecutor() const;
-    // Resize the worker pool to a target size; creates pool on demand.
-    bool resizeWorkerPool(std::size_t target);
     std::shared_ptr<PostIngestQueue> getPostIngestQueue() const {
         return std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
     }
@@ -508,9 +504,6 @@ public:
         return vectorDb ? vectorDb->getConfig().database_path : std::string{};
     }
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");
-    Result<size_t> adoptContentExtractorsFromHosts();
-    Result<size_t> adoptSymbolExtractorsFromHosts();
-    Result<size_t> adoptEntityExtractorsFromHosts();
     bool isEmbeddingsAutoOnAdd() const { return embeddingLifecycle_.isAutoOnAdd(); }
 
     boost::asio::awaitable<Result<size_t>> autoloadPluginsNow();

@@ -20,7 +20,7 @@
 - Snapshot management with Merkle tree diffs and rename detection
 - WAL-backed durability, high-throughput I/O, thread-safe
 - CLI, MCP server, and C-ABI plugins (ONNX/GLiNER/ColBERT, S3 storage, PDF via ZYP)
-- Interactive relevance tuning: [`yams tune`](docs/guides/interactive-tuning.md)
+- Interactive relevance tuning through CLI tuning and doctor workflows
 
 ## Documentation
 
@@ -107,7 +107,7 @@ yams serve
 }
 ```
 
-Tool reference and Claude Desktop setup: [docs/user_guide/mcp.md](docs/user_guide/mcp.md).
+Tool reference and MCP client setup: [docs/user_guide/mcp.md](docs/user_guide/mcp.md).
 
 ## Plugins
 
@@ -161,7 +161,7 @@ Requirements: no model file, no ONNX embedding runtime, no external runtime deps
 
 ONNX remains relevant for optional plugin paths such as GLiNER and ColBERT, not for the default retrieval embedding flow.
 
-Benchmarks and A/B vs legacy ONNX/MiniLM: [docs/benchmarks/simeon_vs_onnx_embedding_ab.md](docs/benchmarks/simeon_vs_onnx_embedding_ab.md).
+Benchmark summaries are maintained under [docs/benchmarks/](docs/benchmarks/).
 
 ## Troubleshooting
 

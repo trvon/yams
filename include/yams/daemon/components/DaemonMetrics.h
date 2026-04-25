@@ -530,6 +530,8 @@ private:
     void dispatchPhysicalWalk() const;
     void dispatchDetailedCollect() const;
     void dispatchStoreStatsRefresh() const;
+    void dispatchOffStrand(std::atomic<bool>& guard, const char* name,
+                           std::function<void()> op) const;
 
     // TTL cache for expensive document counts (avoid blocking DB queries on hot path)
     mutable std::chrono::steady_clock::time_point lastDocCountsAt_{};

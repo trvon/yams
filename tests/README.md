@@ -322,8 +322,6 @@ ASSERT_TRUE(addRes);
 
 `createSearchCorpus` returns both a flat list (`corpus.fixtures`) and a topic map (`corpus.fixturesByTopic`) so callers can pick targeted subsets (for example `topic:python`). All artifacts live under `FixtureManager::root()` and are removed when the manager is destroyed.
 
-> See `docs/delivery/028/artifacts/search-fixture-benchmark.md` for a command-line flow that uses the same presets to benchmark `yams search` end to end.
-
 > **Tip:** Integration smoke tests (daemon ingestion) and metadata-heavy unit suites (search service) are wired to `FixtureManager`; prefer extending those helpers over ad-hoc `std::ofstream` usage when adding new file-backed scenarios.
 
 ## Code Coverage

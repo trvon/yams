@@ -1353,18 +1353,9 @@ void ServiceManager::shutdown() {
             databaseManager_.reset();
             spdlog::info("[ServiceManager] Phase 6.9.5: DatabaseManager reset");
         }
+        database_.reset();
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 6.9.5: Exception resetting DatabaseManager");
-    }
-
-    spdlog::info("[ServiceManager] Phase 7: Database shutdown delegated to DatabaseManager");
-    try {
-        if (database_) {
-            database_->close();
-            database_.reset();
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("[ServiceManager] Phase 7: Legacy database close failed: {}", e.what());
     }
 
     // Release all remaining resources
@@ -1412,20 +1403,6 @@ void ServiceManager::shutdown() {
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting VectorSystemManager");
     }
-    try {
-        if (databaseManager_) {
-            databaseManager_->shutdown();
-            databaseManager_.reset();
-            spdlog::info("[ServiceManager] Phase 9.3: DatabaseManager reset");
-        } else {
-            spdlog::info("[ServiceManager] Phase 9.3: DatabaseManager already reset");
-        }
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 9.3: Exception resetting DatabaseManager");
-    }
-    // Phase 9.4: WALManager shutdown is now handled by DatabaseManager::shutdown()
-    // (invoked in Phase 9.3 above).
-
     spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
     try {
         abiPluginLoader_.reset();
@@ -2789,89 +2766,6 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
     return Result<bool>(false);
 }
 
-// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
-Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
-    if (pluginManager_) {
-        auto result = pluginManager_->adoptContentExtractors();
-        if (result) {
-            // Sync local copy for PostIngestQueue and AppContext
-            contentExtractors_ = pluginManager_->getContentExtractors();
-            spdlog::info("[ServiceManager] Synced {} content extractors from PluginManager",
-                         contentExtractors_.size());
-
-            // Update PostIngestQueue with the newly adopted extractors
-            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
-            if (piq) {
-                piq->setExtractors(contentExtractors_);
-                spdlog::info("[ServiceManager] Updated PostIngestQueue with {} extractors",
-                             contentExtractors_.size());
-            }
-        }
-        return result;
-    }
-    spdlog::warn("[Plugin] PluginManager not initialized");
-    return Result<size_t>(0);
-}
-
-// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
-Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
-    if (pluginManager_) {
-        auto result = pluginManager_->adoptSymbolExtractors();
-        if (result && result.value() > 0) {
-            // Build extension-to-language map from symbol extractors and pass to PostIngestQueue
-            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
-            if (piq) {
-                std::unordered_map<std::string, std::string> extMap;
-                const auto& extractors = pluginManager_->getSymbolExtractors();
-                for (const auto& extractor : extractors) {
-                    if (!extractor)
-                        continue;
-                    auto supported = extractor->getSupportedExtensions();
-                    for (const auto& [ext, lang] : supported) {
-                        extMap[ext] = lang;
-                    }
-                }
-                auto mapSize = extMap.size();
-                piq->setSymbolExtensionMap(std::move(extMap));
-                spdlog::info(
-                    "[ServiceManager] Updated PostIngestQueue with {} symbol extension mappings",
-                    mapSize);
-            }
-        }
-        return result;
-    }
-    spdlog::warn("[Plugin] PluginManager not initialized");
-    return Result<size_t>(0);
-}
-
-// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
-Result<size_t> ServiceManager::adoptEntityExtractorsFromHosts() {
-    if (pluginManager_) {
-        auto result = pluginManager_->adoptEntityExtractors();
-        if (result) {
-            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
-            if (piq) {
-                auto extractor = createGlinerExtractionFunc(pluginManager_->getEntityExtractors());
-                if (!extractor) {
-                    spdlog::warn("[ServiceManager] GLiNER extraction func is null — title "
-                                 "extraction will be disabled (no entity extractors found)");
-                }
-                piq->setTitleExtractor(std::move(extractor));
-                spdlog::info("[ServiceManager] Updated PostIngestQueue title extractor using {} "
-                             "entity extractors",
-                             pluginManager_->getEntityExtractors().size());
-            }
-
-            if (auto engine = getSearchEngineSnapshot()) {
-                wireSearchEngineRuntimeAdapters(engine, "ServiceManager");
-            }
-        }
-        return result;
-    }
-    spdlog::warn("[Plugin] PluginManager not initialized");
-    return Result<size_t>(0);
-}
-
 boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
     if (workCoordinator_)
         return workCoordinator_->getExecutor();
@@ -2897,21 +2791,6 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
         spdlog::info("[{}] GLiNER concept extractor wired to search engine", contextLabel);
     } else {
         spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
-    }
-}
-
-bool ServiceManager::resizeWorkerPool(std::size_t target) {
-    try {
-        if (target == 0)
-            target = 1;
-        // With the new architecture, we don't dynamically resize worker pools
-        // The worker count is fixed at construction time
-        spdlog::debug("resizeWorkerPool called with target {} (ignored in new architecture)",
-                      target);
-        return false; // No change made
-    } catch (const std::exception& e) {
-        spdlog::warn("resizeWorkerPool error: {}", e.what());
-        return false;
     }
 }
 

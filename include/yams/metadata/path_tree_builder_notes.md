@@ -1,6 +1,6 @@
 # Path Tree Builder Helper Notes
 
-Sketch helper signatures needed for PBI 051 path-tree prototype.
+Sketch helper signatures needed for path-tree prototype.
 
 - `PathTreeNode` struct (ids, parentId sentinel, pathSegment, fullPath, docCount, centroidWeight).
 - Repository helpers (likely on `MetadataRepository` or a facade):

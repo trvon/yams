@@ -11,6 +11,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  ZIG_VERSION: 0.15.2
 
 permissions:
   contents: read
@@ -140,6 +141,7 @@ jobs:
             YAMS_VERSION=${{ steps.version.outputs.version }}
             GIT_COMMIT=${{ github.sha }}
             GIT_TAG=${{ github.ref_name }}
+            ZIG_VERSION=${{ env.ZIG_VERSION }}
           # Use GitHub Actions cache for BuildKit layers (scoped per arch)
           cache-from: type=gha,scope=docker-${{ runner.os }}-amd64
           cache-to: type=gha,mode=max,scope=docker-${{ runner.os }}-amd64
@@ -271,6 +273,7 @@ jobs:
             YAMS_VERSION=${{ steps.version.outputs.version }}
             GIT_COMMIT=${{ github.sha }}
             GIT_TAG=${{ github.ref_name }}
+            ZIG_VERSION=${{ env.ZIG_VERSION }}
           # Use GitHub Actions cache for BuildKit layers (scoped per arch)
           cache-from: type=gha,scope=docker-${{ runner.os }}-arm64
           cache-to: type=gha,mode=max,scope=docker-${{ runner.os }}-arm64

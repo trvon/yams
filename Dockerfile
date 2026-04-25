@@ -5,6 +5,7 @@
 FROM ubuntu:24.04 AS deps
 # FROM debian:trixie-slim AS deps
 ARG DEBIAN_FRONTEND=noninteractive
+ARG ZIG_VERSION=0.15.2
 RUN set -eux; \
   for i in 1 2 3; do \
   apt-get update && \
@@ -30,7 +31,8 @@ RUN set -eux; \
   rustup set auto-self-update disable && \
   rustc --version && cargo --version
 
-# Install Zig 0.15.2 stable for zyp PDF plugin
+# Install Zig 0.15.x for zyp PDF plugin.
+# zpdf is not Zig 0.16-compatible yet, so fail fast if this pin is overridden.
 RUN set -eux; \
   ARCH=$(uname -m); \
   case "$ARCH" in \
@@ -38,7 +40,10 @@ RUN set -eux; \
   aarch64) ZIG_ARCH="aarch64" ;; \
   *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
   esac; \
-  ZIG_VERSION="0.15.2"; \
+  case "${ZIG_VERSION}" in \
+  0.15.*) ;; \
+  *) echo "Unsupported Zig version ${ZIG_VERSION}; zpdf requires Zig 0.15.x"; exit 1 ;; \
+  esac; \
   curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
   tar -xJf /tmp/zig.tar.xz -C /opt && \
   mv /opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION} /opt/zig && \

@@ -5,10 +5,22 @@ if not get_option('plugin-zyp')
   subdir_done()
 endif
 
-# Find Zig compiler (requires 0.15.2+)
+# Find Zig compiler (requires 0.15.x; zpdf is not Zig 0.16-compatible yet)
 zig = find_program('zig', required: false)
 if not zig.found()
-  warning('Zig compiler not found, skipping zyp plugin. Install Zig 0.15.2+ to enable.')
+  warning('Zig compiler not found, skipping zyp plugin. Install Zig 0.15.x to enable.')
+  subdir_done()
+endif
+
+zig_version_result = run_command(zig, 'version', check: false)
+if zig_version_result.returncode() != 0
+  warning('Unable to determine Zig version, skipping zyp plugin.')
+  subdir_done()
+endif
+
+zig_version = zig_version_result.stdout().strip()
+if not (zig_version.version_compare('>=0.15.0') and zig_version.version_compare('<0.16.0'))
+  warning('Zig @0@ is unsupported by zyp; zpdf requires Zig 0.15.x. Skipping zyp plugin.'.format(zig_version))
   subdir_done()
 endif
 
