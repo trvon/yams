@@ -7,10 +7,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <thread>
 
 namespace yams::metadata {
 class MetadataRepository;
@@ -104,6 +107,13 @@ private:
     Dependencies deps_;
     Stats stats_;
     std::atomic<bool> running_{false};
+    // Path 1b fix: run the periodic checkpoint on a dedicated thread rather
+    // than on Dependencies::executor. Under heavy ingest the shared executor's
+    // thread pool saturates and an asio timer completion never gets picked up;
+    // the result is that no WAL checkpoint ever fires during bulk ingest.
+    std::thread checkpointThread_;
+    std::mutex cvMutex_;
+    std::condition_variable cv_;
 };
 
 } // namespace yams::daemon

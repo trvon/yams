@@ -39,8 +39,6 @@ namespace yams::daemon {
 // and basic range clamps. Header-only to avoid init-order issues.
 class TuneAdvisor {
 public:
-    enum class AutoEmbedPolicy { Never, Idle, Always };
-
     enum class Profile { Efficient, Balanced, Aggressive };
 
     // Resolve tuning profile (override -> env -> default Balanced).
@@ -223,17 +221,6 @@ private:
 
 public:
     // -------- Runtime-tunable policy (defaults chosen conservatively) --------
-    static AutoEmbedPolicy autoEmbedPolicy() {
-        return autoEmbedPolicy_.load(std::memory_order_relaxed);
-    }
-    static void setAutoEmbedPolicy(AutoEmbedPolicy p) {
-        autoEmbedPolicy_.store(p, std::memory_order_relaxed);
-    }
-
-    static double cpuIdleThresholdPercent() { return cpuIdlePct_.load(std::memory_order_relaxed); }
-    static void setCpuIdleThresholdPercent(double v) {
-        cpuIdlePct_.store(v, std::memory_order_relaxed);
-    }
 
     /// CPU high threshold (%) for admission control. Profile-adjusted defaults:
     ///   Efficient:  50% (early throttling for usability)
@@ -323,13 +310,6 @@ public:
         double overage = currentCpuPct - threshold;
         int32_t delayMs = static_cast<int32_t>(std::llround(overage * 0.5));
         return std::clamp(delayMs, 2, 25);
-    }
-
-    static std::uint64_t muxBacklogHighBytes() {
-        return muxHighBytes_.load(std::memory_order_relaxed);
-    }
-    static void setMuxBacklogHighBytes(std::uint64_t v) {
-        muxHighBytes_.store(v, std::memory_order_relaxed);
     }
 
     // Embedding batch tuning knobs (used by vector::EmbeddingService)
@@ -1150,37 +1130,6 @@ public:
     static void setStreamChunkTimeoutMs(uint32_t ms) {
         streamChunkTimeoutMsOverride_.store(ms, std::memory_order_relaxed);
     }
-    static uint32_t mcpWorkerThreads() { return mcpWorkerThreads_.load(std::memory_order_relaxed); }
-    static void setMcpWorkerThreads(uint32_t n) {
-        mcpWorkerThreads_.store(n, std::memory_order_relaxed);
-    }
-
-    // KG batching control (code-level, default enabled)
-    static bool kgBatchEdgesEnabled() { return kgBatchEdges_.load(std::memory_order_relaxed); }
-    static void setKgBatchEdgesEnabled(bool e) {
-        kgBatchEdges_.store(e, std::memory_order_relaxed);
-    }
-    static bool kgBatchNodesEnabled() { return kgBatchNodes_.load(std::memory_order_relaxed); }
-    static void setKgBatchNodesEnabled(bool e) {
-        kgBatchNodes_.store(e, std::memory_order_relaxed);
-    }
-
-    // Analyzer toggles and caps
-    static bool analyzerUrls() { return analyzerUrls_.load(std::memory_order_relaxed); }
-    static void setAnalyzerUrls(bool e) { analyzerUrls_.store(e, std::memory_order_relaxed); }
-    static bool analyzerEmails() { return analyzerEmails_.load(std::memory_order_relaxed); }
-    static void setAnalyzerEmails(bool e) { analyzerEmails_.store(e, std::memory_order_relaxed); }
-    static bool analyzerFilePaths() { return analyzerFilePaths_.load(std::memory_order_relaxed); }
-    static void setAnalyzerFilePaths(bool e) {
-        analyzerFilePaths_.store(e, std::memory_order_relaxed);
-    }
-    static std::size_t maxEntitiesPerDoc() {
-        return maxEntitiesPerDoc_.load(std::memory_order_relaxed);
-    }
-    static void setMaxEntitiesPerDoc(std::size_t n) {
-        maxEntitiesPerDoc_.store(n, std::memory_order_relaxed);
-    }
-
     // -------- New centralized tuning getters (env-driven) --------
     // Backpressure read pause when receiver is backpressured (ms). Default 10.
     static uint32_t backpressureReadPauseMs() {
@@ -1699,19 +1648,6 @@ public:
     static double streamPageFactorLight3Mul() { return 1.5; }
     static std::size_t streamPageClampMin() { return 5; }
     static std::size_t streamPageClampMax() { return 50000; }
-
-    // General mux backlog fallback when no cap configured
-    static std::uint64_t muxBacklogHighFallbackBytes() {
-        std::uint64_t def = 64ull * 1024ull * 1024ull; // 64 MiB
-        if (const char* s = std::getenv("YAMS_MUX_HIGH_FALLBACK_BYTES")) {
-            try {
-                return static_cast<std::uint64_t>(std::stoull(s));
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
 
     // IO: desired average connections per thread before scaling up IO pool.
     // Default 8; override via YAMS_IO_CONN_PER_THREAD (range 1..1024).
@@ -2748,22 +2684,12 @@ private:
     }
 
     // Runtime policy storage (single process); defaults chosen to reduce CPU when busy
-    static inline std::atomic<AutoEmbedPolicy> autoEmbedPolicy_{AutoEmbedPolicy::Idle};
-    static inline std::atomic<double> cpuIdlePct_{25.0};
     static inline std::atomic<double> cpuHighPct_{0.0};
-    static inline std::atomic<std::uint64_t> muxHighBytes_{256ull * 1024ull * 1024ull};
     static inline std::atomic<double> embedSafety_{0.90};
     static inline std::atomic<std::size_t> embedDocCap_{0};    // 0 = no extra cap
     static inline std::atomic<std::size_t> embedJobDocCap_{0}; // 0 = use derived default
     static inline std::atomic<unsigned> embedPauseMs_{0};      // 0 = no pause
     static inline std::atomic<uint32_t> postIngestThreads_{0};
-    static inline std::atomic<uint32_t> mcpWorkerThreads_{0};
-    static inline std::atomic<bool> kgBatchEdges_{true};
-    static inline std::atomic<bool> kgBatchNodes_{true};
-    static inline std::atomic<bool> analyzerUrls_{true};
-    static inline std::atomic<bool> analyzerEmails_{true};
-    static inline std::atomic<bool> analyzerFilePaths_{false};
-    static inline std::atomic<std::size_t> maxEntitiesPerDoc_{32};
 
     // Overrides for config-driven tuning (0 or negative = unset)
     static inline std::atomic<uint32_t> backpressureReadPauseMsOverride_{0};

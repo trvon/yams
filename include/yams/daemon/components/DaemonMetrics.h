@@ -497,10 +497,39 @@ private:
     mutable std::uint64_t lastProcJiffies_{0};
     mutable std::uint64_t lastTotalJiffies_{0};
 
-    // TTL cache for physical storage scan
+    // TTL cache for physical storage scan.
+    // The disk walk can touch millions of CAS objects on large corpora. It is
+    // dispatched off the polling strand so a slow walk cannot starve snapshot
+    // publishes. At most one walk is in flight at any moment.
     mutable std::chrono::steady_clock::time_point lastPhysicalAt_{};
     mutable std::uint64_t lastPhysicalBytes_{0};
     uint32_t physicalTtlMs_{60000}; // default 60s; may be tuned via env later
+    mutable std::atomic<bool> physicalWalkInFlight_{false};
+    mutable std::atomic<bool> detailedCollectInFlight_{false};
+    mutable std::atomic<bool> storeStatsCollectInFlight_{false};
+    WorkCoordinator* coordinator_{nullptr};
+
+    // Cached ContentStore::getStats() result. cs->getStats() triggers a
+    // full-table aggregate on block_references via ReferenceCounter::getStats()
+    // — seconds on large corpora. Refreshed off the polling strand; readers
+    // (populateCommonSnapshot) use the cached value.
+    struct CachedStoreStats {
+        std::uint64_t totalObjects{0};
+        std::uint64_t totalBytes{0};
+        std::uint64_t totalUncompressedBytes{0};
+        std::uint64_t deduplicatedBytes{0};
+        std::uint64_t uniqueBlocks{0};
+        std::uint64_t compressionSaved{0};
+        double dedupRatio{0.0};
+        bool populated{false};
+    };
+    mutable CachedStoreStats cachedStoreStats_{};
+    mutable std::chrono::steady_clock::time_point lastStoreStatsAt_{};
+    uint32_t storeStatsTtlMs_{5000};
+
+    void dispatchPhysicalWalk() const;
+    void dispatchDetailedCollect() const;
+    void dispatchStoreStatsRefresh() const;
 
     // TTL cache for expensive document counts (avoid blocking DB queries on hot path)
     mutable std::chrono::steady_clock::time_point lastDocCountsAt_{};

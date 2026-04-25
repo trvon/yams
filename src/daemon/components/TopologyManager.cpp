@@ -125,11 +125,34 @@ bool TopologyManager::tryScheduleRebuild() {
     if (!autoRebuildEnabled_.load(std::memory_order_acquire)) {
         return false;
     }
+    // Audit-fix #1: throttle between rebuild completions. During bulk ingest,
+    // every embedding batch fires a tryScheduleRebuild via post_ingest_drain.
+    // Without throttling, the daemon spends most of its wall time running
+    // HDBSCAN on the growing corpus instead of ingesting docs (O(N²) total).
+    // The throttle delays scheduling a NEW rebuild until rebuildMinIntervalMs
+    // has elapsed since the last rebuild ENDED. Dirty hashes accumulate in
+    // dirtyHashes_; the next successful schedule picks them all up at once.
+    const auto throttleMs = rebuildMinIntervalMs_.load(std::memory_order_acquire);
+    if (throttleMs > 0) {
+        const auto nowSteadyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count();
+        const auto lastEndMs = lastRebuildEndSteadyMillis_.load(std::memory_order_acquire);
+        if (lastEndMs > 0 && (nowSteadyMs - lastEndMs) < throttleMs) {
+            return false;
+        }
+    }
     bool expected = false;
     return rebuildScheduled_.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
 }
 
 void TopologyManager::clearScheduled() {
+    // Audit-fix #1: stamp rebuild-end timestamp so the throttle window starts
+    // from the moment the prior rebuild finished (not from when it started).
+    lastRebuildEndSteadyMillis_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count(),
+                                      std::memory_order_release);
     rebuildScheduled_.store(false, std::memory_order_release);
 }
 

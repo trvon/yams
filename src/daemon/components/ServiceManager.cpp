@@ -339,6 +339,26 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         }
     }
 
+    // Audit-fix #1: throttle topology rebuild scheduling. During bulk ingest
+    // every embedding batch fires a `requestTopologyRebuild("post_ingest_drain")`
+    // and without throttling each rebuild starts immediately after the previous
+    // one finishes — turning O(N) ingest into O(N²) wall time because every
+    // rebuild runs HDBSCAN over the full corpus. Default 60s; set to 0 to
+    // disable. Env knob `YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS` overrides.
+    {
+        std::int64_t throttleMs = 60'000; // 60s default
+        if (const char* raw = std::getenv("YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS");
+            raw != nullptr && *raw != '\0') {
+            try {
+                throttleMs = std::max<std::int64_t>(0, std::stoll(raw));
+            } catch (...) {
+                // ignore bad input, keep default
+            }
+        }
+        topologyManager_.setRebuildMinIntervalMs(throttleMs);
+        spdlog::info("[ServiceManager] TopologyManager rebuild throttle = {} ms", throttleMs);
+    }
+
     // Phase G: optional adaptive topology tuner. Disabled by default;
     // opt-in via [topology.tuner].enabled=true in the daemon config.
     {
@@ -2095,6 +2115,41 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 [&]() -> boost::asio::awaitable<Result<size_t>> { return autoloadPluginsNow(); });
             if (loadResult) {
                 spdlog::info("ServiceManager: Autoloaded {} plugins.", loadResult.value());
+            }
+            // PluginManager::autoloadPlugins runs adoptModelProvider() and the three
+            // adoptXExtractors() calls internally — populating PluginManager-owned
+            // collections. ServiceManager keeps its own copies (model provider atomic,
+            // contentExtractors_ vector, plus PostIngestQueue wire-up). Without this
+            // sync, status reports "Waiting on: Content Extractors Ready" + "no provider
+            // after autoload" even though every plugin successfully loaded — same
+            // dual-storage bug class.
+            if (pluginManager_) {
+                if (auto pmp = pluginManager_->getModelProvider()) {
+                    storeModelProvider(pmp);
+                    embeddingLifecycle_.setModelName(pluginManager_->getEmbeddingModelName());
+                }
+                contentExtractors_ = pluginManager_->getContentExtractors();
+                auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+                if (piq) {
+                    if (!contentExtractors_.empty()) {
+                        piq->setExtractors(contentExtractors_);
+                    }
+                    std::unordered_map<std::string, std::string> extMap;
+                    for (const auto& extractor : pluginManager_->getSymbolExtractors()) {
+                        if (!extractor)
+                            continue;
+                        for (const auto& [ext, lang] : extractor->getSupportedExtensions()) {
+                            extMap[ext] = lang;
+                        }
+                    }
+                    if (!extMap.empty()) {
+                        piq->setSymbolExtensionMap(std::move(extMap));
+                    }
+                    if (auto titleExtractor =
+                            createGlinerExtractionFunc(pluginManager_->getEntityExtractors())) {
+                        piq->setTitleExtractor(std::move(titleExtractor));
+                    }
+                }
             }
             auto modelProvider = loadModelProvider();
             if (modelProvider && modelProvider->isAvailable()) {

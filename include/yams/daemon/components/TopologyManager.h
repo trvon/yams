@@ -140,6 +140,19 @@ public:
     }
 
     [[nodiscard]] bool tryScheduleRebuild();
+
+    // Audit-fix #1: throttle between rebuild *completions*. Set the minimum
+    // interval (ms) that must elapse between the end of one rebuild and the
+    // start of the next. tryScheduleRebuild() returns false (without
+    // claiming the schedule) if the throttle hasn't elapsed; dirty hashes
+    // remain in the set and will be picked up by the next call that
+    // succeeds. Default 0 = no throttle (current behavior).
+    void setRebuildMinIntervalMs(std::int64_t millis) noexcept {
+        rebuildMinIntervalMs_.store(millis, std::memory_order_release);
+    }
+    [[nodiscard]] std::int64_t getRebuildMinIntervalMs() const noexcept {
+        return rebuildMinIntervalMs_.load(std::memory_order_acquire);
+    }
     void clearScheduled();
 
     void setAutoRebuildEnabled(bool enabled) {
@@ -203,6 +216,9 @@ private:
 
     std::atomic<bool> rebuildRunning_{false};
     std::atomic<bool> rebuildScheduled_{false};
+    // Audit-fix #1 state:
+    std::atomic<std::int64_t> lastRebuildEndSteadyMillis_{0};
+    std::atomic<std::int64_t> rebuildMinIntervalMs_{0};
     std::atomic<bool> autoRebuildEnabled_{true};
     std::atomic<std::uint64_t> publishedEpoch_{0};
     std::atomic<std::size_t> hdbscanMinPoints_{0};
