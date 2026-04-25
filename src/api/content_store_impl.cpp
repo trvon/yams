@@ -515,43 +515,63 @@ public:
 
     // Memory-based retrieve operation
     Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
+        return retrieveBytesBounded(hash, std::numeric_limits<std::size_t>::max());
+    }
+
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                       std::size_t maxBytes) override {
+        return retrieveBytesBounded(hash, maxBytes);
+    }
+
+    Result<std::vector<std::byte>> retrieveBytesBounded(const std::string& hash,
+                                                        std::size_t maxBytes) {
         YAMS_ZONE_SCOPED_N("content_store::retrieve_bytes");
-        // First try to retrieve manifest (chunked content)
+        if (maxBytes == 0) {
+            return std::vector<std::byte>{};
+        }
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
 
         if (manifestResult) {
-            // Content is chunked - reconstruct from manifest
             auto manifest =
                 manifestManager_->deserialize(std::span<const std::byte>(manifestResult.value()));
             if (!manifest) {
                 return manifest.error();
             }
 
-            // Reconstruct content in memory
             std::vector<std::byte> reconstructed;
-            reconstructed.reserve(manifest.value().fileSize);
+            const auto fileSize = manifest.value().fileSize;
+            const std::size_t cap =
+                std::min<std::size_t>(maxBytes, static_cast<std::size_t>(fileSize));
+            reconstructed.reserve(cap);
 
             for (const auto& chunk : manifest.value().chunks) {
+                if (reconstructed.size() >= maxBytes) {
+                    break;
+                }
                 auto chunkData = storage_->retrieve(chunk.hash);
                 if (!chunkData) {
                     spdlog::warn("Failed to retrieve chunk {} for hash {}", chunk.hash, hash);
                     return chunkData.error();
                 }
-                reconstructed.insert(reconstructed.end(), chunkData.value().begin(),
-                                     chunkData.value().end());
+                const auto& bytes = chunkData.value();
+                const std::size_t remaining = maxBytes - reconstructed.size();
+                const std::size_t take = std::min<std::size_t>(bytes.size(), remaining);
+                reconstructed.insert(reconstructed.end(), bytes.begin(), bytes.begin() + take);
             }
 
             updateStats(0, 0, reconstructed.size(), 0, 0, 1, 0);
             return reconstructed;
         }
 
-        // Fallback: try direct retrieval (small unchunked content)
         auto dataResult = storage_->retrieve(hash);
         if (!dataResult) {
             return dataResult.error();
         }
         auto data = std::move(dataResult.value());
+        if (data.size() > maxBytes) {
+            data.resize(maxBytes);
+        }
         updateStats(0, 0, data.size(), 0, 0, 1, 0);
         return data;
     }

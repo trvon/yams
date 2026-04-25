@@ -77,7 +77,10 @@ public:
         // Hard cap on raw corpus text bytes scanned into the in-memory simeon
         // lexical build. When exceeded, yams stays on FTS5-only instead of
         // attempting an unbounded in-memory lexical index build.
-        std::size_t max_corpus_bytes = 128ULL * 1024ULL * 1024ULL;
+        // Real default is computed by ResourceGovernor::recommendLexicalCorpusBytes()
+        // which scales with the daemon memory budget; 256 MiB is the floor used
+        // when the governor is disabled or unavailable.
+        std::size_t max_corpus_bytes = 256ULL * 1024ULL * 1024ULL;
         // Chunk very large documents into a small number of evenly spaced
         // windows before feeding them into the in-memory simeon lexical
         // enhancement stack. This bounds char-ngram / fragment build pressure

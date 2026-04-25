@@ -108,6 +108,7 @@ private:
         // Use atomic to prevent data races when accessing creation time from multiple threads
         // Store as nanoseconds since steady_clock epoch for thread-safety
         std::atomic<int64_t> created_at_ns{0}; // Connection creation time in nanoseconds
+        std::atomic<int64_t> last_activity_at_ns{0};
 
         // Helper to get creation time as time_point (thread-safe read)
         std::chrono::steady_clock::time_point created_at() const {
@@ -120,6 +121,21 @@ private:
             created_at_ns.store(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count(),
                 std::memory_order_release);
+        }
+
+        std::chrono::steady_clock::time_point last_activity_at() const {
+            const auto raw = last_activity_at_ns.load(std::memory_order_acquire);
+            if (raw == 0) {
+                return created_at();
+            }
+            return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(raw));
+        }
+
+        void touch_activity() {
+            last_activity_at_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count(),
+                                      std::memory_order_release);
         }
     };
     boost::asio::awaitable<void> handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,

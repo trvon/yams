@@ -850,6 +850,37 @@ std::uint32_t ResourceGovernor::recommendRetryAfterMs(
     return std::min<std::uint32_t>(retry, 5000u);
 }
 
+std::uint64_t ResourceGovernor::recommendLexicalCorpusBytes() const noexcept {
+    // The simeon lexical enhancement holds the entire corpus text in RAM during
+    // its build. Allocate ~6.25% of the daemon's memory budget to it, with a
+    // floor of 256 MiB and a ceiling of 4 GiB. Scale down under pressure so a
+    // late rebuild does not push us over the warning/critical thresholds.
+    const std::uint64_t budget = TuneAdvisor::memoryBudgetBytes();
+    if (budget == 0) {
+        return 256ULL * 1024ULL * 1024ULL;
+    }
+
+    constexpr std::uint64_t kFloor = 256ULL * 1024ULL * 1024ULL;           // 256 MiB
+    constexpr std::uint64_t kCeiling = 4ULL * 1024ULL * 1024ULL * 1024ULL; // 4 GiB
+    std::uint64_t cap = budget / 16ULL;                                    // 6.25%
+    cap = std::clamp<std::uint64_t>(cap, kFloor, kCeiling);
+
+    switch (getPressureLevel()) {
+        case ResourcePressureLevel::Warning:
+            cap = std::max<std::uint64_t>(kFloor, cap * 3 / 4);
+            break;
+        case ResourcePressureLevel::Critical:
+            cap = std::max<std::uint64_t>(kFloor, cap / 2);
+            break;
+        case ResourcePressureLevel::Emergency:
+            cap = kFloor;
+            break;
+        case ResourcePressureLevel::Normal:
+            break;
+    }
+    return cap;
+}
+
 std::uint32_t
 ResourceGovernor::recommendBackpressureReadPauseMs(std::uint32_t baseMs) const noexcept {
     std::uint32_t delay = std::max<std::uint32_t>(1u, baseMs);

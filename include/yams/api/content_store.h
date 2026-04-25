@@ -102,6 +102,8 @@ public:
                                            const ContentMetadata& metadata = {}) = 0;
 
     virtual Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) = 0;
+    virtual Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                               std::size_t maxBytes) = 0;
     virtual Result<RawContent> retrieveRaw(const std::string& hash) = 0;
     virtual std::future<Result<RawContent>> retrieveRawAsync(const std::string& hash) = 0;
 

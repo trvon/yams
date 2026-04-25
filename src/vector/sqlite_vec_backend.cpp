@@ -380,6 +380,7 @@ CREATE INDEX IF NOT EXISTS idx_vectors_chunk_id ON vectors(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_vectors_document_hash ON vectors(document_hash);
 CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model_id, model_version);
 CREATE INDEX IF NOT EXISTS idx_vectors_embedding_dim ON vectors(embedding_dim);
+CREATE INDEX IF NOT EXISTS idx_vectors_level ON vectors(level, document_hash);
 )sql";
 
 // Global quantizer metadata table: stores per-coord scales once per quantizer config.

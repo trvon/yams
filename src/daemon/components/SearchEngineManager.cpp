@@ -1,4 +1,5 @@
 #include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
@@ -217,6 +218,13 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                          "instrumentation profile");
         } else if (backend == "simeon" && bm25Policy.enabled.value_or(true)) {
             yams::search::SimeonLexicalBackend::Config lexicalCfg;
+            // Default the corpus byte cap from ResourceGovernor so it scales
+            // with memoryBudgetBytes / pressure level. Explicit config still
+            // wins below.
+            if (auto governorCap = ResourceGovernor::instance().recommendLexicalCorpusBytes();
+                governorCap > 0) {
+                lexicalCfg.max_corpus_bytes = static_cast<std::size_t>(governorCap);
+            }
             if (bm25Policy.variant && *bm25Policy.variant == "atire") {
                 lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
             }

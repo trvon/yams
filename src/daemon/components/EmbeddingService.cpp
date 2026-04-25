@@ -382,49 +382,118 @@ void EmbeddingService::updateSemanticNeighborGraph(
         std::size_t candidateDocs = 0;
         std::size_t similarityPairCount = 0;
         std::size_t candidateNeighborCount = 0;
-        auto candidateStreamResult =
-            vdb->forEachDocumentLevelVector([&](yams::vector::VectorRecord&& record) {
-                if (record.document_hash.empty() || record.embedding.empty()) {
-                    return true;
+
+        // Audit fix C: replace the O(S·C) candidate scan with O(S·log C) HNSW
+        // top-K query per source doc. The previous code did a full corpus
+        // scan per batch (vdb->forEachDocumentLevelVector) and computed
+        // cosine pairwise — at 65k corpus × B=16 source docs, that's ~1M
+        // cosine ops per batch. HNSW's top-K is ~log(corpus) probes per
+        // source. Env knob YAMS_GRAPH_SEMANTIC_USE_HNSW=0 reverts to the
+        // brute-force path for diagnostic comparison.
+        const bool useHnsw = []() {
+            if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_USE_HNSW")) {
+                if (env[0] == '0' || env[0] == 'f' || env[0] == 'F' || env[0] == 'n' ||
+                    env[0] == 'N') {
+                    return false;
                 }
-                ++candidateDocs;
-                for (std::size_t i = 0; i < sources.size(); ++i) {
-                    const auto& source = sources[i];
-                    if (record.document_hash == source.hash) {
+            }
+            return true;
+        }();
+
+        if (useHnsw) {
+            // Per-source HNSW top-K. Overshoot k to compensate for chunk-level
+            // matches that share a document_hash with a doc-level vector.
+            const std::size_t hnswK = std::max<std::size_t>(8, semanticTopK * 4);
+            const float searchThreshold = explicitSemanticThreshold.value_or(0.0f);
+            for (std::size_t i = 0; i < sources.size(); ++i) {
+                const auto& source = sources[i];
+                yams::vector::VectorSearchParams params;
+                params.k = hnswK;
+                params.similarity_threshold = searchThreshold;
+                params.include_embeddings = false;
+                auto hits = vdb->searchSimilar(source.embedding, params);
+                similarityPairCount += hits.size();
+
+                // Dedupe by document_hash; preserve the best per-doc score.
+                std::unordered_map<std::string, float> bestPerDoc;
+                bestPerDoc.reserve(hits.size());
+                for (const auto& hit : hits) {
+                    if (hit.document_hash.empty() || hit.document_hash == source.hash) {
                         continue;
                     }
-                    ++similarityPairCount;
-                    const float similarity = cosineSimilarity(source.embedding, record.embedding);
-                    if (explicitSemanticThreshold.has_value()) {
-                        if (similarity < *explicitSemanticThreshold) {
+                    auto [it, inserted] =
+                        bestPerDoc.try_emplace(hit.document_hash, hit.relevance_score);
+                    if (!inserted && hit.relevance_score > it->second) {
+                        it->second = hit.relevance_score;
+                    }
+                }
+                candidateNeighborCount += bestPerDoc.size();
+
+                auto& topNeighbors = topBySource[i];
+                topNeighbors.reserve(bestPerDoc.size());
+                for (auto& [hash, sim] : bestPerDoc) {
+                    topNeighbors.push_back(StreamNeighborScore{hash, sim});
+                }
+                std::sort(topNeighbors.begin(), topNeighbors.end(), isBetterStreamNeighbor);
+                if (topNeighbors.size() > semanticTopK) {
+                    topNeighbors.resize(semanticTopK);
+                }
+            }
+            // For telemetry continuity, use the deduped neighbor count as a
+            // proxy for "candidate docs touched". Exact corpus size is
+            // available via vdb->getStats() if we ever need it; the prior
+            // value was the corpus-doc count, which under HNSW equals
+            // log(N)·k per source rather than full N.
+            candidateDocs = candidateNeighborCount;
+        } else {
+            auto candidateStreamResult =
+                vdb->forEachDocumentLevelVector([&](yams::vector::VectorRecord&& record) {
+                    if (record.document_hash.empty() || record.embedding.empty()) {
+                        return true;
+                    }
+                    ++candidateDocs;
+                    for (std::size_t i = 0; i < sources.size(); ++i) {
+                        const auto& source = sources[i];
+                        if (record.document_hash == source.hash) {
                             continue;
                         }
-                    } else if (similarity <= 0.0f) {
-                        continue;
-                    }
-                    ++candidateNeighborCount;
+                        ++similarityPairCount;
+                        const float similarity =
+                            cosineSimilarity(source.embedding, record.embedding);
+                        if (explicitSemanticThreshold.has_value()) {
+                            if (similarity < *explicitSemanticThreshold) {
+                                continue;
+                            }
+                        } else if (similarity <= 0.0f) {
+                            continue;
+                        }
+                        ++candidateNeighborCount;
 
-                    StreamNeighborScore candidate{record.document_hash, similarity};
-                    auto& topNeighbors = topBySource[i];
-                    if (topNeighbors.size() < semanticTopK) {
-                        topNeighbors.push_back(std::move(candidate));
-                        continue;
+                        StreamNeighborScore candidate{record.document_hash, similarity};
+                        auto& topNeighbors = topBySource[i];
+                        if (topNeighbors.size() < semanticTopK) {
+                            topNeighbors.push_back(std::move(candidate));
+                            continue;
+                        }
+                        auto worst = std::min_element(topNeighbors.begin(), topNeighbors.end(),
+                                                      [&](const auto& a, const auto& b) {
+                                                          return isWorseStreamNeighbor(a, b);
+                                                      });
+                        if (worst != topNeighbors.end() &&
+                            isBetterStreamNeighbor(candidate, *worst)) {
+                            *worst = std::move(candidate);
+                        }
                     }
-                    auto worst = std::min_element(
-                        topNeighbors.begin(), topNeighbors.end(),
-                        [&](const auto& a, const auto& b) { return isWorseStreamNeighbor(a, b); });
-                    if (worst != topNeighbors.end() && isBetterStreamNeighbor(candidate, *worst)) {
-                        *worst = std::move(candidate);
-                    }
-                }
-                return true;
-            });
-        if (!candidateStreamResult) {
-            spdlog::warn(
-                "EmbeddingService: failed to stream candidate vectors for semantic graph: {}",
-                candidateStreamResult.error().message);
-            return;
+                    return true;
+                });
+            if (!candidateStreamResult) {
+                spdlog::warn(
+                    "EmbeddingService: failed to stream candidate vectors for semantic graph: {}",
+                    candidateStreamResult.error().message);
+                return;
+            }
         }
+
         if (candidateDocs < 2) {
             return;
         }

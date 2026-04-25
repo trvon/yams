@@ -1981,6 +1981,25 @@ private:
                                          key == readiness::kSearchEngineHybridUsable)) {
                     return true;
                 }
+                // Simeon lexical enhancement is opt-in; when not configured or
+                // when the corpus exceeded the size budget, the daemon stays on
+                // FTS5 only — these keys reflect runtime state, not a blocker
+                // on readiness. Only surface during an active build.
+                auto find = [&](std::string_view k) {
+                    auto it = s.readinessStates.find(std::string(k));
+                    return it != s.readinessStates.end() && it->second;
+                };
+                const bool simeonConfigured =
+                    find(readiness::kSearchEngineLexicalEnhancementConfigured);
+                const bool simeonBuilding =
+                    find(readiness::kSearchEngineLexicalEnhancementBuilding);
+                if ((key == readiness::kSearchEngineLexicalEnhancementConfigured ||
+                     key == readiness::kSearchEngineLexicalEnhancementReady ||
+                     key == readiness::kSearchEngineLexicalEnhancementBuilding ||
+                     key == readiness::kSearchEngineFragmentGeometryReady) &&
+                    !(simeonConfigured && simeonBuilding)) {
+                    return true;
+                }
                 return false;
             };
             for (const auto& [key, ready] : s.readinessStates) {
@@ -2261,6 +2280,26 @@ private:
                                                   status.embeddingAvailable;
                     if (emptyCorpusReady && (key == readiness::kSearchEngineVectorUsable ||
                                              key == readiness::kSearchEngineHybridUsable)) {
+                        return true;
+                    }
+                    // Simeon lexical enhancement is opt-in: when not configured (or
+                    // skipped because the corpus exceeded the size budget), the
+                    // daemon stays on FTS5 only — these keys reflect runtime state,
+                    // not a blocker on readiness. Only surface them when an active
+                    // build is in progress (configured + building).
+                    auto find = [&](std::string_view k) {
+                        auto it = status.readinessStates.find(std::string(k));
+                        return it != status.readinessStates.end() && it->second;
+                    };
+                    const bool simeonConfigured =
+                        find(readiness::kSearchEngineLexicalEnhancementConfigured);
+                    const bool simeonBuilding =
+                        find(readiness::kSearchEngineLexicalEnhancementBuilding);
+                    if ((key == readiness::kSearchEngineLexicalEnhancementConfigured ||
+                         key == readiness::kSearchEngineLexicalEnhancementReady ||
+                         key == readiness::kSearchEngineLexicalEnhancementBuilding ||
+                         key == readiness::kSearchEngineFragmentGeometryReady) &&
+                        !(simeonConfigured && simeonBuilding)) {
                         return true;
                     }
                     return false;

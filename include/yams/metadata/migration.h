@@ -244,6 +244,17 @@ private:
 
     // Version 31: Semantic duplicate persistence for doctor/report workflows
     static Migration createSemanticDuplicateSchema();
+
+    // Version 32: Audit fix B — unique index on kg_edges (src, dst, relation)
+    // so the addEdgesUnique hot path can use INSERT OR IGNORE (O(log E))
+    // instead of per-edge `INSERT WHERE NOT EXISTS` (O(E)).
+    static Migration createKgEdgesUniqueIndex();
+
+    // Version 33: Audit fixes M2 + M4 — composite indexes for metadata
+    // (document_id, key) and kg_doc_entities (document_id, extractor) so
+    // hot-path COUNT/aggregation queries can use index-only scans instead
+    // of partition-scan-then-filter.
+    static Migration createMetadataCompositeIndexes();
 };
 
 /**

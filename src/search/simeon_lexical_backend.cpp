@@ -11,8 +11,12 @@
 
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
+#include <mach/mach.h>
+#include <mach/mach_init.h>
+#include <mach/task_info.h>
 #elif defined(__GLIBC__)
 #include <malloc.h>
+#include <sys/resource.h>
 #endif
 
 #include <cctype>
@@ -31,6 +35,57 @@
 #include <vector>
 
 namespace yams::search {
+
+namespace {
+
+std::uint64_t rssBytesCurrent() noexcept {
+#if defined(__APPLE__)
+    mach_task_basic_info info{};
+    mach_msg_type_number_t infoCount = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info),
+                  &infoCount) == KERN_SUCCESS) {
+        return info.resident_size;
+    }
+    return 0;
+#elif defined(__GLIBC__)
+    struct rusage ru{};
+    if (getrusage(RUSAGE_SELF, &ru) == 0) {
+        return static_cast<std::uint64_t>(ru.ru_maxrss) * 1024ull;
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+void releaseTransientPages(const char* phase) {
+    const auto before = rssBytesCurrent();
+#if defined(__APPLE__)
+    vm_address_t* zoneAddrs = nullptr;
+    unsigned zoneCount = 0;
+    if (malloc_get_all_zones(mach_task_self(), nullptr, &zoneAddrs, &zoneCount) == KERN_SUCCESS &&
+        zoneAddrs != nullptr) {
+        for (unsigned i = 0; i < zoneCount; ++i) {
+            auto* zone = reinterpret_cast<malloc_zone_t*>(zoneAddrs[i]);
+            if (zone == nullptr)
+                continue;
+            if (zone->pressure_relief != nullptr) {
+                zone->pressure_relief(zone, 0);
+            }
+        }
+    }
+#elif defined(__GLIBC__)
+    ::malloc_trim(0);
+#endif
+    const auto after = rssBytesCurrent();
+    if (before > 0 && after > 0) {
+        spdlog::info("[simeon-lexical] {} rss {} MiB -> {} MiB (released {} MiB)", phase,
+                     before / (1024ull * 1024ull), after / (1024ull * 1024ull),
+                     (before > after ? before - after : 0ull) / (1024ull * 1024ull));
+    }
+}
+
+} // namespace
 
 namespace {
 
@@ -221,6 +276,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         bcfg.variant = toSimeonVariant(cfg_.variant);
         bcfg.subword_gamma = cfg_.subword_gamma;
         auto primary = std::make_unique<simeon::Bm25Index>(bcfg);
+        primary->reserve_docs(ids.size());
 
         // Secondary index: Atire, only when routing is enabled AND the
         // primary isn't already Atire. Router dispatches between
@@ -232,6 +288,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             simeon::Bm25Config acfg;
             acfg.variant = simeon::Bm25Variant::Atire;
             atire = std::make_unique<simeon::Bm25Index>(acfg);
+            atire->reserve_docs(ids.size());
         }
 
         spdlog::info("[simeon-lexical] bm25_config: variant={} subword_gamma={} "
@@ -318,6 +375,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         if (atire) {
             atire->finalize();
         }
+        releaseTransientPages("post-bm25-finalize");
 
         // Router uses the Atire index when available (matches simeon bench
         // convention — df/idf values are BM25-variant-independent, so the
@@ -362,6 +420,12 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 pmi = std::make_unique<simeon::PmiEmbeddings>(std::move(learned));
                 ecfg.pmi_rows = pmi.get();
                 fragmentEncoder = std::make_unique<simeon::Encoder>(ecfg);
+
+                {
+                    std::vector<std::string>().swap(pmi_sample_texts);
+                    std::vector<std::string_view>().swap(seedViews);
+                }
+                releaseTransientPages("post-pmi-learn");
 
                 docFrags.resize(dense);
                 const auto fragmentDocCap =
@@ -422,8 +486,10 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                          pmi_sample_texts.size(), uniqueWordCount,
                          cfg_.fragment_geometry_min_corpus_docs);
         }
-        pmi_sample_texts.clear();
-        pmi_sample_texts.shrink_to_fit();
+        if (!pmi_sample_texts.empty()) {
+            std::vector<std::string>().swap(pmi_sample_texts);
+        }
+        releaseTransientPages("post-fragment-build");
 
         if (stop.stop_requested()) {
             building_.store(false, std::memory_order_release);
@@ -449,15 +515,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                      variantLabel(cfg_.variant), cfg_.router_enabled ? "on" : "off",
                      fragment_encoder_ ? "on" : "off", dense, missing, rawCorpusBytes,
                      processedCorpusBytes, chunkedDocs, buildMs);
-        // Release the transient tf / posting scratch pages back to the OS.
-        // BM25 index construction churns hundreds of MB of short-lived
-        // allocations (per-doc tf maps, rehashes in FlatHashMapU64); macOS
-        // otherwise keeps them parked in the DefaultMallocZone.
-#if defined(__APPLE__)
-        ::malloc_zone_pressure_relief(nullptr, 0);
-#elif defined(__GLIBC__)
-        ::malloc_trim(0);
-#endif
+        releaseTransientPages("post-build");
     });
 
     return Result<void>{};

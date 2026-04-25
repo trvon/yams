@@ -245,11 +245,10 @@ bool canExtractDocument(
                 return true;
         }
         if (contentStore) {
-            auto bytesRes = contentStore->retrieveBytes(hash);
+            auto bytesRes = contentStore->retrieveBytesPrefix(hash, 8192);
             if (bytesRes) {
                 const auto& bytes = bytesRes.value();
-                size_t checkSize = std::min(bytes.size(), size_t(8192));
-                std::span<const std::byte> sample(bytes.data(), checkSize);
+                std::span<const std::byte> sample(bytes.data(), bytes.size());
                 if (!yams::detection::isBinaryData(sample))
                     return true;
             }

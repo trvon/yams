@@ -203,6 +203,14 @@ public:
     [[nodiscard]] std::uint32_t
     recommendBackpressureReadPauseMs(std::uint32_t baseMs) const noexcept;
 
+    /// Recommend the maximum corpus-text byte budget for the in-memory simeon
+    /// lexical enhancement build. Scales with the daemon memory budget and the
+    /// current pressure level so the lexical build never starves the rest of
+    /// the daemon under load. Callers can clamp further; this is the upper
+    /// bound the governor is willing to grant. Returns 0 when the governor has
+    /// no memory budget (caller should fall back to a conservative literal).
+    [[nodiscard]] std::uint64_t recommendLexicalCorpusBytes() const noexcept;
+
     // ========================================================================
     // Pressure Response Actions (called based on level transitions)
     // ========================================================================

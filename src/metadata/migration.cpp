@@ -346,7 +346,9 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createFeedbackEventsSchema(),
             addListSortCompositeIndex(),
             migrateLegacyPathNodePrefixes(),
-            createSemanticDuplicateSchema()};
+            createSemanticDuplicateSchema(),
+            createKgEdgesUniqueIndex(),
+            createMetadataCompositeIndexes()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2617,6 +2619,66 @@ Migration YamsMetadataMigrations::createSemanticDuplicateSchema() {
     m.downSQL = R"(
         DROP TABLE IF EXISTS semantic_duplicate_group_members;
         DROP TABLE IF EXISTS semantic_duplicate_groups;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createKgEdgesUniqueIndex() {
+    Migration m;
+    m.version = 32;
+    m.name = "Add unique index on kg_edges (src_node_id, dst_node_id, relation)";
+    m.created = std::chrono::system_clock::now();
+
+    // Audit fix B. The legacy `addEdgesUnique` ran `INSERT WHERE NOT EXISTS`
+    // per edge, which does an O(E) sub-query per insert. With this index the
+    // hot path uses `INSERT OR IGNORE` and SQLite enforces uniqueness via the
+    // index probe (O(log E) per edge). Any pre-existing duplicate rows are
+    // collapsed by the dedupe DELETE below so the unique index can be created.
+    m.upSQL = R"(
+        DELETE FROM kg_edges
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid)
+                FROM kg_edges
+                GROUP BY src_node_id, dst_node_id, relation
+            );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_edges_uq
+            ON kg_edges(src_node_id, dst_node_id, relation);
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_kg_edges_uq;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createMetadataCompositeIndexes() {
+    Migration m;
+    m.version = 33;
+    m.name = "Composite indexes for metadata and kg_doc_entities hot paths";
+    m.created = std::chrono::system_clock::now();
+
+    // Audit fixes M2 + M4. Both targets show up in bulk-ingest profiling:
+    //   M2: setMetadataBatch's per-doc tag-count check filters by
+    //       (document_id, key) — without a composite, SQLite scans the
+    //       per-doc partition and applies the key filter post-load.
+    //   M4: kg_doc_entities's per-doc COUNT(*) + SUM(CASE) for extractor
+    //       categories does the same dance. The composite lets SQLite
+    //       evaluate the LIKE 'gliner%' prefix as an indexed range.
+    // Both indexes are additive; existing indexes (idx_metadata_document,
+    // idx_metadata_key, idx_kg_doc_entities_*) stay in place and continue
+    // to serve their narrower lookup paths.
+    m.upSQL = R"(
+        CREATE INDEX IF NOT EXISTS idx_metadata_doc_key
+            ON metadata(document_id, key);
+        CREATE INDEX IF NOT EXISTS idx_kg_doc_entities_doc_extractor
+            ON kg_doc_entities(document_id, extractor);
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_kg_doc_entities_doc_extractor;
+        DROP INDEX IF EXISTS idx_metadata_doc_key;
     )";
 
     return m;

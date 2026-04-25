@@ -247,7 +247,7 @@ RequestHandler::handle_request(std::vector<uint8_t> request_data, yams::compat::
 
 boost::asio::awaitable<void> RequestHandler::handle_connection(
     std::shared_ptr<boost::asio::local::stream_protocol::socket> socket,
-    yams::compat::stop_token token, uint64_t conn_token) {
+    yams::compat::stop_token token, uint64_t conn_token, std::function<void()> on_activity) {
     using boost::asio::use_awaitable;
     const bool stream_trace = stream_trace_enabled_local();
     const auto handler_start = std::chrono::steady_clock::now();
@@ -499,6 +499,9 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 }
                 spdlog::debug("socket.async_read returned {} bytes", bytes_read);
                 consecutive_idle_timeouts = 0; // traffic observed, reset idle counter
+                if (on_activity && bytes_read > 0) {
+                    on_activity();
+                }
                 if (bytes_read == 0) {
                     spdlog::debug("Closing connection: peer sent EOF");
                     fsm.on_close_request();

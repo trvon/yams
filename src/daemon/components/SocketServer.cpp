@@ -1027,93 +1027,94 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             auto connection_strand = boost::asio::make_strand(executor);
             auto lifetime = config_.maxConnectionLifetime;
             auto created_at = tracked_socket->created_at(); // Thread-safe read
+            auto tracked_for_timer = tracked_socket;        // share into timer closure
 
-            bool timedOut =
-                co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
-                                                     void(std::exception_ptr, bool)>(
-                    [this, handler, sock, token, conn_token, executor, connection_strand, lifetime,
-                     created_at](auto completion_handler) mutable {
-                        // Shared state for race coordination
-                        auto completed = std::make_shared<std::atomic<bool>>(false);
-                        auto timer = std::make_shared<boost::asio::steady_timer>(connection_strand);
-                        timer->expires_after(lifetime);
+            bool timedOut = co_await boost::asio::async_initiate<
+                decltype(boost::asio::use_awaitable), void(std::exception_ptr, bool)>(
+                [this, handler, sock, token, conn_token, executor, connection_strand, lifetime,
+                 created_at, tracked_for_timer](auto completion_handler) mutable {
+                    // Shared state for race coordination
+                    auto completed = std::make_shared<std::atomic<bool>>(false);
+                    auto timer = std::make_shared<boost::asio::steady_timer>(connection_strand);
+                    timer->expires_after(lifetime);
 
-                        using HandlerT = std::decay_t<decltype(completion_handler)>;
-                        auto handlerPtr = std::make_shared<HandlerT>(std::move(completion_handler));
-                        auto completion_exec =
-                            boost::asio::get_associated_executor(*handlerPtr, executor);
+                    using HandlerT = std::decay_t<decltype(completion_handler)>;
+                    auto handlerPtr = std::make_shared<HandlerT>(std::move(completion_handler));
+                    auto completion_exec =
+                        boost::asio::get_associated_executor(*handlerPtr, executor);
 
-                        // Set up lifetime timer
-                        timer->async_wait([this, completed, handlerPtr, completion_exec, conn_token,
-                                           created_at, lifetime,
-                                           sock](const boost::system::error_code& ec) mutable {
-                            if (ec == boost::asio::error::operation_aborted)
-                                return; // Cancelled by handler completion
-                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                                // Timer won - lifetime exceeded
-                                auto newCount =
-                                    forcedCloseCount_.fetch_add(1, std::memory_order_relaxed) + 1;
-                                if (state_) {
-                                    state_->stats.forcedCloseCount.store(newCount,
-                                                                         std::memory_order_relaxed);
-                                }
-                                auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
-                                                 std::chrono::steady_clock::now() - created_at)
-                                                 .count();
-                                spdlog::warn("[conn={}] Connection lifetime exceeded (age={}s, "
-                                             "limit={}s) - forcing close",
-                                             conn_token, age_s, lifetime.count());
-                                // Cancel pending async ops so the detached coroutine's
-                                // async_read completes with operation_aborted.  Do NOT
-                                // close() here — closing from the timer callback while
-                                // the coroutine may be mid-resume on another IO thread
-                                // causes a double kqueue_reactor::deregister_descriptor
-                                // → SIGSEGV.
-                                //
-                                // cancel() is safe to call from any completion handler
-                                // on the same io_context (it uses internal locking on
-                                // the descriptor state).  The coroutine will observe
-                                // the read error (operation_aborted), exit its loop,
-                                // and close the socket itself.
-                                //
-                                // shutdown(both) ensures that even if the inner idle
-                                // timer wins the race (swallowing the cancel), the
-                                // *next* async_read returns EOF so the coroutine exits
-                                // promptly rather than lingering for idle-timeout cycles.
-                                if (sock && sock->is_open()) {
-                                    boost::system::error_code shutdown_ec;
-                                    sock->shutdown(boost::asio::socket_base::shutdown_both,
-                                                   shutdown_ec);
-                                    boost::system::error_code cancel_ec;
-                                    sock->cancel(cancel_ec);
-                                }
-                                boost::asio::post(
-                                    completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                                        std::move(h)(std::exception_ptr{}, true); // timedOut = true
-                                    });
+                    auto on_timer_fire =
+                        std::make_shared<std::function<void(const boost::system::error_code&)>>();
+                    *on_timer_fire = [this, completed, handlerPtr, completion_exec, conn_token,
+                                      created_at, lifetime, sock, tracked_for_timer, timer,
+                                      on_timer_fire](const boost::system::error_code& ec) mutable {
+                        if (ec == boost::asio::error::operation_aborted)
+                            return;
+                        if (completed->load(std::memory_order_acquire))
+                            return;
+                        if (tracked_for_timer) {
+                            const auto now = std::chrono::steady_clock::now();
+                            const auto last = tracked_for_timer->last_activity_at();
+                            if (now - last < lifetime / 2) {
+                                timer->expires_after(lifetime / 2);
+                                timer->async_wait(*on_timer_fire);
+                                return;
                             }
-                        });
+                        }
+                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                            auto newCount =
+                                forcedCloseCount_.fetch_add(1, std::memory_order_relaxed) + 1;
+                            if (state_) {
+                                state_->stats.forcedCloseCount.store(newCount,
+                                                                     std::memory_order_relaxed);
+                            }
+                            auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
+                                             std::chrono::steady_clock::now() - created_at)
+                                             .count();
+                            spdlog::warn("[conn={}] Connection lifetime exceeded (age={}s, "
+                                         "limit={}s, idle) - forcing close",
+                                         conn_token, age_s, lifetime.count());
+                            if (sock && sock->is_open()) {
+                                boost::system::error_code shutdown_ec;
+                                sock->shutdown(boost::asio::socket_base::shutdown_both,
+                                               shutdown_ec);
+                                boost::system::error_code cancel_ec;
+                                sock->cancel(cancel_ec);
+                            }
+                            boost::asio::post(completion_exec,
+                                              [h = std::move(*handlerPtr)]() mutable {
+                                                  std::move(h)(std::exception_ptr{}, true);
+                                              });
+                        }
+                    };
+                    timer->async_wait(*on_timer_fire);
 
-                        // Spawn connection handler
-                        boost::asio::co_spawn(
-                            connection_strand,
-                            [handler, sock, token, conn_token, timer, completed, handlerPtr,
-                             completion_exec]() mutable -> boost::asio::awaitable<void> {
-                                co_await handler->handle_connection(sock, token, conn_token);
+                    std::function<void()> on_activity;
+                    if (tracked_for_timer) {
+                        on_activity = [tracked_for_timer]() {
+                            tracked_for_timer->touch_activity();
+                        };
+                    }
+                    boost::asio::co_spawn(
+                        connection_strand,
+                        [handler, sock, token, conn_token, timer, completed, handlerPtr,
+                         completion_exec,
+                         on_activity =
+                             std::move(on_activity)]() mutable -> boost::asio::awaitable<void> {
+                            co_await handler->handle_connection(sock, token, conn_token,
+                                                                std::move(on_activity));
 
-                                if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                                    // Handler completed first
-                                    timer->cancel();
-                                    boost::asio::post(completion_exec,
-                                                      [h = std::move(*handlerPtr)]() mutable {
-                                                          std::move(h)(std::exception_ptr{},
-                                                                       false); // timedOut = false
-                                                      });
-                                }
-                            },
-                            boost::asio::detached);
-                    },
-                    boost::asio::use_awaitable);
+                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                                timer->cancel();
+                                boost::asio::post(completion_exec,
+                                                  [h = std::move(*handlerPtr)]() mutable {
+                                                      std::move(h)(std::exception_ptr{}, false);
+                                                  });
+                            }
+                        },
+                        boost::asio::detached);
+                },
+                boost::asio::use_awaitable);
 
             if (timedOut) {
                 // The timer callback cancelled pending I/O via cancel().
