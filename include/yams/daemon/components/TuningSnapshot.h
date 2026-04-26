@@ -29,6 +29,9 @@ struct TuningSnapshot {
 
     // Writer/mux basics
     std::size_t writerBudgetBytesPerTurn{3072u * 1024u};
+
+    uint32_t repairDegradeHoldMs{750};
+    uint32_t repairReadyHoldMs{1500};
 };
 
 // Registry exposing the latest snapshot using atomic shared_ptr for zero-copy reads.

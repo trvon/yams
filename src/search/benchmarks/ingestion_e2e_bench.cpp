@@ -35,6 +35,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
+#include <yams/vector/simeon_embedding_backend.h>
 
 #include <algorithm>
 #include <chrono>
@@ -102,10 +103,26 @@ public:
         const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
         bool vectorsDisabled = disableVectors && std::string(disableVectors) == "1";
 
+        const char* benchModelEnv = std::getenv("YAMS_BENCH_EMBED_MODEL");
+        std::string benchModel = benchModelEnv && *benchModelEnv ? benchModelEnv : "simeon-default";
+        const bool useSimeon = benchModel == "simeon-default" || benchModel == "simeon";
+
+        if (useSimeon && !std::getenv("YAMS_EMBED_BACKEND")) {
+            setenv("YAMS_EMBED_BACKEND", "simeon", 1);
+        }
+
         if (vectorsDisabled) {
             cfg.useMockModelProvider = true;
             cfg.autoLoadPlugins = false;
             spdlog::info("Using mock model provider (YAMS_DISABLE_VECTORS=1)");
+        } else if (useSimeon) {
+            // Simeon is built in and deterministic, so it is the preferred default for
+            // ingestion profiling. Avoid plugin startup and ONNX model load noise.
+            cfg.useMockModelProvider = false;
+            cfg.autoLoadPlugins = false;
+            cfg.modelPoolConfig.lazyLoading = false;
+            cfg.modelPoolConfig.preloadModels = {"simeon-default"};
+            spdlog::info("Using Simeon embedding provider for ingestion benchmark");
         } else {
             // Use real model provider with plugins for accurate end-to-end benchmark
             cfg.useMockModelProvider = false;
@@ -113,7 +130,7 @@ public:
 
             // Configure model pool for real embedding generation
             cfg.modelPoolConfig.lazyLoading = false;
-            cfg.modelPoolConfig.preloadModels = {"all-MiniLM-L6-v2"};
+            cfg.modelPoolConfig.preloadModels = {benchModel};
         }
 
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
@@ -133,6 +150,15 @@ public:
             auto lifecycle = daemon_->getLifecycle().snapshot();
             if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
                 spdlog::info("Daemon ready at socket: {}", sock_.string());
+                if (!vectorsDisabled) {
+                    if (auto* sm = daemon_->getServiceManager()) {
+                        auto ready = sm->ensureEmbeddingModelReadySync(
+                            useSimeon ? "simeon-default" : benchModel, {}, 10000, false, false);
+                        if (!ready) {
+                            spdlog::warn("Embedding model not ready: {}", ready.error().message);
+                        }
+                    }
+                }
                 return true;
             }
             if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
@@ -309,12 +335,28 @@ struct QueueSnapshot {
     uint64_t embed_prepared_docs_queued = 0;
     uint64_t embed_prepared_chunks_queued = 0;
     uint64_t embed_hash_only_docs_queued = 0;
+    uint64_t kg_jobs = 0;
+    uint64_t symbol_jobs = 0;
+    uint64_t entity_jobs = 0;
+    uint64_t title_jobs = 0;
     uint64_t fts5_queued = 0;
     uint64_t fts5_consumed = 0;
     uint64_t fts5_dropped = 0;
     uint64_t post_queued = 0;
     uint64_t post_consumed = 0;
     uint64_t post_dropped = 0;
+    uint64_t kg_queued = 0;
+    uint64_t kg_consumed = 0;
+    uint64_t kg_dropped = 0;
+    uint64_t symbol_queued = 0;
+    uint64_t symbol_consumed = 0;
+    uint64_t symbol_dropped = 0;
+    uint64_t entity_queued = 0;
+    uint64_t entity_consumed = 0;
+    uint64_t entity_dropped = 0;
+    uint64_t title_queued = 0;
+    uint64_t title_consumed = 0;
+    uint64_t title_dropped = 0;
 
     json toJson() const {
         return json{
@@ -324,6 +366,11 @@ struct QueueSnapshot {
               {"embed_jobs", embed_jobs},
               {"fts5_jobs", fts5_jobs},
               {"post_ingest", post_ingest}}},
+            {"enrichment_depths",
+             {{"kg_jobs", kg_jobs},
+              {"symbol_jobs", symbol_jobs},
+              {"entity_jobs", entity_jobs},
+              {"title_jobs", title_jobs}}},
             {"counters",
              {{"embed",
                {{"queued", embed_queued},
@@ -335,9 +382,20 @@ struct QueueSnapshot {
               {"fts5",
                {{"queued", fts5_queued}, {"consumed", fts5_consumed}, {"dropped", fts5_dropped}}},
               {"post",
-               {{"queued", post_queued},
-                {"consumed", post_consumed},
-                {"dropped", post_dropped}}}}}};
+               {{"queued", post_queued}, {"consumed", post_consumed}, {"dropped", post_dropped}}},
+              {"kg", {{"queued", kg_queued}, {"consumed", kg_consumed}, {"dropped", kg_dropped}}},
+              {"symbol",
+               {{"queued", symbol_queued},
+                {"consumed", symbol_consumed},
+                {"dropped", symbol_dropped}}},
+              {"entity",
+               {{"queued", entity_queued},
+                {"consumed", entity_consumed},
+                {"dropped", entity_dropped}}},
+              {"title",
+               {{"queued", title_queued},
+                {"consumed", title_consumed},
+                {"dropped", title_dropped}}}}}};
     }
 };
 
@@ -372,6 +430,9 @@ struct BenchmarkResult {
     int doc_size = 0;
     int poll_interval_ms = 0;
     std::string timestamp;
+    std::string embedding_model = "simeon-default";
+    std::string embedding_backend = "simeon";
+    std::string simeon_recipe;
 
     // Overall metrics
     int64_t total_duration_ms = 0;
@@ -396,10 +457,11 @@ struct BenchmarkResult {
 
     json toJson() const {
         json j;
-        j["test_config"] = {{"corpus_size", corpus_size},
-                            {"doc_size", doc_size},
-                            {"poll_interval_ms", poll_interval_ms},
-                            {"timestamp", timestamp}};
+        j["test_config"] = {
+            {"corpus_size", corpus_size},           {"doc_size", doc_size},
+            {"poll_interval_ms", poll_interval_ms}, {"timestamp", timestamp},
+            {"embedding_model", embedding_model},   {"embedding_backend", embedding_backend},
+            {"simeon_recipe", simeon_recipe}};
 
         j["total_duration_ms"] = total_duration_ms;
         j["throughput_docs_per_sec"] = throughput_docs_per_sec;
@@ -469,21 +531,31 @@ QueueSnapshot captureQueueSnapshot() {
     // Get actual queue depths by accessing channels
     if (auto q = bus.get_or_create_channel<InternalEventBus::StoreDocumentTask>(
             "store_document_tasks", 4096)) {
-        // Note: SpscQueue doesn't expose size(), so we'll rely on counters for now
-        // Queue depth approximation: queued - consumed
-        snap.store_document_tasks = 0; // TODO: Need size() method on SpscQueue
+        snap.store_document_tasks = q->size_approx();
     }
 
     if (auto q = bus.get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs", 4096)) {
-        snap.embed_jobs = 0; // TODO: Need size() method
+        snap.embed_jobs = q->size_approx();
     }
 
     if (auto q = bus.get_or_create_channel<InternalEventBus::Fts5Job>("fts5_jobs", 4096)) {
-        snap.fts5_jobs = 0; // TODO: Need size() method
+        snap.fts5_jobs = q->size_approx();
     }
 
     if (auto q = bus.get_or_create_channel<InternalEventBus::PostIngestTask>("post_ingest", 4096)) {
-        snap.post_ingest = 0; // TODO: Need size() method
+        snap.post_ingest = q->size_approx();
+    }
+    if (auto q = bus.get_channel<InternalEventBus::KgJob>("kg_jobs")) {
+        snap.kg_jobs = q->size_approx();
+    }
+    if (auto q = bus.get_channel<InternalEventBus::SymbolExtractionJob>("symbol_extraction")) {
+        snap.symbol_jobs = q->size_approx();
+    }
+    if (auto q = bus.get_channel<InternalEventBus::EntityExtractionJob>("entity_extraction")) {
+        snap.entity_jobs = q->size_approx();
+    }
+    if (auto q = bus.get_channel<InternalEventBus::TitleExtractionJob>("title_extraction")) {
+        snap.title_jobs = q->size_approx();
     }
 
     // Get cumulative counters (these work for completion detection)
@@ -501,6 +573,18 @@ QueueSnapshot captureQueueSnapshot() {
     snap.post_queued = bus.postQueued();
     snap.post_consumed = bus.postConsumed();
     snap.post_dropped = bus.postDropped();
+    snap.kg_queued = bus.kgQueued();
+    snap.kg_consumed = bus.kgConsumed();
+    snap.kg_dropped = bus.kgDropped();
+    snap.symbol_queued = bus.symbolQueued();
+    snap.symbol_consumed = bus.symbolConsumed();
+    snap.symbol_dropped = bus.symbolDropped();
+    snap.entity_queued = bus.entityQueued();
+    snap.entity_consumed = bus.entityConsumed();
+    snap.entity_dropped = bus.entityDropped();
+    snap.title_queued = bus.titleQueued();
+    snap.title_consumed = bus.titleConsumed();
+    snap.title_dropped = bus.titleDropped();
 
     return snap;
 }
@@ -515,6 +599,13 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     result.doc_size = docSize;
     result.poll_interval_ms = pollIntervalMs;
     result.timestamp = nowIso8601();
+    if (const char* env = std::getenv("YAMS_BENCH_EMBED_MODEL"); env && *env) {
+        result.embedding_model = env;
+    }
+    const bool simeonModel =
+        result.embedding_model == "simeon-default" || result.embedding_model == "simeon";
+    result.embedding_backend = simeonModel ? "simeon" : "onnxruntime";
+    result.simeon_recipe = simeonModel ? yams::vector::simeonRecipeLabel() : "";
 
     spdlog::info("=== Ingestion E2E Benchmark ===");
     spdlog::info("Corpus size: {}", corpusSize);

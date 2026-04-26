@@ -703,6 +703,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_tune_advisor_snapshot_exe = executable('catch2_tune_advisor_snapshot',
+    files('unit/daemon/tune_advisor_snapshot_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_streaming_processor_exe = executable('catch2_streaming_processor',
     files('unit/daemon/streaming_processor_catch2_test.cpp'),
     include_directories: incs,
@@ -2667,6 +2676,12 @@ if catch2_dep.found()
 
   test('storage_preflight', catch2_storage_preflight_exe,
     suite: ['catch2', 'unit', 'daemon', 'storage_preflight'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('tune_advisor_snapshot', catch2_tune_advisor_snapshot_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune_advisor'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
   )

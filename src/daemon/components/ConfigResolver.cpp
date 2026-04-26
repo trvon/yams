@@ -43,6 +43,21 @@ std::optional<bool> parseBool01(const std::string& raw) {
     }
 }
 
+std::optional<bool> parseBoolValue(std::string raw) {
+    raw.erase(std::remove_if(raw.begin(), raw.end(),
+                             [](unsigned char c) { return std::isspace(c) != 0; }),
+              raw.end());
+    std::transform(raw.begin(), raw.end(), raw.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (raw == "true" || raw == "yes" || raw == "on" || raw == "1") {
+        return true;
+    }
+    if (raw == "false" || raw == "no" || raw == "off" || raw == "0") {
+        return false;
+    }
+    return std::nullopt;
+}
+
 std::optional<double> parseDouble(const std::string& raw) {
     try {
         if (raw.empty()) {
@@ -340,6 +355,12 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
             }
             if (auto it = kv.find("embeddings.selection.intro_boost"); it != kv.end()) {
                 policy.introBoost = parseDouble(it->second, policy.introBoost);
+            }
+            if (auto it = kv.find("embeddings.selection.update_semantic_graph_during_ingest");
+                it != kv.end()) {
+                if (auto v = parseBoolValue(it->second); v.has_value()) {
+                    policy.updateSemanticGraphDuringIngest = *v;
+                }
             }
         }
     } catch (...) {

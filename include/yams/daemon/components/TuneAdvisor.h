@@ -26,6 +26,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <yams/daemon/components/TuningSnapshot.h>
 
 // Platform-specific includes for memory detection (used by detectSystemMemory)
 // Note: These are only used in the implementation of detectSystemMemory()
@@ -643,31 +644,17 @@ public:
         return def;
     }
 
-    // Hysteresis: ms to hold busy before degrading. Default 750 ms.
     static uint32_t repairDegradeHoldMs() {
-        uint32_t def = 750;
-        if (const char* s = std::getenv("YAMS_REPAIR_DEGRADE_HOLD_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                return v;
-            } catch (const std::exception&) {
-                return def;
-            }
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            return snap->repairDegradeHoldMs;
         }
-        return def;
+        return 750;
     }
-    // Hysteresis: ms to hold idle/clear before returning to ready. Default 1500 ms.
     static uint32_t repairReadyHoldMs() {
-        uint32_t def = 1500;
-        if (const char* s = std::getenv("YAMS_REPAIR_READY_HOLD_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                return v;
-            } catch (const std::exception&) {
-                return def;
-            }
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            return snap->repairReadyHoldMs;
         }
-        return def;
+        return 1500;
     }
 
     // Auto-repair tick scheduling (tiered). Set to 0 to disable a tier.

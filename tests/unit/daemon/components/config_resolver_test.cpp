@@ -397,6 +397,20 @@ socket_path = "/tmp/test.sock"
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveEmbeddingSelectionPolicy reads semantic graph ingest flag",
+                 "[daemon][components][config][embeddings][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[embeddings.selection]
+update_semantic_graph_during_ingest = false
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveEmbeddingSelectionPolicy();
+
+    CHECK(policy.updateSemanticGraphDuringIngest == false);
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
                  "ConfigResolver::resolveTopologyTunerPolicy reads populated TOML block",
                  "[daemon][components][config][topology_tuner][catch2]") {
     auto configPath = writeToml("config.toml", R"TOML(

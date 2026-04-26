@@ -39,6 +39,9 @@ public:
         std::size_t maxCharsPerDoc{24000};
         double headingBoost{1.25};
         double introBoost{0.75};
+        // When false, ingestion still generates/stores embeddings but defers
+        // semantic-neighbor KG maintenance to an explicit corpus-wide rebuild.
+        bool updateSemanticGraphDuringIngest{true};
     };
 
     struct EmbeddingChunkingPolicy {

@@ -1070,6 +1070,14 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                     passthrough.push_back(std::move(pending));
                     continue;
                 }
+                // Preserve in-process prepared payloads and explicit semantic-graph policy.
+                // The model-affinity grouper only carries hash lists; grouping these jobs would
+                // silently drop prepared chunks (forcing a DB re-gather/re-chunk) and reset
+                // updateSemanticGraph to its default true value.
+                if (!pending.preparedDocs.empty() || !pending.updateSemanticGraph) {
+                    passthrough.push_back(std::move(pending));
+                    continue;
+                }
                 if (pending.modelName.empty() && !defaultModel.empty()) {
                     pending.modelName.append(defaultModel);
                 }

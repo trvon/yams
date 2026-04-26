@@ -2658,6 +2658,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     std::vector<InternalEventBus::EmbedPreparedDoc> embedPreparedBatch;
     std::vector<std::string> embedHashBatch;
     const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
+    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
     embedPreparedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     embedHashBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     const bool embedStageActive =
@@ -2688,6 +2689,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             job.hashes.push_back(doc.hash);
         }
         job.skipExisting = true;
+        job.updateSemanticGraph = selectionCfg.updateSemanticGraphDuringIngest;
 
         constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
         uint32_t waits = 0;
@@ -2718,7 +2720,6 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         embedHashBatch.clear();
     };
 
-    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
     const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
     auto embedChunker =
         yams::vector::createChunker(chunkPolicy.strategy, chunkPolicy.config, nullptr);

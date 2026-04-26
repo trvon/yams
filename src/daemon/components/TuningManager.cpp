@@ -1318,6 +1318,27 @@ bool TuningManager::tick_once() {
         s->poolIoMin = TuneAdvisor::poolMinSizeIpcIo();
         s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
         s->writerBudgetBytesPerTurn = writerBudget;
+
+        const uint32_t baseDegrade = 750;
+        const uint32_t baseReady = 1500;
+        double degradeMult = 1.0;
+        double readyMult = 1.0;
+        if (govSnap.level >= ResourcePressureLevel::Critical) {
+            degradeMult = 4.0;
+            readyMult = 0.5;
+        } else if (govSnap.level >= ResourcePressureLevel::Warning) {
+            degradeMult = 2.0;
+            readyMult = 0.75;
+        }
+        const auto repairBacklog = state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
+        if (repairBacklog > 1000) {
+            degradeMult *= 1.5;
+        } else if (repairBacklog > 100) {
+            degradeMult *= 1.25;
+        }
+        s->repairDegradeHoldMs = static_cast<uint32_t>(baseDegrade * degradeMult);
+        s->repairReadyHoldMs = static_cast<uint32_t>(baseReady * readyMult);
+
         TuningSnapshotRegistry::instance().set(std::move(s));
     } catch (const std::exception& e) {
         logIgnoredTuningException("Tuning snapshot publish failed", e);
