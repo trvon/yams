@@ -1,6 +1,6 @@
 ---
 description: Codex engineering/bug-bounty prompt with YAMS-first distributed memory
-argument-hint: [TASK=<description>] [MODE=<engineering|bug-bounty>] [PBI=<id>] [PHASE=<start|checkpoint|complete>]
+argument-hint: [TASK=<description>] [MODE=<engineering|bug-bounty>] [PHASE=<start|checkpoint|complete>]
 ---
 
 # Codex Prompt (YAMS-First)
@@ -81,14 +81,14 @@ Allowed exceptions:
 yams add . --recursive \
   --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
   --label "Working on: $TASK" \
-  --metadata "mode=$MODE,pbi=$PBI,task=$TASK,phase=start,owner=opencode,source=code,agent_id=opencode-$TASK"
+  --metadata "mode=$MODE,task=$TASK,phase=start,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
 
 Optional YAMS claim note (YAMS-only fallback):
 
 ```bash
 yams add - --name "claim-$TASK.md" \
-  --metadata "mode=$MODE,pbi=$PBI,task=$TASK,phase=start,owner=opencode,source=note,agent_id=opencode-$TASK" \
+  --metadata "mode=$MODE,task=$TASK,phase=start,owner=opencode,source=note,agent_id=opencode-$TASK" \
   <<'CLAIM'
 ## Claim
 Agent: opencode-$TASK
@@ -108,7 +108,7 @@ CLAIM
 ```bash
 yams add <changed-files> \
   --label "$TASK: checkpoint" \
-  --metadata "mode=$MODE,pbi=$PBI,task=$TASK,phase=checkpoint,owner=opencode,source=code,agent_id=opencode-$TASK"
+  --metadata "mode=$MODE,task=$TASK,phase=checkpoint,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
 
 ### 5) Complete (index final state)
@@ -117,7 +117,7 @@ yams add <changed-files> \
 yams add . --recursive \
   --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
   --label "Completed: $TASK" \
-  --metadata "mode=$MODE,pbi=$PBI,task=$TASK,phase=complete,owner=opencode,source=code,agent_id=opencode-$TASK"
+  --metadata "mode=$MODE,task=$TASK,phase=complete,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
 
 ## Required Metadata (every `yams add`)
@@ -130,7 +130,6 @@ yams add . --recursive \
 ## Recommended Metadata
 
 - `mode`: `engineering|bug-bounty`
-- `pbi`: PBI identifier
 - `agent_id`: canonical agent ID
 - `status`: `open|blocked|done`
 - `trace_id`: correlation id when available
@@ -178,7 +177,6 @@ yams grep "<pattern>" --cwd .
 ```text
 TASK: $TASK
 MODE: $MODE
-PBI: $PBI
 PHASE: $PHASE
 AGENT: opencode-$TASK
 

@@ -17,20 +17,33 @@ Product updates and occasional deep-dives.
 
 Post: https://manta.black/posts/2026-04-25-simeon/
 
-YAMS is switching its default retrieval embeddings backend to **Simeon** (training-free, SIMD/NEON text->vector), and the reason is simple: it makes local-first search faster to iterate on and more deterministic to benchmark.
+YAMS is switching its default retrieval embeddings backend to **Simeon** — training-free, SIMD/NEON, no model downloads. The short version: 7,000 docs/s encode throughput at the quality-matching tier vs MiniLM-L6's 322 docs/s on the same CPU. That speed plus byte-identical determinism is why it's the new default.
 
-Simeon is model-free: it maps text to vectors via char/word n-grams, hashed count-sketch, optional random projection, and L2 normalization. No model downloads. No ONNX embedding runtime required for the default path.
+**BEIR scifact — speed/quality Pareto** (M-series CPU, single-threaded):
 
-This change is also a reaction to the broader "training-free retrieval" momentum (NUMEN and friends): once you take throughput-per-watt and operational simplicity seriously, model-free backends stop looking like a novelty and start looking like a sensible default. The other lesson from our own reproduction attempts is that benchmark fixtures and harness discipline matter as much as the core idea.
+| Configuration | nDCG@10 | enc docs/s | qps |
+|---|---:|---:|---:|
+| `bm25_only` | 0.633 | — | 31,800 |
+| `bm25_pool500_linear_alpha075_4096_384` | 0.638 | 7,000 | 5,800 |
+| `bm25_pool500_linear_alpha075_4096_768` | 0.638 | 3,700 | 4,900 |
+| `router_default_4096_768` | 0.654 | 3,600 | 1,500 |
+| MiniLM-L6 (384-d float32, CPU) | 0.654 | 322 | 1,829 |
 
-This is not a claim that "training-free beats learned" in general. Simeon is best understood as a lexical/topical retrieval backend that composes well with BM25 and hybrid fusion, and it is explicit about transfer limits and negative results.
+`router_default_4096_768` matches MiniLM-L6 on nDCG@10 (0.654) and beats it on MRR@10 (0.626 vs 0.607). The router picks among `Bm25Atire`, `Bm25SabSmooth`, and `CascadeLinearAlpha` per query. For medium/long semantic queries it dispatches to **PHSS** (Per-Hit Score Smoothing) — fragment geometry scoring that cuts the similarity graph at its largest gap.
 
-One benchmark highlight from the vendored Simeon research notes:
-- On BEIR scifact, the shipped routed hybrid (`router_default_4096_768`) matches a MiniLM-L6 reference on `nDCG@10` (0.654 vs 0.654) and beats it on `MRR@10` (0.626 vs 0.607), while trailing on recall.
+**PHSS cross-corpus** (`LargestGapApprox`, richcov builder t=8):
 
-The engineering punchline is throughput: Simeon's encode path is fast enough to turn tuning loops from minutes into seconds (see `docs/benchmarks/retrieval_precision_optimization.md`). That speed, plus byte-identical determinism, is a great fit for YAMS' topology and retrieval ablation harnesses.
+| Corpus | BM25 | PHSS | Δ |
+|---|---:|---:|---:|
+| scifact | 0.6188 | 0.6188 | +0.000 |
+| NFCorpus | 0.2521 | 0.2544 | +0.002 |
+| FiQA | 0.2053 | 0.2089 | +0.004 |
 
-One internal benchmark takeaway worth calling out: when YAMS instrumented per-component nDCG on scifact/Simeon, it found cases where vector-only ordering quality was higher than the final fused result, meaning fusion was destroying real signal rather than embeddings being "bad" (see `docs/benchmarks/e1_per_component_telemetry.md`).
+BM25 parity on scifact, small consistent lifts on the other two — at ~2× the query throughput of the heavy `LargestGap` variant.
+
+**Transfer caveat:** scifact parity with MiniLM does not transfer. On FiQA the scifact-tuned router lands at 0.202 vs MiniLM's 0.359. Simeon is a lexical/topical backend that composes well with BM25; it is not a general learned-embedding replacement.
+
+**Fusion note:** per-component nDCG instrumentation found cases where vector-only ordering was higher than the fused result — fusion was destroying signal, not the embeddings. Linear-α z-scored fusion is the only strategy that consistently beats BM25 alone on top-10 ranking.
 
 Links:
 - Simeon repo: https://github.com/trvon/simeon

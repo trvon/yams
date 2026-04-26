@@ -88,6 +88,8 @@ int count_live_statements(sqlite3* db) {
     return count;
 }
 
+thread_local std::vector<sqlite3_stmt*> tl_deferred_finalize;
+
 // Helper to safely get string from sqlite column (avoids GNU ?: extension)
 inline std::string safeColumnText(sqlite3_stmt* stmt, int col) {
     const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col));
@@ -1232,6 +1234,10 @@ public:
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureVec0ReadyUnlocked(query_dim);
                 write_lock.unlock();
+                for (auto* s : tl_deferred_finalize) {
+                    sqlite3_finalize(s);
+                }
+                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -1257,6 +1263,10 @@ public:
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureSimeonPqReadyUnlocked(query_dim);
                 write_lock.unlock();
+                for (auto* s : tl_deferred_finalize) {
+                    sqlite3_finalize(s);
+                }
+                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -1298,6 +1308,10 @@ public:
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureVec0ReadyUnlocked(query_dim);
                 write_lock.unlock();
+                for (auto* s : tl_deferred_finalize) {
+                    sqlite3_finalize(s);
+                }
+                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -1324,6 +1338,10 @@ public:
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureSimeonPqReadyUnlocked(query_dim);
                 write_lock.unlock();
+                for (auto* s : tl_deferred_finalize) {
+                    sqlite3_finalize(s);
+                }
+                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -2536,8 +2554,10 @@ private:
         // Column indices match SELECT statement
         // 0: rowid, 1: chunk_id, 2: document_hash, 3: embedding, 4: embedding_dim, 5: content, ...
 
-        record.chunk_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        record.document_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        const char* chunk_id_txt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        record.chunk_id = chunk_id_txt ? chunk_id_txt : "";
+        const char* doc_hash_txt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        record.document_hash = doc_hash_txt ? doc_hash_txt : "";
 
         // Embedding blob — may be NULL in quantized-primary mode
         const void* blob = sqlite3_column_blob(stmt, 3);
@@ -2674,7 +2694,8 @@ private:
                     dims.push_back(static_cast<size_t>(dim));
                 }
             }
-            sqlite3_finalize(stmt);
+            sqlite3_reset(stmt);
+            tl_deferred_finalize.push_back(stmt);
         }
         return dims;
     }
@@ -2761,7 +2782,8 @@ private:
             }
         }
 
-        sqlite3_finalize(stmt);
+        sqlite3_reset(stmt);
+        tl_deferred_finalize.push_back(stmt);
         return rows;
     }
 

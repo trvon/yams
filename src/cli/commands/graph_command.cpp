@@ -524,7 +524,7 @@ private:
         std::filesystem::path normalizedPath(normalized);
         std::error_code ec;
         auto rel = normalizedPath.lexically_relative(cwd);
-        if (!rel.empty() && rel.native().find("..") != 0) {
+        if (!rel.empty() && rel.generic_string().find("..") != 0) {
             return rel.generic_string();
         }
 
