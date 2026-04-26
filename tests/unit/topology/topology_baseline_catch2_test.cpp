@@ -17,6 +17,8 @@
 #include <yams/topology/topology_offline_analyzer.h>
 #include <yams/vector/vector_database.h>
 
+#include "tests/common/test_helpers_catch2.h"
+
 using namespace yams;
 using namespace yams::metadata;
 using namespace yams::topology;
@@ -259,6 +261,9 @@ TEST_CASE("Metadata KG topology store clears stale memberships on partial replac
 
 TEST_CASE("Topology extractor and offline analyzer use real stores",
           "[unit][topology][extractor][offline]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
+    yams::test::ScopedEnvVar skipVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+
     TopologyFixture fix;
 
     vector::VectorDatabaseConfig vectorConfig;

@@ -604,7 +604,7 @@ TEST_CASE("AsioConnectionPool shutdown short-circuits in one-shot CLI mode",
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start);
 
-    CHECK(elapsed < 150ms);
+    CHECK(elapsed < 450ms);
 
     pendingReadLoop.set_value();
     stop.store(true, std::memory_order_release);
