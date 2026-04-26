@@ -2049,6 +2049,11 @@ private:
 
             std::cout << title_banner("YAMS Daemon") << "\n\n";
 
+            if (!s.storageWarning.empty()) {
+                std::cout << colorize("⚠ Slow storage: ", Ansi::YELLOW) << s.storageWarning
+                          << "\n\n";
+            }
+
             // Single overview table with essential info
             std::vector<Row> overview;
             overview.push_back({"State", paintStatus(stateSeverity, lifecycle),
@@ -2083,6 +2088,57 @@ private:
                     {"Memory",
                      paintStatus(memSev, std::to_string(static_cast<int>(s.memoryUsageMb)) + " MB"),
                      ""});
+            }
+
+            // Database phase visibility: lets the user tell a slow open / repair from a hang.
+            {
+                namespace dbphase = yams::daemon::dbphase;
+                const std::string& phase = s.databasePhase;
+                const uint64_t elapsedMs = s.databasePhaseElapsedMs;
+                const std::string elapsedSec =
+                    elapsedMs > 0 ? format_duration(elapsedMs / 1000) + " elapsed" : "";
+                std::string label;
+                std::string extra;
+                Severity dbSev = Severity::Good;
+
+                if (phase == dbphase::kOpening) {
+                    label = "Opening";
+                    extra = elapsedSec;
+                    dbSev = (elapsedMs > 30000) ? Severity::Warn : Severity::Good;
+                    if (!s.metadataDbPath.empty()) {
+                        if (!extra.empty())
+                            extra += " · ";
+                        extra += s.metadataDbPath;
+                    }
+                } else if (phase == dbphase::kRecovering) {
+                    label = "Repairing";
+                    extra = elapsedSec.empty() ? std::string("quarantining corrupt DB")
+                                               : elapsedSec + " · quarantining corrupt DB";
+                    dbSev = Severity::Warn;
+                } else if (phase == dbphase::kMigrating) {
+                    label = "Migrating";
+                    extra = elapsedSec;
+                    dbSev = Severity::Warn;
+                } else if (phase == dbphase::kReady ||
+                           s.readinessStates.count(std::string(readiness::kDatabase))) {
+                    auto it = s.readinessStates.find(std::string(readiness::kDatabase));
+                    const bool ready = (it != s.readinessStates.end()) ? it->second : true;
+                    if (!ready) {
+                        label = "Initializing";
+                        extra = elapsedSec;
+                        dbSev = Severity::Warn;
+                    } else {
+                        label = "Ready";
+                        if (!s.databaseRecoveredFrom.empty()) {
+                            extra = "recovered from " + s.databaseRecoveredFrom +
+                                    " · run 'yams repair --orphans'";
+                            dbSev = Severity::Warn;
+                        }
+                    }
+                }
+                if (!label.empty()) {
+                    overview.push_back({"Database", paintStatus(dbSev, label), extra});
+                }
             }
 
             // Search summary

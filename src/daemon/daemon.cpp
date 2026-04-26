@@ -23,6 +23,7 @@
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
+#include <yams/daemon/components/storage_preflight.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
@@ -352,6 +353,27 @@ Result<void> YamsDaemon::start() {
     if (auto preflight = validate_socket_path_preflight(config_.socketPath); !preflight) {
         running_ = false;
         return preflight.error();
+    }
+
+    if (!config_.dataDir.empty()) {
+        spdlog::info("[Startup] Phase: Storage Preflight");
+        auto storage = probeStorage(config_.dataDir);
+        if (!storage) {
+            spdlog::error("[Startup] Storage preflight failed for '{}': {}. Hint: check that the "
+                          "mount is reachable (ls/stat the path); on a hung NFS/SMB/external mount "
+                          "use 'umount -f' or move the data dir to local storage.",
+                          config_.dataDir.string(), storage.error().message);
+            running_ = false;
+            return storage.error();
+        }
+        if (storage.value().slow) {
+            spdlog::warn("[Startup] {}", storage.value().detail);
+            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+            state_.readiness.storageWarning = storage.value().detail;
+        } else {
+            spdlog::info("[Startup] Storage preflight OK ({}ms)",
+                         storage.value().probeDuration.count());
+        }
     }
 
     spdlog::info("[Startup] Phase: LifecycleManager Init");

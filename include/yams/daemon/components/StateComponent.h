@@ -41,6 +41,17 @@ struct DaemonReadiness {
     std::string databaseRecoveredAt;
     std::string databaseRecoveredFrom;
 
+    // Database init phase visibility. Lets `yams daemon status` show what the
+    // daemon is doing during a slow open/migrate/recover instead of a generic
+    // "Initializing". Values: "" (unset), "opening", "recovering", "migrating",
+    // "ready". Updated under recoveryMutex along with phase start time.
+    std::string databasePhase;
+    std::chrono::steady_clock::time_point databasePhaseSince;
+
+    // Set by the storage preflight when the data dir responded but was slow.
+    // Surfaced as a banner in `yams daemon status`.
+    std::string storageWarning;
+
     // Bootstrap-only readiness summary used before lifecycle-backed status is available.
     bool bootstrapReady() const {
         return ipcServerReady && contentStoreReady && databaseReady && metadataRepoReady &&

@@ -1644,6 +1644,24 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
     } catch (...) {
     }
 
+    // Database init phase + recovery + storage warning. Read under recoveryMutex
+    // because the writers in ServiceManager::co_openDatabase / co_migrateDatabase
+    // also hold it when mutating these fields.
+    try {
+        std::lock_guard<std::mutex> lk(state_->readiness.recoveryMutex);
+        out.databasePhase = state_->readiness.databasePhase;
+        if (state_->readiness.databasePhaseSince.time_since_epoch().count() != 0) {
+            out.databasePhaseElapsedMs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - state_->readiness.databasePhaseSince)
+                    .count());
+        }
+        out.databaseRecoveredAt = state_->readiness.databaseRecoveredAt;
+        out.databaseRecoveredFrom = state_->readiness.databaseRecoveredFrom;
+        out.storageWarning = state_->readiness.storageWarning;
+    } catch (...) {
+    }
+
     // Centralized service states
     try {
         if (services_) {

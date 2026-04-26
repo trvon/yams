@@ -70,6 +70,11 @@ void populateStatusCoreFromSnapshot(StatusResponse& res, const MetricsSnapshot& 
     res.vectorDbInitAttempted = snap.vectorDbInitAttempted;
     res.vectorDbReady = snap.vectorDbReady;
     res.vectorDbDim = snap.vectorDbDim;
+    res.databasePhase = snap.databasePhase;
+    res.databasePhaseElapsedMs = snap.databasePhaseElapsedMs;
+    res.databaseRecoveredAt = snap.databaseRecoveredAt;
+    res.databaseRecoveredFrom = snap.databaseRecoveredFrom;
+    res.storageWarning = snap.storageWarning;
     res.readinessStates[std::string(readiness::kVectorDbInitAttempted)] = res.vectorDbInitAttempted;
     res.readinessStates[std::string(readiness::kVectorDbReady)] = res.vectorDbReady;
     res.readinessStates[std::string(readiness::kVectorDbDim)] = (res.vectorDbDim > 0);
@@ -515,7 +520,28 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 co_return finalizeStatusResponse();
             }
             populateStatusFromSnapshot(res, *snap, includeExtendedStatus, serviceManager_, state_);
-        } else {
+        }
+        // Always overlay live database-phase + storage-warning fields from state_
+        // so a stale snapshot (e.g. polling has not yet refreshed after a phase
+        // transition) cannot mask the current value the operator asks about.
+        if (state_) {
+            try {
+                std::lock_guard<std::mutex> lk(state_->readiness.recoveryMutex);
+                res.databasePhase = state_->readiness.databasePhase;
+                if (state_->readiness.databasePhaseSince.time_since_epoch().count() != 0) {
+                    res.databasePhaseElapsedMs = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - state_->readiness.databasePhaseSince)
+                            .count());
+                }
+                res.databaseRecoveredAt = state_->readiness.databaseRecoveredAt;
+                res.databaseRecoveredFrom = state_->readiness.databaseRecoveredFrom;
+                res.storageWarning = state_->readiness.storageWarning;
+            } catch (...) {
+                // Best effort; leave whatever the snapshot populated.
+            }
+        }
+        if (!metrics_) {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
             res.running = true;
             res.version = YAMS_VERSION_STRING;

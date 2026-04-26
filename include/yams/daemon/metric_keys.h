@@ -297,6 +297,31 @@ constexpr std::string_view kSearchEngineFragmentGeometryReady =
 
 } // namespace yams::daemon::readiness
 
+namespace yams::daemon::dbphase {
+
+// Database init phase values surfaced via StateComponent.readiness.databasePhase
+// and the StatusResponse.databasePhase IPC field. Pin the strings here so
+// daemon writers and CLI/MCP readers cannot drift.
+constexpr std::string_view kOpening = "opening";
+constexpr std::string_view kRecovering = "recovering";
+constexpr std::string_view kMigrating = "migrating";
+constexpr std::string_view kReady = "ready";
+
+} // namespace yams::daemon::dbphase
+
+namespace yams::daemon::status_keys {
+
+// Keys used to piggyback string/integer status fields in
+// StatusResponse.request_counts (proto IPC) and the bootstrap status JSON
+// written to $XDG_RUNTIME_DIR/yams-daemon.status.json.
+constexpr std::string_view kDatabasePhase = "database_phase";
+constexpr std::string_view kDatabasePhaseElapsedMs = "database_phase_elapsed_ms";
+constexpr std::string_view kDatabaseRecoveredAt = "database_recovered_at";
+constexpr std::string_view kDatabaseRecoveredFrom = "database_recovered_from";
+constexpr std::string_view kStorageWarning = "storage_warning";
+
+} // namespace yams::daemon::status_keys
+
 namespace yams::daemon::ir_metrics {
 constexpr std::string_view kIRSchemaVersion = "topology_ablation_quality_v1";
 constexpr std::string_view kIRTestKey = "test";

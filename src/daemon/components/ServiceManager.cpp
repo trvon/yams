@@ -1497,8 +1497,24 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
         {
             std::lock_guard<std::mutex> lk(state.readiness.recoveryMutex);
             if (!state.readiness.databaseRecoveredAt.empty()) {
-                j["database_recovered_at"] = state.readiness.databaseRecoveredAt;
-                j["database_recovered_from"] = state.readiness.databaseRecoveredFrom;
+                j[std::string(status_keys::kDatabaseRecoveredAt)] =
+                    state.readiness.databaseRecoveredAt;
+                j[std::string(status_keys::kDatabaseRecoveredFrom)] =
+                    state.readiness.databaseRecoveredFrom;
+            }
+            if (!state.readiness.databasePhase.empty()) {
+                j[std::string(status_keys::kDatabasePhase)] = state.readiness.databasePhase;
+                if (state.readiness.databasePhaseSince.time_since_epoch().count() != 0) {
+                    auto elapsed =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - state.readiness.databasePhaseSince)
+                            .count();
+                    j[std::string(status_keys::kDatabasePhaseElapsedMs)] =
+                        static_cast<uint64_t>(elapsed);
+                }
+            }
+            if (!state.readiness.storageWarning.empty()) {
+                j[std::string(status_keys::kStorageWarning)] = state.readiness.storageWarning;
             }
         }
         nlohmann::json pr;
@@ -2625,6 +2641,12 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
     auto completed = std::make_shared<std::atomic<bool>>(false);
     const auto startedAt = std::chrono::steady_clock::now();
 
+    {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        state_.readiness.databasePhase = std::string(dbphase::kOpening);
+        state_.readiness.databasePhaseSince = startedAt;
+    }
+
     // Liveness watchdog: emits periodic progress logs so a slow cold-open on external
     // volumes doesn't look like a hang. Terminates as soon as `completed` flips.
     boost::asio::co_spawn(
@@ -2686,6 +2708,8 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
                     state_.readiness.databaseRecoveredAt = recovery.value().timestamp;
                     state_.readiness.databaseRecoveredFrom =
                         recovery.value().quarantinedPath.string();
+                    state_.readiness.databasePhase = std::string(dbphase::kRecovering);
+                    state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
                 }
                 if (!openOnce()) {
                     return false;
@@ -2694,6 +2718,11 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
 
             ok = true;
             state_.readiness.databaseReady = true;
+            {
+                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                state_.readiness.databasePhase = std::string(dbphase::kReady);
+                state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+            }
             spdlog::info("Database opened successfully");
         } catch (const std::exception& e) {
             spdlog::warn("Database open threw exception: {}", e.what());
@@ -2739,6 +2768,12 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int /*timeout_ms
 
     auto completed = std::make_shared<std::atomic<bool>>(false);
     const auto startedAt = std::chrono::steady_clock::now();
+
+    {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        state_.readiness.databasePhase = std::string(dbphase::kMigrating);
+        state_.readiness.databasePhaseSince = startedAt;
+    }
 
     // Progress watchdog
     boost::asio::co_spawn(
@@ -2790,6 +2825,11 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int /*timeout_ms
         spdlog::warn("[ServiceManager] Database migration completed but shutdown was requested; "
                      "treating as failure");
         co_return false;
+    }
+    if (ok) {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        state_.readiness.databasePhase = std::string(dbphase::kReady);
+        state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
     }
     co_return ok;
 }

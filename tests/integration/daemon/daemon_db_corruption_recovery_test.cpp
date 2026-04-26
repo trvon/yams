@@ -81,6 +81,11 @@ TEST_CASE("Daemon auto-recovers from corrupt metadata DB on startup",
 
     auto status = yams::cli::run_sync(client.status(), 5s);
     REQUIRE(status.has_value());
+    // After a corruption-triggered recovery the daemon should report the
+    // ready phase and remember which file was quarantined so the CLI can
+    // surface "recovered from …" in `yams daemon status`.
+    REQUIRE(status.value().databasePhase == "ready");
+    REQUIRE_FALSE(status.value().databaseRecoveredFrom.empty());
 
     harness.stop();
 
