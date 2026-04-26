@@ -333,26 +333,45 @@ backend = "SIMEON"
         CHECK(ConfigResolver::resolveEmbeddingBackend() == "simeon");
     }
 
-    SECTION("maps legacy onnx backend names to daemon") {
+    SECTION("maps legacy onnx backend names to onnxruntime") {
         auto configPath = writeToml("embedding_backend_legacy_onnx.toml", R"(
 [embeddings]
 backend = "local_onnx"
 )");
         EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+    }
+
+    SECTION("normalizes explicit onnxruntime from config") {
+        auto configPath = writeToml("embedding_backend_onnxruntime.toml", R"(
+[embeddings]
+backend = "ONNX-RUNTIME"
+)");
+        EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
     }
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
-                 "ConfigResolver resolveEmbeddingBackend maps legacy env aliases to daemon",
+                 "ConfigResolver resolveEmbeddingBackend maps ONNX env aliases to onnxruntime",
                  "[daemon][components][config][catch2]") {
     SECTION("maps onnx env alias") {
         EnvGuard backendGuard("YAMS_EMBED_BACKEND", "onnx");
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
     }
 
     SECTION("maps local_onnx env alias") {
         EnvGuard backendGuard("YAMS_EMBED_BACKEND", "local_onnx");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+    }
+
+    SECTION("maps ort env alias") {
+        EnvGuard backendGuard("YAMS_EMBED_BACKEND", "ort");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+    }
+
+    SECTION("keeps daemon env selection distinct") {
+        EnvGuard backendGuard("YAMS_EMBED_BACKEND", "daemon");
         CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
     }
 }

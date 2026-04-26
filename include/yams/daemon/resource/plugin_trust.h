@@ -115,6 +115,16 @@ inline TrustStoreLoadResult loadTrustStore(const std::filesystem::path& trustFil
         return result;
     }
 
+    // Migration from the legacy trust file is only relevant for the canonical daemon trust file.
+    // Unit tests and isolated daemon harnesses pass per-run trust files under temporary data
+    // directories; normalizing those with weakly_canonical() can block in platform filesystem
+    // calls when the path is on a slow or wedged volume. Avoid touching canonical/legacy paths
+    // unless the caller's trust file is lexically the canonical file.
+    if (!canonicalTrustFile.empty() &&
+        trustFile.lexically_normal() != canonicalTrustFile.lexically_normal()) {
+        return result;
+    }
+
     const auto trustNorm = normalizePath(trustFile);
     std::optional<std::filesystem::path> canonicalNormStorage;
     const std::filesystem::path* canonicalNorm = &trustNorm;

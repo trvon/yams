@@ -20,9 +20,10 @@ namespace yams::vector {
 struct EmbeddingConfig {
     // Backend selection
     enum class Backend {
-        Daemon, // Use daemon service
-        Hybrid, // Legacy alias; treated as daemon-only
-        Simeon  // In-process SIMD model-free (third_party/simeon)
+        Daemon,      // Use daemon service / daemon-selected model provider
+        Hybrid,      // Legacy alias; treated as daemon-only
+        Simeon,      // In-process SIMD model-free (third_party/simeon)
+        OnnxRuntime, // ONNX Runtime embeddings via the daemon/plugin model provider path
     };
     Backend backend = Backend::Daemon; // Daemon-only embedding path
 

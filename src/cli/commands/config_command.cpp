@@ -10,10 +10,10 @@
 #include <sstream>
 #include <yams/cli/command.h>
 #include <yams/cli/result_helpers.h>
-#include <yams/common/fs_utils.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/storage/storage_runtime_resolver.h>
@@ -102,6 +102,18 @@ public:
             ->required();
         modelCmd->callback(
             [this]() { exitOnError(executeEmbeddingsModel(), "Set embeddings model"); });
+
+        // Set embedding backend
+        auto* embeddingBackendCmd =
+            embeddingsCmd->add_subcommand("backend", "Set embedding backend");
+        embeddingBackendCmd
+            ->add_option("backend", embeddingBackend_,
+                         "simeon|onnxruntime|daemon|auto (aliases: onnx, ort, local_onnx)")
+            ->required()
+            ->check(CLI::IsMember({"simeon", "onnxruntime", "onnx-runtime", "onnx", "ort",
+                                   "local_onnx", "daemon", "hybrid", "local", "auto"}));
+        embeddingBackendCmd->callback(
+            [this]() { exitOnError(executeEmbeddingsBackend(), "Set embeddings backend"); });
 
         // Tune performance
         auto* tuneCmd = embeddingsCmd->add_subcommand("tune", "Apply performance preset");
@@ -302,6 +314,7 @@ private:
     std::string configPath_;
     std::string format_;
     std::string embeddingModel_;
+    std::string embeddingBackend_;
     std::string embeddingPreset_;
     std::string tuningProfile_;
     std::string pathTreeMode_;
@@ -1016,6 +1029,11 @@ private:
             std::cout << "Auto-generation: "
                       << (autoEnabled ? ui::status_ok("Enabled") : ui::status_error("Disabled"))
                       << "\n";
+            std::string backend = config["embeddings.backend"];
+            if (backend.empty()) {
+                backend = "simeon (default)";
+            }
+            std::cout << "Backend: " << backend << "\n";
 
             // Available models
             std::cout << "Available models: ";
@@ -1041,6 +1059,8 @@ private:
             std::cout << "\nCommands:\n";
             std::cout << "  yams config embeddings enable   - Enable auto-generation\n";
             std::cout << "  yams config embeddings disable  - Disable auto-generation\n";
+            std::cout << "  yams config embeddings backend <simeon|onnxruntime|daemon|auto> - "
+                         "Change backend\n";
             std::cout << "  yams config embeddings model <name> - Change preferred model\n";
             std::cout << "  yams config embeddings tune <preset> - Apply performance preset\n";
 
@@ -1115,6 +1135,52 @@ private:
 
             return Result<void>();
 
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeEmbeddingsBackend() {
+        try {
+            std::string normalized = embeddingBackend_;
+            std::ranges::transform(normalized, normalized.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+
+            if (normalized == "onnx" || normalized == "onnx-runtime" || normalized == "ort" ||
+                normalized == "local_onnx") {
+                normalized = "onnxruntime";
+            } else if (normalized == "hybrid" || normalized == "local") {
+                normalized = "daemon";
+            }
+
+            const bool valid = normalized == "simeon" || normalized == "onnxruntime" ||
+                               normalized == "daemon" || normalized == "auto";
+            if (!valid) {
+                return Error{ErrorCode::InvalidArgument,
+                             "Embedding backend must be one of: simeon, onnxruntime, daemon, "
+                             "auto"};
+            }
+
+            auto result = writeConfigValue("embeddings.backend", normalized);
+            if (!result)
+                return result;
+
+            std::cout << ui::status_ok("Embedding backend set to: " + normalized) << "\n";
+            if (normalized == "onnxruntime") {
+                std::cout << "  Uses the ONNX Runtime model_provider plugin through the daemon.\n";
+                std::cout << "  Download/select a model with:\n";
+                std::cout << "    yams model download <embedding-model>\n";
+                std::cout << "    yams config embeddings model <embedding-model>\n";
+            } else if (normalized == "simeon") {
+                std::cout << "  Uses the training-free third_party/simeon embedding path.\n";
+            } else if (normalized == "daemon") {
+                std::cout << "  Uses the daemon-selected model provider path.\n";
+            } else {
+                std::cout << "  Lets daemon plugin/provider discovery choose the provider.\n";
+            }
+            std::cout << "  Restart the daemon to apply provider selection changes.\n";
+            return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
         }

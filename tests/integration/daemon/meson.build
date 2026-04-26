@@ -47,6 +47,10 @@ else
     'stats_command_crash_test.cpp',
   )
 
+  daemon_db_corruption_recovery_srcs = files(
+    'daemon_db_corruption_recovery_test.cpp',
+  )
+
   cli_responsiveness_under_load_srcs = files(
     'cli_responsiveness_under_load_test.cpp',
   )
@@ -340,6 +344,22 @@ else
     test('stats_command_crash',
       stats_command_crash_exe,
       suite: ['integration', 'daemon', 'catch2', 'stats', 'crash'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+    )
+
+    daemon_db_corruption_recovery_exe = executable('yams_daemon_db_corruption_recovery_tests_catch2',
+      daemon_db_corruption_recovery_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('daemon_db_corruption_recovery',
+      daemon_db_corruption_recovery_exe,
+      suite: ['integration', 'daemon', 'catch2', 'db_recovery'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),

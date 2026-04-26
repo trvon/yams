@@ -62,6 +62,7 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
@@ -1493,6 +1494,13 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
             }
         }
         j["readiness"] = std::move(rd);
+        {
+            std::lock_guard<std::mutex> lk(state.readiness.recoveryMutex);
+            if (!state.readiness.databaseRecoveredAt.empty()) {
+                j["database_recovered_at"] = state.readiness.databaseRecoveredAt;
+                j["database_recovered_from"] = state.readiness.databaseRecoveredFrom;
+            }
+        }
         nlohmann::json pr;
         pr[std::string(readiness::kSearchEngine)] = state.readiness.searchProgress.load();
         pr[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexProgress.load();
@@ -2645,14 +2653,48 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
     auto task = std::make_shared<std::packaged_task<bool()>>([this, dbPath]() {
         bool ok = false;
         try {
-            auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
-            ok = static_cast<bool>(r);
-            if (!ok) {
-                spdlog::warn("Database open failed: {}", r.error().message);
-            } else {
-                state_.readiness.databaseReady = true;
-                spdlog::info("Database opened successfully");
+            auto openOnce = [&]() -> bool {
+                auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
+                if (!r) {
+                    spdlog::warn("Database open failed: {}", r.error().message);
+                    return false;
+                }
+                return true;
+            };
+
+            if (!openOnce()) {
+                return false;
             }
+
+            auto integrity = database_->checkIntegrity();
+            if (!integrity) {
+                spdlog::error("[ServiceManager] Metadata DB integrity check failed: {}",
+                              integrity.error().message);
+                database_->close();
+                auto recovery = quarantineAndRecreate(dbPath);
+                if (!recovery) {
+                    spdlog::error("[ServiceManager] Could not auto-recover DB: {}. Inspect "
+                                  "{} or run 'yams repair --orphans' after manual cleanup.",
+                                  recovery.error().message, dbPath.string());
+                    return false;
+                }
+                spdlog::warn("[ServiceManager] Quarantined corrupt DB to {}; reopening fresh "
+                             "metadata DB. Run 'yams repair --orphans' to rebuild metadata.",
+                             recovery.value().quarantinedPath.string());
+                {
+                    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                    state_.readiness.databaseRecoveredAt = recovery.value().timestamp;
+                    state_.readiness.databaseRecoveredFrom =
+                        recovery.value().quarantinedPath.string();
+                }
+                if (!openOnce()) {
+                    return false;
+                }
+            }
+
+            ok = true;
+            state_.readiness.databaseReady = true;
+            spdlog::info("Database opened successfully");
         } catch (const std::exception& e) {
             spdlog::warn("Database open threw exception: {}", e.what());
         } catch (...) {

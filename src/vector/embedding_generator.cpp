@@ -631,8 +631,11 @@ public:
             if (s == "simeon") {
                 effective = EmbeddingConfig::Backend::Simeon;
                 config_.backend = effective;
-            } else if (s == "daemon" || s == "hybrid" || s == "local" || s == "local_onnx" ||
-                       s == "onnx") {
+            } else if (s == "onnx" || s == "onnxruntime" || s == "onnx-runtime" || s == "ort" ||
+                       s == "local_onnx") {
+                effective = EmbeddingConfig::Backend::OnnxRuntime;
+                config_.backend = effective;
+            } else if (s == "daemon" || s == "hybrid" || s == "local") {
                 effective = EmbeddingConfig::Backend::Daemon;
                 config_.backend = effective;
             }
@@ -641,6 +644,7 @@ public:
             case EmbeddingConfig::Backend::Simeon:
                 backend_ = makeSimeonBackend(config_);
                 break;
+            case EmbeddingConfig::Backend::OnnxRuntime:
             case EmbeddingConfig::Backend::Daemon:
             case EmbeddingConfig::Backend::Hybrid:
             default:

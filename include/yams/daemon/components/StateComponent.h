@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <mutex>
 #include <string>
 
 namespace yams::daemon {
@@ -32,6 +33,13 @@ struct DaemonReadiness {
 
     // Track doc count at last search engine build for re-tuning decisions
     std::atomic<uint64_t> searchEngineDocCount{0};
+
+    // Populated when the metadata DB failed integrity_check on startup and was
+    // quarantined + recreated. Write-once during init; reads are guarded by
+    // recoveryMutex_.
+    mutable std::mutex recoveryMutex;
+    std::string databaseRecoveredAt;
+    std::string databaseRecoveredFrom;
 
     // Bootstrap-only readiness summary used before lifecycle-backed status is available.
     bool bootstrapReady() const {

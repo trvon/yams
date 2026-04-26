@@ -668,7 +668,11 @@ std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultVa
     auto normalize = [](std::string s) {
         for (auto& c : s)
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (s == "hybrid" || s == "local" || s == "local_onnx" || s == "onnx") {
+        if (s == "onnx" || s == "onnxruntime" || s == "onnx-runtime" || s == "ort" ||
+            s == "local_onnx") {
+            return std::string("onnxruntime");
+        }
+        if (s == "hybrid" || s == "local") {
             return std::string("daemon");
         }
         return s;

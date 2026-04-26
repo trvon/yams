@@ -211,9 +211,10 @@ public:
      *   2. `embeddings.backend` key in TOML config
      *   3. defaultValue fallback
      *
-     * Recognized values: "auto", "daemon", "simeon", "mock".
+     * Recognized values: "auto", "daemon", "simeon", "onnxruntime", "mock".
      * "auto" means: let PluginManager pick ABI plugin first, fall back to any
      * registered in-process provider.
+     * "onnxruntime" means: prefer the bundled ONNX Runtime model_provider plugin.
      *
      * @param defaultValue Value returned when neither env nor TOML is set.
      * @return Lower-cased backend name.

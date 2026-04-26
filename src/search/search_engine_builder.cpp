@@ -678,6 +678,13 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine semanticNeighborExpansionK overridden to {} via env",
                          cfg.semanticNeighborExpansionK);
         }
+        if (auto minMeanCluster =
+                getEnvFloat("YAMS_SEARCH_TOPOLOGY_ROUTING_MIN_MEAN_CLUSTER_SIZE")) {
+            cfg.topologyRoutingMinMeanClusterSize = std::max(0.0f, *minMeanCluster);
+            spdlog::info(
+                "SearchEngine topologyRoutingMinMeanClusterSize overridden to {:.2f} via env",
+                cfg.topologyRoutingMinMeanClusterSize);
+        }
         if (auto bypassWarming = getEnvBool("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE")) {
             cfg.bypassCorpusWarmingGate = *bypassWarming;
             spdlog::info("SearchEngine bypassCorpusWarmingGate overridden to {} via env",

@@ -48,3 +48,45 @@ BM25 parity on scifact, small consistent lifts on the other two — at ~2× the 
 Links:
 - Simeon repo: https://github.com/trvon/simeon
 - Benchmarks and research notes: `third_party/simeon/docs/research/`
+
+### 2026-04-26 validation: selectable ONNX Runtime embeddings
+
+Follow-up validation restored an explicit **ONNX Runtime** selection path for users who still want
+model-backed embeddings while keeping Simeon as the default. The release smoke now runs a focused
+A/B in `tests/benchmarks/retrieval_service_benchmarks.cpp`:
+
+```bash
+YAMS_BENCH_DOC_COUNT=1 \
+YAMS_BENCH_INDEX_WAIT_MS=15000 \
+YAMS_BENCH_REPAIR_WAIT_MS=90000 \
+YAMS_EMBED_SHUTDOWN_WAIT_MS=5000 \
+build/debug/tests/benchmarks/yams_retrieval_service_benchmarks \
+  --benchmark_filter=EmbeddingBackendAB_Generate \
+  --benchmark_out=/tmp/yams_embedding_backend_ab.json \
+  --benchmark_out_format=json
+```
+
+Local smoke result on `neutron.local` (4 texts/batch, 10 iterations):
+
+| Requested backend | Observed provider | Dim | p50 | p95 | Result |
+|---|---|---:|---:|---:|---|
+| `simeon` | `plugin:Simeon` / `Simeon` | 1024 | 11.075 ms | 11.094 ms | pass |
+| `onnxruntime` | `plugin:ABIModelProvider` / `all-MiniLM-L6-v2` | 384 | 10.669 ms | 21.259 ms | pass |
+
+The same benchmark now sweeps 100- and 1,000-document batches (`--benchmark_filter=EmbeddingBackendAB_Generate`,
+3 iterations per row). Current daemon-path throughput:
+
+| Requested backend | Docs/batch | Avg latency | p50 throughput | p95 throughput | Avg throughput |
+|---|---:|---:|---:|---:|---:|
+| `simeon` | 100 | 10.887 ms | 9,032 docs/s | 8,803 docs/s | 9,185 docs/s |
+| `onnxruntime` | 100 | 230.831 ms | 463 docs/s | 381 docs/s | 433 docs/s |
+| `simeon` | 1,000 | 61.368 ms | 30,867 docs/s | 8,363 docs/s | 16,295 docs/s |
+| `onnxruntime` | 1,000 | 2,579.397 ms | 386 docs/s | 369 docs/s | 388 docs/s |
+
+These are end-to-end daemon embedding RPC measurements, not raw encoder-only numbers. They still
+include current daemon/provider overhead and are intended as the baseline before profiling away
+remaining bloat.
+
+The benchmark drives backend selection through `[embeddings].backend`, not a new production tuning
+knob. For the ONNX row it forces CPU execution during release validation so CoreML provider
+partition failures do not mask whether ONNX Runtime selection and daemon embedding RPCs work.

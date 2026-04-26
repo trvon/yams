@@ -30,6 +30,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <type_traits>
@@ -338,7 +339,7 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
         std::string inProcessBackend;
         {
             auto backend = ConfigResolver::resolveEmbeddingBackend("auto");
-            if (backend != "auto" && backend != "daemon") {
+            if (backend != "auto" && backend != "daemon" && backend != "onnxruntime") {
                 const auto known = getRegisteredProviders();
                 if (std::find(known.begin(), known.end(), backend) != known.end()) {
                     skipAbiModelProviders = true;
@@ -817,8 +818,10 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         };
 
         const auto configuredBackend = ConfigResolver::resolveEmbeddingBackend("auto");
+        const bool onnxRuntimeBackendSelected = configuredBackend == "onnxruntime";
         const bool inProcessBackendSelected =
-            configuredBackend != "auto" && configuredBackend != "daemon" && [&]() {
+            configuredBackend != "auto" && configuredBackend != "daemon" &&
+            !onnxRuntimeBackendSelected && [&]() {
                 const auto known = getRegisteredProviders();
                 return std::find(known.begin(), known.end(), configuredBackend) != known.end();
             }();
@@ -826,6 +829,38 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         // Try preferred name first
         if (!preferredName.empty() && tryAdopt(preferredName)) {
             return Result<bool>(true);
+        }
+
+        auto tryAdoptOnnxRuntime = [&]() -> bool {
+            spdlog::info("[PluginManager] adoptModelProvider: preferring ONNX Runtime plugin "
+                         "because embeddings.backend='onnxruntime'");
+            for (const auto& d : loaded) {
+                std::string name = d.name;
+                std::transform(name.begin(), name.end(), name.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (name.find("onnx") != std::string::npos && tryAdopt(d.name)) {
+                    return true;
+                }
+                try {
+                    auto stem = std::filesystem::path(d.path).stem().string();
+                    std::string lowerStem = stem;
+                    std::transform(
+                        lowerStem.begin(), lowerStem.end(), lowerStem.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (!stem.empty() && stem != d.name &&
+                        lowerStem.find("onnx") != std::string::npos && tryAdopt(stem)) {
+                        return true;
+                    }
+                } catch (...) {
+                }
+            }
+            spdlog::warn("[PluginManager] ONNX Runtime embeddings requested, but no usable ONNX "
+                         "model_provider plugin was loaded");
+            return false;
+        };
+
+        if (preferredName.empty() && onnxRuntimeBackendSelected) {
+            return Result<bool>(tryAdoptOnnxRuntime());
         }
 
         // When the user has selected a specific in-process backend and did not name a

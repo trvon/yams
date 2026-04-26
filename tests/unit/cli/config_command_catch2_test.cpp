@@ -163,6 +163,18 @@ TEST_CASE("ConfigCommand - set model finds model in XDG data home",
     CHECK(rc == 0);
 }
 
+TEST_CASE("ConfigCommand - embeddings backend writes ONNX Runtime selection",
+          "[cli][config][embeddings][catch2]") {
+    ConfigCommandFixture fixture;
+
+    int rc = fixture.runCommand({"yams", "config", "embeddings", "backend", "onnx"});
+    REQUIRE(rc == 0);
+
+    const auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("embeddings.backend") == 1);
+    CHECK(cfg.at("embeddings.backend") == "onnxruntime");
+}
+
 TEST_CASE("ConfigCommand - set model fails for missing model",
           "[cli][config][embeddings][catch2][.death_test]") {
     ConfigCommandFixture fixture;

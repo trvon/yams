@@ -105,9 +105,21 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
         return routed;
     }
 
-    // Fail-soft: if the freshness snapshot reported a different epoch than the artifacts
-    // we just loaded, the topology state drifted between request dispatch and routing.
-    // Skip the topology boost for this request and let the caller record it in stats.
+    if (config.topologyRoutingMinMeanClusterSize > 0.0f) {
+        const auto& clusters = latestResult.value()->clusters;
+        if (!clusters.empty()) {
+            std::size_t totalMembers = 0;
+            for (const auto& c : clusters) {
+                totalMembers += c.memberDocumentHashes.size();
+            }
+            const float meanSize =
+                static_cast<float>(totalMembers) / static_cast<float>(clusters.size());
+            if (meanSize < config.topologyRoutingMinMeanClusterSize) {
+                return routed;
+            }
+        }
+    }
+
     if (expectedTopologyEpoch != 0 && latestResult.value()->topologyEpoch != 0 &&
         latestResult.value()->topologyEpoch != expectedTopologyEpoch) {
         if (epochMismatch) {

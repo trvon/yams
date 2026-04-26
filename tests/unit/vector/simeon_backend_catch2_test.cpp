@@ -5,11 +5,11 @@
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <array>
-#include <catch2/matchers/catch_matchers_string.hpp>
 #include <cmath>
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 using namespace yams::vector;
 using Catch::Matchers::StartsWith;
@@ -126,6 +126,26 @@ TEST_CASE("EmbeddingGenerator maps legacy onnx env override to Daemon", "[vector
     REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
 
     unsetenv("YAMS_EMBED_BACKEND");
+}
+
+TEST_CASE("EmbeddingGenerator maps onnxruntime env override to Daemon path", "[vector][daemon]") {
+    setenv("YAMS_EMBED_BACKEND", "onnxruntime", 1);
+
+    EmbeddingConfig cfg;
+    cfg.backend = EmbeddingConfig::Backend::Simeon;
+    EmbeddingGenerator gen(cfg);
+
+    REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
+
+    unsetenv("YAMS_EMBED_BACKEND");
+}
+
+TEST_CASE("EmbeddingGenerator maps OnnxRuntime config to Daemon path", "[vector][daemon]") {
+    EmbeddingConfig cfg;
+    cfg.backend = EmbeddingConfig::Backend::OnnxRuntime;
+
+    EmbeddingGenerator gen(cfg);
+    REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
 }
 
 TEST_CASE("EmbeddingGenerator selects Daemon when configured directly", "[vector][daemon]") {

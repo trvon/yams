@@ -1114,7 +1114,7 @@ private:
                          "present.\n";
             std::cout << "\n  If you want to use this optional embedding model instead of the "
                          "default Simeon path:\n";
-            std::cout << "    yams config embeddings backend daemon\n";
+            std::cout << "    yams config embeddings backend onnxruntime\n";
             std::cout << "\n  Set this as the preferred embedding model:\n";
             std::cout << "    yams config embeddings model " << model_name << "\n";
             if (props.dim > 0) {
@@ -1199,7 +1199,7 @@ private:
             }
             std::cout << "\nHint: default retrieval embeddings already use Simeon.\n";
             std::cout << "To switch to this optional model-backed path:\n";
-            std::cout << "  yams config embeddings backend daemon\n";
+            std::cout << "  yams config embeddings backend onnxruntime\n";
             std::cout << "  yams config embeddings model " << model.name << "\n";
         } else if (model.type == "reranker") {
             std::cout << "\nReranker Model Details:\n";

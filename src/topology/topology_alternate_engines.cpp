@@ -436,8 +436,12 @@ HDBSCANTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> doc
         clusteringInput = smoothedOwned;
     }
 
-    auto assignment =
-        runHDBSCAN(clusteringInput, config.hdbscanMinPoints, config.hdbscanMinClusterSize);
+    const std::size_t minClusterSize =
+        config.hdbscanMinClusterSize == 0
+            ? std::max<std::size_t>(
+                  5, static_cast<std::size_t>(std::sqrt(static_cast<double>(documents.size()))))
+            : config.hdbscanMinClusterSize;
+    auto assignment = runHDBSCAN(clusteringInput, config.hdbscanMinPoints, minClusterSize);
     auto batch = buildBatchFromAssignment(documents, assignment, pairWeights, "hdbscan_v1", ts);
     batch.inputKind = config.inputKind;
     return batch;

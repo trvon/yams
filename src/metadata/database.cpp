@@ -598,6 +598,51 @@ Result<void> Database::execute(const std::string& sql) {
     return {};
 }
 
+Result<void> Database::checkIntegrity() {
+    if (!db_) {
+        return Error{ErrorCode::InvalidState, "Database not open"};
+    }
+
+    sqlite3_busy_timeout(db_, 10000);
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_, "PRAGMA quick_check", -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::string err = sqlite3_errmsg(db_);
+        return Error{ErrorCode::DatabaseError, "quick_check prepare failed: " + err};
+    }
+
+    std::string firstLine;
+    std::string allLines;
+    int rowCount = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const unsigned char* text = sqlite3_column_text(stmt, 0);
+        std::string line = text ? reinterpret_cast<const char*>(text) : "";
+        if (rowCount == 0) {
+            firstLine = line;
+        }
+        if (!allLines.empty()) {
+            allLines += "; ";
+        }
+        allLines += line;
+        ++rowCount;
+        if (rowCount >= 16) {
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        std::string err = sqlite3_errmsg(db_);
+        return Error{ErrorCode::DatabaseError, "quick_check step failed: " + err};
+    }
+
+    if (rowCount == 1 && firstLine == "ok") {
+        return {};
+    }
+    return Error{ErrorCode::DatabaseError, "quick_check reported: " + allLines};
+}
+
 Result<void> Database::beginTransaction() {
     if (inTransaction_) {
         return Error{ErrorCode::InvalidState, "Already in transaction"};

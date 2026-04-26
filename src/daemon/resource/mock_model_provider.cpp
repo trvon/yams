@@ -391,9 +391,11 @@ std::unique_ptr<IModelProvider> createModelProvider([[maybe_unused]] const Model
     auto& registry = getProviderRegistry();
 
     // Resolve embedding backend selection: env > TOML > "auto".
-    // Non-"auto" / non-"daemon" names dispatch to the in-process registry.
+    // Non-"auto" / non-"daemon" names dispatch to the in-process registry, except
+    // "onnxruntime", which is an ABI/plugin provider selected by PluginManager.
     const auto backendSelection = ConfigResolver::resolveEmbeddingBackend("auto");
-    if (backendSelection != "auto" && backendSelection != "daemon") {
+    if (backendSelection != "auto" && backendSelection != "daemon" &&
+        backendSelection != "onnxruntime") {
         auto it = registry.find(backendSelection);
         if (it != registry.end() && it->second) {
             if (auto provider = it->second()) {

@@ -668,8 +668,15 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
             if (s == "simeon") {
                 embConfig.backend = vector::EmbeddingConfig::Backend::Simeon;
-            } else if (s == "daemon" || s == "hybrid" || s == "local" || s == "local_onnx" ||
-                       s == "onnx") {
+            } else if (s == "onnx" || s == "onnxruntime" || s == "onnx-runtime" || s == "ort" ||
+                       s == "local_onnx") {
+                embConfig.backend = vector::EmbeddingConfig::Backend::OnnxRuntime;
+                if (s == "local_onnx") {
+                    spdlog::warn("EmbeddingService: YAMS_EMBED_BACKEND={} is deprecated; using "
+                                 "onnxruntime backend",
+                                 s);
+                }
+            } else if (s == "daemon" || s == "hybrid" || s == "local") {
                 embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
                 if (s != "daemon") {
                     spdlog::warn("EmbeddingService: YAMS_EMBED_BACKEND={} is deprecated; using "
@@ -701,7 +708,11 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         vdbConfig.embedding_dim =
             yams::vector::dimres::resolve_dim(dataPath_, actualDim, actualDim);
         const char* backendName =
-            (embConfig.backend == vector::EmbeddingConfig::Backend::Simeon) ? "Simeon" : "Daemon";
+            (embConfig.backend == vector::EmbeddingConfig::Backend::Simeon)
+                ? "Simeon"
+                : (embConfig.backend == vector::EmbeddingConfig::Backend::OnnxRuntime
+                       ? "OnnxRuntime"
+                       : "Daemon");
         spdlog::info("EmbeddingService: model={} dim={} max_seq={} backend={}", selectedModel,
                      actualDim, modelMaxSeq, backendName);
 

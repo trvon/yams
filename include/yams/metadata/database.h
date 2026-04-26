@@ -267,6 +267,13 @@ public:
     Result<void> execute(const std::string& sql);
 
     /**
+     * @brief Run PRAGMA quick_check; fails if SQLite reports corruption.
+     * Bounded ~ 10s by setting a busy timeout. Suitable for pre-flight on
+     * daemon startup before migrations run.
+     */
+    Result<void> checkIntegrity();
+
+    /**
      * @brief Begin transaction
      */
     Result<void> beginTransaction();

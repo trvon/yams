@@ -145,6 +145,14 @@ struct ExternalPluginHost::Impl {
                     "ExternalPluginHost: Read manifest from disk for {} (no process spawned)",
                     file.string());
             }
+        } else if (fs::is_regular_file(file) && file.has_parent_path() &&
+                   isPluginDirectory(file.parent_path())) {
+            if (auto disk_manifest = readManifest(file.parent_path())) {
+                desc = buildDescriptorFromManifest(*disk_manifest, file);
+                spdlog::info("ExternalPluginHost: Read adjacent manifest from {} for {} "
+                             "(no process spawned)",
+                             file.parent_path().string(), file.string());
+            }
         }
 
         // Fall back to launching process to get manifest (for standalone scripts)
