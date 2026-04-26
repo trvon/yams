@@ -59,6 +59,8 @@ public:
         std::optional<std::size_t> recallExpandPerCluster;
         std::optional<float> rrfK;
         std::optional<std::string> routeScoring;
+        std::optional<bool> enableSemanticNeighborExpansion;
+        std::optional<std::size_t> semanticNeighborExpansionK;
     };
 
     struct TopologyEnginePolicy {

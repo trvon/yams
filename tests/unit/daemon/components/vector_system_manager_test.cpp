@@ -143,6 +143,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
         yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
         yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+        yams::test::ScopedEnvVar disableInMemory("YAMS_VDB_IN_MEMORY", std::nullopt);
 
         auto warmDeps = makeDeps();
         warmDeps.getEmbeddingDimension = []() { return static_cast<size_t>(64); };
@@ -186,6 +187,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
         yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
         yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+        yams::test::ScopedEnvVar disableInMemory("YAMS_VDB_IN_MEMORY", std::nullopt);
 
         auto warmDeps = makeDeps();
         warmDeps.getEmbeddingDimension = []() { return static_cast<size_t>(64); };

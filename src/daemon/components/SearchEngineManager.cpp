@@ -362,6 +362,16 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                 opts.config.topologyRouteScoring = RS::Current;
             spdlog::info("SearchEngine topologyRouteScoring applied via config: {}", raw);
         }
+        if (tp.enableSemanticNeighborExpansion) {
+            opts.config.enableSemanticNeighborExpansion = *tp.enableSemanticNeighborExpansion;
+            spdlog::info("SearchEngine enableSemanticNeighborExpansion applied via config: {}",
+                         *tp.enableSemanticNeighborExpansion);
+        }
+        if (tp.semanticNeighborExpansionK) {
+            opts.config.semanticNeighborExpansionK = *tp.semanticNeighborExpansionK;
+            spdlog::info("SearchEngine semanticNeighborExpansionK applied via config: {}",
+                         *tp.semanticNeighborExpansionK);
+        }
     }
 
     if (!vectorEnabled) {

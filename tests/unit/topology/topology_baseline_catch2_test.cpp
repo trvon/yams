@@ -263,6 +263,7 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
           "[unit][topology][extractor][offline]") {
     yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
     yams::test::ScopedEnvVar skipVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+    yams::test::ScopedEnvVar disableInMemory("YAMS_VDB_IN_MEMORY", std::nullopt);
 
     TopologyFixture fix;
 

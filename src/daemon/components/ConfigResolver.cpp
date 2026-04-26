@@ -770,6 +770,13 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (!it->second.empty())
                 policy.routeScoring = it->second;
         }
+        if (auto it = kv.find("search.topology.enable_semantic_neighbor_expansion");
+            it != kv.end()) {
+            policy.enableSemanticNeighborExpansion = parseBool(it->second);
+        }
+        if (auto it = kv.find("search.topology.semantic_neighbor_expansion_k"); it != kv.end()) {
+            policy.semanticNeighborExpansionK = parseSize(it->second);
+        }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology routing policy: {}", e.what());
     }

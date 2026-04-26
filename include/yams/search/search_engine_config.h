@@ -108,6 +108,9 @@ struct SearchEngineConfig {
     bool enableTopologyAllQueryRouting = false;
     float topologyRoutingMinMedoidCosine = 0.40f;
 
+    bool enableSemanticNeighborExpansion = false;
+    size_t semanticNeighborExpansionK = 8;
+
     // Phase I: anchor-affinity fusion leg.
     // Per-doc anchor_score = cosine(query, medoid_of_cluster(doc)) mapped [-1,1] -> [0,1].
     // Off by default until measured; treated as a third fusion leg (Source::Anchor) when on.

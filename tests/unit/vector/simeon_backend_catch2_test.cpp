@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/compat/unistd.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/simeon_embedding_backend.h>
 

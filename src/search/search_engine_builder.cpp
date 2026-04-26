@@ -668,6 +668,16 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine topologyRoutedBaseMultiplier overridden to {:.3f} via env",
                          cfg.topologyRoutedBaseMultiplier);
         }
+        if (auto semNbrExpansion = getEnvBool("YAMS_SEARCH_ENABLE_SEMANTIC_NEIGHBOR_EXPANSION")) {
+            cfg.enableSemanticNeighborExpansion = *semNbrExpansion;
+            spdlog::info("SearchEngine enableSemanticNeighborExpansion {} via env",
+                         cfg.enableSemanticNeighborExpansion ? "enabled" : "disabled");
+        }
+        if (auto semNbrK = getEnvInt("YAMS_SEARCH_SEMANTIC_NEIGHBOR_EXPANSION_K")) {
+            cfg.semanticNeighborExpansionK = static_cast<size_t>(std::max(1, *semNbrK));
+            spdlog::info("SearchEngine semanticNeighborExpansionK overridden to {} via env",
+                         cfg.semanticNeighborExpansionK);
+        }
         if (auto bypassWarming = getEnvBool("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE")) {
             cfg.bypassCorpusWarmingGate = *bypassWarming;
             spdlog::info("SearchEngine bypassCorpusWarmingGate overridden to {} via env",

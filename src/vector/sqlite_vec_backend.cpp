@@ -2683,10 +2683,8 @@ private:
         sqlite3_stmt* stmt = nullptr;
         // Include both float-blob rows and quantized-primary rows (where embedding_dim > 0).
         // embedding_dim is now always populated even when embedding blob is NULL.
-        const char* sql =
-            "SELECT DISTINCT CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
-            "THEN LENGTH(embedding) / 4 ELSE embedding_dim END AS dim "
-            "FROM vectors WHERE embedding IS NOT NULL OR embedding_dim > 0 ORDER BY dim";
+        const char* sql = "SELECT DISTINCT embedding_dim FROM vectors WHERE embedding_dim > 0 "
+                          "ORDER BY embedding_dim";
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
             while (sqlite3_step(stmt) == SQLITE_ROW) {
                 int64_t dim = sqlite3_column_int64(stmt, 0);
@@ -2765,9 +2763,7 @@ private:
         std::vector<std::pair<size_t, std::vector<float>>> rows;
         const char* sql =
             "SELECT rowid, embedding, quantized_format, quantized_bits, quantized_seed, "
-            "quantized_packed_codes FROM vectors "
-            "WHERE (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
-            "THEN LENGTH(embedding) / 4 ELSE embedding_dim END) = ? ORDER BY rowid";
+            "quantized_packed_codes FROM vectors WHERE embedding_dim = ? ORDER BY rowid";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
             return rows;
@@ -3305,8 +3301,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        source_chunk_ids, parent_document_hash, child_document_hashes,
        quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
 FROM vectors
-WHERE (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 THEN LENGTH(embedding) / 4
-            ELSE embedding_dim END) = ?
+WHERE embedding_dim = ?
 ORDER BY rowid
 )sql";
 

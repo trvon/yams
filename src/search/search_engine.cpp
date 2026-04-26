@@ -206,6 +206,49 @@ std::unordered_set<std::string> buildTopologyWeakQueryCandidates(
         }
     }
 
+    if (config.enableSemanticNeighborExpansion && config.semanticNeighborExpansionK > 0 &&
+        routed.size() < config.topologyWeakQueryMaxDocs) {
+        std::vector<std::int64_t> neighborDstIds;
+        neighborDstIds.reserve(seedDocumentHashes.size() * config.semanticNeighborExpansionK);
+        for (const auto& seedHash : seedDocumentHashes) {
+            if (routed.size() >= config.topologyWeakQueryMaxDocs) {
+                break;
+            }
+            auto nodeRes = kgStore->getNodeByKey("doc:" + seedHash);
+            if (!nodeRes || !nodeRes.value().has_value()) {
+                continue;
+            }
+            const auto nodeId = nodeRes.value()->id;
+            auto edgesRes = kgStore->getEdgesFrom(nodeId, std::string_view{"semantic_neighbor"},
+                                                  config.semanticNeighborExpansionK);
+            if (!edgesRes) {
+                continue;
+            }
+            for (const auto& edge : edgesRes.value()) {
+                neighborDstIds.push_back(edge.dstNodeId);
+            }
+        }
+        if (!neighborDstIds.empty()) {
+            auto nodesRes = kgStore->getNodesByIds(neighborDstIds);
+            if (nodesRes) {
+                constexpr std::string_view kDocPrefix = "doc:";
+                for (const auto& node : nodesRes.value()) {
+                    if (routed.size() >= config.topologyWeakQueryMaxDocs) {
+                        break;
+                    }
+                    if (node.nodeKey.size() <= kDocPrefix.size() ||
+                        node.nodeKey.compare(0, kDocPrefix.size(), kDocPrefix) != 0) {
+                        continue;
+                    }
+                    std::string hash = node.nodeKey.substr(kDocPrefix.size());
+                    if (!seedDocumentHashes.contains(hash)) {
+                        routed.insert(std::move(hash));
+                    }
+                }
+            }
+        }
+    }
+
     return routed;
 }
 
