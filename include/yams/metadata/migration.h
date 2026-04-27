@@ -255,6 +255,9 @@ private:
     // hot-path COUNT/aggregation queries can use index-only scans instead
     // of partition-scan-then-filter.
     static Migration createMetadataCompositeIndexes();
+
+    // Version 34: Cover graph expansion adjacency reads ordered by edge strength.
+    static Migration createKgEdgesSemanticNeighborOrderIndex();
 };
 
 /**

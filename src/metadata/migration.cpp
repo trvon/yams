@@ -348,7 +348,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             migrateLegacyPathNodePrefixes(),
             createSemanticDuplicateSchema(),
             createKgEdgesUniqueIndex(),
-            createMetadataCompositeIndexes()};
+            createMetadataCompositeIndexes(),
+            createKgEdgesSemanticNeighborOrderIndex()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2679,6 +2680,27 @@ Migration YamsMetadataMigrations::createMetadataCompositeIndexes() {
     m.downSQL = R"(
         DROP INDEX IF EXISTS idx_kg_doc_entities_doc_extractor;
         DROP INDEX IF EXISTS idx_metadata_doc_key;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createKgEdgesSemanticNeighborOrderIndex() {
+    Migration m;
+    m.version = 34;
+    m.name = "Cover ordered semantic neighbor adjacency reads";
+    m.created = std::chrono::system_clock::now();
+
+    // Graph-backed search/grep asks for the strongest outgoing semantic neighbors
+    // for a seed document. This covering order lets SQLite satisfy
+    // WHERE src_node_id=? AND relation=? ORDER BY weight DESC, created_time DESC.
+    m.upSQL = R"(
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_src_rel_weight_time
+            ON kg_edges(src_node_id, relation, weight DESC, created_time DESC, id DESC);
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_kg_edges_src_rel_weight_time;
     )";
 
     return m;

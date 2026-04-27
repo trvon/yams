@@ -47,6 +47,20 @@
 
 namespace yams::daemon {
 
+namespace {
+
+std::chrono::milliseconds responsePollDelay(std::chrono::steady_clock::duration elapsed) {
+    // Most daemon request/stream responses are ready in the low-millisecond range. A fixed
+    // 10ms poll interval adds a full scheduler tick to every sequential request and dominates
+    // tight ingest loops, so poll quickly at first and back off for genuinely long operations.
+    if (elapsed < std::chrono::milliseconds(50)) {
+        return std::chrono::milliseconds(1);
+    }
+    return std::chrono::milliseconds(10);
+}
+
+} // namespace
+
 using boost::asio::as_tuple;
 using boost::asio::awaitable;
 using boost::asio::co_spawn;
@@ -498,7 +512,7 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
             }
             co_return result;
         }
-        timer.expires_after(10ms);
+        timer.expires_after(responsePollDelay(std::chrono::steady_clock::now() - wait_start));
         co_await timer.async_wait(use_awaitable);
     }
 
@@ -714,7 +728,8 @@ boost::asio::awaitable<Result<void>> AsioTransportAdapter::send_request_streamin
 
                 co_return result;
             }
-            timer.expires_after(10ms);
+            timer.expires_after(
+                responsePollDelay(std::chrono::steady_clock::now() - stream_wait_start));
             co_await timer.async_wait(use_awaitable);
         }
 

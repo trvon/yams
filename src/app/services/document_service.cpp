@@ -556,6 +556,17 @@ public:
         if (!req.sessionId.empty() && !req.bypassSession) {
             md.tags["session_id"] = req.sessionId;
         }
+        if (!req.precomputedHash.empty()) {
+            md.contentHash = req.precomputedHash;
+            if (req.precomputedFileSize) {
+                md.size = *req.precomputedFileSize;
+            }
+            md.tags["__yams_trusted_hash_hint"] = "1";
+            if (req.precomputedLastWriteTimeNs) {
+                md.tags["__yams_hash_hint_mtime_ns"] =
+                    std::to_string(*req.precomputedLastWriteTimeNs);
+            }
+        }
 
         std::string usePath;
         std::optional<std::filesystem::path> tmpToRemove;

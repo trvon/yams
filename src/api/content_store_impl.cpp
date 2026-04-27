@@ -12,11 +12,43 @@
 #include <spdlog/spdlog.h>
 
 #include <fstream>
+#include <charconv>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
 
 namespace yams::api {
+
+namespace {
+
+constexpr std::string_view kTrustedHashHintTag = "__yams_trusted_hash_hint";
+constexpr std::string_view kHashHintMtimeNsTag = "__yams_hash_hint_mtime_ns";
+
+std::optional<int64_t> parseInt64(std::string_view value) {
+    int64_t out = 0;
+    const auto* begin = value.data();
+    const auto* end = begin + value.size();
+    auto [ptr, ec] = std::from_chars(begin, end, out);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return out;
+}
+
+int64_t fileTimeNs(const std::filesystem::file_time_type& time) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
+}
+
+ContentMetadata sanitizeStoredMetadata(ContentMetadata metadata, const std::string& hash,
+                                       uint64_t size) {
+    metadata.contentHash = hash;
+    metadata.size = size;
+    metadata.tags.erase(std::string{kTrustedHashHintTag});
+    metadata.tags.erase(std::string{kHashHintMtimeNsTag});
+    return metadata;
+}
+
+} // namespace
 
 // Implementation of the content store
 class ContentStore : public IContentStore {
@@ -51,13 +83,28 @@ public:
             reporter.setCallback(progress);
         }
 
-        // ContentStore is shared across daemon worker threads. The default SHA256 hasher owns
-        // mutable OpenSSL EVP state and is not thread-safe, so serialize access when reusing the
-        // injected hasher instance.
         std::string fileHash;
-        {
-            std::lock_guard<std::mutex> hasherLock(hasherMutex_);
-            fileHash = hasher_->hashFile(path);
+        const auto trustedHint = metadata.tags.find(std::string{kTrustedHashHintTag});
+        if (trustedHint != metadata.tags.end() && trustedHint->second == "1" &&
+            !metadata.contentHash.empty() && metadata.size == fileSize) {
+            bool mtimeMatches = true;
+            const auto mtimeIt = metadata.tags.find(std::string{kHashHintMtimeNsTag});
+            if (mtimeIt != metadata.tags.end()) {
+                std::error_code ec;
+                const auto currentMtime = std::filesystem::last_write_time(path, ec);
+                const auto expectedMtime = parseInt64(mtimeIt->second);
+                mtimeMatches = !ec && expectedMtime && *expectedMtime == fileTimeNs(currentMtime);
+            }
+            if (mtimeMatches) {
+                fileHash = metadata.contentHash;
+                spdlog::debug("Reusing precomputed file hash: {} for {}", fileHash, path.string());
+            }
+        }
+        if (fileHash.empty()) {
+            // ContentStore is shared across daemon worker threads. Hash with a per-operation hasher
+            // instead of serializing all ingest workers behind the injected mutable hasher.
+            auto fileHasher = crypto::createSHA256Hasher();
+            fileHash = fileHasher->hashFile(path);
         }
         spdlog::debug("File hash: {} for {}", fileHash, path.string());
 
@@ -149,7 +196,7 @@ public:
         // Store manifest metadata
         {
             std::unique_lock lock(metadataMutex_);
-            metadataStore_[fileHash] = metadata;
+            metadataStore_[fileHash] = sanitizeStoredMetadata(metadata, fileHash, fileSize);
         }
 
         // Store manifest
@@ -335,13 +382,7 @@ public:
                                    const ContentMetadata& metadata) override {
         auto startTime = std::chrono::steady_clock::now();
 
-        std::string dataHash;
-        {
-            std::lock_guard<std::mutex> hasherLock(hasherMutex_);
-            hasher_->init();
-            hasher_->update(data);
-            dataHash = hasher_->finalize();
-        }
+        const std::string dataHash = crypto::SHA256Hasher::hash(data);
 
         // For small data, store directly without chunking
         if (data.size() <= config_.chunkSize) {
@@ -865,7 +906,6 @@ private:
 
     // Metadata storage (in-memory for now)
     mutable std::shared_mutex metadataMutex_;
-    mutable std::mutex hasherMutex_;
     std::unordered_map<std::string, ContentMetadata> metadataStore_;
 
     // Statistics

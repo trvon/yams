@@ -3132,6 +3132,19 @@ private:
                     }
                     return false;
                 };
+                auto matchesReady = [&](std::string_view k) {
+                    auto it = status.readinessStates.find(std::string(k));
+                    return it != status.readinessStates.end() && it->second;
+                };
+                auto isSimeonKey = [](std::string_view k) {
+                    return k == readiness::kSearchEngineLexicalEnhancementConfigured ||
+                           k == readiness::kSearchEngineLexicalEnhancementReady ||
+                           k == readiness::kSearchEngineLexicalEnhancementBuilding ||
+                           k == readiness::kSearchEngineFragmentGeometryReady;
+                };
+                const bool simeonActiveBuild =
+                    matchesReady(readiness::kSearchEngineLexicalEnhancementConfigured) &&
+                    matchesReady(readiness::kSearchEngineLexicalEnhancementBuilding);
                 for (const auto& rd : readinessList) {
                     // Skip "degraded" flags (inverses of ready flags) and items already shown
                     // elsewhere
@@ -3144,9 +3157,10 @@ private:
                     // Skip "build reason" keys - they're informational, not readiness indicators.
                     // The search_engine key itself indicates readiness.
                     bool isBuildReason = lowerLabel.find("build reason") != std::string::npos;
+                    bool isSimeonSteady = isSimeonKey(rd.key) && !simeonActiveBuild;
 
-                    if (!isDegraded && !isAlreadyShown && !isBuildReason && rd.issue &&
-                        !suppressDetailedIssue(lowerLabel)) {
+                    if (!isDegraded && !isAlreadyShown && !isBuildReason && !isSimeonSteady &&
+                        rd.issue && !suppressDetailedIssue(lowerLabel)) {
                         issueRows.push_back({rd.label, paintStatus(rd.severity, rd.text), ""});
                     }
                 }

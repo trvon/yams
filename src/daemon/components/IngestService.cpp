@@ -378,6 +378,9 @@ static PendingPostIngestByMime processTask(ServiceManager* sm,
     } else {
         auto docService = yams::app::services::makeDocumentService(appContext);
         auto serviceReq = yams::daemon::dispatch::mapStoreDocumentRequest(req);
+        serviceReq.precomputedHash = task.precomputedHash;
+        serviceReq.precomputedFileSize = task.precomputedFileSize;
+        serviceReq.precomputedLastWriteTimeNs = task.precomputedLastWriteTimeNs;
 
         auto result = docService->store(serviceReq);
         if (!result) {

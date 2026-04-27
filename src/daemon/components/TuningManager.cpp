@@ -57,6 +57,26 @@ void updateRepairHysteresis(bool isBusy, std::chrono::steady_clock::time_point n
 }
 } // namespace
 
+RepairHoldHints computeRepairHoldHints(ResourcePressureLevel level, std::uint64_t repairBacklog,
+                                       uint32_t baseDegradeMs, uint32_t baseReadyMs) noexcept {
+    double degradeMult = 1.0;
+    double readyMult = 1.0;
+    if (level >= ResourcePressureLevel::Critical) {
+        degradeMult = 4.0;
+        readyMult = 0.5;
+    } else if (level >= ResourcePressureLevel::Warning) {
+        degradeMult = 2.0;
+        readyMult = 0.75;
+    }
+    if (repairBacklog > 1000) {
+        degradeMult *= 1.5;
+    } else if (repairBacklog > 100) {
+        degradeMult *= 1.25;
+    }
+    return RepairHoldHints{static_cast<uint32_t>(static_cast<double>(baseDegradeMs) * degradeMult),
+                           static_cast<uint32_t>(static_cast<double>(baseReadyMs) * readyMult)};
+}
+
 TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
                              WorkCoordinator* coordinator)
     : sm_(sm), state_(state), coordinator_(coordinator), strand_(coordinator->getExecutor()) {}
@@ -1319,25 +1339,10 @@ bool TuningManager::tick_once() {
         s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
         s->writerBudgetBytesPerTurn = writerBudget;
 
-        const uint32_t baseDegrade = 750;
-        const uint32_t baseReady = 1500;
-        double degradeMult = 1.0;
-        double readyMult = 1.0;
-        if (govSnap.level >= ResourcePressureLevel::Critical) {
-            degradeMult = 4.0;
-            readyMult = 0.5;
-        } else if (govSnap.level >= ResourcePressureLevel::Warning) {
-            degradeMult = 2.0;
-            readyMult = 0.75;
-        }
         const auto repairBacklog = state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
-        if (repairBacklog > 1000) {
-            degradeMult *= 1.5;
-        } else if (repairBacklog > 100) {
-            degradeMult *= 1.25;
-        }
-        s->repairDegradeHoldMs = static_cast<uint32_t>(baseDegrade * degradeMult);
-        s->repairReadyHoldMs = static_cast<uint32_t>(baseReady * readyMult);
+        const auto holdHints = computeRepairHoldHints(govSnap.level, repairBacklog);
+        s->repairDegradeHoldMs = holdHints.degradeHoldMs;
+        s->repairReadyHoldMs = holdHints.readyHoldMs;
 
         TuningSnapshotRegistry::instance().set(std::move(s));
     } catch (const std::exception& e) {

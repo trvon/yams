@@ -334,7 +334,6 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"max_log_size", "104857600"},
               {"sync_interval", "1000"},
               {"sync_timeout_ms", "100"},
-              {"compress_old_logs", "true"},
               {"max_open_files", "10"},
               {"enable_group_commit", "true"}}},
 

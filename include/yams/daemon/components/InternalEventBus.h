@@ -331,6 +331,9 @@ public:
     };
     struct StoreDocumentTask {
         AddDocumentRequest request;
+        std::string precomputedHash;
+        std::optional<uint64_t> precomputedFileSize;
+        std::optional<int64_t> precomputedLastWriteTimeNs;
     };
     struct ModelReadyEvent {
         std::string modelId;

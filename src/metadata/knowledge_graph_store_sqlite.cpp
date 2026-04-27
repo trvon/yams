@@ -281,6 +281,60 @@ public:
         });
     }
 
+    Result<std::vector<KGNode>> getNodesByKeys(const std::vector<std::string>& nodeKeys) override {
+        if (nodeKeys.empty()) {
+            return std::vector<KGNode>{};
+        }
+        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+            std::string placeholders;
+            for (std::size_t i = 0; i < nodeKeys.size(); ++i) {
+                if (i > 0)
+                    placeholders += ", ";
+                placeholders += "?";
+            }
+            std::string sql =
+                "SELECT id, node_key, label, type, created_time, updated_time, properties "
+                "FROM kg_nodes WHERE node_key IN (" +
+                placeholders + ")";
+
+            auto stmtR = db.prepare(sql);
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            for (std::size_t i = 0; i < nodeKeys.size(); ++i) {
+                auto br = stmt.bind(static_cast<int>(i + 1), nodeKeys[i]);
+                if (!br)
+                    return br.error();
+            }
+
+            std::vector<KGNode> out;
+            out.reserve(nodeKeys.size());
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                KGNode n;
+                n.id = stmt.getInt64(0);
+                n.nodeKey = stmt.getString(1);
+                if (!stmt.isNull(2))
+                    n.label = stmt.getString(2);
+                if (!stmt.isNull(3))
+                    n.type = stmt.getString(3);
+                if (!stmt.isNull(4))
+                    n.createdTime = stmt.getInt64(4);
+                if (!stmt.isNull(5))
+                    n.updatedTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    n.properties = stmt.getString(6);
+                out.push_back(std::move(n));
+            }
+            return out;
+        });
+    }
+
     Result<std::vector<KGNode>> getNodesByIds(const std::vector<std::int64_t>& nodeIds) override {
         if (nodeIds.empty()) {
             return std::vector<KGNode>{};
@@ -744,14 +798,21 @@ public:
             return Result<void>();
         return pool_->withConnection([&](Database& db) -> Result<void> {
             return db.transaction([&]() -> Result<void> {
-                // Audit fix B: rely on the unique index `idx_kg_edges_uq` over
-                // (src_node_id, dst_node_id, relation) for dedup; INSERT OR IGNORE
-                // is O(log E) per edge instead of O(E) for the prior
-                // INSERT ... WHERE NOT EXISTS pattern.
-                auto stmtR =
-                    db.prepare("INSERT OR IGNORE INTO kg_edges "
-                               "(src_node_id, dst_node_id, relation, weight, created_time, "
-                               "properties) VALUES (?, ?, ?, ?, ?, ?)");
+                // Rely on the unique index `idx_kg_edges_uq` over
+                // (src_node_id, dst_node_id, relation) for dedup, but refresh
+                // existing semantic/derived edges instead of freezing stale scores.
+                auto stmtR = db.prepare(
+                    "INSERT INTO kg_edges "
+                    "(src_node_id, dst_node_id, relation, weight, created_time, "
+                    "properties) VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(src_node_id, dst_node_id, relation) DO UPDATE SET "
+                    "weight = MAX(kg_edges.weight, excluded.weight), "
+                    "created_time = COALESCE(excluded.created_time, kg_edges.created_time), "
+                    "properties = CASE "
+                    "  WHEN excluded.weight >= kg_edges.weight "
+                    "  THEN COALESCE(excluded.properties, kg_edges.properties) "
+                    "  ELSE kg_edges.properties "
+                    "END");
                 if (!stmtR)
                     return stmtR.error();
                 auto stmt = std::move(stmtR).value();
@@ -806,7 +867,7 @@ public:
             if (relation.has_value()) {
                 sql += " AND relation = ?";
             }
-            sql += " LIMIT ? OFFSET ?";
+            sql += " ORDER BY weight DESC, created_time DESC, id DESC LIMIT ? OFFSET ?";
 
             auto stmtR = db.prepare(sql);
             if (!stmtR)
@@ -847,6 +908,80 @@ public:
                 if (!stmt.isNull(6))
                     e.properties = stmt.getString(6);
                 out.push_back(std::move(e));
+            }
+            return out;
+        });
+    }
+
+    Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
+    getEdgesFromBatch(const std::vector<std::int64_t>& srcNodeIds,
+                      std::optional<std::string_view> relation, std::size_t limitPerNode) override {
+        using ResultMap = std::unordered_map<std::int64_t, std::vector<KGEdge>>;
+
+        if (srcNodeIds.empty()) {
+            return ResultMap{};
+        }
+
+        return pool_->withConnection([&](Database& db) -> Result<ResultMap> {
+            std::string placeholders;
+            for (size_t i = 0; i < srcNodeIds.size(); ++i) {
+                if (i > 0)
+                    placeholders += ",";
+                placeholders += "?";
+            }
+
+            std::string sql =
+                "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
+                "FROM ("
+                "  SELECT *, ROW_NUMBER() OVER (PARTITION BY src_node_id "
+                "    ORDER BY weight DESC, created_time DESC, id DESC) as rn "
+                "  FROM kg_edges "
+                "  WHERE src_node_id IN (" +
+                placeholders + ")";
+            if (relation.has_value()) {
+                sql += " AND relation = ?";
+            }
+            sql += ") WHERE rn <= ?";
+
+            auto stmtR = db.prepare(sql);
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            int idx = 1;
+            for (const auto& nodeId : srcNodeIds) {
+                auto br = stmt.bind(idx++, nodeId);
+                if (!br)
+                    return br.error();
+            }
+            if (relation.has_value()) {
+                auto br = stmt.bind(idx++, relation.value());
+                if (!br)
+                    return br.error();
+            }
+            auto br = stmt.bind(idx, static_cast<int64_t>(limitPerNode));
+            if (!br)
+                return br.error();
+
+            ResultMap out;
+            out.reserve(srcNodeIds.size());
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                KGEdge e;
+                e.id = stmt.getInt64(0);
+                e.srcNodeId = stmt.getInt64(1);
+                e.dstNodeId = stmt.getInt64(2);
+                e.relation = stmt.getString(3);
+                e.weight = static_cast<float>(stmt.getDouble(4));
+                if (!stmt.isNull(5))
+                    e.createdTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    e.properties = stmt.getString(6);
+                out[e.srcNodeId].push_back(std::move(e));
             }
             return out;
         });
@@ -2641,17 +2776,20 @@ public:
         }
         Database& db = **conn_;
 
-        // Audit fix B: replace per-edge `INSERT WHERE NOT EXISTS` (which scanned
-        // kg_edges via index lookup BUT still ran a sub-query per edge) with
-        // `INSERT OR IGNORE`. The unique index `idx_kg_edges_uq` on
-        // (src_node_id, dst_node_id, relation) created in migration.cpp lets
-        // SQLite handle deduplication via index probe (O(log E) per edge) and
-        // skip any conflict at insert time. On 65k-doc bulk ingest with
-        // ~1M edges, this is a 2-3× speedup on the kg_edges write path.
+        // Upsert via the unique index `idx_kg_edges_uq` so graph maintenance can
+        // refresh stale derived-edge scores/properties without duplicating rows.
         auto stmtR = db.prepareCached(
-            "INSERT OR IGNORE INTO kg_edges "
+            "INSERT INTO kg_edges "
             "(src_node_id, dst_node_id, relation, weight, created_time, properties) "
-            "VALUES (?, ?, ?, ?, ?, ?)");
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(src_node_id, dst_node_id, relation) DO UPDATE SET "
+            "weight = MAX(kg_edges.weight, excluded.weight), "
+            "created_time = COALESCE(excluded.created_time, kg_edges.created_time), "
+            "properties = CASE "
+            "  WHEN excluded.weight >= kg_edges.weight "
+            "  THEN COALESCE(excluded.properties, kg_edges.properties) "
+            "  ELSE kg_edges.properties "
+            "END");
         if (!stmtR)
             return stmtR.error();
         auto& stmt = *stmtR.value();

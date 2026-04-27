@@ -621,8 +621,20 @@ int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDe
     return std::min(maxDelayMs, expDelay + jitter);
 }
 
-boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDocumentRequest& req,
-                                                                    std::size_t channelCapacity) {
+struct ImmediateAddFingerprint {
+    std::string hash;
+    std::optional<uint64_t> fileSize;
+    std::optional<int64_t> lastWriteTimeNs;
+};
+
+int64_t fileTimeNs(const std::filesystem::file_time_type& time) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
+}
+
+boost::asio::awaitable<bool>
+tryEnqueueStoreDocumentTaskWithBackoff(const AddDocumentRequest& req,
+                                       const ImmediateAddFingerprint& fingerprint,
+                                       std::size_t channelCapacity) {
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
             "store_document_tasks", channelCapacity);
@@ -635,7 +647,11 @@ boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDoc
     boost::asio::steady_timer timer(ex);
 
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-        InternalEventBus::StoreDocumentTask task{req};
+        InternalEventBus::StoreDocumentTask task;
+        task.request = req;
+        task.precomputedHash = fingerprint.hash;
+        task.precomputedFileSize = fingerprint.fileSize;
+        task.precomputedLastWriteTimeNs = fingerprint.lastWriteTimeNs;
         bool pushed = false;
         if (g_documentsEnqueueFailuresBeforeSuccess.load(std::memory_order_acquire) > 0) {
             g_documentsEnqueueFailuresBeforeSuccess.fetch_sub(1, std::memory_order_acq_rel);
@@ -663,31 +679,57 @@ boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDoc
     co_return false;
 }
 
-std::string computeImmediateAddHash(const AddDocumentRequest& req, bool isDir) {
+ImmediateAddFingerprint computeImmediateAddFingerprint(const AddDocumentRequest& req, bool isDir) {
+    ImmediateAddFingerprint fingerprint;
     if (isDir || req.recursive) {
-        return "";
+        return fingerprint;
     }
 
     try {
         auto hasher = yams::crypto::createSHA256Hasher();
         maybeThrowForcedDocumentsHashFailure();
         if (!req.content.empty()) {
-            return hasher->hash(req.content);
+            fingerprint.hash = hasher->hash(req.content);
+            fingerprint.fileSize = static_cast<uint64_t>(req.content.size());
+            return fingerprint;
         }
         if (!req.path.empty()) {
-            return hasher->hashFile(req.path);
+            std::error_code ec;
+            const auto beforeSize = std::filesystem::file_size(req.path, ec);
+            if (ec) {
+                return fingerprint;
+            }
+            const auto beforeMtime = std::filesystem::last_write_time(req.path, ec);
+            if (ec) {
+                return fingerprint;
+            }
+            const auto hash = hasher->hashFile(req.path);
+            const auto afterSize = std::filesystem::file_size(req.path, ec);
+            if (ec || afterSize != beforeSize) {
+                fingerprint.hash = hash;
+                return fingerprint;
+            }
+            const auto afterMtime = std::filesystem::last_write_time(req.path, ec);
+            if (ec || afterMtime != beforeMtime) {
+                fingerprint.hash = hash;
+                return fingerprint;
+            }
+            fingerprint.hash = hash;
+            fingerprint.fileSize = beforeSize;
+            fingerprint.lastWriteTimeNs = fileTimeNs(beforeMtime);
         }
     } catch (...) {
     }
-    return "";
+    return fingerprint;
 }
 
-AddDocumentResponse makeQueuedAddResponse(const AddDocumentRequest& req, std::string_view message,
-                                          bool isDir) {
+AddDocumentResponse makeQueuedAddResponse(const AddDocumentRequest& req,
+                                          const ImmediateAddFingerprint& fingerprint,
+                                          std::string_view message) {
     AddDocumentResponse response;
     response.path = req.path.empty() ? req.name : req.path;
     response.documentsAdded = 0;
-    response.hash = computeImmediateAddHash(req, isDir);
+    response.hash = fingerprint.hash;
     response.extractionStatus = "pending";
     response.message = std::string(message);
     return response;
@@ -697,11 +739,12 @@ boost::asio::awaitable<Response>
 enqueueAddDocumentOrReject(ServiceManager* serviceManager, StateComponent* state,
                            const AddDocumentRequest& req, std::size_t channelCapacity,
                            std::string_view message, bool countDeferred, bool isDir) {
-    if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, channelCapacity)) {
+    const auto fingerprint = computeImmediateAddFingerprint(req, isDir);
+    if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, fingerprint, channelCapacity)) {
         if (countDeferred) {
             state->stats.addRequestsDeferred.fetch_add(1, std::memory_order_acq_rel);
         }
-        co_return makeQueuedAddResponse(req, message, isDir);
+        co_return makeQueuedAddResponse(req, fingerprint, message);
     }
 
     state->stats.addRequestsRejected.fetch_add(1, std::memory_order_acq_rel);

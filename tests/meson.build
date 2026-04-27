@@ -712,6 +712,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_repair_hold_hints_exe = executable('catch2_repair_hold_hints',
+    files('unit/daemon/repair_hold_hints_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_streaming_processor_exe = executable('catch2_streaming_processor',
     files('unit/daemon/streaming_processor_catch2_test.cpp'),
     include_directories: incs,
@@ -2682,6 +2691,12 @@ if catch2_dep.found()
 
   test('tune_advisor_snapshot', catch2_tune_advisor_snapshot_exe,
     suite: ['catch2', 'unit', 'daemon', 'tune_advisor'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('repair_hold_hints', catch2_repair_hold_hints_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tuning'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
   )

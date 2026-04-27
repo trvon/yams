@@ -453,6 +453,13 @@ struct StoreDocumentRequest {
     // Embedding control
     bool noEmbeddings{false}; // disable embedding generation
 
+    // Optional hash hint computed by the daemon front door before enqueueing async ingest.
+    // When the backing file still matches the captured fingerprint, the content store can
+    // reuse this hash instead of reading the same file twice.
+    std::string precomputedHash;
+    std::optional<uint64_t> precomputedFileSize;
+    std::optional<int64_t> precomputedLastWriteTimeNs;
+
     // Directory recursion options (when path is a directory)
     bool recursive{false};                    // recursively add files from directories
     std::vector<std::string> includePatterns; // glob patterns to include

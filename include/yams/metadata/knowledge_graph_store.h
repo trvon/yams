@@ -224,6 +224,11 @@ public:
     virtual Result<std::optional<KGNode>> getNodeById(std::int64_t nodeId) = 0;
     virtual Result<std::optional<KGNode>> getNodeByKey(std::string_view nodeKey) = 0;
 
+    // Batch node retrieval by stable node keys. Missing keys are omitted.
+    // More efficient than calling getNodeByKey N times for semantic graph maintenance.
+    virtual Result<std::vector<KGNode>>
+    getNodesByKeys(const std::vector<std::string>& nodeKeys) = 0;
+
     // Batch node retrieval: returns nodes by IDs in a single query
     // More efficient than calling getNodeById N times for BFS hydration
     virtual Result<std::vector<KGNode>> getNodesByIds(const std::vector<std::int64_t>& nodeIds) = 0;
@@ -281,6 +286,14 @@ public:
     virtual Result<std::vector<KGEdge>>
     getEdgesFrom(std::int64_t srcNodeId, std::optional<std::string_view> relation = std::nullopt,
                  std::size_t limit = 200, std::size_t offset = 0) = 0;
+
+    // Batch version of getEdgesFrom: fetch edges for multiple source nodes in one query.
+    // Returns a map from source node ID to its outgoing edges.
+    // Useful for bounded graph-maintenance regions without full relation scans.
+    virtual Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
+    getEdgesFromBatch(const std::vector<std::int64_t>& srcNodeIds,
+                      std::optional<std::string_view> relation = std::nullopt,
+                      std::size_t limitPerNode = 10) = 0;
 
     virtual Result<std::vector<KGEdge>>
     getEdgesTo(std::int64_t dstNodeId, std::optional<std::string_view> relation = std::nullopt,

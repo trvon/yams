@@ -3,12 +3,15 @@
 // in user-facing operations like get-by-name, cat, grep, search.
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <numeric>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -32,9 +35,12 @@ namespace {
 
 struct BenchConfig {
     bool embeddingsEnabled{false};
+    // empty => leave daemon/backend defaults in place
+    std::string embeddingBackend;
     std::string tuningProfile; // empty => use default
     bool operator==(const BenchConfig& other) const {
-        return embeddingsEnabled == other.embeddingsEnabled && tuningProfile == other.tuningProfile;
+        return embeddingsEnabled == other.embeddingsEnabled &&
+               embeddingBackend == other.embeddingBackend && tuningProfile == other.tuningProfile;
     }
 };
 
@@ -44,6 +50,213 @@ std::unique_ptr<daemon::DaemonClient> g_client;
 std::vector<std::string> g_test_docs;      // Hashes of test documents
 std::vector<std::string> g_test_doc_names; // Names used for by-name retrieval
 BenchConfig g_activeConfig;
+std::optional<std::filesystem::path> g_activeConfigPath;
+std::optional<std::string> g_savedEmbedBackendEnv;
+bool g_savedEmbedBackendEnvPresent{false};
+bool g_savedEmbedBackendEnvCaptured{false};
+std::optional<std::string> g_savedOnnxForceCpuEnv;
+bool g_savedOnnxForceCpuEnvPresent{false};
+bool g_savedOnnxForceCpuEnvCaptured{false};
+std::string g_observedEmbeddingBackend;
+std::string g_observedEmbeddingModel;
+uint32_t g_observedEmbeddingDim{0};
+uint64_t g_observedVectorCount{0};
+uint64_t g_embeddingRepairSucceeded{0};
+
+std::string lowerCopy(std::string value) {
+    for (auto& c : value) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return value;
+}
+
+std::string embeddingBackendForArg(int64_t arg) {
+    switch (arg) {
+        case 1:
+            return "simeon";
+        case 2:
+            return "onnxruntime";
+        default:
+            return {};
+    }
+}
+
+std::string preferredModelForBackend(const std::string& backend) {
+    if (backend == "simeon") {
+        return "simeon-default";
+    }
+    if (backend == "onnxruntime") {
+        return "all-MiniLM-L6-v2";
+    }
+    return {};
+}
+
+std::filesystem::path resolveBenchmarkPluginDir() {
+    namespace fs = std::filesystem;
+    if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
+        return fs::path(envPluginDir);
+    }
+
+    const auto cwd = fs::current_path();
+    const std::vector<fs::path> candidates = {
+        cwd / "build" / "debug" / "plugins",
+        cwd / "builddir" / "plugins",
+        cwd / "build" / "plugins",
+    };
+    std::error_code ec;
+    for (const auto& candidate : candidates) {
+        if (fs::exists(candidate, ec) && fs::is_directory(candidate, ec)) {
+            return candidate;
+        }
+    }
+    return cwd / "builddir" / "plugins";
+}
+
+std::filesystem::path writeEmbeddingBackendConfig(const BenchConfig& config) {
+    namespace fs = std::filesystem;
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto configDir =
+        fs::temp_directory_path() / ("yams_retrieval_service_bench_" + std::to_string(stamp));
+    fs::create_directories(configDir);
+    auto configPath = configDir / "config.toml";
+
+    std::ofstream out(configPath);
+    out << "[embeddings]\n";
+    out << "backend = \"" << config.embeddingBackend << "\"\n";
+    const auto preferred = preferredModelForBackend(config.embeddingBackend);
+    if (!preferred.empty()) {
+        out << "preferred_model = \"" << preferred << "\"\n";
+    }
+    out.close();
+
+    return configPath;
+}
+
+void captureEmbedBackendEnvOnce() {
+    if (g_savedEmbedBackendEnvCaptured) {
+        return;
+    }
+    g_savedEmbedBackendEnvCaptured = true;
+    if (const char* env = std::getenv("YAMS_EMBED_BACKEND")) {
+        g_savedEmbedBackendEnvPresent = true;
+        g_savedEmbedBackendEnv = std::string(env);
+    } else {
+        g_savedEmbedBackendEnvPresent = false;
+        g_savedEmbedBackendEnv.reset();
+    }
+}
+
+void restoreEmbedBackendEnvIfCaptured() {
+    if (!g_savedEmbedBackendEnvCaptured) {
+        return;
+    }
+    if (g_savedEmbedBackendEnvPresent && g_savedEmbedBackendEnv) {
+        ::setenv("YAMS_EMBED_BACKEND", g_savedEmbedBackendEnv->c_str(), 1);
+    } else {
+        ::unsetenv("YAMS_EMBED_BACKEND");
+    }
+    g_savedEmbedBackendEnvCaptured = false;
+    g_savedEmbedBackendEnvPresent = false;
+    g_savedEmbedBackendEnv.reset();
+}
+
+void captureOnnxForceCpuEnvOnce() {
+    if (g_savedOnnxForceCpuEnvCaptured) {
+        return;
+    }
+    g_savedOnnxForceCpuEnvCaptured = true;
+    if (const char* env = std::getenv("YAMS_ONNX_FORCE_CPU")) {
+        g_savedOnnxForceCpuEnvPresent = true;
+        g_savedOnnxForceCpuEnv = std::string(env);
+    } else {
+        g_savedOnnxForceCpuEnvPresent = false;
+        g_savedOnnxForceCpuEnv.reset();
+    }
+}
+
+void restoreOnnxForceCpuEnvIfCaptured() {
+    if (!g_savedOnnxForceCpuEnvCaptured) {
+        return;
+    }
+    if (g_savedOnnxForceCpuEnvPresent && g_savedOnnxForceCpuEnv) {
+        ::setenv("YAMS_ONNX_FORCE_CPU", g_savedOnnxForceCpuEnv->c_str(), 1);
+    } else {
+        ::unsetenv("YAMS_ONNX_FORCE_CPU");
+    }
+    g_savedOnnxForceCpuEnvCaptured = false;
+    g_savedOnnxForceCpuEnvPresent = false;
+    g_savedOnnxForceCpuEnv.reset();
+}
+
+void updateObservedEmbeddingStatus(const daemon::StatusResponse& status) {
+    g_observedEmbeddingBackend = status.embeddingBackend;
+    g_observedEmbeddingModel = status.embeddingModel;
+    g_observedEmbeddingDim = status.embeddingDim;
+    if (auto it = status.requestCounts.find("vector_count"); it != status.requestCounts.end()) {
+        g_observedVectorCount = it->second;
+    } else {
+        g_observedVectorCount = 0;
+    }
+}
+
+void runBenchmarkEmbeddingRepair(const BenchConfig& config) {
+    g_embeddingRepairSucceeded = 0;
+    daemon::RepairRequest repairReq;
+    repairReq.repairEmbeddings = true;
+    repairReq.foreground = true;
+    repairReq.force = true;
+    repairReq.maxRetries = 1;
+    repairReq.embeddingModel = preferredModelForBackend(config.embeddingBackend);
+
+    auto timeout = std::chrono::milliseconds(180000);
+    if (const char* env = std::getenv("YAMS_BENCH_REPAIR_WAIT_MS")) {
+        try {
+            timeout = std::chrono::milliseconds(
+                static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
+        } catch (...) {
+        }
+    }
+
+    std::cout << "Running foreground embedding repair";
+    if (!repairReq.embeddingModel.empty()) {
+        std::cout << " (model=" << repairReq.embeddingModel << ")";
+    }
+    std::cout << "...\n";
+
+    auto repairResult = cli::run_sync(g_client->callRepair(repairReq), timeout);
+    if (!repairResult) {
+        std::cerr << "WARNING: Embedding repair failed: " << repairResult.error().message << "\n";
+        return;
+    }
+
+    const auto& resp = repairResult.value();
+    std::cout << "Embedding repair result: success=" << (resp.success ? 1 : 0)
+              << " operations=" << resp.totalOperations << " succeeded=" << resp.totalSucceeded
+              << " failed=" << resp.totalFailed << " skipped=" << resp.totalSkipped << "\n";
+    for (const auto& op : resp.operationResults) {
+        if (op.operation == "embeddings") {
+            g_embeddingRepairSucceeded = op.succeeded;
+            std::cout << "Embedding repair operation: processed=" << op.processed
+                      << " succeeded=" << op.succeeded << " failed=" << op.failed
+                      << " skipped=" << op.skipped;
+            if (!op.message.empty()) {
+                std::cout << " message=" << op.message;
+            }
+            std::cout << "\n";
+        }
+    }
+}
+
+bool benchmarkFilterTargetsBackendAB(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i] ? argv[i] : "";
+        if (arg.rfind("--benchmark_filter=", 0) == 0 &&
+            arg.find("BackendAB") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
 
 std::size_t benchDocCount() {
     if (const char* env = std::getenv("YAMS_BENCH_DOC_COUNT")) {
@@ -324,6 +537,12 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
     g_test_docs.clear();
     g_test_doc_names.clear();
     g_activeConfig = config;
+    g_activeConfigPath.reset();
+    g_observedEmbeddingBackend.clear();
+    g_observedEmbeddingModel.clear();
+    g_observedEmbeddingDim = 0;
+    g_observedVectorCount = 0;
+    g_embeddingRepairSucceeded = 0;
 
     std::cout << "\n=== Setting up benchmark environment ===\n";
 
@@ -344,11 +563,26 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
         harnessOptions.autoLoadPlugins = true;
         harnessOptions.configureModelPool = true;
         harnessOptions.modelPoolLazyLoading = false;
-        if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
-            harnessOptions.pluginDir = std::filesystem::path(envPluginDir);
-        } else {
-            harnessOptions.pluginDir = std::filesystem::current_path() / "builddir" / "plugins";
+        harnessOptions.pluginDir = resolveBenchmarkPluginDir();
+        if (!config.embeddingBackend.empty()) {
+            // Backend A/B is driven through typed config so the benchmark exercises the same
+            // ConfigResolver path as production. Clear the legacy env overlay while the
+            // benchmark-owned config is active; restore it on teardown.
+            captureEmbedBackendEnvOnce();
+            ::unsetenv("YAMS_EMBED_BACKEND");
+            if (config.embeddingBackend == "onnxruntime" && !std::getenv("YAMS_ONNX_FORCE_CPU")) {
+                // Keep release-validation numbers comparable and avoid platform EP failures
+                // (e.g. CoreML partition bugs) from masking ONNX Runtime backend selection.
+                captureOnnxForceCpuEnvOnce();
+                ::setenv("YAMS_ONNX_FORCE_CPU", "1", 1);
+            }
+            auto configPath = writeEmbeddingBackendConfig(config);
+            harnessOptions.configPath = configPath;
+            g_activeConfigPath = configPath;
+            std::cout << "Embedding backend config: " << config.embeddingBackend
+                      << " (config=" << configPath << ")\n";
         }
+        std::cout << "Plugin dir: " << harnessOptions.pluginDir->string() << "\n";
     }
     g_harness = std::make_unique<DaemonHarness>(harnessOptions);
     if (!g_harness->start(std::chrono::seconds(5))) {
@@ -426,20 +660,33 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
     }
 
     if (embeddingsEnabled) {
-        std::cout << "Waiting for embedding queue to drain...\n";
-        auto timeout = std::chrono::milliseconds(600000);
-        if (const char* env = std::getenv("YAMS_BENCH_EMBED_WAIT_MS")) {
-            timeout = std::chrono::milliseconds(
-                static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
+        if (!config.embeddingBackend.empty()) {
+            runBenchmarkEmbeddingRepair(config);
+        } else {
+            std::cout << "Waiting for embedding queue to drain...\n";
+            auto timeout = std::chrono::milliseconds(600000);
+            if (const char* env = std::getenv("YAMS_BENCH_EMBED_WAIT_MS")) {
+                timeout = std::chrono::milliseconds(
+                    static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
+            }
+            DrainMetrics metrics;
+            if (!waitForEmbeddingDrainWithMetrics(g_test_docs.size(), timeout, metrics)) {
+                std::cerr << "WARNING: Embedding drain timeout; proceeding anyway.\n";
+            }
+            std::cout << "Embedding drain observed peaks: embedQueued=" << metrics.maxEmbedQueued
+                      << " embedInflight=" << metrics.maxEmbedInflight
+                      << " postQueued=" << metrics.maxPostQueued
+                      << " postInflight=" << metrics.maxPostInflight << "\n";
         }
-        DrainMetrics metrics;
-        if (!waitForEmbeddingDrainWithMetrics(g_test_docs.size(), timeout, metrics)) {
-            std::cerr << "WARNING: Embedding drain timeout; proceeding anyway.\n";
+
+        if (auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5))) {
+            updateObservedEmbeddingStatus(status.value());
+            std::cout << "Embedding runtime: available="
+                      << (status.value().embeddingAvailable ? 1 : 0)
+                      << " backend=" << g_observedEmbeddingBackend
+                      << " model=" << g_observedEmbeddingModel << " dim=" << g_observedEmbeddingDim
+                      << " vectorCount=" << g_observedVectorCount << "\n";
         }
-        std::cout << "Embedding drain observed peaks: embedQueued=" << metrics.maxEmbedQueued
-                  << " embedInflight=" << metrics.maxEmbedInflight
-                  << " postQueued=" << metrics.maxPostQueued
-                  << " postInflight=" << metrics.maxPostInflight << "\n";
     }
 
     std::cout << "Setup complete: " << g_test_docs.size() << " documents added\n\n";
@@ -451,8 +698,16 @@ void TeardownBenchmarkSuite() {
     g_test_docs.clear();
     g_test_doc_names.clear();
     g_activeConfig = {};
+    g_activeConfigPath.reset();
+    g_observedEmbeddingBackend.clear();
+    g_observedEmbeddingModel.clear();
+    g_observedEmbeddingDim = 0;
+    g_observedVectorCount = 0;
+    g_embeddingRepairSucceeded = 0;
     ::unsetenv("YAMS_TUNING_PROFILE");
     ::unsetenv("YAMS_BENCH_ENABLE_EMBEDDINGS");
+    restoreEmbedBackendEnvIfCaptured();
+    restoreOnnxForceCpuEnvIfCaptured();
 }
 
 } // anonymous namespace
@@ -832,6 +1087,123 @@ static void BM_RetrievalService_Search_Hybrid(benchmark::State& state) {
     }
 }
 
+// Benchmark: direct daemon embedding generation, sweeping the selected provider backend.
+// This provides a stable A/B signal for provider selection and embedding throughput without
+// coupling the result to vector-index rebuild policy.
+static void BM_EmbeddingBackendAB_Generate(benchmark::State& state) {
+#ifdef TRACY_ENABLE
+    ZoneScopedN("BM_EmbeddingBackendAB_Generate");
+#endif
+
+    const auto backend = embeddingBackendForArg(state.range(0));
+    if (backend.empty()) {
+        state.SkipWithError("Unknown backend arg");
+        return;
+    }
+
+    BenchConfig cfg;
+    cfg.embeddingsEnabled = true;
+    cfg.embeddingBackend = backend;
+    SetupBenchmarkSuite(cfg);
+
+    auto statusResult = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+    if (!statusResult) {
+        state.SkipWithError("Unable to read daemon status for embedding backend validation");
+        return;
+    }
+    const auto status = statusResult.value();
+    updateObservedEmbeddingStatus(status);
+    const auto observed = lowerCopy(status.embeddingBackend + " " + status.embeddingModel + " " +
+                                    status.embeddingModelPath + " " + status.version);
+    if (!status.embeddingAvailable) {
+        state.SkipWithError("Embedding backend is not available");
+        return;
+    }
+    if (backend == "simeon" && observed.find("simeon") == std::string::npos) {
+        state.SkipWithError("Requested simeon but daemon did not report a Simeon provider");
+        return;
+    }
+    if (backend == "onnxruntime" && observed.find("onnx") == std::string::npos &&
+        observed.find("abimodelprovider") == std::string::npos) {
+        state.SkipWithError("Requested onnxruntime but daemon did not report an ONNX/ABI provider");
+        return;
+    }
+
+    const auto docCount = static_cast<std::size_t>(std::max<int64_t>(1, state.range(1)));
+    std::vector<std::string> texts;
+    texts.reserve(docCount);
+    for (std::size_t i = 0; i < docCount; ++i) {
+        texts.push_back("YAMS embedding throughput document " + std::to_string(i) +
+                        " for backend " + backend +
+                        ". This sample text exercises daemon batch embedding generation.");
+    }
+    const auto model = preferredModelForBackend(backend);
+    state.SetLabel("requested=" + backend + " observed=" + status.embeddingBackend +
+                   " model=" + status.embeddingModel);
+
+    std::vector<int64_t> latencies_us;
+    size_t success_count = 0;
+    size_t failure_count = 0;
+
+    for (auto _ : state) {
+        auto start = std::chrono::high_resolution_clock::now();
+
+        daemon::BatchEmbeddingRequest req;
+        req.texts = texts;
+        req.modelName = model;
+        req.normalize = true;
+        req.batchSize = texts.size();
+
+        auto result =
+            cli::run_sync(g_client->generateBatchEmbeddings(req), std::chrono::milliseconds(30000));
+        if (result && result.value().successCount == texts.size()) {
+            success_count += result.value().successCount;
+        } else {
+            ++failure_count;
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        latencies_us.push_back(
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+    }
+
+    if (latencies_us.empty()) {
+        state.SkipWithError("No samples collected for embedding backend A/B benchmark");
+        return;
+    }
+    std::sort(latencies_us.begin(), latencies_us.end());
+    auto p50 = latencies_us[latencies_us.size() / 2];
+    auto p95 = latencies_us[static_cast<size_t>(latencies_us.size() * 0.95)];
+    auto max_us = latencies_us.back();
+    const auto totalLatencyUs =
+        std::accumulate(latencies_us.begin(), latencies_us.end(), int64_t{0});
+    const auto avg_us = latencies_us.empty()
+                            ? int64_t{0}
+                            : totalLatencyUs / static_cast<int64_t>(latencies_us.size());
+
+    state.counters["success_count"] = static_cast<double>(success_count);
+    state.counters["failure_count"] = static_cast<double>(failure_count);
+    state.counters["batch_docs"] = static_cast<double>(docCount);
+    state.counters["texts_per_iter"] = static_cast<double>(texts.size());
+    state.counters["avg_us"] = static_cast<double>(avg_us);
+    state.counters["p50_us"] = static_cast<double>(p50);
+    state.counters["p95_us"] = static_cast<double>(p95);
+    state.counters["max_us"] = static_cast<double>(max_us);
+    state.counters["avg_docs_per_s"] =
+        avg_us > 0 ? static_cast<double>(docCount) * 1'000'000.0 / static_cast<double>(avg_us)
+                   : 0.0;
+    state.counters["p50_docs_per_s"] =
+        p50 > 0 ? static_cast<double>(docCount) * 1'000'000.0 / static_cast<double>(p50) : 0.0;
+    state.counters["p95_docs_per_s"] =
+        p95 > 0 ? static_cast<double>(docCount) * 1'000'000.0 / static_cast<double>(p95) : 0.0;
+    state.counters["embedding_dim"] = static_cast<double>(g_observedEmbeddingDim);
+    state.counters["repair_succeeded"] = static_cast<double>(g_embeddingRepairSucceeded);
+
+    if (failure_count > 0) {
+        state.SkipWithError("Embedding backend A/B generation saw daemon errors");
+    }
+}
+
 // Benchmark: Get by name when document doesn't exist (tests fast-path error handling)
 static void BM_RetrievalService_GetByName_NotFound(benchmark::State& state) {
 #ifdef TRACY_ENABLE
@@ -1034,6 +1406,16 @@ BENCHMARK(BM_RetrievalService_Search_Fuzzy)->Unit(benchmark::kMicrosecond)->Iter
 
 BENCHMARK(BM_RetrievalService_Search_Hybrid)->Unit(benchmark::kMicrosecond)->Iterations(20);
 
+// Arg backend: 1=simeon, 2=onnxruntime.
+BENCHMARK(BM_EmbeddingBackendAB_Generate)
+    ->ArgNames({"backend", "docs"})
+    ->Args({1, 100})
+    ->Args({2, 100})
+    ->Args({1, 1000})
+    ->Args({2, 1000})
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(3);
+
 // Custom main to setup/teardown daemon
 int main(int argc, char** argv) {
     std::cout << "\n";
@@ -1051,8 +1433,12 @@ int main(int argc, char** argv) {
     std::cout << "  • Grep search:                P95 < 500ms (with sync indexing)\n";
     std::cout << "\n";
 
-    // Setup daemon and test data
-    SetupBenchmarkSuite();
+    // Setup daemon and test data. The embedding backend A/B benchmark owns its setup per backend
+    // row, so skip this default harness when the filter targets only that validation pass.
+    const bool deferSetupToBackendAB = benchmarkFilterTargetsBackendAB(argc, argv);
+    if (!deferSetupToBackendAB) {
+        SetupBenchmarkSuite();
+    }
 
     // Run benchmarks
     ::benchmark::Initialize(&argc, argv);

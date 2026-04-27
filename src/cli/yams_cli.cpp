@@ -594,8 +594,7 @@ int YamsCLI::run(int argc, char* argv[]) {
             // Prefer per-command embedded constants when available; fallback to slicing from full
             // blob
             const char* sectionPtr = nullptr;
-            if (false) {
-            } else if (cmd == "init")
+            if (cmd == "init")
                 sectionPtr = yams::cli_help::CMD_INIT;
             else if (cmd == "add")
                 sectionPtr = yams::cli_help::CMD_ADD;

@@ -605,6 +605,32 @@ public:
         }
     }
 
+    std::vector<std::vector<VectorRecord>>
+    searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings,
+                       const VectorSearchParams& params, size_t num_threads) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_ || query_embeddings.empty()) {
+            return {};
+        }
+        for (const auto& query : query_embeddings) {
+            if (query.size() != config_.embedding_dim) {
+                return {};
+            }
+        }
+
+        try {
+            auto result = backend_->searchSimilarBatch(query_embeddings, params.k,
+                                                       params.similarity_threshold, num_threads);
+            if (!result) {
+                return {};
+            }
+            return result.value();
+        } catch (const std::exception&) {
+            return {};
+        }
+    }
+
     Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
@@ -1285,6 +1311,17 @@ std::vector<VectorRecord> VectorDatabase::searchSimilar(const std::vector<float>
     YAMS_PLOT("vector_db::search_k", static_cast<int64_t>(params.k));
     auto results = pImpl->searchSimilar(query_embedding, params);
     YAMS_PLOT("vector_db::search_results", static_cast<int64_t>(results.size()));
+    return results;
+}
+
+std::vector<std::vector<VectorRecord>>
+VectorDatabase::searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings,
+                                   const VectorSearchParams& params, size_t num_threads) const {
+    YAMS_ZONE_SCOPED_N("VectorDB::searchSimilarBatch");
+    YAMS_PLOT("vector_db::batch_search_queries", static_cast<int64_t>(query_embeddings.size()));
+    YAMS_PLOT("vector_db::batch_search_k", static_cast<int64_t>(params.k));
+    auto results = pImpl->searchSimilarBatch(query_embeddings, params, num_threads);
+    YAMS_PLOT("vector_db::batch_search_result_sets", static_cast<int64_t>(results.size()));
     return results;
 }
 

@@ -234,7 +234,6 @@ struct ConfigLatest {
         size_t max_log_size = 104857600;
         size_t sync_interval = 1000;
         int sync_timeout_ms = 100;
-        bool compress_old_logs = true;
         size_t max_open_files = 10;
         bool enable_group_commit = true;
     } wal;

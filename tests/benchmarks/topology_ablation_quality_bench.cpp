@@ -34,7 +34,9 @@
 
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/metric_keys.h>
@@ -800,9 +802,24 @@ bool ingestFixtureMode(DaemonClient& client, const Fixture& fx, bool withEmbeddi
         req.tags = {"topology-ablation-quality"};
         req.noEmbeddings = !withEmbeddings;
 
-        auto res = yams::cli::run_sync(client.streamingAddDocument(req), 60s);
-        if (!res) {
-            spdlog::warn("Ingest failed for {}: {}", d.filename, res.error().message);
+        int attempts = 0;
+        while (true) {
+            auto res = yams::cli::run_sync(client.streamingAddDocument(req), 60s);
+            if (res) {
+                break;
+            }
+            const auto& msg = res.error().message;
+            if (msg.find("queue is full") != std::string::npos ||
+                msg.find("queue full") != std::string::npos) {
+                if (++attempts >= 120) {
+                    spdlog::warn("Ingest queue full after {} retries, giving up on {}", attempts,
+                                 d.filename);
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+            spdlog::warn("Ingest failed for {}: {}", d.filename, msg);
             return false;
         }
     }
@@ -1627,7 +1644,7 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
             harnessOpts.configPath = configTomlPath;
         }
         DaemonHarness harness(harnessOpts);
-        const fs::path dataDir = harness.rootDir() / "data";
+        const fs::path dataDir = harness.dataDir();
         std::error_code ec_fx;
         fs::create_directories(dataDir, ec_fx);
         const bool fixtureLoaded = tryLoadBenchFixture(cfg, dataDir);
@@ -1667,6 +1684,49 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
             spdlog::info("Bench: skipping ingest (fixture loaded for {})", fixtureKey(cfg));
         }
 
+        if (!fixtureLoaded) {
+            auto* daemon = harness.daemon();
+            auto* sm = daemon ? daemon->getServiceManager() : nullptr;
+            if (sm) {
+                const auto corpusDocs = static_cast<unsigned long>(fx.docs.size());
+                const auto timeoutSecs = std::min(7200UL, 900UL + (corpusDocs / 1000UL) * 60UL);
+                const auto drainDeadline =
+                    std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSecs);
+                int stableCount = 0;
+                uint64_t lastVicEpoch = std::numeric_limits<uint64_t>::max();
+                std::chrono::steady_clock::time_point lastLog{};
+                while (std::chrono::steady_clock::now() < drainDeadline) {
+                    const auto snap = sm->getIndexFreshnessSnapshot();
+                    auto vic = sm->getVectorIndexCoordinator();
+                    const auto vicSnap =
+                        vic ? vic->snapshot() : yams::daemon::VectorIndexTelemetry{};
+                    const bool vicHasBuilt = vicSnap.rebuildEpoch > 0;
+                    const bool idle = vicHasBuilt && snap.postIngestQueued == 0 &&
+                                      snap.postIngestInFlight == 0 && !vicSnap.rebuilding &&
+                                      vicSnap.rebuildEpoch == lastVicEpoch;
+                    lastVicEpoch = vicSnap.rebuildEpoch;
+                    if (idle) {
+                        if (++stableCount >= 6) {
+                            break;
+                        }
+                    } else {
+                        stableCount = 0;
+                        const auto now = std::chrono::steady_clock::now();
+                        if (now - lastLog >= std::chrono::seconds(30)) {
+                            spdlog::info("[Bench] Drain waiting: postIngest={}/{} vicBuilding={} "
+                                         "vicEpoch={} vicHasBuilt={}",
+                                         snap.postIngestQueued, snap.postIngestInFlight,
+                                         vicSnap.rebuilding, vicSnap.rebuildEpoch, vicHasBuilt);
+                            lastLog = now;
+                        }
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+                spdlog::info("[Bench] Embedding pipeline drain: stable={} epoch={}",
+                             stableCount >= 6, lastVicEpoch);
+            }
+        }
+
         outcome.cellIdentityExpected = computeCellIdentityFromEnv();
         if (cfg.mode == FixtureMode::Beir) {
             auto* daemon = harness.daemon();
@@ -1679,6 +1739,10 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
                 } else {
                     spdlog::info("Bench: corpus-wide semantic neighbor rebuild produced {} edges",
                                  rebuilt.value());
+                }
+                if (auto* cpm = sm->getCheckpointManager()) {
+                    cpm->checkpointNow();
+                    spdlog::info("Bench: WAL checkpoint after neighbor graph rebuild");
                 }
             }
             outcome.topologySeeded =
@@ -1694,6 +1758,17 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
                 auto* daemon = harness.daemon();
                 auto* sm = daemon ? daemon->getServiceManager() : nullptr;
                 (void)runSyncTopologyRebuild(sm, outcome.cellIdentityExpected, outcome);
+            }
+        }
+
+        {
+            auto* daemon = harness.daemon();
+            auto* sm = daemon ? daemon->getServiceManager() : nullptr;
+            if (sm) {
+                sm->getTopologyManager().setAutoRebuildEnabled(false);
+                if (auto vic = sm->getVectorIndexCoordinator()) {
+                    vic->setBuildsSuppressed(true);
+                }
             }
         }
 
@@ -1721,8 +1796,32 @@ CellOutcome runCell(std::size_t maxClusters, std::size_t maxDocs, float medoidBo
         }
 
         if (!fixtureLoaded) {
-            harness.stop();
+            if (auto* d = harness.daemon()) {
+                if (auto* sm = d->getServiceManager()) {
+                    const auto deadline =
+                        std::chrono::steady_clock::now() + std::chrono::seconds(120);
+                    int stableCount = 0;
+                    uint64_t lastEpoch = std::numeric_limits<uint64_t>::max();
+                    while (std::chrono::steady_clock::now() < deadline) {
+                        const auto snap = sm->getIndexFreshnessSnapshot();
+                        auto vic = sm->getVectorIndexCoordinator();
+                        const auto vs =
+                            vic ? vic->snapshot() : yams::daemon::VectorIndexTelemetry{};
+                        const bool idle = snap.postIngestQueued == 0 &&
+                                          snap.postIngestInFlight == 0 && !vs.rebuilding &&
+                                          vs.rebuildEpoch == lastEpoch;
+                        lastEpoch = vs.rebuildEpoch;
+                        if (idle && ++stableCount >= 6)
+                            break;
+                        else if (!idle)
+                            stableCount = 0;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    }
+                    spdlog::info("[Bench] Pre-stop drain: stableCount={}", stableCount);
+                }
+            }
             saveBenchFixture(cfg, dataDir);
+            harness.stop();
         }
     } catch (const std::exception& e) {
         spdlog::warn("Cell threw: {}", e.what());

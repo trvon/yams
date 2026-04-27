@@ -343,29 +343,30 @@ void EmbeddingService::updateSemanticNeighborGraph(
 
         std::vector<SourceDoc> sources;
         sources.reserve(requestedSourcePaths.size());
-        auto sourceStreamResult =
-            vdb->forEachDocumentLevelVector([&](yams::vector::VectorRecord&& record) {
-                if (record.document_hash.empty() || record.embedding.empty()) {
-                    return true;
+        for (const auto& [hash, requestedPath] : requestedSourcePaths) {
+            auto records = vdb->getVectorsByDocument(hash);
+            auto recordIt = std::find_if(
+                records.begin(), records.end(), [](const yams::vector::VectorRecord& r) {
+                    return r.level == yams::vector::EmbeddingLevel::DOCUMENT &&
+                           !r.document_hash.empty() && !r.embedding.empty();
+                });
+            if (recordIt == records.end()) {
+                recordIt = std::find_if(records.begin(), records.end(),
+                                        [](const yams::vector::VectorRecord& r) {
+                                            return !r.document_hash.empty() && !r.embedding.empty();
+                                        });
+            }
+            if (recordIt == records.end()) {
+                continue;
+            }
+            std::string filePath = requestedPath;
+            if (filePath.empty()) {
+                if (auto it = recordIt->metadata.find("path"); it != recordIt->metadata.end()) {
+                    filePath = it->second;
                 }
-                auto requested = requestedSourcePaths.find(record.document_hash);
-                if (requested == requestedSourcePaths.end()) {
-                    return true;
-                }
-                std::string filePath = requested->second;
-                if (filePath.empty()) {
-                    if (auto it = record.metadata.find("path"); it != record.metadata.end()) {
-                        filePath = it->second;
-                    }
-                }
-                sources.push_back(SourceDoc{std::move(record.document_hash), std::move(filePath),
-                                            std::move(record.embedding)});
-                return sources.size() < requestedSourcePaths.size();
-            });
-        if (!sourceStreamResult) {
-            spdlog::warn("EmbeddingService: failed to stream source vectors for semantic graph: {}",
-                         sourceStreamResult.error().message);
-            return;
+            }
+            sources.push_back(SourceDoc{recordIt->document_hash, std::move(filePath),
+                                        std::move(recordIt->embedding)});
         }
         if (sources.empty()) {
             spdlog::debug("EmbeddingService: semantic graph skipped; no source document "
@@ -390,7 +391,7 @@ void EmbeddingService::updateSemanticNeighborGraph(
         // cosine ops per batch. HNSW's top-K is ~log(corpus) probes per
         // source. Env knob YAMS_GRAPH_SEMANTIC_USE_HNSW=0 reverts to the
         // brute-force path for diagnostic comparison.
-        const bool useHnsw = []() {
+        const bool useHnswOverride = []() {
             if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_USE_HNSW")) {
                 if (env[0] == '0' || env[0] == 'f' || env[0] == 'F' || env[0] == 'n' ||
                     env[0] == 'N') {
@@ -399,19 +400,38 @@ void EmbeddingService::updateSemanticNeighborGraph(
             }
             return true;
         }();
+        const auto stats = vdb->getStats();
+        constexpr std::size_t kExactPairBudget = 250'000;
+        const bool exactMicroBatch =
+            sources.size() * std::max<std::size_t>(stats.total_vectors, sources.size()) <=
+            kExactPairBudget;
+        const bool useHnsw = useHnswOverride && !exactMicroBatch;
 
         if (useHnsw) {
-            // Per-source HNSW top-K. Overshoot k to compensate for chunk-level
+            // Batched HNSW/SPQ top-K. Overshoot k to compensate for chunk-level
             // matches that share a document_hash with a doc-level vector.
             const std::size_t hnswK = std::max<std::size_t>(8, semanticTopK * 4);
             const float searchThreshold = explicitSemanticThreshold.value_or(0.0f);
+            std::vector<std::vector<float>> queries;
+            queries.reserve(sources.size());
+            for (const auto& source : sources) {
+                queries.push_back(source.embedding);
+            }
+            yams::vector::VectorSearchParams params;
+            params.k = hnswK;
+            params.similarity_threshold = searchThreshold;
+            params.include_embeddings = false;
+            auto hitBatches = vdb->searchSimilarBatch(queries, params);
+            if (hitBatches.size() != sources.size()) {
+                hitBatches.clear();
+                hitBatches.reserve(sources.size());
+                for (const auto& source : sources) {
+                    hitBatches.push_back(vdb->searchSimilar(source.embedding, params));
+                }
+            }
             for (std::size_t i = 0; i < sources.size(); ++i) {
                 const auto& source = sources[i];
-                yams::vector::VectorSearchParams params;
-                params.k = hnswK;
-                params.similarity_threshold = searchThreshold;
-                params.include_embeddings = false;
-                auto hits = vdb->searchSimilar(source.embedding, params);
+                const auto& hits = hitBatches[i];
                 similarityPairCount += hits.size();
 
                 // Dedupe by document_hash; preserve the best per-doc score.
@@ -498,8 +518,39 @@ void EmbeddingService::updateSemanticNeighborGraph(
             return;
         }
 
+        std::vector<std::string> nodeKeys;
+        nodeKeys.reserve(sources.size() + candidateNeighborCount);
+        std::unordered_set<std::string> seenNodeKeys;
+        seenNodeKeys.reserve(sources.size() + candidateNeighborCount);
+        auto rememberNodeKey = [&](const std::string& hash) {
+            if (hash.empty()) {
+                return;
+            }
+            std::string key = "doc:" + hash;
+            if (seenNodeKeys.insert(key).second) {
+                nodeKeys.push_back(std::move(key));
+            }
+        };
+        for (const auto& source : sources) {
+            rememberNodeKey(source.hash);
+        }
+        for (const auto& topNeighbors : topBySource) {
+            for (const auto& neighbor : topNeighbors) {
+                rememberNodeKey(neighbor.hash);
+            }
+        }
+
         std::unordered_map<std::string, std::optional<std::int64_t>> nodeIdCache;
-        nodeIdCache.reserve(candidateDocs + sources.size());
+        nodeIdCache.reserve(nodeKeys.size());
+        auto nodesResult = kgStore->getNodesByKeys(nodeKeys);
+        if (nodesResult) {
+            for (const auto& node : nodesResult.value()) {
+                nodeIdCache.emplace(node.nodeKey, node.id);
+            }
+        } else {
+            spdlog::warn("EmbeddingService: batch node lookup for semantic graph failed: {}",
+                         nodesResult.error().message);
+        }
         auto resolveDocNodeId = [&](const std::string& hash) -> std::optional<std::int64_t> {
             const std::string key = "doc:" + hash;
             auto cached = nodeIdCache.find(key);
@@ -593,7 +644,7 @@ void EmbeddingService::updateSemanticNeighborGraph(
         }
 
         if (semanticEdges.empty()) {
-            spdlog::info(
+            spdlog::debug(
                 "EmbeddingService: streaming semantic neighbor graph produced no edges "
                 "(processed_docs={} candidate_docs={} similarity_pairs={} candidate_neighbors={} "
                 "missing_src_nodes={} missing_dst_nodes={} threshold_mode={} threshold_min={} "
@@ -613,7 +664,7 @@ void EmbeddingService::updateSemanticNeighborGraph(
             return;
         }
         semanticEdgesCreated_.fetch_add(semanticEdges.size(), std::memory_order_relaxed);
-        spdlog::info(
+        spdlog::debug(
             "EmbeddingService: streaming semantic neighbor graph added {} edges "
             "(processed_docs={} candidate_docs={} similarity_pairs={} candidate_neighbors={} "
             "missing_src_nodes={} missing_dst_nodes={} threshold_mode={} threshold_min={} "
@@ -834,7 +885,7 @@ void EmbeddingService::updateSemanticNeighborGraph(
     }
 
     if (semanticEdges.empty()) {
-        spdlog::info(
+        spdlog::debug(
             "EmbeddingService: semantic neighbor graph produced no edges (processed_docs={} "
             "candidate_docs={} similarity_pairs={} candidate_neighbors={} missing_src_nodes={} "
             "missing_dst_nodes={} threshold_mode={} threshold_min={} threshold_max={} topk={})",
@@ -854,7 +905,7 @@ void EmbeddingService::updateSemanticNeighborGraph(
     }
 
     semanticEdgesCreated_.fetch_add(semanticEdges.size(), std::memory_order_relaxed);
-    spdlog::info(
+    spdlog::debug(
         "EmbeddingService: semantic neighbor graph added {} edges (processed_docs={} "
         "candidate_docs={} similarity_pairs={} candidate_neighbors={} missing_src_nodes={} "
         "missing_dst_nodes={} threshold_mode={} threshold_min={} threshold_max={} topk={})",
@@ -921,7 +972,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
     }();
 
     const auto& gpuInfo = resource::detectGpu();
-    const bool coremlUnified =
+    const bool coremlUnifiedHardware =
         gpuInfo.detected && gpuInfo.provider == "coreml" && gpuInfo.unifiedMemory;
     std::size_t coremlUnifiedCap = 1;
     std::string embedProfile;
@@ -944,12 +995,24 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         } catch (...) {
         }
     }
-    if (coremlUnified) {
+    if (coremlUnifiedHardware) {
         spdlog::info(
-            "[EmbeddingService] CoreML unified-memory safety mode enabled: max concurrent embed "
+            "[EmbeddingService] CoreML unified-memory safety mode available: non-Simeon embed "
             "jobs capped at {} (profile='{}')",
             coremlUnifiedCap, embedProfile.empty() ? "default" : embedProfile);
     }
+    auto usesSimeonPreferredModel = [&]() {
+        std::string preferred;
+        if (getPreferredModel_) {
+            try {
+                preferred = getPreferredModel_();
+            } catch (...) {
+            }
+        }
+        std::transform(preferred.begin(), preferred.end(), preferred.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return preferred.find("simeon") != std::string::npos;
+    };
 
     std::size_t coremlDynamicCap = coremlUnifiedCap;
     uint64_t lastWarnCountObserved = 0;
@@ -998,7 +1061,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
             effectiveMaxConcurrent = std::min(effectiveMaxConcurrent, onnxBudget);
         } catch (...) {
         }
-        if (coremlUnified) {
+        const bool applyCoremlUnifiedCap = coremlUnifiedHardware && !usesSimeonPreferredModel();
+        if (applyCoremlUnifiedCap) {
             const auto lastInferMs = inferSubBatchLastDurationMs_.load(std::memory_order_relaxed);
             const auto oldestInferMs = inferOldestActiveMs();
             const auto warnCount = inferSubBatchWarnCount_.load(std::memory_order_relaxed);
@@ -1070,14 +1134,6 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                     passthrough.push_back(std::move(pending));
                     continue;
                 }
-                // Preserve in-process prepared payloads and explicit semantic-graph policy.
-                // The model-affinity grouper only carries hash lists; grouping these jobs would
-                // silently drop prepared chunks (forcing a DB re-gather/re-chunk) and reset
-                // updateSemanticGraph to its default true value.
-                if (!pending.preparedDocs.empty() || !pending.updateSemanticGraph) {
-                    passthrough.push_back(std::move(pending));
-                    continue;
-                }
                 if (pending.modelName.empty() && !defaultModel.empty()) {
                     pending.modelName.append(defaultModel);
                 }
@@ -1085,13 +1141,18 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                 if (bucket.hashes.empty()) {
                     bucket.modelName = pending.modelName;
                     bucket.skipExisting = pending.skipExisting;
+                    bucket.updateSemanticGraph = pending.updateSemanticGraph;
                 }
-                if (bucket.skipExisting != pending.skipExisting) {
+                if (bucket.skipExisting != pending.skipExisting ||
+                    bucket.updateSemanticGraph != pending.updateSemanticGraph) {
                     deferred.push_back(std::move(pending));
                     continue;
                 }
                 bucket.hashes.insert(bucket.hashes.end(), pending.hashes.begin(),
                                      pending.hashes.end());
+                bucket.preparedDocs.insert(bucket.preparedDocs.end(),
+                                           std::make_move_iterator(pending.preparedDocs.begin()),
+                                           std::make_move_iterator(pending.preparedDocs.end()));
             }
 
             this->pendingJobs_.clear();
@@ -1249,6 +1310,14 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                 auto& bucket = *entry.bucket;
                 if (stop_.load(std::memory_order_acquire)) {
                     break;
+                }
+                if (!bucket.preparedDocs.empty()) {
+                    if (inFlight_.load() >= effectiveMaxConcurrent) {
+                        this->pendingJobs_.push_back(std::move(bucket));
+                        continue;
+                    }
+                    dispatchJob(std::move(bucket));
+                    continue;
                 }
                 std::size_t offset = 0;
                 while (offset < bucket.hashes.size() && inFlight_.load() < effectiveMaxConcurrent) {
@@ -2647,7 +2716,10 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                          insertedChunkRecords, insertedDocRecords,
                          insertedChunkRecords + insertedDocRecords, insertChunkSize));
 
-    // Update metadata and repair status for all succeeded documents (single transaction each)
+    // Update metadata and repair status for all succeeded documents (single transaction each).
+    // Keep semantic graph timing separate: graph construction is part of post-ingest retrieval
+    // quality, but it should not be hidden inside "metadata_update" when diagnosing ingestion
+    // throughput.
     const auto tMeta = std::chrono::steady_clock::now();
     std::vector<std::string> successHashes;
     successHashes.reserve(docsToEmbed.size());
@@ -2676,19 +2748,22 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                      successHashes.size(), repairStatusResult.error().message);
     }
 
+    logPhase("metadata_update", tMeta,
+             fmt::format("docs={} model='{}'", successHashes.size(), modelName));
+
     if (job.updateSemanticGraph && getKgStore_) {
         auto kgStore = getKgStore_();
         if (kgStore) {
+            const auto tGraph = std::chrono::steady_clock::now();
             updateSemanticNeighborGraph(kgStore, vdb, modelName, semanticSourceDocuments);
+            logPhase("semantic_graph_update", tGraph,
+                     fmt::format("docs={} model='{}'", semanticSourceDocuments.size(), modelName));
         }
     } else if (!job.updateSemanticGraph) {
         spdlog::debug(
             "EmbeddingService: semantic neighbor graph update skipped for job={} model='{}'",
             jobTag, modelName);
     }
-
-    logPhase("metadata_update", tMeta,
-             fmt::format("docs={} model='{}'", successHashes.size(), modelName));
     updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
         mon.succeededDocs += successHashes.size();
         mon.processedChunks = mon.totalChunks;

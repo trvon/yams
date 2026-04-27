@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <unordered_map>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -83,6 +84,34 @@ TEST_CASE("KG Store: batch upsert nodes is idempotent", "[unit][metadata][kg]") 
     }
 }
 
+TEST_CASE("KG Store: getNodesByKeys batches stable node-key lookup", "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    std::vector<KGNode> nodes{
+        KGNode{.id = 0,
+               .nodeKey = "doc:a",
+               .label = std::string("a"),
+               .type = std::string("document")},
+        KGNode{.id = 0,
+               .nodeKey = "doc:b",
+               .label = std::string("b"),
+               .type = std::string("document")},
+    };
+    auto ids = fix.store_->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    auto out = fix.store_->getNodesByKeys({"doc:b", "doc:missing", "doc:a"});
+    REQUIRE(out.has_value());
+    REQUIRE(out.value().size() == 2);
+
+    std::unordered_map<std::string, std::int64_t> byKey;
+    for (const auto& node : out.value()) {
+        byKey.emplace(node.nodeKey, node.id);
+    }
+    CHECK(byKey.at("doc:a") == ids.value()[0]);
+    CHECK(byKey.at("doc:b") == ids.value()[1]);
+}
+
 TEST_CASE("KG Store: addEdgesUnique deduplicates edges", "[unit][metadata][kg]") {
     KGStoreFixture fix;
 
@@ -121,6 +150,60 @@ TEST_CASE("KG Store: addEdgesUnique deduplicates edges", "[unit][metadata][kg]")
         }
         CHECK(count == 1);
     }
+}
+
+TEST_CASE("KG Store: semantic edge upsert keeps strongest score and reads strongest first",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    std::vector<KGNode> nodes{
+        KGNode{.id = 0,
+               .nodeKey = "doc:src",
+               .label = std::string("src"),
+               .type = std::string("document")},
+        KGNode{.id = 0,
+               .nodeKey = "doc:weak",
+               .label = std::string("weak"),
+               .type = std::string("document")},
+        KGNode{.id = 0,
+               .nodeKey = "doc:strong",
+               .label = std::string("strong"),
+               .type = std::string("document")},
+    };
+    auto ids = fix.store_->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    KGEdge weak;
+    weak.srcNodeId = ids.value()[0];
+    weak.dstNodeId = ids.value()[1];
+    weak.relation = "semantic_neighbor";
+    weak.weight = 0.2F;
+    weak.createdTime = 10;
+    weak.properties = R"({"rank":2})";
+
+    KGEdge strong;
+    strong.srcNodeId = ids.value()[0];
+    strong.dstNodeId = ids.value()[2];
+    strong.relation = "semantic_neighbor";
+    strong.weight = 0.8F;
+    strong.createdTime = 11;
+    strong.properties = R"({"rank":1})";
+
+    REQUIRE(fix.store_->addEdgesUnique({weak, strong}).has_value());
+
+    weak.weight = 0.9F;
+    weak.createdTime = 12;
+    weak.properties = R"({"rank":1,"updated":true})";
+    REQUIRE(fix.store_->addEdgesUnique({weak}).has_value());
+
+    auto out = fix.store_->getEdgesFrom(ids.value()[0], "semantic_neighbor", 10, 0);
+    REQUIRE(out.has_value());
+    REQUIRE(out.value().size() == 2);
+    CHECK(out.value()[0].dstNodeId == ids.value()[1]);
+    CHECK(out.value()[0].weight == Approx(0.9F));
+    REQUIRE(out.value()[0].properties.has_value());
+    CHECK(out.value()[0].properties->find("updated") != std::string::npos);
+    CHECK(out.value()[1].dstNodeId == ids.value()[2]);
 }
 
 TEST_CASE("KG Store: ensurePathNode links logical path to snapshot path", "[unit][metadata][kg]") {

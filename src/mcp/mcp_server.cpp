@@ -388,20 +388,6 @@ buildTraversalRelationHints(const yams::daemon::GraphQueryResponse& resp) {
     return hints;
 }
 
-// Synchronous pooled_execute is deprecated and returns NotImplemented
-// This is kept only for toolRegistry compatibility until it's migrated to async
-template <typename Manager, typename TRequest, typename Render>
-Result<void> pooled_execute(Manager& manager, const TRequest& req,
-                            std::function<Result<void>()> fallback, Render&& render) {
-    (void)manager;
-    (void)req;
-    (void)fallback;
-    (void)render;
-    return Error{
-        ErrorCode::NotImplemented,
-        "Synchronous pooled_execute is deprecated. Use async handlers via direct method calls."};
-}
-
 // Async variant to be used once MCP handlers become coroutine-based.
 
 // No-op async bridge here; MCP dispatch below uses a detached thread

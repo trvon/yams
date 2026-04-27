@@ -46,6 +46,9 @@ public:
 
     std::vector<VectorRecord> searchSimilar(const std::vector<float>& query_embedding,
                                             const VectorSearchParams& params = {}) const;
+    std::vector<std::vector<VectorRecord>>
+    searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings,
+                       const VectorSearchParams& params = {}, size_t num_threads = 0) const;
     std::vector<VectorRecord> searchSimilarToDocument(const std::string& document_hash,
                                                       const VectorSearchParams& params = {}) const;
     std::vector<VectorRecord> search(const std::vector<float>& query_embedding,
