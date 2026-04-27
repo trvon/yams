@@ -1525,14 +1525,31 @@ TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and i
     // Batch insert content for all 3
     std::vector<BatchContentEntry> entries;
     for (int i = 0; i < 3; ++i) {
-        entries.push_back({docIds[static_cast<size_t>(i)], "Title " + std::to_string(i),
-                           "Content text " + std::to_string(i), "text/plain", "test", "en"});
+        BatchContentEntry entry;
+        entry.documentId = docIds[static_cast<size_t>(i)];
+        entry.title = "Title " + std::to_string(i);
+        entry.contentText = "Content text " + std::to_string(i);
+        entry.mimeType = "text/plain";
+        entry.extractionMethod = "test";
+        entry.language = "en";
+        entry.priorStateKnown = true;
+        entry.priorContentExtracted = false;
+        entry.priorExtractionStatus = ExtractionStatus::Pending;
+        entries.push_back(std::move(entry));
     }
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE(batchResult.has_value());
 
     CHECK(fix.repository_->getCachedExtractedCount() == extractedBefore + 3);
     CHECK(fix.repository_->getCachedIndexedCount() == indexedBefore + 3);
+
+    for (auto docId : docIds) {
+        auto docResult = fix.repository_->getDocument(docId);
+        REQUIRE(docResult.has_value());
+        REQUIRE(docResult.value().has_value());
+        CHECK(docResult.value()->repairStatus == RepairStatus::Completed);
+        CHECK(docResult.value()->repairAttempts == 1);
+    }
 }
 
 TEST_CASE("batchInsertContentAndIndex: already-extracted documents don't double-count",

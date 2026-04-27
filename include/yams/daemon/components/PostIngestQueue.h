@@ -145,6 +145,28 @@ class PostIngestQueue {
 public:
     static constexpr double kKgBackpressureThreshold = 0.95;
 
+    struct Timing {
+        std::uint64_t calls{0};
+        std::uint64_t totalMs{0};
+        std::uint64_t maxMs{0};
+    };
+
+    struct BatchMetrics {
+        std::uint64_t extractionBatches{0};
+        std::uint64_t extractionTasks{0};
+        std::uint64_t extractionSuccesses{0};
+        std::uint64_t extractionFailures{0};
+        std::uint64_t embedJobsEmitted{0};
+        std::uint64_t embedDocsEmitted{0};
+        std::uint64_t embedPreparedDocsEmitted{0};
+        std::uint64_t embedHashOnlyDocsEmitted{0};
+    };
+
+    struct MetricsSnapshot {
+        std::unordered_map<std::string, Timing> timings;
+        BatchMetrics batches;
+    };
+
     struct Task {
         std::string hash;
         std::string mime;
@@ -163,6 +185,8 @@ public:
         std::vector<std::string> tags;
         std::string language;
         std::shared_ptr<std::vector<std::byte>> contentBytes;
+        bool priorContentExtracted = false;
+        metadata::ExtractionStatus priorExtractionStatus = metadata::ExtractionStatus::Pending;
 
         // Dispatch flags (determined during preparation)
         bool shouldDispatchKg = true;
@@ -251,6 +275,8 @@ public:
     double latencyMsEma() const { return latencyMsEma_.load(); }
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
     std::size_t capacity() const { return capacity_.load(std::memory_order_relaxed); }
+    MetricsSnapshot metricsSnapshot() const;
+    void resetMetrics();
 
     // Backpressure observability
     std::uint64_t backpressureRejects() const {
@@ -552,6 +578,7 @@ private:
 
     /// Process batch with work-stealing parallelization (default)
     void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
+    void recordTiming(const std::string& name, std::chrono::steady_clock::time_point start);
 
     /// Snapshot stage config under locks (symbol extension map + entity providers)
     struct StageConfigSnapshot {
@@ -575,6 +602,16 @@ private:
 
     /// Cache for metadata lookups
     MetadataCache metadataCache_;
+    mutable std::mutex metricsMutex_;
+    std::unordered_map<std::string, Timing> timings_;
+    std::atomic<std::uint64_t> extractionBatches_{0};
+    std::atomic<std::uint64_t> extractionTasks_{0};
+    std::atomic<std::uint64_t> extractionSuccesses_{0};
+    std::atomic<std::uint64_t> extractionFailures_{0};
+    std::atomic<std::uint64_t> embedJobsEmitted_{0};
+    std::atomic<std::uint64_t> embedDocsEmitted_{0};
+    std::atomic<std::uint64_t> embedPreparedDocsEmitted_{0};
+    std::atomic<std::uint64_t> embedHashOnlyDocsEmitted_{0};
 
     // Backpressure metrics
     std::atomic<std::uint64_t> backpressureRejects_{0};

@@ -1979,17 +1979,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     if (repairActive) {
                         spdlog::info("[ServiceManager] Skipping drain-triggered graph maintenance "
                                      "while repair RPC is active");
-                    } else if (auto graphComponent = getGraphComponent()) {
-                        auto maintenance = graphComponent->maintainSemanticTopology(false);
-                        if (!maintenance) {
-                            spdlog::warn(
-                                "[ServiceManager] Semantic topology maintenance failed: {}",
-                                maintenance.error().message);
-                        } else if (maintenance.value().semanticEdgesPruned > 0) {
-                            spdlog::info("[ServiceManager] Pruned {} one-way semantic_neighbor "
-                                         "edges after drain",
-                                         maintenance.value().semanticEdgesPruned);
-                        }
+                    } else {
+                        requestSemanticTopologyMaintenance("post_ingest_drain");
                     }
                     if (!disableDrainTopologyRebuild && !repairActive) {
                         requestTopologyRebuild("post_ingest_drain");
@@ -3455,6 +3446,59 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                 self->topologyManager_.restoreDirtyHashes(rebuildHashes);
             } else if (result.value().skipped) {
                 self->topologyManager_.restoreDirtyHashes(rebuildHashes);
+            }
+        }
+    });
+}
+
+void ServiceManager::requestSemanticTopologyMaintenance(const std::string& reason) {
+    if (shutdownInvoked_.load(std::memory_order_acquire))
+        return;
+    if (!serviceFsm_.isReady())
+        return;
+
+    bool expected = false;
+    if (!semanticTopologyMaintenanceScheduled_.compare_exchange_strong(expected, true,
+                                                                       std::memory_order_acq_rel)) {
+        return;
+    }
+
+    auto weakSelf = weak_from_this();
+    auto executor = getWorkerExecutor();
+    auto debounceTimer = std::make_shared<boost::asio::steady_timer>(executor);
+    debounceTimer->expires_after(std::chrono::milliseconds(250));
+    debounceTimer->async_wait([weakSelf, reason,
+                               debounceTimer](const boost::system::error_code& ec) mutable {
+        if (auto self = weakSelf.lock()) {
+            auto clearScheduled = [&]() {
+                self->semanticTopologyMaintenanceScheduled_.store(false, std::memory_order_release);
+            };
+            if (ec || self->shutdownInvoked_.load(std::memory_order_acquire)) {
+                clearScheduled();
+                return;
+            }
+
+            auto graphComponent = self->getGraphComponent();
+            if (!graphComponent) {
+                clearScheduled();
+                return;
+            }
+
+            auto dirtyForMaintenance = self->topologyManager_.getOverlayHashes(4096);
+            if (dirtyForMaintenance.empty()) {
+                clearScheduled();
+                return;
+            }
+
+            auto maintenance =
+                graphComponent->maintainSemanticTopologyForDocuments(dirtyForMaintenance, false);
+            clearScheduled();
+            if (!maintenance) {
+                spdlog::warn("[ServiceManager] Semantic topology maintenance failed: {}",
+                             maintenance.error().message);
+            } else if (maintenance.value().semanticEdgesPruned > 0) {
+                spdlog::info("[ServiceManager] Pruned {} one-way semantic_neighbor edges after {}",
+                             maintenance.value().semanticEdgesPruned, reason);
             }
         }
     });

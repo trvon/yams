@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -41,6 +42,12 @@ struct ModelLoadEvent;
  */
 class EmbeddingService : public IComponent {
 public:
+    struct PhaseTiming {
+        uint64_t calls{0};
+        uint64_t totalMs{0};
+        uint64_t maxMs{0};
+    };
+
     EmbeddingService(std::shared_ptr<api::IContentStore> store,
                      std::shared_ptr<metadata::MetadataRepository> meta,
                      WorkCoordinator* coordinator);
@@ -78,6 +85,8 @@ public:
     uint64_t semanticUpdateErrors() const {
         return semanticUpdateErrors_.load(std::memory_order_relaxed);
     }
+    std::unordered_map<std::string, PhaseTiming> phaseTimingsSnapshot() const;
+    void resetPhaseTimings();
 
     void setTopologyRebuildRequester(std::function<void(const std::vector<std::string>&)> cb);
 
@@ -99,6 +108,7 @@ private:
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
         const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
         bool sourceAllCorpus = false);
+    void recordPhaseTiming(const std::string& phase, std::chrono::steady_clock::time_point start);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -136,8 +146,23 @@ private:
     std::atomic<uint64_t> semanticDocsProcessed_{0};
     std::atomic<uint64_t> semanticUpdateErrors_{0};
     std::atomic<uint64_t> inferTokenCounter_{0};
+    mutable std::mutex phaseTimingsMutex_;
+    std::unordered_map<std::string, PhaseTiming> phaseTimings_;
     mutable std::mutex inferTrackerMutex_;
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> activeInferSubBatches_;
+    struct SemanticCorpusEntry {
+        std::string hash;
+        std::string filePath;
+        std::vector<float> embedding;
+        float invNorm{0.0f};
+    };
+    mutable std::mutex semanticCorpusMutex_;
+    std::unordered_map<std::string, SemanticCorpusEntry> semanticCorpusCache_;
+    mutable std::mutex semanticNodeIdCacheMutex_;
+    std::unordered_map<std::string, std::optional<std::int64_t>> semanticNodeIdCache_;
+    mutable std::mutex semanticGraphPendingMutex_;
+    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>>
+        semanticGraphPendingByModel_;
     std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
     std::vector<InternalEventBus::EmbedJob> pendingJobs_;
 };

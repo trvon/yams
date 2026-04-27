@@ -391,6 +391,7 @@ public:
     Result<std::size_t> rebuildSemanticNeighborGraph(const std::string& reason);
     void requestTopologyRebuild(const std::string& reason,
                                 const std::vector<std::string>& documentHashes = {});
+    void requestSemanticTopologyMaintenance(const std::string& reason);
     TopologyTelemetrySnapshot getTopologyTelemetrySnapshot() const {
         return topologyManager_.getTelemetrySnapshot();
     }
@@ -460,6 +461,16 @@ public:
     }
     uint64_t getEmbeddingSemanticUpdateErrors() const {
         return embeddingLifecycle_.semanticUpdateErrors();
+    }
+    std::unordered_map<std::string, EmbeddingService::PhaseTiming>
+    getEmbeddingPhaseTimingsSnapshot() const {
+        return embeddingService_ ? embeddingService_->phaseTimingsSnapshot()
+                                 : std::unordered_map<std::string, EmbeddingService::PhaseTiming>{};
+    }
+    void resetEmbeddingPhaseTimings() {
+        if (embeddingService_) {
+            embeddingService_->resetPhaseTimings();
+        }
     }
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
@@ -682,6 +693,7 @@ private:
     TuningConfig tuningConfig_{};
 
     std::atomic<bool> shutdownInvoked_{false};
+    std::atomic<bool> semanticTopologyMaintenanceScheduled_{false};
 
     DaemonLifecycleFsm& lifecycleFsm_;
 

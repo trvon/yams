@@ -235,6 +235,9 @@ struct BatchContentEntry {
     std::string mimeType;         ///< MIME type for FTS content_type
     std::string extractionMethod; ///< Method used for extraction
     std::string language;         ///< Detected language code
+    bool priorStateKnown = false;
+    bool priorContentExtracted = false;
+    ExtractionStatus priorExtractionStatus = ExtractionStatus::Pending;
 };
 
 /**

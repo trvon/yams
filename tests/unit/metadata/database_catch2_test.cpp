@@ -321,11 +321,10 @@ TEST_CASE("Database: Migrations", "[unit][metadata][database]") {
         auto migrateResult = mm.migrate();
         REQUIRE(migrateResult.has_value());
 
-        // Verify final version
+        const int latestAvailable = mm.getLatestVersion();
         auto currentVersion = mm.getCurrentVersion();
         REQUIRE(currentVersion.has_value());
-        CHECK(currentVersion.value() ==
-              33); // Latest schema version (keep in sync with migration.cpp)
+        CHECK(currentVersion.value() == latestAvailable);
 
         // Verify tables exist
         auto docExists = db.tableExists("documents");

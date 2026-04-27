@@ -110,6 +110,9 @@ public:
         std::vector<std::string> issues;
     };
     Result<SemanticTopologyMaintenanceStats> maintainSemanticTopology(bool dryRun = false);
+    Result<SemanticTopologyMaintenanceStats>
+    maintainSemanticTopologyForDocuments(const std::vector<std::string>& documentHashes,
+                                         bool dryRun = false);
 
     std::shared_ptr<app::services::IGraphQueryService> getQueryService() const;
 

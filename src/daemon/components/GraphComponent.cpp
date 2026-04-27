@@ -1074,6 +1074,166 @@ GraphComponent::maintainSemanticTopology(bool dryRun) {
     return stats;
 }
 
+Result<GraphComponent::SemanticTopologyMaintenanceStats>
+GraphComponent::maintainSemanticTopologyForDocuments(const std::vector<std::string>& documentHashes,
+                                                     bool dryRun) {
+    if (!initialized_ || !kgStore_) {
+        return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
+    }
+
+    SemanticTopologyMaintenanceStats stats;
+    if (documentHashes.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back("semantic topology scoped maintenance skipped: no dirty documents");
+        return stats;
+    }
+
+    bool expected = false;
+    if (!semanticTopologyMaintenanceRunning_.compare_exchange_strong(expected, true,
+                                                                     std::memory_order_acq_rel)) {
+        stats.skipped = true;
+        stats.issues.push_back("semantic topology maintenance already in progress");
+        return stats;
+    }
+
+    struct Guard {
+        std::atomic<bool>& flag;
+        ~Guard() { flag.store(false, std::memory_order_release); }
+    } guard{semanticTopologyMaintenanceRunning_};
+
+    std::vector<std::string> nodeKeys;
+    nodeKeys.reserve(documentHashes.size());
+    std::unordered_set<std::string> seenHashes;
+    seenHashes.reserve(documentHashes.size());
+    for (const auto& hash : documentHashes) {
+        if (hash.empty() || !seenHashes.insert(hash).second) {
+            continue;
+        }
+        nodeKeys.push_back("doc:" + hash);
+    }
+    if (nodeKeys.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back(
+            "semantic topology scoped maintenance skipped: no valid dirty documents");
+        return stats;
+    }
+
+    auto nodesResult = kgStore_->getNodesByKeys(nodeKeys);
+    if (!nodesResult) {
+        return Error{ErrorCode::InternalError,
+                     "failed to resolve scoped semantic topology nodes: " +
+                         nodesResult.error().message};
+    }
+
+    std::vector<std::int64_t> nodeIds;
+    nodeIds.reserve(nodesResult.value().size());
+    for (const auto& node : nodesResult.value()) {
+        if (node.id > 0) {
+            nodeIds.push_back(node.id);
+        }
+    }
+    if (nodeIds.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back(
+            "semantic topology scoped maintenance skipped: no graph nodes for dirty documents");
+        return stats;
+    }
+
+    constexpr std::size_t kIncidentEdgeLimitPerNode = 4096;
+    auto outgoingResult = kgStore_->getEdgesFromBatch(
+        nodeIds, std::string_view("semantic_neighbor"), kIncidentEdgeLimitPerNode);
+    if (!outgoingResult) {
+        return Error{ErrorCode::InternalError,
+                     "failed to load scoped outgoing semantic_neighbor edges: " +
+                         outgoingResult.error().message};
+    }
+    auto incomingResult = kgStore_->getEdgesToBatch(nodeIds, std::string_view("semantic_neighbor"),
+                                                    kIncidentEdgeLimitPerNode);
+    if (!incomingResult) {
+        return Error{ErrorCode::InternalError,
+                     "failed to load scoped incoming semantic_neighbor edges: " +
+                         incomingResult.error().message};
+    }
+
+    std::unordered_map<DirectedNodePair, std::int64_t, DirectedNodePairHash> edgeIdsByPair;
+    std::size_t incidentEdges = 0;
+    auto rememberEdge = [&](const metadata::KGEdge& edge) {
+        if (edge.srcNodeId <= 0 || edge.dstNodeId <= 0) {
+            return;
+        }
+        ++incidentEdges;
+        edgeIdsByPair.emplace(DirectedNodePair{edge.srcNodeId, edge.dstNodeId}, edge.id);
+    };
+    for (const auto& [_, edges] : outgoingResult.value()) {
+        for (const auto& edge : edges) {
+            rememberEdge(edge);
+        }
+    }
+    for (const auto& [_, edges] : incomingResult.value()) {
+        for (const auto& edge : edges) {
+            rememberEdge(edge);
+        }
+    }
+
+    if (edgeIdsByPair.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back(
+            "semantic topology scoped maintenance skipped: no incident semantic edges");
+        return stats;
+    }
+
+    std::vector<std::int64_t> edgesToRemove;
+    edgesToRemove.reserve(edgeIdsByPair.size());
+    std::size_t reciprocalPairs = 0;
+    for (const auto& [pair, edgeId] : edgeIdsByPair) {
+        if (pair.first == pair.second) {
+            edgesToRemove.push_back(edgeId);
+            continue;
+        }
+        if (edgeIdsByPair.contains(DirectedNodePair{pair.second, pair.first})) {
+            ++reciprocalPairs;
+            continue;
+        }
+        edgesToRemove.push_back(edgeId);
+    }
+
+    stats.reciprocalCommunities = reciprocalPairs / 2;
+    stats.largestReciprocalCommunity = stats.reciprocalCommunities > 0 ? 2 : 0;
+
+    if (edgesToRemove.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back("semantic topology scoped maintenance skipped: incident region "
+                               "reciprocity healthy enough");
+        return stats;
+    }
+
+    if (dryRun) {
+        stats.issues.push_back("dry-run: would prune " + std::to_string(edgesToRemove.size()) +
+                               " one-way semantic_neighbor edges from scoped region");
+        return stats;
+    }
+
+    for (const auto edgeId : edgesToRemove) {
+        auto removeResult = kgStore_->removeEdgeById(edgeId);
+        if (!removeResult) {
+            return Error{ErrorCode::InternalError,
+                         "failed to prune scoped semantic_neighbor edge " + std::to_string(edgeId) +
+                             ": " + removeResult.error().message};
+        }
+        ++stats.semanticEdgesPruned;
+    }
+
+    stats.issues.push_back("scoped semantic topology maintenance checked " +
+                           std::to_string(nodeIds.size()) + " dirty docs and " +
+                           std::to_string(incidentEdges) + " incident edges");
+    if (stats.semanticEdgesPruned > 0) {
+        stats.issues.push_back("pruned " + std::to_string(stats.semanticEdgesPruned) +
+                               " one-way semantic_neighbor edges from scoped region");
+    }
+
+    return stats;
+}
+
 std::shared_ptr<app::services::IGraphQueryService> GraphComponent::getQueryService() const {
     return queryService_;
 }

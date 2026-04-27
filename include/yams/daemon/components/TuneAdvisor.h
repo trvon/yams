@@ -104,7 +104,7 @@ public:
     // Public accessors for embedding-related knobs (used outside daemon module)
     // These forward to internal tunables while keeping implementation details private.
     static constexpr std::size_t kDefaultEmbedDocCap = 64;
-    static constexpr std::size_t kDefaultEmbedJobDocCap = 16;
+    static constexpr std::size_t kDefaultEmbedJobDocCap = 64;
     static double getEmbedSafety() { return embedSafety(); }
     static std::size_t getEmbedDocCap() { return embedDocCap(); }
     static std::size_t resolvedEmbedDocCap() {

@@ -371,6 +371,50 @@ TEST_CASE("GraphComponent: maintainSemanticTopology keeps reciprocal communities
     CHECK(topology->reciprocalCommunityCount == 1);
 }
 
+TEST_CASE("GraphComponent: scoped semantic maintenance prunes only dirty incident one-way edges",
+          "[daemon][graph][repair]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    std::vector<KGNode> nodes = {
+        KGNode{.nodeKey = "doc:a", .label = std::string("a"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:b", .label = std::string("b"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:c", .label = std::string("c"), .type = std::string("document")},
+        KGNode{.nodeKey = "doc:d", .label = std::string("d"), .type = std::string("document")},
+    };
+    auto ids = fixture.kgStore->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+
+    REQUIRE(fixture.kgStore
+                ->addEdgesUnique({
+                    // Dirty incident one-way edge: should be pruned.
+                    KGEdge{.srcNodeId = ids.value()[0],
+                           .dstNodeId = ids.value()[1],
+                           .relation = "semantic_neighbor",
+                           .weight = 0.95f},
+                    // Non-dirty one-way edge: should be left for a future scoped/global pass.
+                    KGEdge{.srcNodeId = ids.value()[2],
+                           .dstNodeId = ids.value()[3],
+                           .relation = "semantic_neighbor",
+                           .weight = 0.93f},
+                })
+                .has_value());
+
+    auto maintenance = component.maintainSemanticTopologyForDocuments({"a"}, false);
+    REQUIRE(maintenance.has_value());
+    CHECK(maintenance.value().semanticEdgesPruned == 1);
+
+    auto aEdges = fixture.kgStore->getEdgesFrom(ids.value()[0], "semantic_neighbor");
+    REQUIRE(aEdges.has_value());
+    CHECK(aEdges.value().empty());
+
+    auto cEdges = fixture.kgStore->getEdgesFrom(ids.value()[2], "semantic_neighbor");
+    REQUIRE(cEdges.has_value());
+    REQUIRE(cEdges.value().size() == 1);
+    CHECK(cEdges.value().front().dstNodeId == ids.value()[3]);
+}
+
 TEST_CASE("GraphComponent: Get query service after init", "[daemon][graph][lifecycle]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);

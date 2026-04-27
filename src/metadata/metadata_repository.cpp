@@ -1552,7 +1552,10 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             UPDATE documents
             SET content_extracted = 1,
                 extraction_status = 'Success',
-                extraction_error = NULL
+                extraction_error = NULL,
+                repair_status = 'completed',
+                repair_attempted_at = unixepoch(),
+                repair_attempts = repair_attempts + 1
             WHERE id = ?
         )");
         if (!combinedStmtResult) {
@@ -1619,29 +1622,28 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 }
             }
 
-            // 3. Update extracted/indexed flags with a single combined UPDATE.
-            // Pre-check current state to determine counter increments.
-            if (auto r = checkStmt.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = checkStmt.clearBindings(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = checkStmt.bind(1, entry.documentId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            auto checkStep = checkStmt.step();
-            if (!checkStep) {
-                db.execute("ROLLBACK");
-                return checkStep.error();
-            }
-            bool wasExtracted = checkStep.value() && checkStmt.getInt(0) == 1;
-            std::string priorStatus;
-            if (checkStep.value()) {
-                priorStatus = checkStmt.getString(1);
+            bool wasExtracted = entry.priorContentExtracted;
+            bool wasIndexed = entry.priorExtractionStatus == ExtractionStatus::Success;
+            if (!entry.priorStateKnown) {
+                if (auto r = checkStmt.reset(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = checkStmt.clearBindings(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = checkStmt.bind(1, entry.documentId); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                auto checkStep = checkStmt.step();
+                if (!checkStep) {
+                    db.execute("ROLLBACK");
+                    return checkStep.error();
+                }
+                wasExtracted = checkStep.value() && checkStmt.getInt(0) == 1;
+                wasIndexed = checkStep.value() && checkStmt.getString(1) == "Success";
             }
 
             if (auto r = combinedStmt.reset(); !r) {
@@ -1664,7 +1666,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             if (!wasExtracted) {
                 newlyExtracted++;
             }
-            if (priorStatus != "Success") {
+            if (!wasIndexed) {
                 newlyIndexed++;
             }
         }

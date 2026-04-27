@@ -49,6 +49,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <yams/compat/unistd.h>
 
@@ -443,6 +444,9 @@ struct BenchmarkResult {
     StageMetrics fts5_extraction;
     StageMetrics embedding_generation;
     StageMetrics kg_extraction;
+    std::unordered_map<std::string, yams::daemon::EmbeddingService::PhaseTiming>
+        embedding_phase_timings;
+    yams::daemon::PostIngestQueue::MetricsSnapshot post_ingest_metrics;
 
     // Queue monitoring
     std::vector<QueueSnapshot> queue_samples;
@@ -470,6 +474,39 @@ struct BenchmarkResult {
                        {"fts5_extraction", fts5_extraction.toJson()},
                        {"embedding_generation", embedding_generation.toJson()},
                        {"kg_extraction", kg_extraction.toJson()}};
+
+        json phaseTimings = json::object();
+        for (const auto& [phase, timing] : embedding_phase_timings) {
+            phaseTimings[phase] = {{"calls", timing.calls},
+                                   {"total_ms", timing.totalMs},
+                                   {"max_ms", timing.maxMs},
+                                   {"avg_ms", timing.calls == 0
+                                                  ? 0.0
+                                                  : static_cast<double>(timing.totalMs) /
+                                                        static_cast<double>(timing.calls)}};
+        }
+        j["embedding_phase_timings"] = std::move(phaseTimings);
+
+        json postTimings = json::object();
+        for (const auto& [phase, timing] : post_ingest_metrics.timings) {
+            postTimings[phase] = {{"calls", timing.calls},
+                                  {"total_ms", timing.totalMs},
+                                  {"max_ms", timing.maxMs},
+                                  {"avg_ms", timing.calls == 0
+                                                 ? 0.0
+                                                 : static_cast<double>(timing.totalMs) /
+                                                       static_cast<double>(timing.calls)}};
+        }
+        j["post_ingest_phase_timings"] = std::move(postTimings);
+        j["post_ingest_batch_metrics"] = {
+            {"extraction_batches", post_ingest_metrics.batches.extractionBatches},
+            {"extraction_tasks", post_ingest_metrics.batches.extractionTasks},
+            {"extraction_successes", post_ingest_metrics.batches.extractionSuccesses},
+            {"extraction_failures", post_ingest_metrics.batches.extractionFailures},
+            {"embed_jobs_emitted", post_ingest_metrics.batches.embedJobsEmitted},
+            {"embed_docs_emitted", post_ingest_metrics.batches.embedDocsEmitted},
+            {"embed_prepared_docs_emitted", post_ingest_metrics.batches.embedPreparedDocsEmitted},
+            {"embed_hash_only_docs_emitted", post_ingest_metrics.batches.embedHashOnlyDocsEmitted}};
 
         j["queues"] = {{"max_store_document_tasks", max_store_document_tasks},
                        {"max_embed_jobs", max_embed_jobs},
@@ -652,6 +689,10 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         } else {
             spdlog::warn("Model provider not available");
         }
+        serviceManager->resetEmbeddingPhaseTimings();
+        if (auto postIngest = serviceManager->getPostIngestQueue()) {
+            postIngest->resetMetrics();
+        }
     }
 
     // Capture baseline counters (start from zero)
@@ -792,6 +833,12 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     int64_t totalEndMs = nowMs();
     result.total_duration_ms = totalEndMs - ingestStartMs;
     result.throughput_docs_per_sec = successCount / (result.total_duration_ms / 1000.0);
+    if (serviceManager) {
+        result.embedding_phase_timings = serviceManager->getEmbeddingPhaseTimingsSnapshot();
+        if (auto postIngest = serviceManager->getPostIngestQueue()) {
+            result.post_ingest_metrics = postIngest->metricsSnapshot();
+        }
+    }
 
     spdlog::info("=== Benchmark Complete ===");
     spdlog::info("Total duration: {} ms", result.total_duration_ms);

@@ -629,13 +629,7 @@ double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* c
 
 std::size_t PostIngestQueue::adaptiveExtractionBatchSize(std::size_t baseBatchSize) const {
     baseBatchSize = std::max<std::size_t>(1u, baseBatchSize);
-    // Keep extraction commits meaningfully batched even when stage concurrency is clamped.
-    // Concurrency governs how many batches run at once; this floor governs docs per batch.
     constexpr std::size_t kExtractionBatchFloor = 4u;
-    // Extraction batch size is decoupled from KG channel backpressure. KG processing
-    // is downstream and independent — a full KG channel should not throttle text
-    // extraction + FTS indexing. The KG channel already handles drops gracefully
-    // when full, and the KG poller runs on its own independent schedule.
     return std::max(baseBatchSize, kExtractionBatchFloor);
 }
 
@@ -886,6 +880,53 @@ std::size_t PostIngestQueue::size() const {
     return normalDepth + rpcDepth;
 }
 
+PostIngestQueue::MetricsSnapshot PostIngestQueue::metricsSnapshot() const {
+    MetricsSnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(metricsMutex_);
+        snapshot.timings = timings_;
+    }
+    snapshot.batches.extractionBatches = extractionBatches_.load(std::memory_order_relaxed);
+    snapshot.batches.extractionTasks = extractionTasks_.load(std::memory_order_relaxed);
+    snapshot.batches.extractionSuccesses = extractionSuccesses_.load(std::memory_order_relaxed);
+    snapshot.batches.extractionFailures = extractionFailures_.load(std::memory_order_relaxed);
+    snapshot.batches.embedJobsEmitted = embedJobsEmitted_.load(std::memory_order_relaxed);
+    snapshot.batches.embedDocsEmitted = embedDocsEmitted_.load(std::memory_order_relaxed);
+    snapshot.batches.embedPreparedDocsEmitted =
+        embedPreparedDocsEmitted_.load(std::memory_order_relaxed);
+    snapshot.batches.embedHashOnlyDocsEmitted =
+        embedHashOnlyDocsEmitted_.load(std::memory_order_relaxed);
+    return snapshot;
+}
+
+void PostIngestQueue::resetMetrics() {
+    {
+        std::lock_guard<std::mutex> lock(metricsMutex_);
+        timings_.clear();
+    }
+    extractionBatches_.store(0, std::memory_order_relaxed);
+    extractionTasks_.store(0, std::memory_order_relaxed);
+    extractionSuccesses_.store(0, std::memory_order_relaxed);
+    extractionFailures_.store(0, std::memory_order_relaxed);
+    embedJobsEmitted_.store(0, std::memory_order_relaxed);
+    embedDocsEmitted_.store(0, std::memory_order_relaxed);
+    embedPreparedDocsEmitted_.store(0, std::memory_order_relaxed);
+    embedHashOnlyDocsEmitted_.store(0, std::memory_order_relaxed);
+}
+
+void PostIngestQueue::recordTiming(const std::string& name,
+                                   std::chrono::steady_clock::time_point start) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+    std::lock_guard<std::mutex> lock(metricsMutex_);
+    auto& timing = timings_[name];
+    timing.calls += 1;
+    timing.totalMs += static_cast<std::uint64_t>(std::max<long long>(0, ms));
+    timing.maxMs = std::max<std::uint64_t>(timing.maxMs,
+                                           static_cast<std::uint64_t>(std::max<long long>(0, ms)));
+}
+
 std::size_t PostIngestQueue::kgQueueDepth() const {
     return kgChannel_ ? kgChannel_->size_approx() : 0;
 }
@@ -931,6 +972,8 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.mimeType = mime.empty() ? info.mimeType : mime;
     prepared.extension = info.fileExtension;
     prepared.tags = tags;
+    prepared.priorContentExtracted = info.contentExtracted;
+    prepared.priorExtractionStatus = info.extractionStatus;
 
     // Respect per-document opt-out (set by StoreDocumentRequest.noEmbeddings).
     // DocumentService persists this as a real tag key "tag:no_embeddings".
@@ -2575,6 +2618,13 @@ PostIngestQueue::StageConfigSnapshot PostIngestQueue::snapshotStageConfig() {
 
 void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& successes,
                                          std::vector<ExtractionFailure>& failures) {
+    const auto timingStart = std::chrono::steady_clock::now();
+    struct TimingGuard {
+        PostIngestQueue* self;
+        std::chrono::steady_clock::time_point start;
+        ~TimingGuard() { self->recordTiming("commit_batch_results", start); }
+    } timingGuard{this, timingStart};
+
     if (!successes.empty() && meta_) {
         std::vector<metadata::BatchContentEntry> entries;
         entries.reserve(successes.size());
@@ -2587,6 +2637,9 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
             entry.mimeType = prepared.mimeType;
             entry.extractionMethod = "post_ingest";
             entry.language = prepared.language;
+            entry.priorStateKnown = true;
+            entry.priorContentExtracted = prepared.priorContentExtracted;
+            entry.priorExtractionStatus = prepared.priorExtractionStatus;
             entries.push_back(std::move(entry));
         }
 
@@ -2637,19 +2690,16 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                                                            metadata::RepairStatus::Failed);
         }
     }
-
-    if (!successes.empty() && meta_) {
-        std::vector<std::string> successHashes;
-        successHashes.reserve(successes.size());
-        for (const auto& prepared : successes) {
-            successHashes.push_back(prepared.hash);
-        }
-        (void)meta_->batchUpdateDocumentRepairStatuses(successHashes,
-                                                       metadata::RepairStatus::Completed);
-    }
 }
 
 void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>& successes) {
+    const auto timingStart = std::chrono::steady_clock::now();
+    struct TimingGuard {
+        PostIngestQueue* self;
+        std::chrono::steady_clock::time_point start;
+        ~TimingGuard() { self->recordTiming("dispatch_successes", start); }
+    } timingGuard{this, timingStart};
+
     std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
 
     // Opportunistically enqueue embedding jobs for successfully extracted/indexed documents.
@@ -2657,7 +2707,10 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     auto embedQ = embedChannel_;
     std::vector<InternalEventBus::EmbedPreparedDoc> embedPreparedBatch;
     std::vector<std::string> embedHashBatch;
+    std::size_t embedPreparedBatchPayloadBytes = 0;
     const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
+    constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4u * 1024u * 1024u;
+    constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16u * 1024u * 1024u;
     const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
     embedPreparedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     embedHashBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
@@ -2696,6 +2749,10 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         while (!stop_.load(std::memory_order_acquire)) {
             if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
                 InternalEventBus::instance().incEmbedQueued(batchSize);
+                embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);
+                embedDocsEmitted_.fetch_add(batchSize, std::memory_order_relaxed);
+                embedPreparedDocsEmitted_.fetch_add(preparedDocsCount, std::memory_order_relaxed);
+                embedHashOnlyDocsEmitted_.fetch_add(hashOnlyDocsCount, std::memory_order_relaxed);
                 TuningManager::notifyWakeup();
                 if (preparedDocsCount > 0) {
                     InternalEventBus::instance().incEmbedPreparedQueued(preparedDocsCount,
@@ -2718,6 +2775,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         }
         embedPreparedBatch.clear();
         embedHashBatch.clear();
+        embedPreparedBatchPayloadBytes = 0;
     };
 
     const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
@@ -2740,10 +2798,6 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             return std::nullopt;
         }
 
-        // Keep the in-process embed channel from becoming a second large text store. Large
-        // documents fall back to hash-only jobs; EmbeddingService can gather/chunk from metadata
-        // when the worker is ready instead of pinning all chunk strings in the ring buffer.
-        constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4u * 1024u * 1024u;
         std::size_t payloadBytes = 0;
         for (const auto& chunk : preparedDoc->chunks) {
             payloadBytes += chunk.content.size();
@@ -2779,9 +2833,18 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         if (embedQ && embedStageActive && prepared.shouldDispatchEmbed) {
             if (auto preparedDoc = makePreparedDoc(prepared);
                 preparedDoc && !preparedDoc->chunks.empty()) {
+                std::size_t docPayloadBytes = 0;
+                for (const auto& chunk : preparedDoc->chunks) {
+                    docPayloadBytes += chunk.content.size();
+                }
+                if (!embedPreparedBatch.empty() &&
+                    embedPreparedBatchPayloadBytes + docPayloadBytes >
+                        kMaxPreparedEmbedBatchPayloadBytes) {
+                    flushEmbedBatch();
+                }
+                embedPreparedBatchPayloadBytes += docPayloadBytes;
                 embedPreparedBatch.push_back(std::move(*preparedDoc));
             } else {
-                // Fallback: queue by hash.
                 embedHashBatch.push_back(prepared.hash);
             }
 
@@ -2821,6 +2884,14 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     if (tasks.empty()) {
         return;
     }
+    const auto processStart = std::chrono::steady_clock::now();
+    struct TimingGuard {
+        PostIngestQueue* self;
+        std::chrono::steady_clock::time_point start;
+        ~TimingGuard() { self->recordTiming("process_batch", start); }
+    } timingGuard{this, processStart};
+    extractionBatches_.fetch_add(1, std::memory_order_relaxed);
+    extractionTasks_.fetch_add(tasks.size(), std::memory_order_relaxed);
 
     if (!store_ || !meta_) {
         spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping {} tasks",
@@ -2854,6 +2925,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         allSuccesses.reserve(tasks.size());
         allFailures.reserve(tasks.size() / 10);
 
+        const auto prepareStart = std::chrono::steady_clock::now();
         for (const auto& task : tasks) {
             auto result = prepareTask(task);
             if (std::holds_alternative<PreparedMetadataEntry>(result)) {
@@ -2862,9 +2934,12 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
                 allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
             }
         }
+        recordTiming("prepare_metadata", prepareStart);
 
         processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
         failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+        extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+        extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
         commitBatchResults(allSuccesses, allFailures);
         dispatchSuccesses(allSuccesses);
         return;
@@ -2879,6 +2954,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     futures.reserve(numChunks);
     auto executor = coordinator_->getExecutor();
 
+    const auto prepareStart = std::chrono::steady_clock::now();
     for (std::size_t i = 0; i < tasks.size(); i += chunkSize) {
         std::size_t end = std::min(i + chunkSize, tasks.size());
         std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
@@ -2920,9 +2996,12 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
             spdlog::error("[PostIngestQueue] Chunk processing failed: unknown exception");
         }
     }
+    recordTiming("prepare_metadata", prepareStart);
 
     processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
     failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+    extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+    extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
     commitBatchResults(allSuccesses, allFailures);
     dispatchSuccesses(allSuccesses);
 }
