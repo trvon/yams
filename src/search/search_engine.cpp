@@ -579,6 +579,95 @@ buildQueryDirectClusterGate(const std::vector<float>& queryEmbedding,
     return result;
 }
 
+struct SemanticNeighborGraphRoutingResult {
+    std::unordered_set<std::string> routedHashes;
+    std::size_t seedDocCount{0};
+    std::size_t neighborsExpanded{0};
+    float avgSeedScore{0.0f};
+    float bestSeedScore{0.0f};
+};
+
+SemanticNeighborGraphRoutingResult buildSemanticNeighborGraphRoutingPool(
+    const std::vector<float>& queryEmbedding,
+    const std::shared_ptr<yams::vector::VectorDatabase>& vectorDb,
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore, std::size_t seedK,
+    std::size_t hopK, float seedMinCosine) {
+    SemanticNeighborGraphRoutingResult result;
+    if (queryEmbedding.empty() || !vectorDb || !kgStore || seedK == 0) {
+        return result;
+    }
+
+    yams::vector::VectorSearchParams params;
+    params.k = seedK;
+    params.similarity_threshold = std::clamp(seedMinCosine, 0.0F, 1.0F);
+    auto seedRecs = vectorDb->search(queryEmbedding, params);
+    if (seedRecs.empty()) {
+        return result;
+    }
+
+    std::unordered_set<std::string> seedHashes;
+    seedHashes.reserve(seedK);
+    double scoreSum = 0.0;
+    float bestScore = 0.0F;
+    for (const auto& rec : seedRecs) {
+        if (rec.level != yams::vector::EmbeddingLevel::DOCUMENT || rec.document_hash.empty()) {
+            continue;
+        }
+        if (!seedHashes.insert(rec.document_hash).second) {
+            continue;
+        }
+        scoreSum += static_cast<double>(rec.relevance_score);
+        if (rec.relevance_score > bestScore) {
+            bestScore = rec.relevance_score;
+        }
+        if (seedHashes.size() >= seedK) {
+            break;
+        }
+    }
+    result.seedDocCount = seedHashes.size();
+    if (!seedHashes.empty()) {
+        result.avgSeedScore = static_cast<float>(scoreSum / static_cast<double>(seedHashes.size()));
+        result.bestSeedScore = bestScore;
+    }
+
+    std::unordered_set<std::string> routed = seedHashes;
+    std::vector<std::int64_t> neighborDstIds;
+    neighborDstIds.reserve(seedHashes.size() * hopK);
+    for (const auto& seedHash : seedHashes) {
+        auto nodeRes = kgStore->getNodeByKey("doc:" + seedHash);
+        if (!nodeRes || !nodeRes.value().has_value()) {
+            continue;
+        }
+        auto edgesRes =
+            kgStore->getEdgesFrom(nodeRes.value()->id, std::string_view{"semantic_neighbor"}, hopK);
+        if (!edgesRes) {
+            continue;
+        }
+        for (const auto& edge : edgesRes.value()) {
+            neighborDstIds.push_back(edge.dstNodeId);
+        }
+    }
+    result.neighborsExpanded = neighborDstIds.size();
+
+    if (!neighborDstIds.empty()) {
+        auto nodesRes = kgStore->getNodesByIds(neighborDstIds);
+        if (nodesRes) {
+            constexpr std::string_view kDocPrefix = "doc:";
+            for (const auto& node : nodesRes.value()) {
+                if (node.nodeKey.size() <= kDocPrefix.size() ||
+                    node.nodeKey.compare(0, kDocPrefix.size(), kDocPrefix) != 0) {
+                    continue;
+                }
+                std::string hash = node.nodeKey.substr(kDocPrefix.size());
+                routed.insert(std::move(hash));
+            }
+        }
+    }
+
+    result.routedHashes = std::move(routed);
+    return result;
+}
+
 template <typename Work>
 auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& executor)
     -> std::future<decltype(work())> {
@@ -1733,6 +1822,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<ComponentResult> allComponentResults;
     std::unordered_set<std::string> topologyMedoidHashes;
     ClusterGateResult queryGateResult;
+    SemanticNeighborGraphRoutingResult sngRoutingResult;
     size_t estimatedResults = 0;
     if (workingConfig.textWeight > 0.0f)
         estimatedResults += workingConfig.textMaxResults;
@@ -2211,6 +2301,28 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 fmt::format("{:.3f}", queryGateResult.bestCosine);
             response.debugStats["query_gate_mean_cosine"] =
                 fmt::format("{:.3f}", queryGateResult.meanCosine);
+
+            if (workingConfig.enableSemanticNeighborGraphRouting && queryEmbedding.has_value() &&
+                vectorDb_ && kgStore_) {
+                sngRoutingResult = buildSemanticNeighborGraphRoutingPool(
+                    queryEmbedding.value(), vectorDb_, kgStore_,
+                    workingConfig.semanticNeighborGraphSeedK,
+                    workingConfig.semanticNeighborGraphHopK,
+                    workingConfig.semanticNeighborGraphSeedMinCosine);
+                for (const auto& hash : sngRoutingResult.routedHashes) {
+                    tier2Candidates.insert(hash);
+                }
+            }
+            response.debugStats["sng_routing_seed_docs"] =
+                std::to_string(sngRoutingResult.seedDocCount);
+            response.debugStats["sng_routing_neighbors_expanded"] =
+                std::to_string(sngRoutingResult.neighborsExpanded);
+            response.debugStats["sng_routing_routed_docs"] =
+                std::to_string(sngRoutingResult.routedHashes.size());
+            response.debugStats["sng_routing_avg_seed_score"] =
+                fmt::format("{:.3f}", sngRoutingResult.avgSeedScore);
+            response.debugStats["sng_routing_best_seed_score"] =
+                fmt::format("{:.3f}", sngRoutingResult.bestSeedScore);
 
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
@@ -3134,6 +3246,42 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                : "0.000";
             response.debugStats["query_gate_in_gate_count"] = std::to_string(inGate);
         }
+    }
+
+    if (workingConfig.enableSemanticNeighborGraphRouting &&
+        !sngRoutingResult.routedHashes.empty() && !response.results.empty()) {
+        const float boost = workingConfig.semanticNeighborGraphCoreBoost;
+        const float penalty = workingConfig.semanticNeighborGraphNoiseBoost;
+        std::size_t inPool = 0;
+        bool needsSort = false;
+        for (auto& r : response.results) {
+            if (sngRoutingResult.routedHashes.contains(r.document.sha256Hash)) {
+                ++inPool;
+                if (boost != 1.0f) {
+                    r.score *= boost;
+                    needsSort = true;
+                }
+            } else if (penalty != 1.0f) {
+                r.score *= penalty;
+                needsSort = true;
+            }
+        }
+        if (needsSort) {
+            std::stable_sort(response.results.begin(), response.results.end(),
+                             [](const auto& a, const auto& b) { return a.score > b.score; });
+        }
+        const std::size_t evalWindow = std::min(response.results.size(), std::size_t(10));
+        std::size_t coverageInTop = 0;
+        for (std::size_t i = 0; i < evalWindow; ++i) {
+            if (sngRoutingResult.routedHashes.contains(response.results[i].document.sha256Hash)) {
+                ++coverageInTop;
+            }
+        }
+        response.debugStats["sng_routing_result_coverage"] =
+            evalWindow > 0 ? fmt::format("{:.3f}", static_cast<float>(coverageInTop) /
+                                                       static_cast<float>(evalWindow))
+                           : "0.000";
+        response.debugStats["sng_routing_in_pool_count"] = std::to_string(inPool);
     }
 
     const bool hasGraphSources =

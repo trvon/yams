@@ -26,6 +26,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <yams/daemon/components/RepairTuning.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 
 // Platform-specific includes for memory detection (used by detectSystemMemory)
@@ -364,6 +365,9 @@ public:
 
     // Writer budget per turn for multiplexed writer (bytes). Default 3 MiB.
     static uint32_t writerBudgetBytesPerTurn() {
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            return static_cast<uint32_t>(snap->writerBudgetBytesPerTurn);
+        }
         uint32_t def = 3072u * 1024u; // 3 MiB
         if (const char* wb = std::getenv("YAMS_WRITER_BUDGET_BYTES")) {
             try {
@@ -381,6 +385,9 @@ public:
     // Max inflight requests per connection (server). Default tuned for fairness under
     // multi-client load.
     static std::size_t serverMaxInflightPerConn() {
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            return snap->serverMaxInflightPerConn;
+        }
         if (const char* s = std::getenv("YAMS_SERVER_MAX_INFLIGHT")) {
             try {
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
@@ -395,6 +402,9 @@ public:
 
     // Per-request queued frames cap (server). Default 1024.
     static std::size_t serverQueueFramesCap() {
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            return snap->serverQueueFramesCap;
+        }
         if (const char* s = std::getenv("YAMS_SERVER_QUEUE_FRAMES_CAP")) {
             try {
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
@@ -409,6 +419,9 @@ public:
 
     // Total queued bytes per connection cap (server). Default 128 MiB.
     static std::size_t serverQueueBytesCap() {
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            return snap->serverQueueBytesCap;
+        }
         if (const char* s = std::getenv("YAMS_SERVER_QUEUE_BYTES_CAP")) {
             try {
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
@@ -424,6 +437,9 @@ public:
     // Server writer budget per turn (bytes). Falls back to 8 MiB default for balanced
     // throughput if unset.
     static std::size_t serverWriterBudgetBytesPerTurn() {
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            return snap->serverWriterBudgetBytesPerTurn;
+        }
         if (const char* s = std::getenv("YAMS_SERVER_WRITER_BUDGET_BYTES")) {
             try {
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
@@ -439,6 +455,9 @@ public:
     // Server writer maximum budget clamp per turn (bytes). Centralized here for consistency.
     // Default 8 MiB; env YAMS_SERVER_WRITER_BUDGET_MAX may override (min 4 KiB).
     static std::size_t serverWriterBudgetMaxBytesPerTurn() {
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            return snap->serverWriterBudgetMaxBytesPerTurn;
+        }
         std::size_t def = 8ull * 1024ull * 1024ull;
         if (const char* mb = std::getenv("YAMS_SERVER_WRITER_BUDGET_MAX")) {
             try {
@@ -644,18 +663,8 @@ public:
         return def;
     }
 
-    static uint32_t repairDegradeHoldMs() {
-        if (auto snap = TuningSnapshotRegistry::instance().get()) {
-            return snap->repairDegradeHoldMs;
-        }
-        return 750;
-    }
-    static uint32_t repairReadyHoldMs() {
-        if (auto snap = TuningSnapshotRegistry::instance().get()) {
-            return snap->repairReadyHoldMs;
-        }
-        return 1500;
-    }
+    static uint32_t repairDegradeHoldMs() { return repair_tuning::repairDegradeHoldMs(); }
+    static uint32_t repairReadyHoldMs() { return repair_tuning::repairReadyHoldMs(); }
 
     // Auto-repair tick scheduling (tiered). Set to 0 to disable a tier.
     static uint32_t repairAutoInitialDelayMinutes() {

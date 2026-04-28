@@ -1339,6 +1339,12 @@ bool TuningManager::tick_once() {
         s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
         s->writerBudgetBytesPerTurn = writerBudget;
 
+        s->serverMaxInflightPerConn = TuneAdvisor::serverMaxInflightPerConn();
+        s->serverQueueFramesCap = TuneAdvisor::serverQueueFramesCap();
+        s->serverQueueBytesCap = TuneAdvisor::serverQueueBytesCap();
+        s->serverWriterBudgetBytesPerTurn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+        s->serverWriterBudgetMaxBytesPerTurn = TuneAdvisor::serverWriterBudgetMaxBytesPerTurn();
+
         const auto repairBacklog = state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
         const auto holdHints = computeRepairHoldHints(govSnap.level, repairBacklog);
         s->repairDegradeHoldMs = holdHints.degradeHoldMs;

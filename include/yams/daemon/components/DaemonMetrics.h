@@ -229,6 +229,10 @@ struct MetricsSnapshot {
     std::uint64_t vectorPhysicalBytes{0};   // vector DB + index files
     std::uint64_t logsTmpPhysicalBytes{0};  // logs + temp files under data dir
     std::uint64_t physicalTotalBytes{0};    // sum of above components
+    std::uint64_t volumeUsedBytes{0};       // statvfs/GetDiskFreeSpaceExW used bytes for the
+                                            // mount holding the data dir; instant fast-path
+                                            // populated every status tick (independent of the
+                                            // adaptive deep-walk TTL)
 
     // Resolved data directory
     std::string dataDir;
@@ -511,7 +515,7 @@ private:
     // publishes. At most one walk is in flight at any moment.
     mutable std::chrono::steady_clock::time_point lastPhysicalAt_{};
     mutable std::uint64_t lastPhysicalBytes_{0};
-    uint32_t physicalTtlMs_{60000}; // default 60s; may be tuned via env later
+    mutable std::uint64_t lastWalkDurationMs_{0};
     mutable std::atomic<bool> physicalWalkInFlight_{false};
     mutable std::atomic<bool> detailedCollectInFlight_{false};
     mutable std::atomic<bool> storeStatsCollectInFlight_{false};
@@ -559,5 +563,7 @@ private:
     mutable std::uint64_t cachedTunerDocCount_{0}; // docCount when tuner was cached
     uint32_t tunerStateTtlMs_{30000}; // 30s TTL for tuner state (matches CorpusStats cache)
 };
+
+std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept;
 
 } // namespace yams::daemon

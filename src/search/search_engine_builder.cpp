@@ -717,6 +717,38 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine queryDirectGateSoftBonus overridden to {:.3f} via env",
                          cfg.queryDirectGateSoftBonus);
         }
+        if (auto sngEnabled = getEnvBool("YAMS_SEARCH_ENABLE_SNG_ROUTING")) {
+            cfg.enableSemanticNeighborGraphRouting = *sngEnabled;
+            spdlog::info("SearchEngine enableSemanticNeighborGraphRouting {} via env",
+                         cfg.enableSemanticNeighborGraphRouting ? "enabled" : "disabled");
+        }
+        if (auto sngSeedK = getEnvInt("YAMS_SEARCH_SNG_SEED_K")) {
+            cfg.semanticNeighborGraphSeedK = static_cast<std::size_t>(std::max(1, *sngSeedK));
+            spdlog::info("SearchEngine semanticNeighborGraphSeedK overridden to {} via env",
+                         cfg.semanticNeighborGraphSeedK);
+        }
+        if (auto sngHopK = getEnvInt("YAMS_SEARCH_SNG_HOP_K")) {
+            cfg.semanticNeighborGraphHopK = static_cast<std::size_t>(std::max(1, *sngHopK));
+            spdlog::info("SearchEngine semanticNeighborGraphHopK overridden to {} via env",
+                         cfg.semanticNeighborGraphHopK);
+        }
+        if (auto sngMinCos = getEnvFloat("YAMS_SEARCH_SNG_SEED_MIN_COSINE")) {
+            cfg.semanticNeighborGraphSeedMinCosine = std::clamp(*sngMinCos, 0.0f, 1.0f);
+            spdlog::info(
+                "SearchEngine semanticNeighborGraphSeedMinCosine overridden to {:.3f} via env",
+                cfg.semanticNeighborGraphSeedMinCosine);
+        }
+        if (auto sngCoreBoost = getEnvFloat("YAMS_SEARCH_SNG_CORE_BOOST")) {
+            cfg.semanticNeighborGraphCoreBoost = std::max(0.0f, *sngCoreBoost);
+            spdlog::info("SearchEngine semanticNeighborGraphCoreBoost overridden to {:.3f} via env",
+                         cfg.semanticNeighborGraphCoreBoost);
+        }
+        if (auto sngNoiseBoost = getEnvFloat("YAMS_SEARCH_SNG_NOISE_BOOST")) {
+            cfg.semanticNeighborGraphNoiseBoost = std::max(0.0f, *sngNoiseBoost);
+            spdlog::info(
+                "SearchEngine semanticNeighborGraphNoiseBoost overridden to {:.3f} via env",
+                cfg.semanticNeighborGraphNoiseBoost);
+        }
         if (auto bypassWarming = getEnvBool("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE")) {
             cfg.bypassCorpusWarmingGate = *bypassWarming;
             spdlog::info("SearchEngine bypassCorpusWarmingGate overridden to {} via env",

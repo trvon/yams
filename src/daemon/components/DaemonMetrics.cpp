@@ -4,6 +4,17 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#ifndef _WIN32
+#include <sys/statvfs.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
+#include <Windows.h>
+#endif
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -59,6 +70,49 @@
 #endif
 
 namespace yams::daemon {
+
+std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept {
+    constexpr std::uint64_t kMinTtlMs = 60'000;
+    constexpr std::uint64_t kMaxTtlMs = 1'800'000;
+    constexpr std::uint64_t kAmplifier = 10;
+    if (lastDurationMs == 0) {
+        return kMinTtlMs;
+    }
+    const std::uint64_t scaled =
+        (lastDurationMs > kMaxTtlMs / kAmplifier) ? kMaxTtlMs : lastDurationMs * kAmplifier;
+    return std::clamp(scaled, kMinTtlMs, kMaxTtlMs);
+}
+
+namespace {
+std::uint64_t queryVolumeUsedBytes(const std::filesystem::path& path) noexcept {
+    if (path.empty())
+        return 0;
+#ifndef _WIN32
+    struct statvfs vfs{};
+    if (::statvfs(path.c_str(), &vfs) != 0)
+        return 0;
+    const std::uint64_t blockSize =
+        vfs.f_frsize != 0 ? vfs.f_frsize : static_cast<std::uint64_t>(vfs.f_bsize);
+    if (blockSize == 0 || vfs.f_blocks == 0)
+        return 0;
+    const std::uint64_t totalBlocks = vfs.f_blocks;
+    const std::uint64_t freeBlocks = vfs.f_bfree;
+    if (freeBlocks > totalBlocks)
+        return 0;
+    return (totalBlocks - freeBlocks) * blockSize;
+#else
+    ULARGE_INTEGER freeAvail{};
+    ULARGE_INTEGER total{};
+    ULARGE_INTEGER totalFree{};
+    const auto wpath = path.wstring();
+    if (!::GetDiskFreeSpaceExW(wpath.c_str(), &freeAvail, &total, &totalFree))
+        return 0;
+    if (totalFree.QuadPart > total.QuadPart)
+        return 0;
+    return static_cast<std::uint64_t>(total.QuadPart - totalFree.QuadPart);
+#endif
+}
+} // namespace
 
 namespace {
 struct MemoryUsageSample {
@@ -491,6 +545,7 @@ void DaemonMetrics::dispatchOffStrand(std::atomic<bool>& guard, const char* name
 
 void DaemonMetrics::dispatchPhysicalWalk() const {
     dispatchOffStrand(physicalWalkInFlight_, "physical walk", [this]() {
+        const auto walkStart = std::chrono::steady_clock::now();
         std::uint64_t total = 0;
         std::uint64_t casObjectsBytes = 0;
         std::uint64_t refsDbBytes = 0;
@@ -579,9 +634,14 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
         std::uint64_t totalComputed =
             casObjectsBytes + metaBytes + indexBytes + vecBytes + tmpBytes;
 
+        const auto walkEnd = std::chrono::steady_clock::now();
+        const auto walkDurationMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(walkEnd - walkStart).count();
+
         std::unique_lock lock(cacheMutex_);
         lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
-        lastPhysicalAt_ = std::chrono::steady_clock::now();
+        lastPhysicalAt_ = walkEnd;
+        lastWalkDurationMs_ = static_cast<std::uint64_t>(std::max<std::int64_t>(0, walkDurationMs));
         cached_.casPhysicalBytes = casObjectsBytes;
         cached_.metadataPhysicalBytes = metaBytes;
         cached_.indexPhysicalBytes = indexBytes;
@@ -786,17 +846,20 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                 }
             }
 
-            // Update physical filesystem stats in background (TTL-based)
+            // Update physical filesystem stats in background (adaptive TTL).
+            // The TTL scales with the previous walk's duration so a slow walk
+            // on a large/external mount does not re-fire before it finishes.
             bool updatePhysical = false;
             {
                 std::shared_lock lk(cacheMutex_);
                 if (lastPhysicalAt_.time_since_epoch().count() == 0) {
-                    updatePhysical = true; // First time
+                    updatePhysical = true;
                 } else {
-                    auto age =
+                    const auto age =
                         std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPhysicalAt_)
                             .count();
-                    updatePhysical = (age < 0) || (static_cast<uint32_t>(age) >= physicalTtlMs_);
+                    const auto ttlMs = computePhysicalWalkTtl(lastWalkDurationMs_);
+                    updatePhysical = (age < 0) || (static_cast<std::uint64_t>(age) >= ttlMs);
                 }
             }
 
@@ -1813,14 +1876,23 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             }
             if (detailed) {
                 try {
-                    std::shared_lock lk(cacheMutex_);
-                    out.physicalBytes = lastPhysicalBytes_;
-                    out.casPhysicalBytes = cached_.casPhysicalBytes;
-                    out.metadataPhysicalBytes = cached_.metadataPhysicalBytes;
-                    out.indexPhysicalBytes = cached_.indexPhysicalBytes;
-                    out.vectorPhysicalBytes = cached_.vectorPhysicalBytes;
-                    out.logsTmpPhysicalBytes = cached_.logsTmpPhysicalBytes;
-                    out.physicalTotalBytes = cached_.physicalTotalBytes;
+                    std::filesystem::path dataDirForVolume;
+                    {
+                        std::shared_lock lk(cacheMutex_);
+                        out.physicalBytes = lastPhysicalBytes_;
+                        out.casPhysicalBytes = cached_.casPhysicalBytes;
+                        out.metadataPhysicalBytes = cached_.metadataPhysicalBytes;
+                        out.indexPhysicalBytes = cached_.indexPhysicalBytes;
+                        out.vectorPhysicalBytes = cached_.vectorPhysicalBytes;
+                        out.logsTmpPhysicalBytes = cached_.logsTmpPhysicalBytes;
+                        out.physicalTotalBytes = cached_.physicalTotalBytes;
+                    }
+                    if (services_) {
+                        dataDirForVolume = services_->getResolvedDataDir();
+                    }
+                    if (const auto volumeUsed = queryVolumeUsedBytes(dataDirForVolume)) {
+                        out.volumeUsedBytes = volumeUsed;
+                    }
                 } catch (...) {
                 }
             }

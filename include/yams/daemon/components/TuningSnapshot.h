@@ -32,6 +32,12 @@ struct TuningSnapshot {
 
     uint32_t repairDegradeHoldMs{750};
     uint32_t repairReadyHoldMs{1500};
+
+    std::size_t serverMaxInflightPerConn{64};
+    std::size_t serverQueueFramesCap{1024};
+    std::size_t serverQueueBytesCap{128ull * 1024ull * 1024ull};
+    std::size_t serverWriterBudgetBytesPerTurn{8ull * 1024ull * 1024ull};
+    std::size_t serverWriterBudgetMaxBytesPerTurn{8ull * 1024ull * 1024ull};
 };
 
 // Registry exposing the latest snapshot using atomic shared_ptr for zero-copy reads.
