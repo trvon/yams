@@ -2643,7 +2643,9 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
             entries.push_back(std::move(entry));
         }
 
+        const auto contentWriteStart = std::chrono::steady_clock::now();
         auto batchResult = meta_->batchInsertContentAndIndex(entries);
+        recordTiming("commit_content_index", contentWriteStart);
         if (!batchResult) {
             spdlog::error("[PostIngestQueue] Batch DB write failed: {}",
                           batchResult.error().message);
@@ -2668,7 +2670,9 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                                           metadata::MetadataValue(prepared.title));
             }
             if (!titleUpdates.empty()) {
+                const auto titleWriteStart = std::chrono::steady_clock::now();
                 auto metaResult = meta_->setMetadataBatch(titleUpdates);
+                recordTiming("commit_title_metadata", titleWriteStart);
                 if (!metaResult) {
                     spdlog::warn("[PostIngestQueue] Batch title metadata write failed: {}",
                                  metaResult.error().message);
@@ -2677,6 +2681,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         }
     }
 
+    const auto failureWriteStart = std::chrono::steady_clock::now();
     for (const auto& failure : failures) {
         if (failure.documentId >= 0 && meta_) {
             auto updateRes = meta_->updateDocumentExtractionStatus(
@@ -2689,6 +2694,9 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
             (void)meta_->batchUpdateDocumentRepairStatuses({failure.hash},
                                                            metadata::RepairStatus::Failed);
         }
+    }
+    if (!failures.empty()) {
+        recordTiming("commit_failures", failureWriteStart);
     }
 }
 

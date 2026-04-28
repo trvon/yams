@@ -217,14 +217,11 @@ void hdbscanStar::hdbscanAlgorithm::computeHierarchyAndClusterTree(
                          it != vertexToExploreEdgeList.end();) {
                         int neighbor = *it;
                         anyEdges = true;
-                        if (std::find(constructingSubCluster.begin(), constructingSubCluster.end(),
-                                      neighbor) == constructingSubCluster.end()) {
+                        if (!constructingSubCluster.count(neighbor)) {
                             constructingSubCluster.insert(neighbor);
                             unexploredSubClusterPoints.push_back(neighbor);
-                            if (std::find(examinedVertices.begin(), examinedVertices.end(),
-                                          neighbor) != examinedVertices.end())
-                                examinedVertices.erase(std::find(examinedVertices.begin(),
-                                                                 examinedVertices.end(), neighbor));
+                            if (examinedVertices.count(neighbor))
+                                examinedVertices.erase(neighbor);
 
                         } else {
                             ++it;
@@ -248,8 +245,7 @@ void hdbscanStar::hdbscanAlgorithm::computeHierarchyAndClusterTree(
                     anyEdges) {
                     // Check this child cluster is not equal to the unexplored first child cluster:
                     int firstChildClusterMember = *prev(firstChildCluster.end());
-                    if (std::find(constructingSubCluster.begin(), constructingSubCluster.end(),
-                                  firstChildClusterMember) != constructingSubCluster.end())
+                    if (constructingSubCluster.count(firstChildClusterMember))
                         numChildClusters--;
                     // Otherwise, c a new cluster:
                     else {
@@ -281,8 +277,7 @@ void hdbscanStar::hdbscanAlgorithm::computeHierarchyAndClusterTree(
                              mst->getEdgeListForVertex(vertexToExplore).begin();
                          it != mst->getEdgeListForVertex(vertexToExplore).end(); it++) {
                         int neighbor = *it;
-                        if (std::find(firstChildCluster.begin(), firstChildCluster.end(),
-                                      neighbor) == firstChildCluster.end()) {
+                        if (!firstChildCluster.count(neighbor)) {
                             firstChildCluster.insert(neighbor);
                             unexploredFirstChildClusterPoints.push_back(neighbor);
                         }

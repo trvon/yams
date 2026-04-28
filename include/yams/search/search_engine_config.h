@@ -147,6 +147,17 @@ struct SearchEngineConfig {
     };
     TopologyRouteScoring topologyRouteScoring = TopologyRouteScoring::Current;
 
+    enum class QueryDirectGateMode {
+        Narrow,
+        Soft,
+        Hard,
+    };
+    bool enableQueryDirectClusterGate{false};
+    std::size_t queryDirectClusterGateTopK{3};
+    float queryDirectClusterGateMinCosine{0.0f};
+    QueryDirectGateMode queryDirectGateMode{QueryDirectGateMode::Soft};
+    float queryDirectGateSoftBonus{2.0f};
+
     bool bypassCorpusWarmingGate = false;
     float rrfK = 12.0f;
     float bm25NormDivisor = 25.0f;

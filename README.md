@@ -131,37 +131,11 @@ Plugin architecture, trust model, and bundled plugins (ONNX, S3, ZYP, GLiNER, sy
 
 Auto-detected at build. Override with `YAMS_ONNX_GPU=auto|cuda|coreml|directml|migraphx|none`. Details: [plugins/onnx/README.md](plugins/onnx/README.md).
 
-Default retrieval backend: `simeon` (training-free, model-free, 1024-d on new installs).
+### Simeon backend
 
-### Simeon embedding backend
+YAMS uses `simeon` by default for both dense vector embeddings and lexical (BM25) search — no model download required. Set `embeddings.backend = "simeon"` in your TOML config (or leave it unset; simeon is the default). Fine-grained knobs live under `[embeddings.simeon]`.
 
-YAMS now uses the training-free `simeon` backend by default for retrieval embeddings. No embedding model download is required for the normal semantic-search path.
-
-Enable it via config:
-
-```toml
-[embeddings]
-backend = "simeon"
-preferred_model = "simeon-default"
-embedding_dim = 1024  # existing vector DBs keep their stored dim
-```
-
-Simeon's output dimension is tunable — training-free, so higher dims have no training cost, only storage and compute cost:
-
-| `embedding_dim` | Use when                                              |
-|-----------------|-------------------------------------------------------|
-| 384             | Tight-budget fallback; smallest index, fastest.       |
-| 768             | More separability, fewer hash collisions; 2× storage. |
-| 1024            | Default for new installs; balanced quality / size.    |
-| 1536+           | Experimental headroom; diminishing returns past ~2k.  |
-
-Set via config (`embedding_dim`). Internal ngram/sketch/projection knobs: [third_party/simeon/README.md](third_party/simeon/README.md).
-
-Requirements: no model file, no ONNX embedding runtime, no external runtime deps. When building from source, fetch the submodule: `git submodule update --init --recursive`.
-
-ONNX remains relevant for optional plugin paths such as GLiNER and ColBERT, not for the default retrieval embedding flow.
-
-Benchmark summaries are maintained under [docs/benchmarks/](docs/benchmarks/).
+Full config reference and dim tradeoffs: [docs/user_guide/embeddings.md](docs/user_guide/embeddings.md).
 
 ## Troubleshooting
 

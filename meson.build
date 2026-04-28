@@ -373,9 +373,8 @@ if host_machine.system() == 'windows'
 root = pathlib.Path(os.path.expanduser("~/.conan2/p"))
 dirs = []
 if root.exists():
-    for child in root.iterdir():
-        bin_dir = child / "p" / "bin"
-        if bin_dir.exists():
+    for pattern in ("*/p/bin", "b/*/p/bin"):
+        for bin_dir in root.glob(pattern):
             dll = bin_dir / "onnxruntime.dll"
             if dll.exists():
                 dirs.append(str(bin_dir))

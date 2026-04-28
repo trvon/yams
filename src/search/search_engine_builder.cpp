@@ -685,6 +685,38 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                 "SearchEngine topologyRoutingMinMeanClusterSize overridden to {:.2f} via env",
                 cfg.topologyRoutingMinMeanClusterSize);
         }
+        if (auto gateEnabled = getEnvBool("YAMS_SEARCH_ENABLE_QUERY_DIRECT_GATE")) {
+            cfg.enableQueryDirectClusterGate = *gateEnabled;
+            spdlog::info("SearchEngine enableQueryDirectClusterGate {} via env",
+                         cfg.enableQueryDirectClusterGate ? "enabled" : "disabled");
+        }
+        if (auto gateK = getEnvInt("YAMS_SEARCH_QUERY_DIRECT_GATE_K")) {
+            cfg.queryDirectClusterGateTopK = static_cast<std::size_t>(std::max(1, *gateK));
+            spdlog::info("SearchEngine queryDirectClusterGateTopK overridden to {} via env",
+                         cfg.queryDirectClusterGateTopK);
+        }
+        if (auto gateMinCos = getEnvFloat("YAMS_SEARCH_QUERY_DIRECT_GATE_MIN_COSINE")) {
+            cfg.queryDirectClusterGateMinCosine = std::clamp(*gateMinCos, 0.0f, 1.0f);
+            spdlog::info(
+                "SearchEngine queryDirectClusterGateMinCosine overridden to {:.3f} via env",
+                cfg.queryDirectClusterGateMinCosine);
+        }
+        if (auto gateMode = getEnvString("YAMS_SEARCH_QUERY_DIRECT_GATE_MODE")) {
+            using M = SearchEngineConfig::QueryDirectGateMode;
+            const auto& raw = *gateMode;
+            if (raw == "narrow")
+                cfg.queryDirectGateMode = M::Narrow;
+            else if (raw == "hard")
+                cfg.queryDirectGateMode = M::Hard;
+            else
+                cfg.queryDirectGateMode = M::Soft;
+            spdlog::info("SearchEngine queryDirectGateMode set to '{}' via env", raw);
+        }
+        if (auto softBonus = getEnvFloat("YAMS_SEARCH_QUERY_DIRECT_GATE_SOFT_BONUS")) {
+            cfg.queryDirectGateSoftBonus = std::max(0.0f, *softBonus);
+            spdlog::info("SearchEngine queryDirectGateSoftBonus overridden to {:.3f} via env",
+                         cfg.queryDirectGateSoftBonus);
+        }
         if (auto bypassWarming = getEnvBool("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE")) {
             cfg.bypassCorpusWarmingGate = *bypassWarming;
             spdlog::info("SearchEngine bypassCorpusWarmingGate overridden to {} via env",

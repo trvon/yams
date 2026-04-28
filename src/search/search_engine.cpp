@@ -485,6 +485,100 @@ float bestMedoidCosineForQuery(
     return best;
 }
 
+struct ClusterGateResult {
+    std::unordered_set<std::string> gateHashes;
+    std::size_t clustersSelected{0};
+    std::size_t docsInGate{0};
+    float bestCosine{0.0f};
+    float meanCosine{0.0f};
+};
+
+ClusterGateResult
+buildQueryDirectClusterGate(const std::vector<float>& queryEmbedding,
+                            const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+                            const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+                            const std::shared_ptr<yams::vector::VectorDatabase>& vectorDb,
+                            std::size_t topK, float minCosine) {
+    ClusterGateResult result;
+    if (queryEmbedding.empty() || !metadataRepo || !kgStore || !vectorDb || topK == 0) {
+        return result;
+    }
+    auto metadataIface =
+        std::static_pointer_cast<yams::metadata::IMetadataRepository>(metadataRepo);
+    yams::topology::MetadataKgTopologyArtifactStore store(std::move(metadataIface), kgStore);
+    auto latestResult = store.loadLatest();
+    if (!latestResult || !latestResult.value().has_value()) {
+        return result;
+    }
+    const auto& batch = *latestResult.value();
+    if (batch.clusters.empty()) {
+        return result;
+    }
+
+    auto cosine = [](std::span<const float> a, std::span<const float> b) -> float {
+        if (a.size() != b.size() || a.empty()) {
+            return 0.0F;
+        }
+        double dot = 0.0;
+        double na = 0.0;
+        double nb = 0.0;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            const double ai = static_cast<double>(a[i]);
+            const double bi = static_cast<double>(b[i]);
+            dot += ai * bi;
+            na += ai * ai;
+            nb += bi * bi;
+        }
+        if (na <= 0.0 || nb <= 0.0) {
+            return 0.0F;
+        }
+        return static_cast<float>(dot / std::sqrt(na * nb));
+    };
+
+    struct ScoredCluster {
+        float cos{0.0f};
+        const yams::topology::ClusterArtifact* cluster{nullptr};
+    };
+    std::vector<ScoredCluster> scored;
+    scored.reserve(batch.clusters.size());
+
+    for (const auto& cluster : batch.clusters) {
+        if (!cluster.medoid.has_value() || cluster.medoid->documentHash.empty()) {
+            continue;
+        }
+        auto recs = vectorDb->getVectorsByDocument(cluster.medoid->documentHash);
+        if (recs.empty() || recs.front().embedding.empty()) {
+            continue;
+        }
+        const float c = cosine(std::span<const float>(queryEmbedding),
+                               std::span<const float>(recs.front().embedding));
+        if (c >= minCosine) {
+            scored.push_back({c, &cluster});
+        }
+    }
+
+    if (scored.empty()) {
+        return result;
+    }
+
+    std::sort(scored.begin(), scored.end(),
+              [](const ScoredCluster& a, const ScoredCluster& b) { return a.cos > b.cos; });
+
+    const std::size_t take = std::min(topK, scored.size());
+    double cosSum = 0.0;
+    for (std::size_t i = 0; i < take; ++i) {
+        cosSum += static_cast<double>(scored[i].cos);
+        for (const auto& hash : scored[i].cluster->memberDocumentHashes) {
+            result.gateHashes.insert(hash);
+        }
+    }
+    result.clustersSelected = take;
+    result.docsInGate = result.gateHashes.size();
+    result.bestCosine = scored.front().cos;
+    result.meanCosine = take > 0 ? static_cast<float>(cosSum / static_cast<double>(take)) : 0.0f;
+    return result;
+}
+
 template <typename Work>
 auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& executor)
     -> std::future<decltype(work())> {
@@ -1638,6 +1732,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     std::vector<ComponentResult> allComponentResults;
     std::unordered_set<std::string> topologyMedoidHashes;
+    ClusterGateResult queryGateResult;
     size_t estimatedResults = 0;
     if (workingConfig.textWeight > 0.0f)
         estimatedResults += workingConfig.textMaxResults;
@@ -2095,10 +2190,34 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // post-fusion steps are not blocked by adaptive lexical skipping.
             awaitEmbedding();
 
+            const std::unordered_set<std::string>* vectorSearchNarrowSet = nullptr;
+            if (workingConfig.enableQueryDirectClusterGate && queryEmbedding.has_value() &&
+                vectorDb_) {
+                queryGateResult =
+                    buildQueryDirectClusterGate(queryEmbedding.value(), metadataRepo_, kgStore_,
+                                                vectorDb_, workingConfig.queryDirectClusterGateTopK,
+                                                workingConfig.queryDirectClusterGateMinCosine);
+                using M = SearchEngineConfig::QueryDirectGateMode;
+                if (!queryGateResult.gateHashes.empty() &&
+                    workingConfig.queryDirectGateMode == M::Narrow) {
+                    vectorSearchNarrowSet = &queryGateResult.gateHashes;
+                }
+            }
+            response.debugStats["query_gate_clusters_selected"] =
+                std::to_string(queryGateResult.clustersSelected);
+            response.debugStats["query_gate_docs_eligible"] =
+                std::to_string(queryGateResult.docsInGate);
+            response.debugStats["query_gate_best_cosine"] =
+                fmt::format("{:.3f}", queryGateResult.bestCosine);
+            response.debugStats["query_gate_mean_cosine"] =
+                fmt::format("{:.3f}", queryGateResult.meanCosine);
+
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
-            const bool shouldNarrow = workingConfig.tieredNarrowVectorSearch &&
-                                      tier2Candidates.size() >= workingConfig.tieredMinCandidates;
+            // Phase O: gate Narrow mode overrides with query-direct cluster hashes
+            const bool shouldNarrow = (vectorSearchNarrowSet != nullptr) ||
+                                      (workingConfig.tieredNarrowVectorSearch &&
+                                       tier2Candidates.size() >= workingConfig.tieredMinCandidates);
 
             response.debugStats["topology_weak_query_routing_applied"] =
                 topologyWeakQueryRoutingApplied ? "1" : "0";
@@ -2135,21 +2254,22 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     std::llround(static_cast<double>(tier1TopTextScore) * 1000.0)));
 
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
-                vectorFuture =
-                    schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
-                             stats_.avgVectorTimeMicros,
-                             [&queryEmbedding, &tier2Candidates, shouldNarrow,
-                              effectiveVectorMaxResults, &queryVectorWithRelaxedRetry]() {
-                                 YAMS_ZONE_SCOPED_N("component::vector");
-                                 if (shouldNarrow) {
-                                     return queryVectorWithRelaxedRetry(queryEmbedding.value(),
-                                                                        effectiveVectorMaxResults,
-                                                                        &tier2Candidates);
-                                 } else {
-                                     return queryVectorWithRelaxedRetry(queryEmbedding.value(),
-                                                                        effectiveVectorMaxResults);
-                                 }
-                             });
+                vectorFuture = schedule(
+                    "vector", workingConfig.vectorWeight, stats_.vectorQueries,
+                    stats_.avgVectorTimeMicros,
+                    [&queryEmbedding, &tier2Candidates, vectorSearchNarrowSet, shouldNarrow,
+                     effectiveVectorMaxResults, &queryVectorWithRelaxedRetry]() {
+                        YAMS_ZONE_SCOPED_N("component::vector");
+                        if (shouldNarrow) {
+                            const auto* narrowSet =
+                                vectorSearchNarrowSet ? vectorSearchNarrowSet : &tier2Candidates;
+                            return queryVectorWithRelaxedRetry(
+                                queryEmbedding.value(), effectiveVectorMaxResults, narrowSet);
+                        } else {
+                            return queryVectorWithRelaxedRetry(queryEmbedding.value(),
+                                                               effectiveVectorMaxResults);
+                        }
+                    });
 
                 entityVectorFuture = schedule(
                     "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
@@ -2974,6 +3094,45 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::stable_sort(response.results.begin(), response.results.end(),
                              [](const auto& a, const auto& b) { return a.score > b.score; });
             response.debugStats["topology_medoid_promoted_count"] = std::to_string(promoted);
+        }
+    }
+
+    if (workingConfig.enableQueryDirectClusterGate && !queryGateResult.gateHashes.empty() &&
+        !response.results.empty()) {
+        using M = SearchEngineConfig::QueryDirectGateMode;
+        const auto mode = workingConfig.queryDirectGateMode;
+        if (mode == M::Soft || mode == M::Hard) {
+            const float bonus = workingConfig.queryDirectGateSoftBonus;
+            std::size_t inGate = 0;
+            bool needsSort = false;
+            for (auto& r : response.results) {
+                if (queryGateResult.gateHashes.contains(r.document.sha256Hash)) {
+                    ++inGate;
+                    if (mode == M::Soft) {
+                        r.score *= bonus;
+                        needsSort = true;
+                    }
+                } else if (mode == M::Hard) {
+                    r.score = 0.0;
+                    needsSort = true;
+                }
+            }
+            if (needsSort) {
+                std::stable_sort(response.results.begin(), response.results.end(),
+                                 [](const auto& a, const auto& b) { return a.score > b.score; });
+            }
+            const std::size_t evalWindow = std::min(response.results.size(), std::size_t(10));
+            std::size_t coverageInTop = 0;
+            for (std::size_t i = 0; i < evalWindow; ++i) {
+                if (queryGateResult.gateHashes.contains(response.results[i].document.sha256Hash)) {
+                    ++coverageInTop;
+                }
+            }
+            response.debugStats["query_gate_result_coverage"] =
+                evalWindow > 0 ? fmt::format("{:.3f}", static_cast<float>(coverageInTop) /
+                                                           static_cast<float>(evalWindow))
+                               : "0.000";
+            response.debugStats["query_gate_in_gate_count"] = std::to_string(inGate);
         }
     }
 
