@@ -1896,11 +1896,21 @@ public:
         for (uint32_t m = mask; m != 0; m >>= 1) {
             activeStages += (m & 1u);
         }
+
+        // Clamp to hardware capacity FIRST, then re-apply the per-stage floor.
+        // The previous order let `clamp(total, 2u, hw)` truncate below
+        // `activeStages` on small machines (hw < 6) — silently starving the
+        // symbol/entity/title stages of any worker slot. The bench harness hit
+        // this: limits={extraction=1, kg=1, symbol=0, entity=0, title=0}, so
+        // GLiNER's titlePoller spawned but never dispatched any work, leaving
+        // kg_doc_entities empty. Per-stage caps in postIngestBudgetedConcurrency
+        // already cap each stage independently; the total budget only needs to
+        // be large enough that the allocator can give every active stage ≥1.
+        total = std::clamp(total, 2u, std::max(2u, hw));
         if (activeStages > 0) {
             total = std::max(total, activeStages);
         }
-
-        return std::clamp(total, 2u, std::max(2u, hw));
+        return total;
     }
     static void setPostIngestTotalConcurrent(uint32_t v) {
         if (v == 0) {

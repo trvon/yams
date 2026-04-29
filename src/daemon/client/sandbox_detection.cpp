@@ -8,6 +8,7 @@
 
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/sandbox_probe.h>
 
 namespace yams::daemon {
 namespace {
@@ -30,30 +31,6 @@ bool is_false(std::string_view raw) {
 
 bool is_auto(std::string_view raw) {
     return normalize(std::string(raw)) == "auto";
-}
-
-bool in_container() {
-    std::error_code ec;
-    if (std::filesystem::exists("/.dockerenv", ec)) {
-        return true;
-    }
-    if (const char* container = std::getenv("container"); container && *container) {
-        return true;
-    }
-    return false;
-}
-
-bool in_codex_sandbox() {
-    if (const char* codexCi = std::getenv("CODEX_CI"); codexCi && *codexCi) {
-        return true;
-    }
-    if (const char* threadId = std::getenv("CODEX_THREAD_ID"); threadId && *threadId) {
-        return true;
-    }
-    if (const char* sandbox = std::getenv("CODEX_SANDBOX"); sandbox && *sandbox) {
-        return true;
-    }
-    return false;
 }
 
 } // namespace
@@ -99,22 +76,12 @@ ClientTransportMode resolve_transport_mode(const ClientConfig& config) {
         return ClientTransportMode::Socket;
     }
 
-    if (!autoProbe) {
-        // Codex on macOS can allow filesystem access while rejecting AF_UNIX daemon IPC with
-        // EPERM ("Operation not permitted"). In that environment, the default socket-first mode
-        // produces an unactionable daemon-start hint even though the safer path is embedded
-        // in-process transport. Explicit YAMS_EMBEDDED/config socket settings above still win.
-        if (in_codex_sandbox()) {
-            return ClientTransportMode::InProcess;
-        }
-        return ClientTransportMode::Socket;
+    if (!unix_socket_io_permitted()) {
+        return ClientTransportMode::InProcess;
     }
 
-    if (in_codex_sandbox()) {
-        return ClientTransportMode::InProcess;
-    }
-    if (in_container()) {
-        return ClientTransportMode::InProcess;
+    if (!autoProbe) {
+        return ClientTransportMode::Socket;
     }
 
     std::optional<std::filesystem::path> resolvedSocketPath;

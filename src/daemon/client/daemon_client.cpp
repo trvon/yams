@@ -9,6 +9,7 @@
 #include <yams/daemon/client/ipc_failure.h>
 #include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/client/sandbox_detection.h>
+#include <yams/daemon/client/sandbox_probe.h>
 #include <yams/daemon/client/streaming_handlers.h>
 #include <yams/daemon/embedded_service_host.h>
 #include <yams/daemon/ipc/connection_fsm.h>
@@ -465,8 +466,7 @@ std::filesystem::path resolveDataDirCached() {
 namespace {
 
 bool running_under_codex_client() {
-    return (std::getenv("CODEX_CI") != nullptr) || (std::getenv("CODEX_THREAD_ID") != nullptr) ||
-           (std::getenv("CODEX_SANDBOX") != nullptr);
+    return !unix_socket_io_permitted();
 }
 
 Result<std::shared_ptr<EmbeddedServiceHost>> ensure_embedded_host(daemon::ClientConfig& config) {

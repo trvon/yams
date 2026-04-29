@@ -459,6 +459,59 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     extractionConfig.requireEmbeddings = true;
     extractionConfig.requireGraphNode = true;
 
+    // Phase V — feature composer configuration via env (bench-driven; TOML wiring is a
+    // follow-up). All branches default off, so when no env vars are set the composer is a
+    // no-op and the cluster input matches Phase U's dense-only baseline.
+    {
+        auto& fc = extractionConfig.featureComposition;
+        const auto envBool = [](const char* n) -> bool {
+            const char* r = std::getenv(n);
+            if (r == nullptr || *r == '\0') {
+                return false;
+            }
+            const std::string v{r};
+            return v == "1" || v == "true" || v == "yes" || v == "on";
+        };
+        const auto envSize = [](const char* n, std::size_t fallback) -> std::size_t {
+            const char* r = std::getenv(n);
+            if (r == nullptr || *r == '\0') {
+                return fallback;
+            }
+            try {
+                return static_cast<std::size_t>(std::stoull(r));
+            } catch (...) {
+                return fallback;
+            }
+        };
+        const auto envFloat = [](const char* n, float fallback) -> float {
+            const char* r = std::getenv(n);
+            if (r == nullptr || *r == '\0') {
+                return fallback;
+            }
+            try {
+                return std::stof(r);
+            } catch (...) {
+                return fallback;
+            }
+        };
+        fc.enableEntityFusion = envBool("YAMS_TOPOLOGY_FEATURE_ENTITY_FUSION");
+        fc.entitySignatureK = envSize("YAMS_TOPOLOGY_FEATURE_ENTITY_K", fc.entitySignatureK);
+        fc.entityFusionAlpha = envFloat("YAMS_TOPOLOGY_FEATURE_ENTITY_ALPHA", fc.entityFusionAlpha);
+        fc.entityMinConfidence =
+            envFloat("YAMS_TOPOLOGY_FEATURE_ENTITY_MIN_CONF", fc.entityMinConfidence);
+        fc.enableMatryoshkaCoarseView = envBool("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA");
+        fc.matryoshkaTargetDim =
+            envSize("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA_DIM", fc.matryoshkaTargetDim);
+        fc.enableMinHashSketch = envBool("YAMS_TOPOLOGY_FEATURE_MINHASH");
+        fc.minhashSketchDim = envSize("YAMS_TOPOLOGY_FEATURE_MINHASH_DIM", fc.minhashSketchDim);
+        fc.minhashAlpha = envFloat("YAMS_TOPOLOGY_FEATURE_MINHASH_ALPHA", fc.minhashAlpha);
+        spdlog::info("[topology] Phase V composer cfg: entity_on={} K={} alpha={} matryoshka_on={} "
+                     "dim={} minhash_on={} sketch_dim={} alpha_m={}",
+                     fc.enableEntityFusion, fc.entitySignatureK, fc.entityFusionAlpha,
+                     fc.enableMatryoshkaCoarseView, fc.matryoshkaTargetDim, fc.enableMinHashSketch,
+                     fc.minhashSketchDim, fc.minhashAlpha);
+    }
+
     topology::TopologyBuildConfig buildConfig;
     buildConfig.mode = topology::TopologyBuildMode::Approximate;
     buildConfig.inputKind = topology::TopologyInputKind::Hybrid;
