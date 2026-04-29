@@ -283,97 +283,87 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
     auto startTime = std::chrono::steady_clock::now();
     std::size_t skipped = 0;
 
-    // Collect all extraction jobs for batch submission
+    if (!entityService_ || !serviceManager_) {
+        return Error{ErrorCode::NotInitialized,
+                     "GraphComponent batch ingest requires entity service + service manager"};
+    }
+    auto contentStore = serviceManager_->getContentStore();
+    if (!contentStore) {
+        return Error{ErrorCode::NotInitialized, "ContentStore unavailable"};
+    }
+
+    std::unordered_map<std::string, std::string> extToLang;
+    {
+        const auto& extractors = serviceManager_->getSymbolExtractors();
+        for (const auto& extractor : extractors) {
+            if (!extractor)
+                continue;
+            for (const auto& [ext, lang] : extractor->getSupportedExtensions()) {
+                extToLang.emplace(ext, lang);
+            }
+        }
+    }
+    const auto& nlExtractors = serviceManager_->getEntityExtractors();
+    auto nlSupports = [&](std::string_view contentType) {
+        for (const auto& ex : nlExtractors) {
+            if (ex && ex->supportsContentType(std::string(contentType)))
+                return true;
+        }
+        return false;
+    };
+
     std::vector<EntityExtractionJob> extractionJobs;
     extractionJobs.reserve(contexts.size());
 
     for (auto& ctx : contexts) {
-        // Skip if entity extraction disabled or no service
-        if (ctx.skipEntityExtraction || !entityService_) {
+        if (ctx.skipEntityExtraction) {
             skipped++;
             continue;
         }
 
-        // Need ServiceManager to access content store
-        if (!serviceManager_) {
-            skipped++;
-            continue;
-        }
-
-        // Get content store to load document content
-        auto contentStore = serviceManager_->getContentStore();
-        if (!contentStore) {
-            skipped++;
-            continue;
-        }
-
-        // Detect language from file extension
         std::string language;
+        std::string ext;
         if (!ctx.filePath.empty()) {
             std::filesystem::path path(ctx.filePath);
-            std::string ext = path.extension().string();
+            ext = path.extension().string();
             if (!ext.empty() && ext[0] == '.') {
                 ext = ext.substr(1);
             }
-
-            // Query symbol extractors for language mapping
-            const auto& extractors = serviceManager_->getSymbolExtractors();
-            for (const auto& extractor : extractors) {
-                if (!extractor)
-                    continue;
-                auto supported = extractor->getSupportedExtensions();
-                auto it = supported.find(ext);
-                if (it != supported.end()) {
-                    language = it->second;
-                    break;
-                }
+            if (auto it = extToLang.find(ext); it != extToLang.end()) {
+                language = it->second;
             }
         }
 
-        // Check if NL entity extractors support this file type
         bool hasNlExtractor = false;
-        std::string contentType;
         if (language.empty() && !ctx.filePath.empty()) {
-            std::filesystem::path path(ctx.filePath);
-            std::string ext = path.extension().string();
-
-            // Map extension to content type for NL extractors
-            if (ext == ".md" || ext == ".markdown") {
+            std::string_view contentType;
+            if (ext == "md" || ext == "markdown") {
                 contentType = "text/markdown";
-            } else if (ext == ".json" || ext == ".jsonl") {
+            } else if (ext == "json" || ext == "jsonl") {
                 contentType = "application/json";
-            } else if (ext == ".txt" || ext.empty()) {
+            } else if (ext == "txt" || ext.empty()) {
                 contentType = "text/plain";
             }
-
-            // Check if any NL entity extractor supports this content type
             if (!contentType.empty()) {
-                const auto& nlExtractors = serviceManager_->getEntityExtractors();
-                for (const auto& ex : nlExtractors) {
-                    if (ex && ex->supportsContentType(contentType)) {
-                        hasNlExtractor = true;
-                        break;
-                    }
-                }
+                hasNlExtractor = nlSupports(contentType);
             }
         }
 
-        // Skip if no language detected AND no NL extractor supports the content type
         if (language.empty() && !hasNlExtractor) {
             spdlog::debug(
                 "[GraphComponent] No language/extractor for {} (ext='{}'), skipping extraction",
-                ctx.filePath,
-                ctx.filePath.empty() ? ""
-                                     : std::filesystem::path(ctx.filePath).extension().string());
+                ctx.filePath, ext);
             skipped++;
             continue;
         }
 
-        std::vector<std::byte> bytes;
+        const std::byte* dataPtr = nullptr;
+        std::size_t dataLen = 0;
+        std::vector<std::byte> ownedFallback;
         if (ctx.contentBytes) {
-            bytes = *ctx.contentBytes;
+            dataPtr = ctx.contentBytes->data();
+            dataLen = ctx.contentBytes->size();
         } else {
-            // Load document content
             auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
             if (!contentResult) {
                 spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
@@ -381,11 +371,12 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
                 skipped++;
                 continue;
             }
-            bytes = std::move(contentResult.value());
+            ownedFallback = std::move(contentResult.value());
+            dataPtr = ownedFallback.data();
+            dataLen = ownedFallback.size();
         }
 
-        // Convert bytes to UTF-8 string
-        std::string contentUtf8(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        std::string contentUtf8(reinterpret_cast<const char*>(dataPtr), dataLen);
 
         // Build extraction job
         EntityExtractionJob job;

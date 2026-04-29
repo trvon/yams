@@ -1302,13 +1302,18 @@ void PostIngestQueue::processSymbolExtractionBatch(
             continue;
         }
         try {
-            std::vector<std::byte> bytes;
+            const std::byte* dataPtr = nullptr;
+            std::size_t dataLen = 0;
+            std::vector<std::byte> ownedFallback;
             if (j.contentBytes) {
-                bytes = *j.contentBytes;
+                dataPtr = j.contentBytes->data();
+                dataLen = j.contentBytes->size();
             } else if (store_) {
                 auto contentResult = store_->retrieveBytes(hash);
                 if (contentResult) {
-                    bytes = std::move(contentResult.value());
+                    ownedFallback = std::move(contentResult.value());
+                    dataPtr = ownedFallback.data();
+                    dataLen = ownedFallback.size();
                 } else {
                     spdlog::warn(
                         "[PostIngestQueue] Failed to load content for symbol extraction: {}",
@@ -1324,8 +1329,7 @@ void PostIngestQueue::processSymbolExtractionBatch(
             extractJob.documentHash = hash;
             extractJob.filePath = j.filePath;
             extractJob.language = std::move(j.language);
-            extractJob.contentUtf8 =
-                std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            extractJob.contentUtf8 = std::string(reinterpret_cast<const char*>(dataPtr), dataLen);
 
             auto result = graphComponent_->submitEntityExtraction(std::move(extractJob));
             if (!result) {

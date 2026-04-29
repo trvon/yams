@@ -1852,6 +1852,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::unordered_set<std::string> topologyMedoidHashes;
     ClusterGateResult queryGateResult;
     SemanticNeighborGraphRoutingResult sngRoutingResult;
+    std::unordered_set<std::string> phaseS_bucketRouterMembers;
     size_t estimatedResults = 0;
     if (workingConfig.textWeight > 0.0f)
         estimatedResults += workingConfig.textMaxResults;
@@ -2337,56 +2338,71 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // vs. each bucket's centroid as the dense signal. Union the
             // selected buckets' member hashes into bucketRouterMembers and
             // narrow vector search to that set.
-            std::unordered_set<std::string> bucketRouterMembers;
+            // Aliased onto the function-scope set so post-component injection can see it.
+            auto& bucketRouterMembers = phaseS_bucketRouterMembers;
             std::size_t bucketRoutesSelected = 0;
+            std::size_t bucketRouterClusters = 0;
             if (workingConfig.enableSubtopicBucketRouting && metadataRepo_ && kgStore_) {
-                auto metadataIface =
-                    std::static_pointer_cast<yams::metadata::IMetadataRepository>(metadataRepo_);
-                yams::topology::MetadataKgTopologyArtifactStore artifactStore(
-                    std::move(metadataIface), kgStore_);
-                auto latestResult = artifactStore.loadLatest();
-                if (latestResult && latestResult.value().has_value()) {
-                    const auto& batch = *latestResult.value();
-                    yams::topology::TopologyRouteRequest req;
-                    req.queryText = query;
-                    req.seedDocumentHashes.reserve(tier1Candidates.size());
-                    for (const auto& h : tier1Candidates) {
-                        req.seedDocumentHashes.push_back(h);
-                    }
-                    req.limit = workingConfig.bucketRouterTopK;
-                    req.sparseDenseAlpha = workingConfig.bucketRouterAlpha;
-                    if (queryEmbedding.has_value()) {
-                        req.queryEmbedding = queryEmbedding.value();
-                    }
-                    yams::topology::SparseGuidedClusterRouter router;
-                    auto routesRes = router.route(req, batch);
-                    if (routesRes) {
-                        const auto& routes = routesRes.value();
-                        bucketRoutesSelected = routes.size();
-                        std::unordered_map<std::string, const yams::topology::ClusterArtifact*>
-                            byId;
-                        byId.reserve(batch.clusters.size());
-                        for (const auto& c : batch.clusters) {
-                            byId.emplace(c.clusterId, &c);
+                try {
+                    auto metadataIface =
+                        std::static_pointer_cast<yams::metadata::IMetadataRepository>(
+                            metadataRepo_);
+                    yams::topology::MetadataKgTopologyArtifactStore artifactStore(
+                        std::move(metadataIface), kgStore_);
+                    auto latestResult = artifactStore.loadLatest();
+                    if (latestResult && latestResult.value().has_value() &&
+                        !latestResult.value()->clusters.empty()) {
+                        const auto& batch = *latestResult.value();
+                        bucketRouterClusters = batch.clusters.size();
+                        yams::topology::TopologyRouteRequest req;
+                        req.queryText = query;
+                        req.seedDocumentHashes.reserve(tier1Candidates.size());
+                        for (const auto& h : tier1Candidates) {
+                            req.seedDocumentHashes.push_back(h);
                         }
-                        for (const auto& route : routes) {
-                            auto it = byId.find(route.clusterId);
-                            if (it == byId.end()) {
-                                continue;
+                        req.limit = std::max<std::size_t>(1, workingConfig.bucketRouterTopK);
+                        req.sparseDenseAlpha = workingConfig.bucketRouterAlpha;
+                        if (queryEmbedding.has_value()) {
+                            req.queryEmbedding = queryEmbedding.value();
+                        }
+                        yams::topology::SparseGuidedClusterRouter router;
+                        auto routesRes = router.route(req, batch);
+                        if (routesRes) {
+                            const auto& routes = routesRes.value();
+                            bucketRoutesSelected = routes.size();
+                            std::unordered_map<std::string, const yams::topology::ClusterArtifact*>
+                                byId;
+                            byId.reserve(batch.clusters.size());
+                            for (const auto& c : batch.clusters) {
+                                byId.emplace(c.clusterId, &c);
                             }
-                            for (const auto& h : it->second->memberDocumentHashes) {
-                                bucketRouterMembers.insert(h);
+                            for (const auto& route : routes) {
+                                auto it = byId.find(route.clusterId);
+                                if (it == byId.end() || it->second == nullptr) {
+                                    continue;
+                                }
+                                for (const auto& h : it->second->memberDocumentHashes) {
+                                    if (!h.empty()) {
+                                        bucketRouterMembers.insert(h);
+                                    }
+                                }
                             }
-                        }
-                        if (!bucketRouterMembers.empty()) {
-                            vectorSearchNarrowSet = &bucketRouterMembers;
+                            // Phase S: ADDITIVE injection (CluSD style). Do NOT narrow
+                            // vector search — that throws out relevant docs the buckets
+                            // miss. Instead, expose bucket members as a recall pool that
+                            // gets converted to ComponentResults at fusion time.
                         }
                     }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[bucket_router] exception: {}", e.what());
+                } catch (...) {
+                    spdlog::warn("[bucket_router] non-std exception");
                 }
             }
             response.debugStats["bucket_routes_selected"] = std::to_string(bucketRoutesSelected);
             response.debugStats["bucket_router_members"] =
                 std::to_string(bucketRouterMembers.size());
+            response.debugStats["bucket_router_clusters"] = std::to_string(bucketRouterClusters);
 
             if (workingConfig.enableSemanticNeighborGraphRouting && queryEmbedding.has_value() &&
                 vectorDb_ && kgStore_) {
@@ -3206,6 +3222,26 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             allComponentResults.insert(allComponentResults.end(), sngDocResults.begin(),
                                        sngDocResults.end());
             contributing.push_back("sng_routing");
+        }
+    }
+
+    // Phase S: bucket router additive injection (CluSD style).
+    // Reuses buildSemanticNeighborGraphComponentResults — same signature
+    // (resolves hashes via batchGetDocumentsByHash, wraps in ComponentResult
+    // with Source::GraphVector). Bucket members enter fusion alongside text/
+    // vector/kg legs, raising the candidate pool ceiling without narrowing.
+    if (workingConfig.enableSubtopicBucketRouting && !phaseS_bucketRouterMembers.empty()) {
+        auto bucketDocResults = buildSemanticNeighborGraphComponentResults(
+            metadataRepo_, phaseS_bucketRouterMembers, workingConfig);
+        if (!bucketDocResults.empty()) {
+            for (auto& cr : bucketDocResults) {
+                cr.debugInfo["bucket_routed"] = "true";
+            }
+            response.debugStats["bucket_router_component_emitted"] =
+                std::to_string(bucketDocResults.size());
+            allComponentResults.insert(allComponentResults.end(), bucketDocResults.begin(),
+                                       bucketDocResults.end());
+            contributing.push_back("bucket_router");
         }
     }
 

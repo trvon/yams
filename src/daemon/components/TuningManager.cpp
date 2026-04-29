@@ -4,6 +4,11 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
@@ -54,6 +59,16 @@ void updateRepairHysteresis(bool isBusy, std::chrono::steady_clock::time_point n
         activeSince = now;
     }
     inactiveSince = {};
+}
+
+void releaseFreedSlabsToOs() noexcept {
+#if defined(__APPLE__)
+    if (auto* zone = malloc_default_zone()) {
+        malloc_zone_pressure_relief(zone, 0);
+    }
+#elif defined(__GLIBC__)
+    (void)malloc_trim(0);
+#endif
 }
 } // namespace
 
@@ -1476,7 +1491,19 @@ bool TuningManager::tick_once() {
         logIgnoredTuningException("Model maintenance check failed");
     }
 
-    // Return idle hint for tuning loop cadence: true when no real work is pending.
+    if (daemonIdle) {
+        static std::atomic<std::int64_t> sLastReleaseAtMs{0};
+        constexpr std::int64_t kMinReleaseIntervalMs = 30'000;
+        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+        std::int64_t last = sLastReleaseAtMs.load(std::memory_order_relaxed);
+        if (nowMs - last >= kMinReleaseIntervalMs &&
+            sLastReleaseAtMs.compare_exchange_strong(last, nowMs, std::memory_order_acq_rel)) {
+            releaseFreedSlabsToOs();
+        }
+    }
+
     return daemonIdle;
 }
 
