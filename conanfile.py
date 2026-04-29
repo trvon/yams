@@ -129,7 +129,7 @@ class YamsConan(ConanFile):
             except Exception:
                 pass
 
-        self.requires("xz_utils/5.6.4")
+        self.requires("xz_utils/5.8.3")
 
         # RE2 regex engine for high-performance grep (optional)
         if self.options.enable_re2:  # type: ignore
