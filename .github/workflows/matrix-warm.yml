@@ -177,6 +177,17 @@ jobs:
           fi
           conan profile show
 
+      - name: Pin conancenter to v2 index
+        shell: bash
+        run: |
+          set -euo pipefail
+          if conan remote list | grep -q 'conancenter'; then
+            conan remote update conancenter --url https://center2.conan.io || true
+          else
+            conan remote add conancenter https://center2.conan.io
+          fi
+          conan remote list
+
       - name: Warm dependencies (${{ inputs.build_type }})
         if: steps.cache_conan_warm.outputs.cache-hit != 'true' || steps.cache_ccache_warm.outputs.cache-hit != 'true'
         shell: bash

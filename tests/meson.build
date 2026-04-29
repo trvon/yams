@@ -1350,6 +1350,7 @@ if catch2_dep.found()
         'unit/vector/dim_resolver_catch2_test.cpp',
         'unit/vector/embedding_service_synthetic_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp',
+        'unit/vector/sqlite_vec_backend_persistence_catch2_test.cpp',
         'unit/vector/sqlite_vec_c_api_smoke_catch2_test.cpp',
         'unit/vector/vector_schema_migration_vec0_catch2_test.cpp',
         'unit/vector/vector_dimension_validation_catch2_test.cpp',

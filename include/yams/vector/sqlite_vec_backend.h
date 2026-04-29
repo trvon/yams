@@ -157,6 +157,11 @@ public:
     /// No-op for V2 schema (unified table has no rowid sync issues)
     Result<void> ensureEmbeddingRowIdColumn();
 
+    /// Self-heal: create simeon_pq_meta + simeon_pq_codes if missing.
+    /// Idempotent (CREATE TABLE IF NOT EXISTS). Required for legacy
+    /// vectors.db files predating the PQ persistence schema.
+    Result<void> ensurePersistenceSchema();
+
     /// No-op for V2 schema (unified table has no orphans)
     Result<OrphanCleanupStats> cleanupOrphanRows();
 

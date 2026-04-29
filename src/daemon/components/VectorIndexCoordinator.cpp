@@ -157,7 +157,10 @@ void VectorIndexCoordinator::doFinalizeOnStrand() {
         } else {
             try {
                 vdb->buildIndex();
-                vdb->persistIndex();
+                if (!vdb->persistIndex()) {
+                    spdlog::warn("[VectorIndexCoordinator] persistIndex returned failure: {}",
+                                 vdb->getLastError());
+                }
             } catch (const std::exception& e) {
                 spdlog::warn("[VectorIndexCoordinator] index build/persist failed: {}", e.what());
             } catch (...) {
@@ -250,7 +253,11 @@ void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
             } else {
                 try {
                     vdb->buildIndex();
-                    vdb->persistIndex();
+                    if (!vdb->persistIndex()) {
+                        spdlog::warn(
+                            "[VectorIndexCoordinator] doRebuild persistIndex returned failure: {}",
+                            vdb->getLastError());
+                    }
                 } catch (const std::exception& e) {
                     spdlog::warn("[VectorIndexCoordinator] doRebuild build/persist failed: {}",
                                  e.what());

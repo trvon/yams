@@ -1048,7 +1048,6 @@ PostIngestQueue::prepareMetadataEntry(
     // Title+NL extraction: single GLiNER call for both title and NL entities
     if (hasTitleExtractor() && !isGlinerTitleExtractionDisabled()) {
         prepared.shouldDispatchTitle = true;
-        // Store snippet for GLiNER inference
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)
                                         : prepared.extractedText;
@@ -1789,9 +1788,24 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
     job.language = language;
     job.mimeType = mimeType;
 
-    if (!channel->try_push(std::move(job))) {
-        spdlog::debug("[PostIngestQueue] Title channel full, skipping async title for {}",
-                      hash.substr(0, 12));
+    // Bounded retry absorbs the titlePoller warmup window (cap=0 until next
+    // TuningManager tick) without changing steady-state drop behavior.
+    auto jobCopy = job;
+    bool pushed = channel->try_push(std::move(job));
+    if (!pushed) {
+        TuningManager::notifyWakeup();
+        constexpr int kMaxRetries = 8;
+        constexpr std::chrono::milliseconds kBackoff{4};
+        for (int attempt = 0; attempt < kMaxRetries && !pushed; ++attempt) {
+            std::this_thread::sleep_for(kBackoff);
+            auto retryJob = jobCopy;
+            pushed = channel->try_push(std::move(retryJob));
+        }
+    }
+    if (!pushed) {
+        spdlog::debug(
+            "[PostIngestQueue] Title channel full after retry, dropping async title for {}",
+            hash.substr(0, 12));
         InternalEventBus::instance().incTitleDropped();
     } else {
         spdlog::debug("[PostIngestQueue] Dispatched title+NL extraction job for {}",

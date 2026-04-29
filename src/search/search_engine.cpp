@@ -697,6 +697,149 @@ SemanticNeighborGraphRoutingResult buildSemanticNeighborGraphRoutingPool(
     return result;
 }
 
+// Phase U: Multi-Scale Cover Aggregation.
+// Theory: Chazal-Guibas-Oudot-Skraba 2011 (persistence-based clustering on Riemannian
+// manifolds) + Vietoris-Rips simplicial complex (Giusti-Ghrist-Bassett 2016 — higher-order
+// incidence beats dyadic edges).
+//
+// At each scale s = (seedK, hopK):
+//   S_s = top-seedK doc-level vector neighbors of q
+//   N_s(u) = top-hopK semantic_neighbor of u for u in S_s
+//   M_s(d) = |{u in S_s : d in N_s(u)}|     (cover count at scale s)
+//
+// Persistence count P(d) = |{ s : M_s(d) >= perScaleCoverFloor }|
+// Admit d iff P(d) >= persistenceThreshold.
+// Returns the admitted hash set + telemetry.
+struct MultiScaleCoverResult {
+    std::unordered_set<std::string> admittedHashes;
+    std::unordered_map<std::string, std::size_t> persistencePerDoc;
+    std::size_t scalesEvaluated{0};
+    std::size_t totalSeeds{0};
+    std::size_t totalNeighborsExpanded{0};
+    std::size_t admittedCount{0};
+    float avgPersistence{0.0F};
+    float bestSeedScore{0.0F};
+};
+
+MultiScaleCoverResult buildMultiScaleCoverRoutingResult(
+    const std::vector<float>& queryEmbedding,
+    const std::shared_ptr<yams::vector::VectorDatabase>& vectorDb,
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
+    const std::vector<std::pair<std::size_t, std::size_t>>& scales,
+    std::size_t persistenceThreshold, std::size_t perScaleCoverFloor, float seedMinSimilarity) {
+    MultiScaleCoverResult result;
+    if (queryEmbedding.empty() || !vectorDb || !kgStore || scales.empty()) {
+        return result;
+    }
+    if (persistenceThreshold == 0) {
+        persistenceThreshold = 1;
+    }
+    if (perScaleCoverFloor == 0) {
+        perScaleCoverFloor = 1;
+    }
+
+    std::unordered_map<std::string, std::size_t> persistencePerDoc;
+    persistencePerDoc.reserve(256);
+    std::unordered_set<std::string> unionSeedHashes;
+    float bestSeed = 0.0F;
+
+    for (const auto& [seedK, hopK] : scales) {
+        if (seedK == 0 || hopK == 0) {
+            continue;
+        }
+        ++result.scalesEvaluated;
+
+        // Step 1 — vector top-seedK seeds at this scale.
+        yams::vector::VectorSearchParams params;
+        params.k = seedK;
+        params.similarity_threshold = std::clamp(seedMinSimilarity, 0.0F, 1.0F);
+        auto seedRecs = vectorDb->search(queryEmbedding, params);
+        if (seedRecs.empty()) {
+            continue;
+        }
+        std::vector<std::string> scaleSeeds;
+        scaleSeeds.reserve(seedK);
+        for (const auto& rec : seedRecs) {
+            if (rec.level != yams::vector::EmbeddingLevel::DOCUMENT || rec.document_hash.empty()) {
+                continue;
+            }
+            scaleSeeds.push_back(rec.document_hash);
+            unionSeedHashes.insert(rec.document_hash);
+            if (rec.relevance_score > bestSeed) {
+                bestSeed = rec.relevance_score;
+            }
+            if (scaleSeeds.size() >= seedK) {
+                break;
+            }
+        }
+        result.totalSeeds += scaleSeeds.size();
+
+        // Step 2 — at this scale, compute cover_s(d) over docs in any seed's hopK
+        // neighborhood. Each seed itself gets cover ≥ 1 by virtue of "covering itself".
+        std::unordered_map<std::string, std::size_t> coverAtScale;
+        coverAtScale.reserve(scaleSeeds.size() * hopK);
+        for (const auto& seedHash : scaleSeeds) {
+            // Seed itself is in its own neighborhood.
+            ++coverAtScale[seedHash];
+            auto nodeRes = kgStore->getNodeByKey("doc:" + seedHash);
+            if (!nodeRes || !nodeRes.value().has_value()) {
+                continue;
+            }
+            auto edgesRes = kgStore->getEdgesFrom(nodeRes.value()->id,
+                                                  std::string_view{"semantic_neighbor"}, hopK);
+            if (!edgesRes) {
+                continue;
+            }
+            const auto& edges = edgesRes.value();
+            std::vector<std::int64_t> neighborIds;
+            neighborIds.reserve(edges.size());
+            for (const auto& edge : edges) {
+                neighborIds.push_back(edge.dstNodeId);
+            }
+            if (neighborIds.empty()) {
+                continue;
+            }
+            auto nodesRes = kgStore->getNodesByIds(neighborIds);
+            if (!nodesRes) {
+                continue;
+            }
+            constexpr std::string_view kDocPrefix = "doc:";
+            for (const auto& node : nodesRes.value()) {
+                if (node.nodeKey.size() <= kDocPrefix.size() ||
+                    node.nodeKey.compare(0, kDocPrefix.size(), kDocPrefix) != 0) {
+                    continue;
+                }
+                std::string hash = node.nodeKey.substr(kDocPrefix.size());
+                ++coverAtScale[hash];
+                ++result.totalNeighborsExpanded;
+            }
+        }
+
+        // Step 3 — increment persistence for docs above the per-scale cover floor.
+        for (const auto& [hash, cnt] : coverAtScale) {
+            if (cnt >= perScaleCoverFloor) {
+                ++persistencePerDoc[hash];
+            }
+        }
+    }
+
+    // Step 4 — admit docs with persistence >= threshold.
+    double persistSum = 0.0;
+    for (const auto& [hash, p] : persistencePerDoc) {
+        if (p >= persistenceThreshold) {
+            result.admittedHashes.insert(hash);
+            persistSum += static_cast<double>(p);
+        }
+    }
+    result.admittedCount = result.admittedHashes.size();
+    if (result.admittedCount > 0) {
+        result.avgPersistence = static_cast<float>(persistSum / result.admittedCount);
+    }
+    result.persistencePerDoc = std::move(persistencePerDoc);
+    result.bestSeedScore = bestSeed;
+    return result;
+}
+
 template <typename Work>
 auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& executor)
     -> std::future<decltype(work())> {
@@ -1853,6 +1996,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     ClusterGateResult queryGateResult;
     SemanticNeighborGraphRoutingResult sngRoutingResult;
     std::unordered_set<std::string> phaseS_bucketRouterMembers;
+    MultiScaleCoverResult phaseU_coverResult;
     size_t estimatedResults = 0;
     if (workingConfig.textWeight > 0.0f)
         estimatedResults += workingConfig.textMaxResults;
@@ -2403,6 +2547,33 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             response.debugStats["bucket_router_members"] =
                 std::to_string(bucketRouterMembers.size());
             response.debugStats["bucket_router_clusters"] = std::to_string(bucketRouterClusters);
+
+            // Phase U: multi-scale cover aggregation routing.
+            if (workingConfig.enableMultiScaleCoverRouting && queryEmbedding.has_value() &&
+                vectorDb_ && kgStore_) {
+                try {
+                    phaseU_coverResult = buildMultiScaleCoverRoutingResult(
+                        queryEmbedding.value(), vectorDb_, kgStore_,
+                        workingConfig.multiScaleCoverScales,
+                        workingConfig.multiScaleCoverPersistenceThreshold,
+                        workingConfig.multiScaleCoverPerScaleCoverFloor,
+                        workingConfig.multiScaleCoverSeedMinSimilarity);
+                } catch (const std::exception& e) {
+                    spdlog::warn("[multi_scale_cover] exception: {}", e.what());
+                } catch (...) {
+                    spdlog::warn("[multi_scale_cover] non-std exception");
+                }
+            }
+            response.debugStats["multi_scale_cover_scales"] =
+                std::to_string(phaseU_coverResult.scalesEvaluated);
+            response.debugStats["multi_scale_cover_seeds_total"] =
+                std::to_string(phaseU_coverResult.totalSeeds);
+            response.debugStats["multi_scale_cover_neighbors_total"] =
+                std::to_string(phaseU_coverResult.totalNeighborsExpanded);
+            response.debugStats["multi_scale_cover_admitted"] =
+                std::to_string(phaseU_coverResult.admittedCount);
+            response.debugStats["multi_scale_cover_avg_persistence"] =
+                fmt::format("{:.3f}", phaseU_coverResult.avgPersistence);
 
             if (workingConfig.enableSemanticNeighborGraphRouting && queryEmbedding.has_value() &&
                 vectorDb_ && kgStore_) {
@@ -3242,6 +3413,34 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             allComponentResults.insert(allComponentResults.end(), bucketDocResults.begin(),
                                        bucketDocResults.end());
             contributing.push_back("bucket_router");
+        }
+    }
+
+    // Phase U: multi-scale cover aggregation injection.
+    // Each admitted doc has persistence count P(d). Score-weighted by P(d) so docs
+    // surviving more scales contribute more strongly to fusion.
+    if (workingConfig.enableMultiScaleCoverRouting && !phaseU_coverResult.admittedHashes.empty()) {
+        auto coverDocResults = buildSemanticNeighborGraphComponentResults(
+            metadataRepo_, phaseU_coverResult.admittedHashes, workingConfig);
+        if (!coverDocResults.empty()) {
+            const float scale = std::max(0.0F, workingConfig.multiScaleCoverScoreScale);
+            for (auto& cr : coverDocResults) {
+                auto it = phaseU_coverResult.persistencePerDoc.find(cr.documentHash);
+                const std::size_t p =
+                    it != phaseU_coverResult.persistencePerDoc.end() ? it->second : 1;
+                // Persistence-weighted score: docs at more scales rank higher.
+                cr.score = std::clamp(scale * static_cast<float>(p) /
+                                          static_cast<float>(std::max<std::size_t>(
+                                              1, phaseU_coverResult.scalesEvaluated)),
+                                      0.0F, 1.0F);
+                cr.debugInfo["multi_scale_routed"] = "true";
+                cr.debugInfo["multi_scale_persistence"] = std::to_string(p);
+            }
+            response.debugStats["multi_scale_cover_component_emitted"] =
+                std::to_string(coverDocResults.size());
+            allComponentResults.insert(allComponentResults.end(), coverDocResults.begin(),
+                                       coverDocResults.end());
+            contributing.push_back("multi_scale_cover");
         }
     }
 

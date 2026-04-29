@@ -1897,15 +1897,8 @@ public:
             activeStages += (m & 1u);
         }
 
-        // Clamp to hardware capacity FIRST, then re-apply the per-stage floor.
-        // The previous order let `clamp(total, 2u, hw)` truncate below
-        // `activeStages` on small machines (hw < 6) — silently starving the
-        // symbol/entity/title stages of any worker slot. The bench harness hit
-        // this: limits={extraction=1, kg=1, symbol=0, entity=0, title=0}, so
-        // GLiNER's titlePoller spawned but never dispatched any work, leaving
-        // kg_doc_entities empty. Per-stage caps in postIngestBudgetedConcurrency
-        // already cap each stage independently; the total budget only needs to
-        // be large enough that the allocator can give every active stage ≥1.
+        // Clamp to hardware capacity then re-apply per-stage floor (preserves
+        // ≥1 slot per active stage even when hw < activeStages).
         total = std::clamp(total, 2u, std::max(2u, hw));
         if (activeStages > 0) {
             total = std::max(total, activeStages);
@@ -2608,12 +2601,19 @@ private:
 
         bool hasDynamicCap = false;
         if (includeDynamicCaps) {
-            // Use seqlock-protected consistent read to avoid torn values
             const auto dyn = readDynamicCapsConsistent();
             for (std::size_t i = 0; i < kStageCount; ++i) {
                 if (dyn[i] != UINT32_MAX) {
                     caps[i] = std::min(caps[i], std::min(dyn[i], kMaxCaps[i]));
                     hasDynamicCap = true;
+                }
+            }
+            // Floor active stages to ≥1: a stale dynamic cap of 0 from a prior
+            // idle-tick must not starve a stage that has since become active
+            // (e.g., title stage after plugin autoload completes mid-bench).
+            for (std::size_t i = 0; i < kStageCount; ++i) {
+                if ((activeMask & (1u << i)) != 0u && caps[i] == 0) {
+                    caps[i] = 1;
                 }
             }
         }

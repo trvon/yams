@@ -174,6 +174,38 @@ struct SearchEngineConfig {
     float bucketRouterAlpha{0.5f};
     std::string bucketEngineKey{"kmeans_online"};
 
+    // Phase U: Multi-Scale Cover Aggregation (theory: Chazal et al. 2011
+    // persistence-based clustering + Vietoris-Rips). Each "scale" is a
+    // (seedK, hopK) pair. For each scale we compute the cover count
+    // M_s(d) = #(seeds at scale s whose semantic_neighbor list contains d).
+    // Persistence P(d) = #(scales where M_s(d) >= 2). A doc is admitted if
+    // P(d) >= multiScaleCoverPersistenceThreshold. Score(d) = P(d) *
+    // avg_cosine(d, all-scale-seeds) * multiScaleCoverScoreScale.
+    bool enableMultiScaleCoverRouting{false};
+    // Pairs of (seedK, hopK), in increasing order of seed radius. Default:
+    // 3 scales — (4,4), (8,8), (16,16).
+    std::vector<std::pair<std::size_t, std::size_t>> multiScaleCoverScales{
+        {4, 4}, {8, 8}, {16, 16}};
+    std::size_t multiScaleCoverPersistenceThreshold{2};
+    float multiScaleCoverSeedMinSimilarity{0.30f};
+    float multiScaleCoverScoreScale{1.0f};
+    std::size_t multiScaleCoverPerScaleCoverFloor{2};
+
+    // Phase Y: multi-meta-path scoring (PathSim-style fixed weights, post-fusion boost).
+    // Each enabled meta-path independently scores candidate docs reachable from query
+    // seeds; total boost = Σ_m (w_m × pathScore_m). Phase P is the special case
+    // {only M_sem, w_sem=1, binary boost}. Default off → V0 matches existing Phase P.
+    bool enableMetaPathRouting{false};
+    std::size_t metaPathSeedK{8};     // seeds drawn via vectorDb.search(q, k)
+    std::size_t metaPathHopLimit{16}; // per-edge-type hop budget per seed
+    float metaPathBoostAlpha{0.3f};   // multiplier on the combined boost
+    float metaPathWeightSem{1.0f};    // doc — semantic_neighbor — doc
+    float metaPathWeightCall{
+        0.5f}; // doc — contains — function — calls — function — defined_in — doc
+    float metaPathWeightDef{0.5f};    // doc — contains — symbol — defined_in — doc
+    float metaPathWeightEntity{0.3f}; // doc — kg_doc_entities — node — kg_doc_entities — doc
+    float metaPathWeightBlob{0.2f};   // doc — blob — doc (dedup)
+
     bool bypassCorpusWarmingGate = false;
     float rrfK = 12.0f;
     float bm25NormDivisor = 25.0f;

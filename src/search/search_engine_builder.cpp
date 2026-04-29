@@ -768,6 +768,72 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.bucketEngineKey = *bucketEngine;
             spdlog::info("SearchEngine bucketEngineKey set to '{}' via env", cfg.bucketEngineKey);
         }
+        // Phase U: multi-scale cover aggregation env knobs.
+        if (auto msEnabled = getEnvBool("YAMS_SEARCH_ENABLE_MULTI_SCALE_COVER")) {
+            cfg.enableMultiScaleCoverRouting = *msEnabled;
+            spdlog::info("SearchEngine enableMultiScaleCoverRouting {} via env",
+                         cfg.enableMultiScaleCoverRouting ? "enabled" : "disabled");
+        }
+        if (auto msScales = getEnvString("YAMS_SEARCH_MULTI_SCALE_COVER_SCALES")) {
+            // Format: "seedK1:hopK1,seedK2:hopK2,seedK3:hopK3"
+            std::vector<std::pair<std::size_t, std::size_t>> parsed;
+            std::string acc;
+            auto flush = [&parsed](const std::string& tok) {
+                auto colon = tok.find(':');
+                if (colon == std::string::npos) {
+                    return;
+                }
+                try {
+                    auto sk = std::stoul(tok.substr(0, colon));
+                    auto hk = std::stoul(tok.substr(colon + 1));
+                    if (sk > 0 && hk > 0) {
+                        parsed.emplace_back(sk, hk);
+                    }
+                } catch (...) {
+                }
+            };
+            for (char c : *msScales) {
+                if (c == ',') {
+                    flush(acc);
+                    acc.clear();
+                } else if (!std::isspace(static_cast<unsigned char>(c))) {
+                    acc.push_back(c);
+                }
+            }
+            if (!acc.empty()) {
+                flush(acc);
+            }
+            if (!parsed.empty()) {
+                cfg.multiScaleCoverScales = std::move(parsed);
+                std::string label;
+                for (const auto& [s, h] : cfg.multiScaleCoverScales) {
+                    if (!label.empty())
+                        label += ",";
+                    label += std::to_string(s) + ":" + std::to_string(h);
+                }
+                spdlog::info("SearchEngine multiScaleCoverScales set to '{}' via env", label);
+            }
+        }
+        if (auto msTau = getEnvInt("YAMS_SEARCH_MULTI_SCALE_COVER_PERSISTENCE")) {
+            cfg.multiScaleCoverPersistenceThreshold = static_cast<std::size_t>(std::max(1, *msTau));
+            spdlog::info("SearchEngine multiScaleCoverPersistenceThreshold set to {} via env",
+                         cfg.multiScaleCoverPersistenceThreshold);
+        }
+        if (auto msFloor = getEnvInt("YAMS_SEARCH_MULTI_SCALE_COVER_FLOOR")) {
+            cfg.multiScaleCoverPerScaleCoverFloor = static_cast<std::size_t>(std::max(1, *msFloor));
+            spdlog::info("SearchEngine multiScaleCoverPerScaleCoverFloor set to {} via env",
+                         cfg.multiScaleCoverPerScaleCoverFloor);
+        }
+        if (auto msMin = getEnvFloat("YAMS_SEARCH_MULTI_SCALE_COVER_MIN_SIM")) {
+            cfg.multiScaleCoverSeedMinSimilarity = std::clamp(*msMin, 0.0f, 1.0f);
+            spdlog::info("SearchEngine multiScaleCoverSeedMinSimilarity set to {:.3f} via env",
+                         cfg.multiScaleCoverSeedMinSimilarity);
+        }
+        if (auto msScoreScale = getEnvFloat("YAMS_SEARCH_MULTI_SCALE_COVER_SCALE")) {
+            cfg.multiScaleCoverScoreScale = std::max(0.0f, *msScoreScale);
+            spdlog::info("SearchEngine multiScaleCoverScoreScale set to {:.3f} via env",
+                         cfg.multiScaleCoverScoreScale);
+        }
         if (auto bypassWarming = getEnvBool("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE")) {
             cfg.bypassCorpusWarmingGate = *bypassWarming;
             spdlog::info("SearchEngine bypassCorpusWarmingGate overridden to {} via env",

@@ -459,9 +459,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     extractionConfig.requireEmbeddings = true;
     extractionConfig.requireGraphNode = true;
 
-    // Phase V — feature composer configuration via env (bench-driven; TOML wiring is a
-    // follow-up). All branches default off, so when no env vars are set the composer is a
-    // no-op and the cluster input matches Phase U's dense-only baseline.
+    // Phase V feature composer configuration via env (default off → composer is no-op).
     {
         auto& fc = extractionConfig.featureComposition;
         const auto envBool = [](const char* n) -> bool {
@@ -505,11 +503,6 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         fc.enableMinHashSketch = envBool("YAMS_TOPOLOGY_FEATURE_MINHASH");
         fc.minhashSketchDim = envSize("YAMS_TOPOLOGY_FEATURE_MINHASH_DIM", fc.minhashSketchDim);
         fc.minhashAlpha = envFloat("YAMS_TOPOLOGY_FEATURE_MINHASH_ALPHA", fc.minhashAlpha);
-        spdlog::info("[topology] Phase V composer cfg: entity_on={} K={} alpha={} matryoshka_on={} "
-                     "dim={} minhash_on={} sketch_dim={} alpha_m={}",
-                     fc.enableEntityFusion, fc.entitySignatureK, fc.entityFusionAlpha,
-                     fc.enableMatryoshkaCoarseView, fc.matryoshkaTargetDim, fc.enableMinHashSketch,
-                     fc.minhashSketchDim, fc.minhashAlpha);
     }
 
     topology::TopologyBuildConfig buildConfig;

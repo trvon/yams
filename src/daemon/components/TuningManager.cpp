@@ -1053,13 +1053,21 @@ bool TuningManager::tick_once() {
             }
             previousPressureLevel_ = currentPressure;
 
+            // Inactive stages: write UINT32_MAX (no cap) so the live mask in
+            // postIngestBudgetedConcurrency is the sole gate; avoids a stale-tick
+            // window where a newly-active stage stays capped at 0 until next tick.
+            const uint32_t maskNow = TuneAdvisor::postIngestStageActiveMask();
+            auto capForStage = [&](uint32_t bit, uint32_t computedTarget) -> uint32_t {
+                return ((maskNow & bit) == 0u) ? UINT32_MAX : computedTarget;
+            };
             TuneAdvisor::beginDynamicCapWrite();
-            TuneAdvisor::setPostExtractionConcurrentDynamicCap(extractionTarget);
-            TuneAdvisor::setPostKgConcurrentDynamicCap(kgTarget);
-            TuneAdvisor::setPostSymbolConcurrentDynamicCap(symbolTarget);
-            TuneAdvisor::setPostEntityConcurrentDynamicCap(entityTarget);
-            TuneAdvisor::setPostTitleConcurrentDynamicCap(titleTarget);
-            TuneAdvisor::setPostEmbedConcurrentDynamicCap(embedTarget);
+            TuneAdvisor::setPostExtractionConcurrentDynamicCap(
+                capForStage(1u << 0u, extractionTarget));
+            TuneAdvisor::setPostKgConcurrentDynamicCap(capForStage(1u << 1u, kgTarget));
+            TuneAdvisor::setPostSymbolConcurrentDynamicCap(capForStage(1u << 2u, symbolTarget));
+            TuneAdvisor::setPostEntityConcurrentDynamicCap(capForStage(1u << 3u, entityTarget));
+            TuneAdvisor::setPostTitleConcurrentDynamicCap(capForStage(1u << 4u, titleTarget));
+            TuneAdvisor::setPostEmbedConcurrentDynamicCap(capForStage(1u << 5u, embedTarget));
             TuneAdvisor::endDynamicCapWrite();
 
             // Align EmbeddingGenerator global gate with governor caps

@@ -847,18 +847,8 @@ public:
                          "Failed to create turboquant_quantizer_meta table: " + err};
         }
 
-        rc = sqlite3_exec(db_, kCreateSimeonPqMeta, nullptr, nullptr, &err_msg);
-        if (rc != SQLITE_OK) {
-            std::string err = err_msg ? err_msg : "Unknown error";
-            sqlite3_free(err_msg);
-            return Error{ErrorCode::DatabaseError, "Failed to create simeon_pq_meta table: " + err};
-        }
-        rc = sqlite3_exec(db_, kCreateSimeonPqCodes, nullptr, nullptr, &err_msg);
-        if (rc != SQLITE_OK) {
-            std::string err = err_msg ? err_msg : "Unknown error";
-            sqlite3_free(err_msg);
-            return Error{ErrorCode::DatabaseError,
-                         "Failed to create simeon_pq_codes table: " + err};
+        if (auto er = ensurePersistenceSchema(); !er) {
+            return er;
         }
 
         // NOTE: Legacy vectors_hnsw_meta/vectors_hnsw_nodes and per-dim
@@ -868,6 +858,32 @@ public:
         // Prepare statements
         prepareStatements();
 
+        return Result<void>{};
+    }
+
+    /// Idempotent self-heal for the Simeon PQ persistence tables.
+    /// Legacy vectors.db files predate kCreateSimeonPqMeta/Codes, so the
+    /// load+save path silently no-ops on every restart and the PQ index
+    /// rebuilds from scratch (~16 s @ 280k vectors). Calling this from the
+    /// existing-tables init branch heals the schema once on next open.
+    Result<void> ensurePersistenceSchema() {
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        char* err_msg = nullptr;
+        int rc = sqlite3_exec(db_, kCreateSimeonPqMeta, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            return Error{ErrorCode::DatabaseError, "Failed to ensure simeon_pq_meta table: " + err};
+        }
+        rc = sqlite3_exec(db_, kCreateSimeonPqCodes, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to ensure simeon_pq_codes table: " + err};
+        }
         return Result<void>{};
     }
 
@@ -3542,6 +3558,10 @@ Result<void> SqliteVecBackend::createTables(size_t embedding_dim) {
 
 bool SqliteVecBackend::tablesExist() const {
     return impl_->tablesExist();
+}
+
+Result<void> SqliteVecBackend::ensurePersistenceSchema() {
+    return impl_->ensurePersistenceSchema();
 }
 
 Result<void> SqliteVecBackend::insertVector(const VectorRecord& record) {

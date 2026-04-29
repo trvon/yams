@@ -160,6 +160,10 @@ public:
                 // Tables exist; verify stored dimension vs configured and optionally self-heal.
                 try {
                     if (auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get())) {
+                        if (auto er = sqliteBackend->ensurePersistenceSchema(); !er) {
+                            spdlog::warn("Vector DB persistence schema ensure failed: {}",
+                                         er.error().message);
+                        }
                         if (auto er = sqliteBackend->ensureEmbeddingRowIdColumn(); !er) {
                             spdlog::warn("Vector DB embedding_rowid migration failed: {}",
                                          er.error().message);
