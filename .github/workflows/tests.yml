@@ -232,7 +232,7 @@ jobs:
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python3 -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/bin/python" -m pip install --upgrade pip
-          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade meson 'ninja>=1.10'
+          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade 'meson==1.4.*' 'ninja==1.11.*'
           echo "$PYTOOLS_DIR/bin" >> "$GITHUB_PATH"
           export PATH="$PYTOOLS_DIR/bin:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
@@ -278,7 +278,7 @@ jobs:
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python3 -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/bin/python" -m pip install --upgrade pip
-          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade meson 'ninja>=1.10'
+          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade 'meson==1.4.*' 'ninja==1.11.*'
           echo "$PYTOOLS_DIR/bin" >> "$GITHUB_PATH"
           export PATH="$PYTOOLS_DIR/bin:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
@@ -292,7 +292,7 @@ jobs:
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade pip
-          "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade meson 'ninja>=1.10'
+          "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade 'meson==1.4.*' 'ninja==1.11.*'
           echo "$PYTOOLS_DIR/Scripts" >> "$GITHUB_PATH"
           export PATH="$PYTOOLS_DIR/Scripts:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
@@ -328,9 +328,11 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
             conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-linux-x86_64-
+            conan2-${{ runner.os }}-
       - name: Conan cache diagnostics
         shell: bash
         run: |
@@ -346,6 +348,8 @@ jobs:
           key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
+            ccache-${{ runner.os }}-linux-x86_64-
+            ccache-${{ runner.os }}-
       - name: Install Conan (latest)
         shell: bash
         run: |
@@ -366,7 +370,7 @@ jobs:
           fi
 
           "$VENV_PYTHON" -m pip install --upgrade pip
-          "$VENV_PYTHON" -m pip install --upgrade conan meson 'ninja>=1.10'
+          "$VENV_PYTHON" -m pip install --upgrade 'conan==2.5.*' 'meson==1.4.*' 'ninja==1.11.*'
           echo "$TOOL_BIN" >> "$GITHUB_PATH"
           export PATH="$TOOL_BIN:$PATH"
           conan --version
@@ -391,7 +395,8 @@ jobs:
           echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
           echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,file_macro" >> $GITHUB_ENV
           ccache -p 2>/dev/null || true
           ccache -z 2>/dev/null || true
 
@@ -502,6 +507,14 @@ jobs:
           YAMS_ENABLE_MOBILE_BINDINGS: "false"
         run: |
           .\setup.ps1 Debug
+
+      - name: ccache stats (post-build)
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: |
+          set +e
+          ccache -s 2>/dev/null || true
+          du -sh "${CCACHE_DIR:-$HOME/.cache/ccache}" 2>/dev/null || true
 
       # - name: Check mobile ABI surface
       #   shell: bash

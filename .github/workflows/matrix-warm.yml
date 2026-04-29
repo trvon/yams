@@ -115,13 +115,15 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
             conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-linux-x86_64-
             conan2-${{ runner.os }}-
 
       - name: Cache ccache (warm)
         if: github.actor != 'nektos/act'
+        id: cache_ccache_warm
         uses: actions/cache@v4
         continue-on-error: true
         with:
@@ -131,6 +133,7 @@ jobs:
           key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
+            ccache-${{ runner.os }}-linux-x86_64-
             ccache-${{ runner.os }}-
 
       - name: Install Conan and Meson
@@ -152,7 +155,7 @@ jobs:
             fi
           fi
           "$VENV_PYTHON" -m pip install --upgrade pip
-          "$VENV_PYTHON" -m pip install --upgrade conan meson 'ninja>=1.10'
+          "$VENV_PYTHON" -m pip install --upgrade 'conan==2.5.*' 'meson==1.4.*' 'ninja==1.11.*'
           echo "$TOOL_BIN" >> "$GITHUB_PATH"
           export PATH="$TOOL_BIN:$PATH"
           conan --version
@@ -175,6 +178,7 @@ jobs:
           conan profile show
 
       - name: Warm dependencies (${{ inputs.build_type }})
+        if: steps.cache_conan_warm.outputs.cache-hit != 'true' || steps.cache_ccache_warm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
