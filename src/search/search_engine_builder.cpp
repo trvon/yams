@@ -749,6 +749,25 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                 "SearchEngine semanticNeighborGraphNoiseBoost overridden to {:.3f} via env",
                 cfg.semanticNeighborGraphNoiseBoost);
         }
+        if (auto bucketEnabled = getEnvBool("YAMS_SEARCH_ENABLE_BUCKET_ROUTING")) {
+            cfg.enableSubtopicBucketRouting = *bucketEnabled;
+            spdlog::info("SearchEngine enableSubtopicBucketRouting {} via env",
+                         cfg.enableSubtopicBucketRouting ? "enabled" : "disabled");
+        }
+        if (auto bucketTopK = getEnvInt("YAMS_SEARCH_BUCKET_TOPK")) {
+            cfg.bucketRouterTopK = static_cast<std::size_t>(std::max(1, *bucketTopK));
+            spdlog::info("SearchEngine bucketRouterTopK overridden to {} via env",
+                         cfg.bucketRouterTopK);
+        }
+        if (auto bucketAlpha = getEnvFloat("YAMS_SEARCH_BUCKET_ALPHA")) {
+            cfg.bucketRouterAlpha = std::clamp(*bucketAlpha, 0.0f, 1.0f);
+            spdlog::info("SearchEngine bucketRouterAlpha overridden to {:.3f} via env",
+                         cfg.bucketRouterAlpha);
+        }
+        if (auto bucketEngine = getEnvString("YAMS_SEARCH_BUCKET_ENGINE")) {
+            cfg.bucketEngineKey = *bucketEngine;
+            spdlog::info("SearchEngine bucketEngineKey set to '{}' via env", cfg.bucketEngineKey);
+        }
         if (auto bypassWarming = getEnvBool("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE")) {
             cfg.bypassCorpusWarmingGate = *bypassWarming;
             spdlog::info("SearchEngine bypassCorpusWarmingGate overridden to {} via env",

@@ -1443,6 +1443,19 @@ void ServiceManager::shutdown() {
 static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                                      const yams::daemon::StateComponent& state,
                                      const yams::daemon::ServiceManager* serviceManager = nullptr) {
+    static std::mutex sLastWriteMutex;
+    static std::chrono::steady_clock::time_point sLastWriteAt{};
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lk(sLastWriteMutex);
+        const auto sinceLast =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - sLastWriteAt).count();
+        const bool ready = state.readiness.bootstrapReady();
+        if (!ready && sLastWriteAt.time_since_epoch().count() != 0 && sinceLast < 250) {
+            return;
+        }
+        sLastWriteAt = now;
+    }
     try {
         namespace fs = std::filesystem;
         fs::path dir = yams::daemon::YamsDaemon::getXDGRuntimeDir();
@@ -1659,32 +1672,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             boost::asio::detached);
     });
 
-    // Plugins step: record readiness and duration uniformly.
-    spdlog::info("[ServiceManager] Phase: Plugins Ready.");
-    try {
-        (void)init::record_duration(
-            std::string(readiness::kPlugins),
-            [&]() -> yams::Result<void> {
-                try {
-                    const auto ps = getPluginHostFsmSnapshot();
-                    state_.readiness.pluginsReady = (ps.state == PluginHostState::Ready);
-                } catch (...) {
-                    // Fall back to ready when the host snapshot is unavailable.
-                    state_.readiness.pluginsReady = true;
-                }
-                return yams::Result<void>();
-            },
-            state_.initDurationsMs);
-    } catch (...) {
-        try {
-            const auto ps = getPluginHostFsmSnapshot();
-            state_.readiness.pluginsReady = (ps.state == PluginHostState::Ready);
-        } catch (...) {
-            state_.readiness.pluginsReady = true;
-        }
-    }
-    writeBootstrapStatusFile(config_, state_, this);
-
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
@@ -1887,62 +1874,57 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
     spdlog::info("[ServiceManager] Phase: Sessions Initialized.");
 
+    // KG store + GraphComponent: independent of post-ingest queue, hoisted out of
+    // the queue's try block so a queue init failure cannot mask KG state.
+    try {
+        auto writePool = getWriteConnectionPool();
+        if (writePool) {
+            metadata::KnowledgeGraphStoreConfig kgCfg;
+            kgCfg.enable_alias_fts = true;
+            kgCfg.enable_wal = true;
+            auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*writePool, kgCfg);
+            if (kgRes) {
+                auto kgStore =
+                    std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgRes).value());
+                if (databaseManager_) {
+                    databaseManager_->setKgStore(kgStore);
+                }
+                auto metadataRepo = getMetadataRepo();
+                if (metadataRepo) {
+                    metadataRepo->setKnowledgeGraphStore(kgStore);
+                    spdlog::info("KG store wired to metadata repository for tree diff integration");
+                }
+                try {
+                    auto graphComponent =
+                        std::make_shared<GraphComponent>(metadataRepo, kgStore, this);
+                    auto initResult = graphComponent->initialize();
+                    if (!initResult) {
+                        spdlog::warn("GraphComponent initialization failed: {}",
+                                     initResult.error().message);
+                        storeGraphComponent(std::shared_ptr<GraphComponent>{});
+                    } else {
+                        spdlog::info("GraphComponent initialized successfully");
+                        storeGraphComponent(graphComponent);
+                        if (metadataRepo) {
+                            metadataRepo->setGraphComponent(graphComponent);
+                            spdlog::info("GraphComponent wired to metadata repository");
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("GraphComponent init failed: {}", e.what());
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("KG store init failed: {}", e.what());
+    } catch (...) {
+        spdlog::warn("KG store init failed (unknown)");
+    }
+    spdlog::info("[ServiceManager] Phase: KG Store Initialized.");
+
     // Initialize post-ingest queue (decouple extraction/index/graph from add paths)
     try {
         using TA = yams::daemon::TuneAdvisor;
-        uint32_t taThreads = 0;
-        try {
-            taThreads = TA::postIngestThreads();
-        } catch (...) {
-        }
-        (void)taThreads; // Retrieved for future use in post-ingest configuration
-        // Initialize KG store on daemon side using connection pool if available
-        try {
-            auto writePool = getWriteConnectionPool();
-            if (writePool) {
-                metadata::KnowledgeGraphStoreConfig kgCfg;
-                kgCfg.enable_alias_fts = true;
-                kgCfg.enable_wal = true;
-                auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*writePool, kgCfg);
-                if (kgRes) {
-                    auto uniqueKg = std::move(kgRes).value();
-                    // Promote to shared_ptr for broader use and store as member
-                    auto kgStore =
-                        std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(uniqueKg));
-                    if (databaseManager_) {
-                        databaseManager_->setKgStore(kgStore);
-                    }
-                    // PBI-043-12: Wire KG store to metadata repository for tree diff integration
-                    auto metadataRepo = getMetadataRepo();
-                    if (metadataRepo) {
-                        metadataRepo->setKnowledgeGraphStore(kgStore);
-                        spdlog::info(
-                            "KG store wired to metadata repository for tree diff integration");
-                    }
-                    // PBI-009: Initialize GraphComponent after KG store is ready
-                    try {
-                        auto graphComponent =
-                            std::make_shared<GraphComponent>(metadataRepo, kgStore, this);
-                        auto initResult = graphComponent->initialize();
-                        if (!initResult) {
-                            spdlog::warn("GraphComponent initialization failed: {}",
-                                         initResult.error().message);
-                            storeGraphComponent(std::shared_ptr<GraphComponent>{});
-                        } else {
-                            spdlog::info("GraphComponent initialized successfully");
-                            storeGraphComponent(graphComponent);
-                            if (metadataRepo) {
-                                metadataRepo->setGraphComponent(graphComponent);
-                                spdlog::info("GraphComponent wired to metadata repository");
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::warn("GraphComponent init failed: {}", e.what());
-                    }
-                }
-            }
-        } catch (...) {
-        }
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
         auto newPostIngest = std::make_shared<PostIngestQueue>(
             getContentStore(), getMetadataRepo(), contentExtractors_, getKgStore(),
@@ -2321,16 +2303,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // Build SearchEngine with timeout
     try {
-        state_.readiness.searchProgress = 10;
+        int progress = 10;
+        if (getMetadataRepo())
+            progress = 40;
+        if (getVectorDatabase())
+            progress = 70;
+        state_.readiness.searchProgress = progress;
         writeBootstrapStatusFile(config_, state_, this);
-        if (getMetadataRepo()) {
-            state_.readiness.searchProgress = 40;
-            writeBootstrapStatusFile(config_, state_, this);
-        }
-        if (getVectorDatabase()) {
-            state_.readiness.searchProgress = 70;
-            writeBootstrapStatusFile(config_, state_, this);
-        }
         int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
 
         // Determine vector readiness: honor env disables and presence of vector infra

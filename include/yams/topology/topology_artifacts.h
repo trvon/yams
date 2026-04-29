@@ -80,6 +80,14 @@ struct TopologyBuildConfig {
     // before clustering runs: X' = S_hat^K * X. K = 0 disables smoothing.
     // Only embedding-consuming engines (HDBSCAN) observe the smoothed features.
     std::size_t featureSmoothingHops{0};
+    // Phase S: KMeans engine knobs.
+    // kmeansK: target cluster count for KMeans engines (0 = auto: max(64, min(300, sqrt(n)))).
+    // kmeansMaxIterations: Lloyd iteration cap during buildArtifacts.
+    // minSimilarityToJoin: cosine threshold below which an incremental update spawns a
+    //   new cluster instead of assigning to nearest existing centroid (default 0.45).
+    std::size_t kmeansK{0};
+    std::size_t kmeansMaxIterations{10};
+    float minSimilarityToJoin{0.45F};
 };
 
 struct TopologyDirtyRegion {
@@ -123,6 +131,9 @@ struct ClusterArtifact {
     std::optional<ClusterRepresentative> medoid;
     std::vector<std::string> memberDocumentHashes;
     std::vector<std::string> overlapClusterIds;
+    // Phase S: optional running-mean centroid for online KMeans engine.
+    // Empty for engines that don't compute it (HDBSCAN/Connected/Louvain).
+    std::vector<float> centroidEmbedding;
 };
 
 struct TopologyArtifactBatch {
@@ -165,6 +176,12 @@ struct TopologyRouteRequest {
     bool preferStableClusters{true};
     bool weakQueryOnly{true};
     RouteScoringMode scoringMode{RouteScoringMode::Current};
+    // Phase S: optional dense signal for sparse-guided routing.
+    // Empty queryEmbedding falls back to seed-only scoring (current behaviour).
+    std::vector<float> queryEmbedding;
+    // Blend factor for SparseGuidedClusterRouter: score = alpha · bm25_mass +
+    // (1-alpha) · centroid_cosine. 0.0 = pure dense; 1.0 = pure sparse.
+    float sparseDenseAlpha{0.5F};
 };
 
 struct ClusterRoute {

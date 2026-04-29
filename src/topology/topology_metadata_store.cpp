@@ -153,6 +153,9 @@ json clusterToJson(const ClusterArtifact& cluster) {
     if (cluster.medoid.has_value()) {
         j["medoid"] = representativeToJson(*cluster.medoid);
     }
+    if (!cluster.centroidEmbedding.empty()) {
+        j["centroid_embedding"] = cluster.centroidEmbedding;
+    }
     return j;
 }
 
@@ -175,6 +178,9 @@ ClusterArtifact clusterFromJson(const json& j) {
     }
     if (j.contains("overlap_cluster_ids") && j["overlap_cluster_ids"].is_array()) {
         cluster.overlapClusterIds = j["overlap_cluster_ids"].get<std::vector<std::string>>();
+    }
+    if (j.contains("centroid_embedding") && j["centroid_embedding"].is_array()) {
+        cluster.centroidEmbedding = j["centroid_embedding"].get<std::vector<float>>();
     }
     return cluster;
 }

@@ -587,6 +587,35 @@ struct SemanticNeighborGraphRoutingResult {
     float bestSeedScore{0.0f};
 };
 
+std::vector<ComponentResult> buildSemanticNeighborGraphComponentResults(
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const std::unordered_set<std::string>& routedDocumentHashes, const SearchEngineConfig& config) {
+    std::vector<ComponentResult> results;
+    if (!metadataRepo || routedDocumentHashes.empty()) {
+        return results;
+    }
+    std::vector<std::string> hashes(routedDocumentHashes.begin(), routedDocumentHashes.end());
+    auto docsResult = metadataRepo->batchGetDocumentsByHash(hashes);
+    if (!docsResult) {
+        return results;
+    }
+    const auto& docMap = docsResult.value();
+    results.reserve(docMap.size());
+    std::size_t rank = 0;
+    for (const auto& [hash, doc] : docMap) {
+        ComponentResult cr;
+        cr.documentHash = hash;
+        cr.filePath = doc.filePath;
+        cr.score = std::clamp(0.5f * config.semanticNeighborGraphCoreBoost, 0.0f, 1.0f);
+        cr.source = ComponentResult::Source::GraphVector;
+        cr.rank = rank++;
+        cr.snippet = std::optional<std::string>(doc.filePath);
+        cr.debugInfo["sng_routed"] = "true";
+        results.push_back(std::move(cr));
+    }
+    return results;
+}
+
 SemanticNeighborGraphRoutingResult buildSemanticNeighborGraphRoutingPool(
     const std::vector<float>& queryEmbedding,
     const std::shared_ptr<yams::vector::VectorDatabase>& vectorDb,
@@ -2302,6 +2331,63 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             response.debugStats["query_gate_mean_cosine"] =
                 fmt::format("{:.3f}", queryGateResult.meanCosine);
 
+            // Phase S: subtopic bucket routing (CluSD-inspired).
+            // When enabled, route the query to top-K buckets using BM25 hits
+            // (tier1Candidates) as the sparse signal and the query embedding
+            // vs. each bucket's centroid as the dense signal. Union the
+            // selected buckets' member hashes into bucketRouterMembers and
+            // narrow vector search to that set.
+            std::unordered_set<std::string> bucketRouterMembers;
+            std::size_t bucketRoutesSelected = 0;
+            if (workingConfig.enableSubtopicBucketRouting && metadataRepo_ && kgStore_) {
+                auto metadataIface =
+                    std::static_pointer_cast<yams::metadata::IMetadataRepository>(metadataRepo_);
+                yams::topology::MetadataKgTopologyArtifactStore artifactStore(
+                    std::move(metadataIface), kgStore_);
+                auto latestResult = artifactStore.loadLatest();
+                if (latestResult && latestResult.value().has_value()) {
+                    const auto& batch = *latestResult.value();
+                    yams::topology::TopologyRouteRequest req;
+                    req.queryText = query;
+                    req.seedDocumentHashes.reserve(tier1Candidates.size());
+                    for (const auto& h : tier1Candidates) {
+                        req.seedDocumentHashes.push_back(h);
+                    }
+                    req.limit = workingConfig.bucketRouterTopK;
+                    req.sparseDenseAlpha = workingConfig.bucketRouterAlpha;
+                    if (queryEmbedding.has_value()) {
+                        req.queryEmbedding = queryEmbedding.value();
+                    }
+                    yams::topology::SparseGuidedClusterRouter router;
+                    auto routesRes = router.route(req, batch);
+                    if (routesRes) {
+                        const auto& routes = routesRes.value();
+                        bucketRoutesSelected = routes.size();
+                        std::unordered_map<std::string, const yams::topology::ClusterArtifact*>
+                            byId;
+                        byId.reserve(batch.clusters.size());
+                        for (const auto& c : batch.clusters) {
+                            byId.emplace(c.clusterId, &c);
+                        }
+                        for (const auto& route : routes) {
+                            auto it = byId.find(route.clusterId);
+                            if (it == byId.end()) {
+                                continue;
+                            }
+                            for (const auto& h : it->second->memberDocumentHashes) {
+                                bucketRouterMembers.insert(h);
+                            }
+                        }
+                        if (!bucketRouterMembers.empty()) {
+                            vectorSearchNarrowSet = &bucketRouterMembers;
+                        }
+                    }
+                }
+            }
+            response.debugStats["bucket_routes_selected"] = std::to_string(bucketRoutesSelected);
+            response.debugStats["bucket_router_members"] =
+                std::to_string(bucketRouterMembers.size());
+
             if (workingConfig.enableSemanticNeighborGraphRouting && queryEmbedding.has_value() &&
                 vectorDb_ && kgStore_) {
                 sngRoutingResult = buildSemanticNeighborGraphRoutingPool(
@@ -3108,6 +3194,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         traceCollector.recordStageCounter(
             "anchor_fusion", "phss_confidence_milli",
             static_cast<int64_t>(std::lround(anchorPhssConfidence * 1000.0f)));
+    }
+
+    if (workingConfig.enableSemanticNeighborGraphRouting &&
+        !sngRoutingResult.routedHashes.empty()) {
+        auto sngDocResults = buildSemanticNeighborGraphComponentResults(
+            metadataRepo_, sngRoutingResult.routedHashes, workingConfig);
+        if (!sngDocResults.empty()) {
+            response.debugStats["sng_routing_component_emitted"] =
+                std::to_string(sngDocResults.size());
+            allComponentResults.insert(allComponentResults.end(), sngDocResults.begin(),
+                                       sngDocResults.end());
+            contributing.push_back("sng_routing");
+        }
     }
 
     YAMS_PLOT("component_results_count", static_cast<int64_t>(allComponentResults.size()));

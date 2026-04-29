@@ -2,6 +2,7 @@
 
 #include <yams/topology/topology_alternate_engines.h>
 #include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_online_kmeans_engine.h>
 
 #include <spdlog/spdlog.h>
 
@@ -15,8 +16,10 @@ namespace {
 constexpr std::string_view kConnectedKey = "connected";
 constexpr std::string_view kHdbscanKey = "hdbscan";
 constexpr std::string_view kLouvainKey = "louvain";
+constexpr std::string_view kKmeansOnlineKey = "kmeans_online";
 
-constexpr std::array<std::string_view, 3> kKnownAlgorithms{kConnectedKey, kHdbscanKey, kLouvainKey};
+constexpr std::array<std::string_view, 4> kKnownAlgorithms{kConnectedKey, kHdbscanKey, kLouvainKey,
+                                                           kKmeansOnlineKey};
 
 } // namespace
 
@@ -30,6 +33,9 @@ std::shared_ptr<ITopologyEngine> makeEngine(std::string_view algorithm) {
     }
     if (key == kLouvainKey) {
         return std::make_shared<LouvainTopologyEngine>();
+    }
+    if (key == kKmeansOnlineKey) {
+        return std::make_shared<OnlineKMeansTopologyEngine>();
     }
     spdlog::warn("[topology] unknown algorithm '{}'; falling back to connected", algorithm);
     return std::make_shared<ConnectedComponentTopologyEngine>();

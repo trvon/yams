@@ -604,4 +604,102 @@ StableClusterTopologyRouter::route(const TopologyRouteRequest& request,
     return routes;
 }
 
+namespace {
+
+float dotProduct(const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.size() != b.size() || a.empty()) {
+        return 0.0F;
+    }
+    double acc = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        acc += static_cast<double>(a[i]) * static_cast<double>(b[i]);
+    }
+    return static_cast<float>(acc);
+}
+
+float vectorNorm(const std::vector<float>& a) {
+    if (a.empty()) {
+        return 0.0F;
+    }
+    double acc = 0.0;
+    for (const float v : a) {
+        acc += static_cast<double>(v) * static_cast<double>(v);
+    }
+    return static_cast<float>(std::sqrt(acc));
+}
+
+float cosineCentroid(const std::vector<float>& q, const std::vector<float>& c) {
+    const float qn = vectorNorm(q);
+    const float cn = vectorNorm(c);
+    if (qn <= 0.0F || cn <= 0.0F) {
+        return 0.0F;
+    }
+    return dotProduct(q, c) / (qn * cn);
+}
+
+} // namespace
+
+Result<std::vector<ClusterRoute>>
+SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
+                                 const TopologyArtifactBatch& artifacts) const {
+    std::unordered_set<std::string> seeds(request.seedDocumentHashes.begin(),
+                                          request.seedDocumentHashes.end());
+
+    std::vector<std::pair<const ClusterArtifact*, std::pair<std::size_t, float>>> scored;
+    scored.reserve(artifacts.clusters.size());
+
+    std::size_t maxBm25Mass = 0;
+    for (const auto& cluster : artifacts.clusters) {
+        std::size_t mass = 0;
+        if (!seeds.empty()) {
+            for (const auto& h : cluster.memberDocumentHashes) {
+                if (seeds.contains(h)) {
+                    ++mass;
+                }
+            }
+        }
+        if (mass > maxBm25Mass) {
+            maxBm25Mass = mass;
+        }
+        float dense = 0.0F;
+        if (!request.queryEmbedding.empty() && !cluster.centroidEmbedding.empty()) {
+            dense = cosineCentroid(request.queryEmbedding, cluster.centroidEmbedding);
+            // Map [-1,1] -> [0,1] so it composes with the bm25 mass cleanly.
+            dense = std::clamp((dense + 1.0F) * 0.5F, 0.0F, 1.0F);
+        }
+        scored.emplace_back(&cluster, std::make_pair(mass, dense));
+    }
+
+    const float alpha = std::clamp(request.sparseDenseAlpha, 0.0F, 1.0F);
+    std::vector<ClusterRoute> routes;
+    routes.reserve(scored.size());
+    for (const auto& [cluster, signals] : scored) {
+        const std::size_t mass = signals.first;
+        const float dense = signals.second;
+        const float sparseNorm =
+            (maxBm25Mass > 0) ? static_cast<float>(mass) / static_cast<float>(maxBm25Mass) : 0.0F;
+        const double routeScore = static_cast<double>(alpha * sparseNorm + (1.0F - alpha) * dense) +
+                                  (cluster->persistenceScore * 0.05);
+        routes.push_back(ClusterRoute{
+            .clusterId = cluster->clusterId,
+            .medoidDocumentHash = cluster->medoid.has_value()
+                                      ? std::optional<std::string>(cluster->medoid->documentHash)
+                                      : std::nullopt,
+            .routeScore = routeScore,
+            .stabilityScore = cluster->persistenceScore,
+            .memberCount = cluster->memberCount});
+    }
+
+    std::sort(routes.begin(), routes.end(), [](const ClusterRoute& lhs, const ClusterRoute& rhs) {
+        if (lhs.routeScore != rhs.routeScore) {
+            return lhs.routeScore > rhs.routeScore;
+        }
+        return lhs.clusterId < rhs.clusterId;
+    });
+    if (request.limit > 0 && routes.size() > request.limit) {
+        routes.resize(request.limit);
+    }
+    return routes;
+}
+
 } // namespace yams::topology

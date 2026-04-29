@@ -165,6 +165,15 @@ struct SearchEngineConfig {
     float semanticNeighborGraphCoreBoost{1.2f};
     float semanticNeighborGraphNoiseBoost{0.8f};
 
+    // Phase S: subtopic bucket routing (CluSD-inspired).
+    // When enabled, queries are routed to the top-K most relevant buckets via
+    // SparseGuidedClusterRouter, and vector search is narrowed to the union
+    // of those buckets' member hashes.
+    bool enableSubtopicBucketRouting{false};
+    std::size_t bucketRouterTopK{3};
+    float bucketRouterAlpha{0.5f};
+    std::string bucketEngineKey{"kmeans_online"};
+
     bool bypassCorpusWarmingGate = false;
     float rrfK = 12.0f;
     float bm25NormDivisor = 25.0f;
