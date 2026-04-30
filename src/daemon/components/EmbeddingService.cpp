@@ -1,5 +1,6 @@
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/KGWriteQueue.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 
 #include <spdlog/spdlog.h>
 
@@ -741,12 +742,12 @@ void EmbeddingService::updateSemanticNeighborGraph(
         }
 
         const auto tEdgeUpsert = std::chrono::steady_clock::now();
-        if (auto* queue = getKgWriteQueue_ ? getKgWriteQueue_() : nullptr) {
-            auto batch = std::make_unique<DeferredKGBatch>();
-            batch->sourceFile = "EmbeddingService::semanticNeighborStream";
-            batch->edges = std::move(semanticEdges);
-            const auto enqueuedCount = batch->edges.size();
-            queue->enqueue(std::move(batch));
+        if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
+            auto batch = std::make_unique<WriteBatch>();
+            batch->source = "EmbeddingService::semanticNeighborStream";
+            const auto enqueuedCount = semanticEdges.size();
+            batch->ops.emplace_back(AddEdgesOp{std::move(semanticEdges), /*unique=*/true});
+            coord->enqueue(std::move(batch));
             recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
             semanticEdgesCreated_.fetch_add(enqueuedCount, std::memory_order_relaxed);
             return;
@@ -1009,12 +1010,12 @@ void EmbeddingService::updateSemanticNeighborGraph(
     }
 
     const auto tEdgeUpsert = std::chrono::steady_clock::now();
-    if (auto* queue = getKgWriteQueue_ ? getKgWriteQueue_() : nullptr) {
-        auto batch = std::make_unique<DeferredKGBatch>();
-        batch->sourceFile = "EmbeddingService::semanticNeighborCorpus";
-        batch->edges = std::move(semanticEdges);
-        const auto enqueuedCount = batch->edges.size();
-        queue->enqueue(std::move(batch));
+    if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "EmbeddingService::semanticNeighborCorpus";
+        const auto enqueuedCount = semanticEdges.size();
+        batch->ops.emplace_back(AddEdgesOp{std::move(semanticEdges), /*unique=*/true});
+        coord->enqueue(std::move(batch));
         recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
         semanticEdgesCreated_.fetch_add(enqueuedCount, std::memory_order_relaxed);
         return;

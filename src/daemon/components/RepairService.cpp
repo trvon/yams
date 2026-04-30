@@ -1,4 +1,5 @@
 #include <yams/daemon/components/RepairService.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -50,6 +51,24 @@ namespace yams::daemon {
 namespace {
 
 constexpr size_t kMaxTextToPersistInMetadataBytes = 16 * 1024 * 1024; // 16 MiB (best-effort)
+
+template <typename Meta>
+inline void submitRepairStatusUpdate(const RepairServiceContext& ctx, Meta& metaRepo,
+                                     std::vector<std::string> hashes,
+                                     yams::metadata::RepairStatus status, std::string_view source) {
+    if (hashes.empty())
+        return;
+    if (auto* coord = ctx.getWriteCoordinator ? ctx.getWriteCoordinator() : nullptr) {
+        auto wb = std::make_unique<WriteBatch>();
+        wb->source.assign(source.data(), source.size());
+        wb->ops.emplace_back(UpdateRepairStatusOp{std::move(hashes), status});
+        coord->enqueue(std::move(wb));
+        return;
+    }
+    if (metaRepo) {
+        (void)metaRepo->batchUpdateDocumentRepairStatuses(hashes, status);
+    }
+}
 
 uint64_t steadyNowMillis() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -317,6 +336,7 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
         return services->rebuildSemanticNeighborGraph(reason);
     };
     ctx.vectorIndexCoordinator = services->getVectorIndexCoordinator().get();
+    ctx.getWriteCoordinator = [services] { return services->getWriteCoordinator(); };
     return ctx;
 }
 
@@ -596,12 +616,9 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         if (!missingEmbeddings.empty()) {
             if (state_)
                 state_->stats.repairBatchesAttempted++;
-            if (meta_repo) {
-                // Mark as Processing before queuing
-                auto statusRes = meta_repo->batchUpdateDocumentRepairStatuses(
-                    missingEmbeddings, yams::metadata::RepairStatus::Processing);
-                (void)statusRes;
-            }
+            submitRepairStatusUpdate(ctx_, meta_repo, missingEmbeddings,
+                                     yams::metadata::RepairStatus::Processing,
+                                     "RepairService::queueEmbeddings/processing");
 
             InternalEventBus::EmbedJob job{
                 missingEmbeddings, static_cast<uint32_t>(shutdownState->config.maxBatch), true,
@@ -615,12 +632,9 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             if (queued) {
                 InternalEventBus::instance().incEmbedQueued();
             } else {
-                if (meta_repo) {
-                    // Avoid leaving documents stuck in Processing when enqueue fails (shutdown,
-                    // channel pressure). They can be retried by subsequent repair passes.
-                    (void)meta_repo->batchUpdateDocumentRepairStatuses(
-                        missingEmbeddings, yams::metadata::RepairStatus::Pending);
-                }
+                submitRepairStatusUpdate(ctx_, meta_repo, missingEmbeddings,
+                                         yams::metadata::RepairStatus::Pending,
+                                         "RepairService::queueEmbeddings/rollback");
                 InternalEventBus::instance().incEmbedDropped();
             }
         }
@@ -1556,8 +1570,9 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
             (void)meta->updateDocumentExtractionStatus(s.docId, false,
                                                        metadata::ExtractionStatus::Pending,
                                                        "RepairService: recovery attempt");
-            (void)meta->batchUpdateDocumentRepairStatuses({s.hash},
-                                                          metadata::RepairStatus::Pending);
+            submitRepairStatusUpdate(ctx_, meta, std::vector<std::string>{s.hash},
+                                     metadata::RepairStatus::Pending,
+                                     "RepairService::recovery/single");
             ++result.succeeded;
         } else {
             ++result.failed;
@@ -1660,9 +1675,9 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
                                                        metadata::ExtractionStatus::Pending,
                                                        "RepairService: recovery attempt");
 
-            // Reset repair status to Pending
-            (void)meta->batchUpdateDocumentRepairStatuses({s.hash},
-                                                          metadata::RepairStatus::Pending);
+            submitRepairStatusUpdate(ctx_, meta, std::vector<std::string>{s.hash},
+                                     metadata::RepairStatus::Pending,
+                                     "RepairService::repairAttempt/reset");
 
             ++result.succeeded;
         } else {
@@ -3192,10 +3207,8 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
         const std::size_t batchIndex = (i / batchSize) + 1;
         const std::size_t totalBatches = (hashes.size() + batchSize - 1) / batchSize;
 
-        if (meta) {
-            (void)meta->batchUpdateDocumentRepairStatuses(batch,
-                                                          metadata::RepairStatus::Processing);
-        }
+        submitRepairStatusUpdate(ctx_, meta, batch, metadata::RepairStatus::Processing,
+                                 "RepairService::executeBatch/processing");
 
         InternalEventBus::EmbedJob job{batch,
                                        static_cast<uint32_t>(batch.size()),
@@ -3213,10 +3226,8 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
                                                       jobLabel, batch.size(), 50, 1000, isCanceled);
         if (!queued) {
             result.failed += batch.size();
-            if (meta) {
-                (void)meta->batchUpdateDocumentRepairStatuses(batch,
-                                                              metadata::RepairStatus::Pending);
-            }
+            submitRepairStatusUpdate(ctx_, meta, batch, metadata::RepairStatus::Pending,
+                                     "RepairService::executeBatch/rollback");
             InternalEventBus::instance().incEmbedDropped(batch.size());
             continue;
         }
@@ -3397,10 +3408,8 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         std::vector<std::string> batch(hashes.begin() + i, hashes.begin() + end);
         const std::size_t batchIndex = i / batchSize;
 
-        if (meta) {
-            (void)meta->batchUpdateDocumentRepairStatuses(batch,
-                                                          metadata::RepairStatus::Processing);
-        }
+        submitRepairStatusUpdate(ctx_, meta, batch, metadata::RepairStatus::Processing,
+                                 "RepairService::executeBatchMonitored/processing");
 
         std::shared_ptr<InternalEventBus::EmbedJobMonitor> monitor;
         if (req.foreground) {
@@ -3433,10 +3442,8 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
 
         if (!pushed) {
             result.failed += batch.size();
-            if (meta) {
-                (void)meta->batchUpdateDocumentRepairStatuses(batch,
-                                                              metadata::RepairStatus::Pending);
-            }
+            submitRepairStatusUpdate(ctx_, meta, batch, metadata::RepairStatus::Pending,
+                                     "RepairService::executeBatchMonitored/rollback");
             InternalEventBus::instance().incEmbedDropped();
             continue;
         }

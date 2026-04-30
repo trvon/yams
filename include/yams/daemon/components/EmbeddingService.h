@@ -30,7 +30,8 @@ class VectorDatabase;
 }
 namespace daemon {
 class KGWriteQueue;
-}
+class WriteCoordinator;
+} // namespace daemon
 namespace daemon {
 
 class IModelProvider;
@@ -70,6 +71,10 @@ public:
 
     void setKgWriteQueueGetter(std::function<KGWriteQueue*()> getter) {
         getKgWriteQueue_ = std::move(getter);
+    }
+
+    void setWriteCoordinatorGetter(std::function<WriteCoordinator*()> getter) {
+        getWriteCoordinator_ = std::move(getter);
     }
 
     std::size_t processed() const { return processed_.load(); }
@@ -134,6 +139,7 @@ private:
     std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
     std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore_;
     std::function<KGWriteQueue*()> getKgWriteQueue_;
+    std::function<WriteCoordinator*()> getWriteCoordinator_;
     std::function<Result<std::string>(const std::string&,
                                       std::function<void(const ModelLoadEvent&)>)>
         ensureModelReady_;

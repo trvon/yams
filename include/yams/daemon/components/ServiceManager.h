@@ -36,6 +36,7 @@
 #include <yams/daemon/components/IngestMetricsPublisher.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
@@ -347,6 +348,9 @@ public:
 
     // KG Write Queue - serializes KG writes to eliminate lock contention
     KGWriteQueue* getKgWriteQueue() const { return kgWriteQueue_.get(); }
+
+    // Write Coordinator - unified single-writer entry point for all metadata writes
+    WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
 
     // Graph Component (PBI-009)
     std::shared_ptr<GraphComponent> getGraphComponent() const { return loadGraphComponent(); }
@@ -686,6 +690,7 @@ private:
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<KGWriteQueue> kgWriteQueue_;
+    std::unique_ptr<WriteCoordinator> writeCoordinator_;
     RepairServiceHost repairServiceHost_;
     TopologyManager topologyManager_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;

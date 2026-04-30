@@ -43,6 +43,8 @@ class RepairManager;
 
 namespace yams::daemon {
 
+class WriteCoordinator;
+
 class ServiceManager;
 struct StateComponent;
 class GraphComponent;
@@ -81,6 +83,7 @@ struct RepairServiceContext {
     std::function<Result<std::size_t>(const std::string&)> rebuildSemanticNeighborGraph;
     // Coordinator for vector-index mutations (may be nullptr in tests / CLI contexts).
     VectorIndexCoordinator* vectorIndexCoordinator{nullptr};
+    std::function<WriteCoordinator*()> getWriteCoordinator;
 };
 
 /**

@@ -1256,6 +1256,10 @@ void ServiceManager::shutdown() {
     }
 
     spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down KG write queue");
+    if (writeCoordinator_) {
+        writeCoordinator_->shutdown();
+        writeCoordinator_.reset();
+    }
     if (kgWriteQueue_) {
         kgWriteQueue_->shutdown();
         kgWriteQueue_.reset();
@@ -2049,6 +2053,15 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             kgWriteQueue_ = std::make_unique<KGWriteQueue>(*workCoordinator_->getIOContext(),
                                                            kgStore, queueConfig);
             kgWriteQueue_->start();
+
+            WriteCoordinator::Config wcConfig;
+            wcConfig.maxBatchSize = queueConfig.maxBatchSize;
+            wcConfig.maxBatchDelayMs = queueConfig.maxBatchDelayMs;
+            wcConfig.channelCapacity = queueConfig.channelCapacity;
+            writeCoordinator_ = std::make_unique<WriteCoordinator>(
+                *workCoordinator_->getIOContext(), kgStore, getMetadataRepo(), wcConfig);
+            writeCoordinator_->start();
+
             auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
             if (piq) {
                 piq->setKgWriteQueue(kgWriteQueue_.get());
@@ -2056,8 +2069,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (auto emb =
                     std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire)) {
                 emb->setKgWriteQueueGetter([this]() { return kgWriteQueue_.get(); });
+                emb->setWriteCoordinatorGetter([this]() { return writeCoordinator_.get(); });
             }
-            spdlog::debug("[ServiceManager] KGWriteQueue started");
+            spdlog::debug("[ServiceManager] KGWriteQueue + WriteCoordinator started");
         }
     } catch (const std::exception& e) {
         spdlog::warn("[ServiceManager] KGWriteQueue init failed: {}", e.what());
