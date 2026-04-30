@@ -16,12 +16,12 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -324,19 +324,19 @@ bool EntityGraphService::populateKnowledgeGraph(
     spdlog::debug("EntityGraphService: received {} symbols, {} relations from {}",
                   result->symbol_count, result->relation_count, job.filePath);
 
-    // Require KGWriteQueue - batched writes only (no fallback to per-document commits)
-    KGWriteQueue* kgQueue = services_ ? services_->getKgWriteQueue() : nullptr;
-    if (!kgQueue) {
-        spdlog::error("EntityGraphService: KGWriteQueue not available, cannot process symbols");
+    // Require WriteCoordinator - batched writes only (no fallback to per-document commits)
+    WriteCoordinator* writeCoordinator = services_ ? services_->getWriteCoordinator() : nullptr;
+    if (!writeCoordinator) {
+        spdlog::error("EntityGraphService: WriteCoordinator not available, cannot process symbols");
         return false;
     }
 
-    return populateKnowledgeGraphDeferred(kg, job, result, kgQueue);
+    return populateKnowledgeGraphDeferred(kg, job, result, writeCoordinator);
 }
 
 bool EntityGraphService::populateKnowledgeGraphDeferred(
     const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
-    const yams_symbol_extraction_result_v1* result, KGWriteQueue* kgQueue) {
+    const yams_symbol_extraction_result_v1* result, WriteCoordinator* writeCoordinator) {
     // Build a DeferredKGBatch with all operations using nodeKey references
     // This eliminates lock contention by batching writes from multiple documents
     auto batch = std::make_unique<DeferredKGBatch>();
@@ -577,7 +577,7 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
         };
 
         // Store nodeKey in alias.source field for resolution (hacky but works)
-        // The KGWriteQueue will resolve these based on the nodeKey->nodeId map
+        // The WriteCoordinator will resolve these based on the nodeKey->nodeId map
         if (sym.name) {
             addAliasVariants(sym.name, "symbol_name", 1.0f);
         }
@@ -969,7 +969,9 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
     // === Enqueue ===
     try {
-        kgQueue->enqueue(std::move(batch));
+        auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch),
+                                                    "EntityGraphService::symbols/" + job.filePath);
+        writeCoordinator->enqueue(std::move(wb));
 
         spdlog::debug("EntityGraphService: queued KG batch with {} symbols from {}",
                       result->symbol_count, job.filePath);

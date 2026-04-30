@@ -3165,7 +3165,8 @@ private:
 // Out-of-line implementation of beginWriteBatch (requires SqliteWriteBatch to be defined)
 Result<std::unique_ptr<KnowledgeGraphStore::WriteBatch>>
 SqliteKnowledgeGraphStore::beginWriteBatch() {
-    auto connResult = pool_->acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+    auto connResult = pool_->acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal,
+                                     "KnowledgeGraphStore::beginWriteBatch");
     if (!connResult) {
         return Error{ErrorCode::ResourceExhausted, "Failed to acquire connection for write batch"};
     }

@@ -16,6 +16,7 @@
 #include <boost/asio/strand.hpp>
 #include <yams/daemon/components/IComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/metadata/document_metadata.h>
 
 namespace yams {
 namespace api {
@@ -29,7 +30,6 @@ namespace vector {
 class VectorDatabase;
 }
 namespace daemon {
-class KGWriteQueue;
 class WriteCoordinator;
 } // namespace daemon
 namespace daemon {
@@ -68,10 +68,6 @@ public:
                       std::function<Result<std::string>(const std::string&,
                                                         std::function<void(const ModelLoadEvent&)>)>
                           ensureModelReady = {});
-
-    void setKgWriteQueueGetter(std::function<KGWriteQueue*()> getter) {
-        getKgWriteQueue_ = std::move(getter);
-    }
 
     void setWriteCoordinatorGetter(std::function<WriteCoordinator*()> getter) {
         getWriteCoordinator_ = std::move(getter);
@@ -128,6 +124,8 @@ private:
         const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
         bool sourceAllCorpus = false);
     void recordPhaseTiming(const std::string& phase, std::chrono::steady_clock::time_point start);
+    void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
+                                   std::string source);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -138,7 +136,6 @@ private:
     std::function<std::string()> getPreferredModel_;
     std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
     std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore_;
-    std::function<KGWriteQueue*()> getKgWriteQueue_;
     std::function<WriteCoordinator*()> getWriteCoordinator_;
     std::function<Result<std::string>(const std::string&,
                                       std::function<void(const ModelLoadEvent&)>)>

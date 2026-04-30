@@ -1,5 +1,4 @@
 #include <yams/daemon/components/EmbeddingService.h>
-#include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <spdlog/spdlog.h>
@@ -108,6 +107,23 @@ void EmbeddingService::recordPhaseTiming(const std::string& phase,
     timing.totalMs += static_cast<uint64_t>(std::max<long long>(0, ms));
     timing.maxMs =
         std::max<uint64_t>(timing.maxMs, static_cast<uint64_t>(std::max<long long>(0, ms)));
+}
+
+void EmbeddingService::enqueueRepairStatusUpdate(std::vector<std::string> hashes,
+                                                 metadata::RepairStatus status,
+                                                 std::string source) {
+    if (hashes.empty() || !meta_) {
+        return;
+    }
+    if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = source.empty() ? "EmbeddingService::repairStatus" : std::move(source);
+        batch->ops.emplace_back(UpdateRepairStatusOp{std::move(hashes), status});
+        coord->enqueue(std::move(batch));
+        return;
+    }
+    // Transitional fallback for tests/standalone wiring that has not installed the coordinator.
+    (void)meta_->batchUpdateDocumentRepairStatuses(hashes, status);
 }
 
 void EmbeddingService::shutdown() {
@@ -1680,8 +1696,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     auto markHashesFailed = [&](std::string_view reason) {
         if (!job.hashes.empty()) {
-            (void)meta_->batchUpdateDocumentRepairStatuses(job.hashes,
-                                                           metadata::RepairStatus::Failed);
+            enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Failed,
+                                      "EmbeddingService::jobFailed");
         }
         failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
         finishMonitor("failed", std::string(reason));
@@ -1693,8 +1709,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     if (isJobCanceled()) {
         if (!job.hashes.empty()) {
-            (void)meta_->batchUpdateDocumentRepairStatuses(job.hashes,
-                                                           metadata::RepairStatus::Pending);
+            enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Pending,
+                                      "EmbeddingService::jobPending");
         }
         finishMonitor("cancelled", "embedding job canceled before model preparation");
         return;
@@ -1740,8 +1756,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     if (isJobCanceled()) {
         if (!job.hashes.empty()) {
-            (void)meta_->batchUpdateDocumentRepairStatuses(job.hashes,
-                                                           metadata::RepairStatus::Pending);
+            enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Pending,
+                                      "EmbeddingService::jobPending");
         }
         finishMonitor("cancelled", "embedding job canceled before gather");
         return;
@@ -1898,16 +1914,16 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     failed_.fetch_add(failedGather);
 
     if (!completedGatherHashes.empty()) {
-        (void)meta_->batchUpdateDocumentRepairStatuses(completedGatherHashes,
-                                                       metadata::RepairStatus::Completed);
+        enqueueRepairStatusUpdate(completedGatherHashes, metadata::RepairStatus::Completed,
+                                  "EmbeddingService::gatherCompleted");
     }
     if (!skippedGatherHashes.empty()) {
-        (void)meta_->batchUpdateDocumentRepairStatuses(skippedGatherHashes,
-                                                       metadata::RepairStatus::Skipped);
+        enqueueRepairStatusUpdate(skippedGatherHashes, metadata::RepairStatus::Skipped,
+                                  "EmbeddingService::gatherSkipped");
     }
     if (!failedGatherHashes.empty()) {
-        (void)meta_->batchUpdateDocumentRepairStatuses(failedGatherHashes,
-                                                       metadata::RepairStatus::Failed);
+        enqueueRepairStatusUpdate(failedGatherHashes, metadata::RepairStatus::Failed,
+                                  "EmbeddingService::gatherFailed");
     }
     updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
         mon.succeededDocs += completedGatherHashes.size();
@@ -1933,8 +1949,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         for (const auto& doc : docsToEmbed) {
             pendingHashes.push_back(doc.hash);
         }
-        (void)meta_->batchUpdateDocumentRepairStatuses(pendingHashes,
-                                                       metadata::RepairStatus::Pending);
+        enqueueRepairStatusUpdate(std::move(pendingHashes), metadata::RepairStatus::Pending,
+                                  "EmbeddingService::chunkPending");
         finishMonitor("cancelled", "embedding job canceled before chunking");
         return;
     }
@@ -1949,8 +1965,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         for (const auto& doc : docsToEmbed) {
             failedHashes.push_back(doc.hash);
         }
-        (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
-                                                       metadata::RepairStatus::Failed);
+        enqueueRepairStatusUpdate(std::move(failedHashes), metadata::RepairStatus::Failed,
+                                  "EmbeddingService::chunkFailed");
         finishMonitor("failed", "embedding service shutting down before chunking");
         return;
     }
@@ -2029,8 +2045,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             spdlog::info(
                 "EmbeddingService: aborting job={} during chunking (docs={}) due to cancel", jobTag,
                 docsToEmbed.size());
-            (void)meta_->batchUpdateDocumentRepairStatuses(hashesToUpdate,
-                                                           metadata::RepairStatus::Pending);
+            enqueueRepairStatusUpdate(std::move(hashesToUpdate), metadata::RepairStatus::Pending,
+                                      "EmbeddingService::chunkAbortPending");
             finishMonitor("cancelled", "embedding job canceled during chunking");
             return;
         }
@@ -2039,8 +2055,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                      jobTag, docsToEmbed.size());
         failed_.fetch_add(docsToEmbed.size(), std::memory_order_relaxed);
         InternalEventBus::instance().incEmbedDropped(docsToEmbed.size());
-        (void)meta_->batchUpdateDocumentRepairStatuses(hashesToUpdate,
-                                                       metadata::RepairStatus::Failed);
+        enqueueRepairStatusUpdate(std::move(hashesToUpdate), metadata::RepairStatus::Failed,
+                                  "EmbeddingService::chunkAbortFailed");
         finishMonitor("failed", "embedding service shutting down during chunking");
     };
 
@@ -2399,8 +2415,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         for (const auto& doc : docsToEmbed) {
             failedHashes.push_back(doc.hash);
         }
-        (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
-                                                       metadata::RepairStatus::Failed);
+        enqueueRepairStatusUpdate(std::move(failedHashes), metadata::RepairStatus::Failed,
+                                  "EmbeddingService::chunkFailed");
         finishMonitor("failed", "embedding job failed");
     };
 
@@ -2596,7 +2612,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
         failed_.fetch_add(1, std::memory_order_relaxed);
         (void)meta_->updateDocumentEmbeddingStatusByHash(doc.hash, false, modelName);
-        (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Failed);
+        enqueueRepairStatusUpdate(std::vector<std::string>{doc.hash},
+                                  metadata::RepairStatus::Failed,
+                                  "EmbeddingService::embeddingFailed");
         updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
             mon.failedDocs += 1;
             mon.processedDocs = approxProcessedDocs(mon);
@@ -2624,8 +2642,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 }
             }
             if (!pendingHashes.empty()) {
-                (void)meta_->batchUpdateDocumentRepairStatuses(pendingHashes,
-                                                               metadata::RepairStatus::Pending);
+                enqueueRepairStatusUpdate(std::move(pendingHashes), metadata::RepairStatus::Pending,
+                                          "EmbeddingService::inferenceCancelledPending");
             }
             finishMonitor("cancelled", "embedding job canceled during inference");
             return;
@@ -2935,15 +2953,11 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
     }
 
-    auto repairStatusResult =
-        meta_->batchUpdateDocumentRepairStatuses(successHashes, metadata::RepairStatus::Completed);
-    if (!repairStatusResult) {
-        spdlog::warn("EmbeddingService: failed to mark {} repair statuses completed: {}",
-                     successHashes.size(), repairStatusResult.error().message);
-    }
+    const auto successCount = successHashes.size();
+    enqueueRepairStatusUpdate(successHashes, metadata::RepairStatus::Completed,
+                              "EmbeddingService::successCompleted");
 
-    logPhase("metadata_update", tMeta,
-             fmt::format("docs={} model='{}'", successHashes.size(), modelName));
+    logPhase("metadata_update", tMeta, fmt::format("docs={} model='{}'", successCount, modelName));
 
     if (job.updateSemanticGraph && getKgStore_) {
         auto kgStore = getKgStore_();

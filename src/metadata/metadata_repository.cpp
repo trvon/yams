@@ -4066,7 +4066,14 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
 
     // Keep a dedicated pooled connection alive for SymSpell. SymSpellSearch stores
     // a raw sqlite3* pointer and assumes it remains valid for its entire lifetime.
-    auto connResult = pool_.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+    //
+    // Important: when the daemon runs with a single write connection, this permanent lease must
+    // not come from the write pool or it starves all metadata/KG writes. Prefer the read pool
+    // when available; it is still a normal SQLite handle, just configured for read-heavy access.
+    auto& symspellPool = readPool_ != nullptr ? *readPool_ : pool_;
+    auto connResult =
+        symspellPool.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal,
+                             "MetadataRepository::SymSpell");
     if (!connResult) {
         return Error{ErrorCode::ResourceExhausted,
                      "Failed to acquire database connection for SymSpell"};

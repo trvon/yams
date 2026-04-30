@@ -1255,17 +1255,10 @@ void ServiceManager::shutdown() {
         }
     }
 
-    spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down KG write queue");
+    spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down write coordinator");
     if (writeCoordinator_) {
         writeCoordinator_->shutdown();
         writeCoordinator_.reset();
-    }
-    if (kgWriteQueue_) {
-        kgWriteQueue_->shutdown();
-        kgWriteQueue_.reset();
-        spdlog::info("[ServiceManager] Phase 6.3.6: KG write queue shutdown complete");
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.3.6: No KG write queue to shutdown");
     }
 
     // No vector index to save - using VectorDatabase directly
@@ -2041,40 +2034,30 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: EmbeddingService Initialized.");
 
-    // Initialize KGWriteQueue for serialized KG writes (internal infrastructure, not a phase)
+    // Initialize WriteCoordinator for serialized metadata/KG writes (internal infrastructure).
     try {
         auto kgStore = getKgStore();
         if (kgStore && workCoordinator_) {
-            KGWriteQueue::Config queueConfig;
-            queueConfig.maxBatchSize = 50;
-            queueConfig.maxBatchDelayMs = std::chrono::milliseconds(100);
-            queueConfig.channelCapacity = 1000;
-
-            kgWriteQueue_ = std::make_unique<KGWriteQueue>(*workCoordinator_->getIOContext(),
-                                                           kgStore, queueConfig);
-            kgWriteQueue_->start();
-
             WriteCoordinator::Config wcConfig;
-            wcConfig.maxBatchSize = queueConfig.maxBatchSize;
-            wcConfig.maxBatchDelayMs = queueConfig.maxBatchDelayMs;
-            wcConfig.channelCapacity = queueConfig.channelCapacity;
+            wcConfig.maxBatchSize = 50;
+            wcConfig.maxBatchDelayMs = std::chrono::milliseconds(100);
+            wcConfig.channelCapacity = 1000;
             writeCoordinator_ = std::make_unique<WriteCoordinator>(
                 *workCoordinator_->getIOContext(), kgStore, getMetadataRepo(), wcConfig);
             writeCoordinator_->start();
 
             auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
             if (piq) {
-                piq->setKgWriteQueue(kgWriteQueue_.get());
+                piq->setWriteCoordinator(writeCoordinator_.get());
             }
             if (auto emb =
                     std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire)) {
-                emb->setKgWriteQueueGetter([this]() { return kgWriteQueue_.get(); });
                 emb->setWriteCoordinatorGetter([this]() { return writeCoordinator_.get(); });
             }
-            spdlog::debug("[ServiceManager] KGWriteQueue + WriteCoordinator started");
+            spdlog::debug("[ServiceManager] WriteCoordinator started");
         }
     } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] KGWriteQueue init failed: {}", e.what());
+        spdlog::warn("[ServiceManager] WriteCoordinator init failed: {}", e.what());
     } catch (...) {
     }
 
@@ -3389,9 +3372,9 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                 std::atomic_load_explicit(&self->embeddingService_, std::memory_order_acquire);
             const auto embedQueued = embeddingService ? embeddingService->queuedJobs() : 0U;
             const auto embedInFlight = embeddingService ? embeddingService->inFlightJobs() : 0U;
-            auto* kgWriteQueue = self->getKgWriteQueue();
-            const auto kgQueued = kgWriteQueue ? kgWriteQueue->queuedBatches() : 0U;
-            const auto kgInFlight = kgWriteQueue ? kgWriteQueue->inFlight() : 0U;
+            auto* writeCoordinator = self->getWriteCoordinator();
+            const auto kgQueued = writeCoordinator ? writeCoordinator->queuedBatches() : 0U;
+            const auto kgInFlight = writeCoordinator ? writeCoordinator->inFlight() : 0U;
 
             if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
                 postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||

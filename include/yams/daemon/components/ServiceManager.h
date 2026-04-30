@@ -35,7 +35,6 @@
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/IngestMetricsPublisher.h>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PluginManager.h>
@@ -345,9 +344,6 @@ public:
     std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const {
         return databaseManager_ ? databaseManager_->getKgStore() : nullptr;
     }
-
-    // KG Write Queue - serializes KG writes to eliminate lock contention
-    KGWriteQueue* getKgWriteQueue() const { return kgWriteQueue_.get(); }
 
     // Write Coordinator - unified single-writer entry point for all metadata writes
     WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
@@ -689,7 +685,6 @@ private:
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
-    std::unique_ptr<KGWriteQueue> kgWriteQueue_;
     std::unique_ptr<WriteCoordinator> writeCoordinator_;
     RepairServiceHost repairServiceHost_;
     TopologyManager topologyManager_;

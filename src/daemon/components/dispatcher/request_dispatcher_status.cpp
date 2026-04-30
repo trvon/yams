@@ -1071,18 +1071,22 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     response.additionalStats["post_body_entity_segment_edges_created"] =
                         std::to_string(piq->bodyEntitySegmentEdgesCreated());
                 }
-                if (auto kgq = serviceManager_->getKgWriteQueue()) {
-                    auto stats = kgq->getStats();
+                if (auto wc = serviceManager_->getWriteCoordinator()) {
+                    auto stats = wc->getStats();
                     response.additionalStats["kg_write_batches_enqueued"] =
                         std::to_string(stats.batchesEnqueued);
                     response.additionalStats["kg_write_batches_committed"] =
                         std::to_string(stats.batchesCommitted);
                     response.additionalStats["kg_write_documents_processed"] =
-                        std::to_string(stats.documentsProcessed);
+                        std::to_string(stats.documentsInserted);
                     response.additionalStats["kg_write_doc_entities_inserted"] =
-                        std::to_string(stats.docEntitiesInserted);
+                        std::to_string(stats.docEntitiesAdded);
                     response.additionalStats["kg_write_deferred_doc_entities_skipped"] =
-                        std::to_string(stats.deferredDocEntitiesSkipped);
+                        std::to_string(0);
+                    response.additionalStats["write_metadata_entries_set"] =
+                        std::to_string(stats.metadataEntriesSet);
+                    response.additionalStats["write_extraction_statuses_updated"] =
+                        std::to_string(stats.extractionStatusesUpdated);
                 }
             }
         } catch (...) {

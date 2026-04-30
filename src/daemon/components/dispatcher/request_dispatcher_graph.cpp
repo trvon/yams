@@ -442,8 +442,73 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
 
     KgIngestResponse resp;
 
-    // Phase 1: Ingest nodes
-    // Build a map of nodeKey -> nodeId for edge resolution
+    auto* coord = serviceManager_ ? serviceManager_->getWriteCoordinator() : nullptr;
+    if (coord) {
+        auto wb = std::make_unique<WriteBatch>();
+        wb->source = "RPC::ingestGraph";
+
+        if (!req.nodes.empty()) {
+            std::vector<KGNode> nodes;
+            nodes.reserve(req.nodes.size());
+            for (const auto& n : req.nodes) {
+                KGNode node;
+                node.nodeKey = n.nodeKey;
+                node.label = n.label.empty() ? std::nullopt : std::make_optional(n.label);
+                node.type = n.type.empty() ? std::nullopt : std::make_optional(n.type);
+                node.properties =
+                    n.properties.empty() ? std::nullopt : std::make_optional(n.properties);
+                nodes.push_back(std::move(node));
+            }
+            wb->ops.emplace_back(UpsertNodesOp{std::move(nodes)});
+        }
+
+        if (!req.edges.empty()) {
+            std::vector<DeferredEdgeOp> deferred;
+            deferred.reserve(req.edges.size());
+            for (const auto& edge : req.edges) {
+                DeferredEdgeOp op;
+                op.srcNodeKey = edge.srcNodeKey;
+                op.dstNodeKey = edge.dstNodeKey;
+                op.relation = edge.relation;
+                op.weight = edge.weight;
+                op.properties =
+                    edge.properties.empty() ? std::nullopt : std::make_optional(edge.properties);
+                deferred.push_back(std::move(op));
+            }
+            wb->ops.emplace_back(AddDeferredEdgesOp{std::move(deferred)});
+        }
+
+        if (!req.aliases.empty()) {
+            std::vector<KGAlias> aliases;
+            aliases.reserve(req.aliases.size());
+            for (const auto& a : req.aliases) {
+                KGAlias alias;
+                alias.nodeId = 0;
+                alias.alias = a.alias;
+                std::string realSource = a.source.empty() ? std::string{} : a.source;
+                alias.source = realSource + "|" + a.nodeKey;
+                alias.confidence = a.confidence;
+                aliases.push_back(std::move(alias));
+            }
+            wb->ops.emplace_back(AddAliasesOp{std::move(aliases)});
+        }
+
+        coord->enqueue(std::move(wb));
+        auto fr = coord->flush();
+        if (!fr) {
+            resp.success = false;
+            resp.errors.push_back("Flush failed: " + fr.error().message);
+        } else {
+            resp.success = true;
+            resp.nodesInserted = static_cast<uint32_t>(req.nodes.size());
+            resp.edgesInserted = static_cast<uint32_t>(req.edges.size());
+            resp.aliasesInserted = static_cast<uint32_t>(req.aliases.size());
+        }
+        spdlog::info("KgIngest (via WriteCoordinator) completed: {} nodes, {} edges, {} aliases",
+                     resp.nodesInserted, resp.edgesInserted, resp.aliasesInserted);
+        co_return resp;
+    }
+
     std::unordered_map<std::string, int64_t> nodeKeyToId;
 
     if (!req.nodes.empty()) {

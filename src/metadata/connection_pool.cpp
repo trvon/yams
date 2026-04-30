@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -321,7 +322,41 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
             waitingGuard.markTimeout();
             waitingGuard.finish();
             failedAcquisitions_++;
-            return Error{ErrorCode::Timeout, "Timeout acquiring connection"};
+            std::ostringstream holders;
+            std::size_t shown = 0;
+            const auto now = std::chrono::steady_clock::now();
+            for (const auto* leased : leased_) {
+                if (!leased) {
+                    continue;
+                }
+                if (shown++ > 0) {
+                    holders << "; ";
+                }
+                const auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        now - leased->acquiredAt())
+                                        .count();
+                const auto& tag = leased->holderTag();
+                holders << (tag.empty() ? "<untagged>" : tag) << " held_ms=" << heldMs;
+                if (shown >= 8 && leased_.size() > shown) {
+                    holders << "; +" << (leased_.size() - shown) << " more";
+                    break;
+                }
+            }
+            const std::string holderSummary = holders.str();
+            spdlog::error(
+                "[ConnectionPool] timeout acquiring connection tag='{}' priority={} active={} "
+                "available={} total={} waiting={} holders=[{}]",
+                callerTag.empty() ? "<untagged>" : std::string(callerTag),
+                priority == ConnectionPriority::High ? "high" : "normal",
+                activeConnections_.load(std::memory_order_relaxed), available_.size(),
+                totalConnections_.load(std::memory_order_relaxed),
+                waitingRequests_.load(std::memory_order_relaxed), holderSummary);
+            return Error{ErrorCode::Timeout,
+                         "Timeout acquiring connection; active=" +
+                             std::to_string(activeConnections_.load(std::memory_order_relaxed)) +
+                             " available=" + std::to_string(available_.size()) + " total=" +
+                             std::to_string(totalConnections_.load(std::memory_order_relaxed)) +
+                             " holders=[" + holderSummary + "]"};
         }
         waitingGuard.finish();
 

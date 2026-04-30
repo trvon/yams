@@ -1048,8 +1048,9 @@ private:
                         route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, totalMs,
                         connResult.error().message);
                 }
-                spdlog::error("MetadataRepository::executeQueryOnPool route='{}' acquire error: {}",
-                              route, connResult.error().message);
+                spdlog::error(
+                    "MetadataRepository::executeQueryOnPool route='{}' op='{}' acquire error: {}",
+                    route, op.empty() ? "(unknown)" : op, connResult.error().message);
                 return Error{connResult.error()};
             }
 
@@ -1173,8 +1174,8 @@ private:
         }
 
         const auto start = std::chrono::steady_clock::now();
-        auto connResult =
-            pool_.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+        auto connResult = pool_.acquire(std::chrono::milliseconds(30000),
+                                        ConnectionPriority::Normal, current_metadata_op());
         if (!connResult) {
             if (metadata_trace_enabled()) {
                 const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(

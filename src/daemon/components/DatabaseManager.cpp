@@ -57,7 +57,8 @@ void prewarmReadPool(const std::shared_ptr<metadata::ConnectionPool>& readPool,
 
     for (size_t i = 0; i < targetConnections; ++i) {
         auto connResult =
-            readPool->acquire(std::chrono::milliseconds(150), metadata::ConnectionPriority::High);
+            readPool->acquire(std::chrono::milliseconds(150), metadata::ConnectionPriority::High,
+                              "DatabaseManager::prewarmReadPool");
         if (!connResult) {
             break;
         }
@@ -248,6 +249,11 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
         connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), dbPoolCfg);
         writePool = connectionPool_;
     }
+    // The daemon intentionally has a single metadata write connection while DB writes are being
+    // centralized through WriteCoordinator. Under migration, any legacy direct write that holds
+    // this connection too long can starve all writers; lower the slow-holder threshold so the
+    // culprit is visible before callers hit the 30s acquisition timeout.
+    writePool->setSlowHolderThreshold(std::chrono::milliseconds(1000));
     TuneAdvisor::setStoragePoolSize(static_cast<uint32_t>(readPoolMax));
     TuneAdvisor::setEnableParallelIngest(true);
 
@@ -351,21 +357,23 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
         return false;
     }
 
-    auto journalRes = writePool->withConnection([](metadata::Database& db) -> Result<std::string> {
-        auto stmtRes = db.prepare("PRAGMA journal_mode");
-        if (!stmtRes) {
-            return stmtRes.error();
-        }
-        auto stmt = std::move(stmtRes).value();
-        auto stepRes = stmt.step();
-        if (!stepRes) {
-            return stepRes.error();
-        }
-        if (!stepRes.value()) {
-            return Error{ErrorCode::NotFound, "PRAGMA journal_mode returned no rows"};
-        }
-        return stmt.getString(0);
-    });
+    auto journalRes = writePool->withConnection(
+        [](metadata::Database& db) -> Result<std::string> {
+            auto stmtRes = db.prepare("PRAGMA journal_mode");
+            if (!stmtRes) {
+                return stmtRes.error();
+            }
+            auto stmt = std::move(stmtRes).value();
+            auto stepRes = stmt.step();
+            if (!stepRes) {
+                return stepRes.error();
+            }
+            if (!stepRes.value()) {
+                return Error{ErrorCode::NotFound, "PRAGMA journal_mode returned no rows"};
+            }
+            return stmt.getString(0);
+        },
+        metadata::ConnectionPriority::Normal, "DatabaseManager::journalMode");
     if (journalRes) {
         spdlog::info("[DatabaseManager] Metadata DB journal_mode={}", journalRes.value());
     } else {

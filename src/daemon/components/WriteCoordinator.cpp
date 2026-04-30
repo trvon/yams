@@ -57,6 +57,20 @@ void WriteCoordinator::start() {
     spdlog::info("[WriteCoordinator] Writer coroutine started");
 }
 
+Result<void> WriteCoordinator::flush(std::chrono::milliseconds timeout) {
+    if (stop_.load()) {
+        return Error{ErrorCode::InvalidState, "WriteCoordinator is shutting down"};
+    }
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::unique_lock<std::mutex> lock(queueMutex_);
+    bool drained = drainCv_.wait_until(
+        lock, deadline, [this] { return pendingBatches_.empty() && inFlight_.load() == 0; });
+    if (!drained) {
+        return Error{ErrorCode::Timeout, "WriteCoordinator::flush timed out"};
+    }
+    return Result<void>();
+}
+
 void WriteCoordinator::shutdown() {
     if (stop_.exchange(true)) {
         return;
@@ -132,6 +146,10 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
         spdlog::debug("[WriteCoordinator] Processing {} batches", batchesToProcess.size());
         auto result = applyBatches(batchesToProcess);
         inFlight_.store(0);
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            drainCv_.notify_all();
+        }
         if (!result) {
             spdlog::warn("[WriteCoordinator] Batch apply failed: {}", result.error().message);
         }
@@ -157,7 +175,9 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                     using T = std::decay_t<decltype(concrete)>;
                     if constexpr (std::is_same_v<T, InsertDocumentOp> ||
                                   std::is_same_v<T, UpdateRepairStatusOp> ||
-                                  std::is_same_v<T, UpsertTreeSnapshotOp>) {
+                                  std::is_same_v<T, UpsertTreeSnapshotOp> ||
+                                  std::is_same_v<T, SetMetadataBatchOp> ||
+                                  std::is_same_v<T, UpdateExtractionStatusOp>) {
                         hasMetaOps = true;
                     } else {
                         hasKgOps = true;
@@ -189,13 +209,17 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         Result<void> r;
                         if constexpr (std::is_same_v<T, InsertDocumentOp> ||
                                       std::is_same_v<T, UpdateRepairStatusOp> ||
-                                      std::is_same_v<T, UpsertTreeSnapshotOp>) {
+                                      std::is_same_v<T, UpsertTreeSnapshotOp> ||
+                                      std::is_same_v<T, SetMetadataBatchOp> ||
+                                      std::is_same_v<T, UpdateExtractionStatusOp>) {
                             return;
                         } else if constexpr (std::is_same_v<T, AddDeferredEdgesOp>) {
                             r = applyOp(kgBatch, concrete, nodeKeyToId);
                         } else if constexpr (std::is_same_v<T, AddDeferredDocEntitiesOp>) {
                             r = applyOp(kgBatch, concrete, nodeKeyToId);
                         } else if constexpr (std::is_same_v<T, UpsertNodesOp>) {
+                            r = applyOp(kgBatch, concrete, nodeKeyToId);
+                        } else if constexpr (std::is_same_v<T, AddAliasesOp>) {
                             r = applyOp(kgBatch, concrete, nodeKeyToId);
                         } else {
                             r = applyOp(kgBatch, concrete);
@@ -234,6 +258,10 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         } else if constexpr (std::is_same_v<T, UpdateRepairStatusOp>) {
                             r = applyMetadataOp(concrete);
                         } else if constexpr (std::is_same_v<T, UpsertTreeSnapshotOp>) {
+                            r = applyMetadataOp(concrete);
+                        } else if constexpr (std::is_same_v<T, SetMetadataBatchOp>) {
+                            r = applyMetadataOp(concrete);
+                        } else if constexpr (std::is_same_v<T, UpdateExtractionStatusOp>) {
                             r = applyMetadataOp(concrete);
                         } else {
                             return;
@@ -339,14 +367,44 @@ WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
     return r;
 }
 
-Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
-                                       AddAliasesOp& op) {
+Result<void>
+WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, AddAliasesOp& op,
+                          const std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
     if (op.aliases.empty())
         return Result<void>();
-    auto r = kgBatch.addAliases(op.aliases);
+    std::vector<metadata::KGAlias> resolved;
+    resolved.reserve(op.aliases.size());
+    for (auto& alias : op.aliases) {
+        if (alias.nodeId == 0 && alias.source.has_value() && !alias.source->empty()) {
+            const auto& srcStr = *alias.source;
+            auto pipePos = srcStr.find('|');
+            if (pipePos != std::string::npos) {
+                std::string nodeKey = srcStr.substr(pipePos + 1);
+                std::string realSource = srcStr.substr(0, pipePos);
+                std::int64_t nodeId = 0;
+                auto it = nodeKeyToId.find(nodeKey);
+                if (it != nodeKeyToId.end()) {
+                    nodeId = it->second;
+                } else if (kg_) {
+                    auto nodeRes = kg_->getNodeByKey(nodeKey);
+                    if (nodeRes && nodeRes.value().has_value()) {
+                        nodeId = nodeRes.value()->id;
+                    }
+                }
+                if (nodeId == 0)
+                    continue;
+                alias.nodeId = nodeId;
+                alias.source = std::move(realSource);
+            }
+        }
+        resolved.push_back(std::move(alias));
+    }
+    if (resolved.empty())
+        return Result<void>();
+    auto r = kgBatch.addAliases(resolved);
     if (r) {
         std::lock_guard<std::mutex> lock(statsMutex_);
-        stats_.aliasesAdded += op.aliases.size();
+        stats_.aliasesAdded += resolved.size();
     }
     return r;
 }
@@ -466,6 +524,31 @@ Result<void> WriteCoordinator::applyMetadataOp(UpsertTreeSnapshotOp& op) {
     if (r) {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.treeSnapshotsWritten++;
+    }
+    return r;
+}
+
+Result<void> WriteCoordinator::applyMetadataOp(SetMetadataBatchOp& op) {
+    if (!meta_)
+        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    if (op.entries.empty())
+        return Result<void>();
+    auto r = meta_->setMetadataBatch(op.entries);
+    if (r) {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.metadataEntriesSet += op.entries.size();
+    }
+    return r;
+}
+
+Result<void> WriteCoordinator::applyMetadataOp(UpdateExtractionStatusOp& op) {
+    if (!meta_)
+        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    auto r = meta_->updateDocumentExtractionStatus(op.documentId, op.contentExtracted, op.status,
+                                                   op.error);
+    if (r) {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.extractionStatusesUpdated++;
     }
     return r;
 }

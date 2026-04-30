@@ -46,7 +46,7 @@ class ExternalEntityProviderAdapter;
 class IModelProvider;
 class WorkCoordinator;
 class GraphComponent;
-class KGWriteQueue;
+class WriteCoordinator;
 
 // Simple LRU cache for metadata lookups
 // Template parameters: Key type, Value type
@@ -386,8 +386,7 @@ public:
     // Set title extractor (GLiNER-backed) for deriving better FTS titles.
     void setTitleExtractor(search::EntityExtractionFunc extractor);
 
-    // Set KGWriteQueue for async NL entity KG population (merged with title extraction)
-    void setKgWriteQueue(KGWriteQueue* queue) { kgWriteQueue_ = queue; }
+    void setWriteCoordinator(WriteCoordinator* coord) { writeCoordinator_ = coord; }
 
     /// Set callback to be invoked when the queue drains (all stages become idle).
     /// Used by ServiceManager to trigger search engine rebuild.
@@ -527,7 +526,7 @@ private:
 
     mutable std::mutex titleExtractorMutex_;
     search::EntityExtractionFunc titleExtractor_;
-    KGWriteQueue* kgWriteQueue_{nullptr};
+    WriteCoordinator* writeCoordinator_{nullptr};
 
     // Cached EventBus channel pointers — resolved once in start(), avoids
     // per-call mutex + unordered_map<string> lookups on every enqueue/dispatch/depth query.
