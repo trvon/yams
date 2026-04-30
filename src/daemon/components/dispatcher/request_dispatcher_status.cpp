@@ -1087,6 +1087,33 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                         std::to_string(stats.metadataEntriesSet);
                     response.additionalStats["write_extraction_statuses_updated"] =
                         std::to_string(stats.extractionStatusesUpdated);
+                    response.additionalStats["write_embedding_statuses_updated"] =
+                        std::to_string(stats.embeddingStatusesUpdated);
+                    response.additionalStats["write_symbol_extraction_states_updated"] =
+                        std::to_string(stats.symbolExtractionStatesUpdated);
+                    response.additionalStats["kg_write_edges_deleted"] =
+                        std::to_string(stats.edgesDeleted);
+                    response.additionalStats["kg_write_nodes_deleted"] =
+                        std::to_string(stats.nodesDeleted);
+                    response.additionalStats["kg_write_doc_entities_deleted"] =
+                        std::to_string(stats.docEntitiesDeleted);
+                    response.additionalStats["write_max_batch_apply_ms"] =
+                        std::to_string(stats.maxBatchApplyMs);
+                    response.additionalStats["write_max_batch_queue_wait_ms"] =
+                        std::to_string(stats.maxBatchQueueWaitMs);
+                    std::string hotspotSummary;
+                    for (std::size_t i = 0; i < stats.hotSources.size(); ++i) {
+                        const auto& h = stats.hotSources[i];
+                        if (i > 0)
+                            hotspotSummary += ";";
+                        hotspotSummary += h.source + "|ops=" + std::to_string(h.ops) +
+                                          "|batches=" + std::to_string(h.batches) +
+                                          "|apply_ms=" + std::to_string(h.totalApplyMs) +
+                                          "|max_apply_ms=" + std::to_string(h.maxApplyMs) +
+                                          "|max_wait_ms=" + std::to_string(h.maxQueueWaitMs) +
+                                          "|errors=" + std::to_string(h.errors);
+                    }
+                    response.additionalStats["write_hot_sources"] = std::move(hotspotSummary);
                 }
             }
         } catch (...) {

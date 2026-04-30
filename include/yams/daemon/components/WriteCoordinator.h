@@ -94,9 +94,20 @@ struct UpsertSymbolMetadataOp {
 struct DeleteDocEntitiesForDocumentOp {
     std::int64_t documentId;
 };
+struct DeleteNodeByIdOp {
+    std::int64_t nodeId;
+};
+struct DeleteNodesForDocumentHashOp {
+    std::string documentHash;
+};
 struct DeleteEdgesForSourceFileOp {
     std::string sourceFile;
 };
+struct DeleteEdgesByRelationOp {
+    std::string relation;
+};
+struct DeleteOrphanedEdgesOp {};
+struct DeleteOrphanedDocEntitiesOp {};
 struct InsertDocumentOp {
     metadata::DocumentInfo info;
     std::vector<std::pair<std::string, metadata::MetadataValue>> tags;
@@ -118,12 +129,29 @@ struct UpdateExtractionStatusOp {
     metadata::ExtractionStatus status;
     std::string error;
 };
+struct UpdateEmbeddingStatusByHashOp {
+    std::string hash;
+    bool embedded = false;
+    std::string modelName;
+};
+struct UpdateEmbeddingStatusByHashesOp {
+    std::vector<std::string> hashes;
+    bool embedded = false;
+    std::string modelName;
+};
+struct UpsertSymbolExtractionStateOp {
+    std::string documentHash;
+    metadata::SymbolExtractionState state;
+};
 
 using WriteOp =
     std::variant<UpsertNodesOp, AddEdgesOp, AddDeferredEdgesOp, AddAliasesOp, AddDocEntitiesOp,
                  AddDeferredDocEntitiesOp, UpsertSymbolMetadataOp, DeleteDocEntitiesForDocumentOp,
-                 DeleteEdgesForSourceFileOp, InsertDocumentOp, UpdateRepairStatusOp,
-                 UpsertTreeSnapshotOp, SetMetadataBatchOp, UpdateExtractionStatusOp>;
+                 DeleteNodeByIdOp, DeleteNodesForDocumentHashOp, DeleteEdgesForSourceFileOp,
+                 DeleteEdgesByRelationOp, DeleteOrphanedEdgesOp, DeleteOrphanedDocEntitiesOp,
+                 InsertDocumentOp, UpdateRepairStatusOp, UpsertTreeSnapshotOp, SetMetadataBatchOp,
+                 UpdateExtractionStatusOp, UpdateEmbeddingStatusByHashOp,
+                 UpdateEmbeddingStatusByHashesOp, UpsertSymbolExtractionStateOp>;
 
 struct WriteBatch {
     std::string source;
@@ -173,6 +201,17 @@ public:
     };
 
     struct Stats {
+        struct Hotspot {
+            std::string source;
+            std::uint64_t batches = 0;
+            std::uint64_t ops = 0;
+            std::uint64_t errors = 0;
+            std::uint64_t totalQueueWaitMs = 0;
+            std::uint64_t maxQueueWaitMs = 0;
+            std::uint64_t totalApplyMs = 0;
+            std::uint64_t maxApplyMs = 0;
+        };
+
         std::uint64_t batchesEnqueued = 0;
         std::uint64_t batchesCommitted = 0;
         std::uint64_t opsApplied = 0;
@@ -182,11 +221,19 @@ public:
         std::uint64_t treeSnapshotsWritten = 0;
         std::uint64_t metadataEntriesSet = 0;
         std::uint64_t extractionStatusesUpdated = 0;
+        std::uint64_t embeddingStatusesUpdated = 0;
+        std::uint64_t symbolExtractionStatesUpdated = 0;
         std::uint64_t nodesUpserted = 0;
+        std::uint64_t nodesDeleted = 0;
         std::uint64_t edgesAdded = 0;
         std::uint64_t aliasesAdded = 0;
         std::uint64_t docEntitiesAdded = 0;
         std::uint64_t symbolsUpserted = 0;
+        std::uint64_t edgesDeleted = 0;
+        std::uint64_t docEntitiesDeleted = 0;
+        std::uint64_t maxBatchApplyMs = 0;
+        std::uint64_t maxBatchQueueWaitMs = 0;
+        std::vector<Hotspot> hotSources;
     };
 
     WriteCoordinator(boost::asio::io_context& ioc,
@@ -229,13 +276,39 @@ private:
                          UpsertSymbolMetadataOp& op);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                          DeleteDocEntitiesForDocumentOp& op);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, DeleteNodeByIdOp& op);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                         DeleteNodesForDocumentHashOp& op);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                          DeleteEdgesForSourceFileOp& op);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                         DeleteEdgesByRelationOp& op);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                         DeleteOrphanedEdgesOp& op);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                         DeleteOrphanedDocEntitiesOp& op);
     Result<void> applyMetadataOp(InsertDocumentOp& op);
     Result<void> applyMetadataOp(UpdateRepairStatusOp& op);
     Result<void> applyMetadataOp(UpsertTreeSnapshotOp& op);
     Result<void> applyMetadataOp(SetMetadataBatchOp& op);
     Result<void> applyMetadataOp(UpdateExtractionStatusOp& op);
+    Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashOp& op);
+    Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op);
+    Result<void> applyMetadataOp(UpsertSymbolExtractionStateOp& op);
+
+    void recordSourceQueueWait(const std::string& source, std::uint64_t queueWaitMs);
+    void recordSourceApply(const std::string& source, std::uint64_t opCount, std::uint64_t applyMs,
+                           bool error);
+
+    struct SourceTiming {
+        std::uint64_t batches = 0;
+        std::uint64_t ops = 0;
+        std::uint64_t errors = 0;
+        std::uint64_t totalQueueWaitMs = 0;
+        std::uint64_t maxQueueWaitMs = 0;
+        std::uint64_t totalApplyMs = 0;
+        std::uint64_t maxApplyMs = 0;
+    };
 
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
@@ -251,6 +324,7 @@ private:
 
     mutable std::mutex statsMutex_;
     Stats stats_;
+    std::unordered_map<std::string, SourceTiming> sourceTimings_;
 };
 
 } // namespace yams::daemon

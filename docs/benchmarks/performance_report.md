@@ -1,8 +1,8 @@
 # YAMS Performance Benchmark Report
 
 **Generated**: 2026-02-12
-**Last Updated**: 2026-04-10
-**YAMS Version**: 0.12.0-dev
+**Last Updated**: 2026-04-30
+**YAMS Version**: 0.13.1
 **Build Configuration**: Debug (no TSAN) and Release
 
 > Note: This page is the canonical place for benchmark results. Keep the latest numbers inlined here rather than relying on generated artifacts.
@@ -22,26 +22,31 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 
 > Note: For benchmarks that report percentiles, the “Throughput” values in the tables are the p50 numbers.
 
-**Current Baseline (Debug no-TSAN, M4, 2026-04-08)**:
+**Current Baseline (Debug no-TSAN, M4, 2026-04-30)**:
 
-| Benchmark | Throughput | Δ vs Apr 7 | Notes |
+| Benchmark | Throughput | Δ vs Apr 8 | Notes |
 |-----------|------------|------------|-------|
-| `Ingestion_SmallDocument` | 3,378 ops/s | **+15.7%** | 1 KB document |
-| `Ingestion_MediumDocument` | 106 ops/s | **+8.2%** | 100 KB document |
-| `Metadata_SingleUpdate` | 12,038 ops/s | **+26.4%** | 1,000 docs |
-| `Metadata_BulkUpdate(500)` | 150,875 ops/s | **+8.7%** | 500 updates/batch |
-| `IPC StreamingFramer_32x10` | 4,680 ops/s | **+4.9%** | 256 B chunks |
-| `IPC UnaryFramer_8KB` | 13,158 ops/s | **+9.5%** | 8 KB payload |
+| `Ingestion_SmallDocument` | 4,896 ops/s | **+45%** | 1 KB document |
+| `Ingestion_MediumDocument` | 336 ops/s | **+217%** | 100 KB document |
+| `Metadata_SingleUpdate` | 14,022 ops/s | **+16%** | 1,000 docs |
+| `Metadata_BulkUpdate(500)` | 196,852 ops/s | **+30%** | 500 updates/batch |
+| `IPC StreamingFramer_32x10_256B` | 20,976 ops/s | **+348%** | 256 B chunks |
+| `IPC StreamingFramer_64x6_512B` | 6,638 ops/s | — | 512 B chunks |
+| `IPC UnaryFramer_8KB` | 221,453 ops/s | **+1582%** | 8 KB payload |
 
-**Multi-Client Baseline (Debug no-TSAN, M4, 2026-04-10)**:
+> Δ spans 2026-04-08 → 2026-04-30 (22 days, dozens of commits including the Phase Z search-engine debloat). Not attributable to any single change.
+
+**Multi-Client Baseline (Debug no-TSAN, M4, 2026-04-30)**:
 
 | Benchmark | Throughput | Latency (p50) | Latency (p95) | Notes |
 |-----------|------------|---------------|---------------|-------|
-| Single client ingest | 83.2 docs/s | 11.2 ms | 11.3 ms | 100 docs, 2 KB (**+38.4%**) |
-| 4-client concurrent ingest | 244.0 docs/s | 11.2 ms | 11.3 ms | 400 total docs |
-| 32-client mixed read/write | 404.4 ops/s | Add 10.6 ms | Search 144.6 ms | 0 failures, drained cleanly |
-| 64-client mixed read/write | 244.8 ops/s | Add 127.3 ms | Search 557.3 ms | 0 failures, clean mixed scaling tier in fresh Debug lane |
-| Connection contention (32 burst) | 2,709.0 ops/s | 10.8 ms | 12.3 ms | 0 failures, 0 retry-after responses |
+| Single client ingest (baseline) | 794.2 docs/s | Add 1.11 ms | Add 1.23 ms | 100 docs |
+| Scaling curve, 4 clients | 1,818.7 docs/s | — | — | aggregate, 100 docs/client |
+| Scaling curve, 16 clients | 7,325.3 docs/s | — | — | aggregate |
+| Scaling curve, 32 clients | 12,013.0 docs/s | — | — | aggregate, 0 failures |
+| 16-client concurrent mixed | 457.8 docs/s | — | — | mixed read+write ops |
+| Mixed read/write workload | 117.9 docs/s add, 353.8 ops/s ux | Add 1.12 ms / Search 61.2 ms | Add 34.3 ms / Search 122.9 ms | 4-client mixed |
+| Connection contention burst | 2,490.5 ops/s | 1.11 ms | 2.11 ms | get/cat under contention |
 
 **Previous Baseline (Release, M3, 2026-02-12)**:
 
@@ -56,16 +61,16 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 
 > **Note**: The M3 numbers above are from Release builds. The M4 numbers are from Debug (no-TSAN) builds for safe comparison. Debug adds ~2-4x overhead for ingestion and IPC, so Release numbers will be higher.
 
-**Historical Debug Baseline (Oct 2025 vs Jan 2026 vs Apr 2026)**:
+**Historical Debug Baseline (Oct 2025 → Apr 2026)**:
 
-| Benchmark | Oct 2025 | Jan 2026 | Apr 7 (M4) | Apr 8 (M4, optimized) | Δ Apr 7→8 |
-|-----------|----------|----------|------------|----------------------|-----------|
-| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | 2,921 ops/s | 3,378 ops/s | **+15.7%** |
-| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | 98 ops/s | 106 ops/s | **+8.2%** |
-| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | 9,520 ops/s | 12,038 ops/s | **+26.4%** |
-| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | 138,835 ops/s | 150,875 ops/s | **+8.7%** |
-| `IPC StreamingFramer_32x10` | - | 3,732 ops/s | 4,460 ops/s | 4,680 ops/s | **+4.9%** |
-| `IPC UnaryFramer_8KB` | - | 10,088 ops/s | 12,012 ops/s | 13,158 ops/s | **+9.5%** |
+| Benchmark | Oct 2025 | Jan 2026 | Apr 7 (M4) | Apr 8 (M4, optimized) | Apr 30 (post-debloat) | Δ Apr 8→30 |
+|-----------|----------|----------|------------|----------------------|------------------------|------------|
+| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | 2,921 ops/s | 3,378 ops/s | 4,896 ops/s | **+45%** |
+| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | 98 ops/s | 106 ops/s | 336 ops/s | **+217%** |
+| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | 9,520 ops/s | 12,038 ops/s | 14,022 ops/s | **+16%** |
+| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | 138,835 ops/s | 150,875 ops/s | 196,852 ops/s | **+30%** |
+| `IPC StreamingFramer_32x10` | - | 3,732 ops/s | 4,460 ops/s | 4,680 ops/s | 20,976 ops/s | **+348%** |
+| `IPC UnaryFramer_8KB` | - | 10,088 ops/s | 12,012 ops/s | 13,158 ops/s | 221,453 ops/s | **+1582%** |
 
 > Apr 8 optimizations: CRC32 slicing-by-8, FrameReader memcpy, Rabin lazy chunking, lock-free stats, proto serializer, IngestService futures reuse.
 

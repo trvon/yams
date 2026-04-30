@@ -629,6 +629,25 @@ if ((-not $SystemDeps) -and (Test-Path $conanBuildPs1)) {
     . $conanBuildPs1
 }
 
+# Export BOOST_ROOT so meson's auto-detect Boost dep finds the Conan-installed
+# Boost (Windows has no system Boost fallback). Read prefix= from Conan's
+# boost.pc, which sits next to conanbuild.ps1.
+if ((-not $SystemDeps) -and (-not $env:BOOST_ROOT)) {
+    $boostPc = Join-Path $buildDir "$conanSubdir/conan/boost.pc"
+    if (Test-Path $boostPc) {
+        $prefixLine = Select-String -Path $boostPc `
+            -Pattern '^\s*prefix\s*=' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($prefixLine) {
+            $boostPath = ($prefixLine.Line -replace '^\s*prefix\s*=\s*', '').Trim()
+            if ($boostPath -and (Test-Path (Join-Path $boostPath 'include/boost'))) {
+                $env:BOOST_ROOT = $boostPath
+                Write-Host "BOOST_ROOT set to: $boostPath"
+            }
+        }
+    }
+}
+
 $activeMeson = Get-Command meson -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
 $activeNinja = Get-Command ninja -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
 $conanToolsOverride = ($activeMeson -ne $initialMeson) -or ($activeNinja -ne $initialNinja)

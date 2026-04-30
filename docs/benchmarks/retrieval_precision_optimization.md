@@ -115,8 +115,6 @@ Each backend’s results land under
 `embedding_backend` field so downstream summarizers can group without
 rescanning environment state.
 
-See the A/B at
-[`simeon_vs_onnx_embedding_ab.md`](simeon_vs_onnx_embedding_ab.md) and
-the full simeon ablation at
-[`simeon_ablation_matrix.md`](simeon_ablation_matrix.md) for the quality
-cost of running the loop under simeon.
+Use the generated rows under `.artifacts/precision_loop/<backend>/` for
+backend-specific comparisons. Public benchmark summaries live in this
+directory as stable snapshots are promoted.

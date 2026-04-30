@@ -4,6 +4,7 @@
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/metadata/kg_topology_analysis.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -541,26 +542,26 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
 
     if (!dryRun) {
         emit(processed);
-        auto orphanEdgesRes = runWithHeartbeat([&] { return kgStore_->deleteOrphanedEdges(); });
-        if (!orphanEdgesRes) {
+        auto* coord = serviceManager_ ? serviceManager_->getWriteCoordinator() : nullptr;
+        if (!coord) {
             ++stats.errors;
-            stats.issues.push_back("deleteOrphanedEdges failed: " + orphanEdgesRes.error().message);
-        } else if (orphanEdgesRes.value() > 0) {
-            stats.issues.push_back("removed orphaned edges: " +
-                                   std::to_string(orphanEdgesRes.value()));
+            stats.issues.push_back("WriteCoordinator unavailable for orphan cleanup");
+        } else {
+            auto wb = std::make_unique<WriteBatch>();
+            wb->source = "GraphComponent::orphanCleanup";
+            wb->ops.emplace_back(DeleteOrphanedEdgesOp{});
+            wb->ops.emplace_back(DeleteOrphanedDocEntitiesOp{});
+            coord->enqueue(std::move(wb));
+            auto cleanupRes = runWithHeartbeat([&] { return coord->flush(); });
+            if (!cleanupRes) {
+                ++stats.errors;
+                stats.issues.push_back("orphan cleanup flush failed: " +
+                                       cleanupRes.error().message);
+            } else {
+                stats.issues.push_back("orphan cleanup queued via WriteCoordinator");
+            }
         }
-
         emit(processed);
-        auto orphanEntitiesRes =
-            runWithHeartbeat([&] { return kgStore_->deleteOrphanedDocEntities(); });
-        if (!orphanEntitiesRes) {
-            ++stats.errors;
-            stats.issues.push_back("deleteOrphanedDocEntities failed: " +
-                                   orphanEntitiesRes.error().message);
-        } else if (orphanEntitiesRes.value() > 0) {
-            stats.issues.push_back("removed orphaned doc_entities: " +
-                                   std::to_string(orphanEntitiesRes.value()));
-        }
     }
 
     std::size_t offset = 0;
@@ -598,19 +599,9 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
         const auto tagsByDocId =
             tagsRes ? tagsRes.value() : std::unordered_map<int64_t, std::vector<std::string>>{};
 
-        auto batchRes = kgStore_->beginWriteBatch();
-        if (!batchRes) {
-            ++stats.errors;
-            stats.issues.push_back("beginWriteBatch failed: " + batchRes.error().message);
-            break;
-        }
-        auto batch = std::move(batchRes).value();
-
         // Collect unique nodes for this batch.
         std::vector<metadata::KGNode> nodes;
-        std::vector<std::string> nodeKeys;
         nodes.reserve(docs.size() * 3);
-        nodeKeys.reserve(docs.size() * 3);
 
         std::unordered_map<std::string, std::size_t> nodeIndex;
         nodeIndex.reserve(docs.size() * 3);
@@ -621,7 +612,6 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
                 return;
             }
             nodeIndex.emplace(node.nodeKey, nodes.size());
-            nodeKeys.push_back(node.nodeKey);
             nodes.push_back(std::move(node));
         };
 
@@ -709,25 +699,18 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
             }
         }
 
-        auto idsRes = batch->upsertNodes(nodes);
-        if (!idsRes) {
-            ++stats.errors;
-            stats.issues.push_back("upsertNodes failed: " + idsRes.error().message);
-            // Let WriteBatch destructor rollback.
-            break;
-        }
-        const auto& ids = idsRes.value();
-        stats.nodesCreated += static_cast<uint64_t>(ids.size()); // attempted upserts
+        stats.nodesCreated += static_cast<uint64_t>(nodes.size()); // attempted upserts
         emit(processed);
 
-        std::unordered_map<std::string, std::int64_t> idByKey;
-        idByKey.reserve(ids.size());
-        for (std::size_t i = 0; i < ids.size(); ++i) {
-            idByKey.emplace(nodeKeys[i], ids[i]);
-        }
-
-        std::vector<metadata::KGEdge> edges;
+        std::vector<DeferredEdge> edges;
         edges.reserve(docs.size() * 4);
+        auto addDeferredEdge = [&](std::string srcKey, std::string dstKey, std::string relation) {
+            DeferredEdge e;
+            e.srcNodeKey = std::move(srcKey);
+            e.dstNodeKey = std::move(dstKey);
+            e.relation = std::move(relation);
+            edges.push_back(std::move(e));
+        };
 
         for (const auto& d : docs) {
             if (d.sha256Hash.empty())
@@ -736,22 +719,8 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
             const std::string blobKey = "blob:" + d.sha256Hash;
             const std::string docKey = "doc:" + d.sha256Hash;
 
-            auto blobIdIt = idByKey.find(blobKey);
-            auto docIdIt = idByKey.find(docKey);
-            if (blobIdIt == idByKey.end() || docIdIt == idByKey.end())
-                continue;
-
-            const auto blobId = blobIdIt->second;
-            const auto docNodeId = docIdIt->second;
-
             // doc -> blob (optional bridge)
-            {
-                metadata::KGEdge e;
-                e.srcNodeId = docNodeId;
-                e.dstNodeId = blobId;
-                e.relation = "has_blob";
-                edges.push_back(std::move(e));
-            }
+            addDeferredEdge(docKey, blobKey, "has_blob");
 
             std::string normalizedPath;
             std::string parentPath;
@@ -768,39 +737,16 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
 
             if (!normalizedPath.empty()) {
                 const std::string fileKey = "path:file:" + normalizedPath;
-                auto fileIdIt = idByKey.find(fileKey);
-                if (fileIdIt != idByKey.end()) {
-                    const auto fileId = fileIdIt->second;
 
-                    // file -> blob (has_version) for GraphQueryService hash resolution.
-                    {
-                        metadata::KGEdge e;
-                        e.srcNodeId = fileId;
-                        e.dstNodeId = blobId;
-                        e.relation = "has_version";
-                        edges.push_back(std::move(e));
-                    }
+                // file -> blob (has_version) for GraphQueryService hash resolution.
+                addDeferredEdge(fileKey, blobKey, "has_version");
 
-                    // blob -> file (blob_at_path) helps traversals from blob.
-                    {
-                        metadata::KGEdge e;
-                        e.srcNodeId = blobId;
-                        e.dstNodeId = fileId;
-                        e.relation = "blob_at_path";
-                        edges.push_back(std::move(e));
-                    }
+                // blob -> file (blob_at_path) helps traversals from blob.
+                addDeferredEdge(blobKey, fileKey, "blob_at_path");
 
-                    if (!parentPath.empty()) {
-                        const std::string dirKey = "path:dir:" + parentPath;
-                        auto dirIdIt = idByKey.find(dirKey);
-                        if (dirIdIt != idByKey.end()) {
-                            metadata::KGEdge e;
-                            e.srcNodeId = dirIdIt->second;
-                            e.dstNodeId = fileId;
-                            e.relation = "contains";
-                            edges.push_back(std::move(e));
-                        }
-                    }
+                if (!parentPath.empty()) {
+                    const std::string dirKey = "path:dir:" + parentPath;
+                    addDeferredEdge(dirKey, fileKey, "contains");
                 }
             }
 
@@ -810,33 +756,35 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
                 for (const auto& t : tagIt->second) {
                     if (t.empty())
                         continue;
-                    const std::string tagKey = "tag:" + t;
-                    auto tagIdIt = idByKey.find(tagKey);
-                    if (tagIdIt == idByKey.end())
-                        continue;
-                    metadata::KGEdge e;
-                    e.srcNodeId = docNodeId;
-                    e.dstNodeId = tagIdIt->second;
-                    e.relation = "has_tag";
-                    edges.push_back(std::move(e));
+                    addDeferredEdge(docKey, "tag:" + t, "has_tag");
                 }
             }
         }
 
-        auto edgesRes = batch->addEdgesUnique(edges);
-        if (!edgesRes) {
-            ++stats.errors;
-            stats.issues.push_back("addEdgesUnique failed: " + edgesRes.error().message);
-            break;
-        }
         stats.edgesCreated += static_cast<uint64_t>(edges.size()); // attempted unique inserts
         emit(processed);
 
         if (!dryRun) {
-            auto commitRes = batch->commit();
-            if (!commitRes) {
+            auto* coord = serviceManager_ ? serviceManager_->getWriteCoordinator() : nullptr;
+            if (!coord) {
                 ++stats.errors;
-                stats.issues.push_back("commit failed: " + commitRes.error().message);
+                stats.issues.push_back("WriteCoordinator unavailable for graph repair batch");
+                break;
+            }
+            auto wb = std::make_unique<WriteBatch>();
+            wb->source = "GraphComponent::repairGraph";
+            if (!nodes.empty()) {
+                wb->ops.emplace_back(UpsertNodesOp{std::move(nodes)});
+            }
+            if (!edges.empty()) {
+                wb->ops.emplace_back(AddDeferredEdgesOp{std::move(edges)});
+            }
+            coord->enqueue(std::move(wb));
+            auto flushRes = coord->flush();
+            if (!flushRes) {
+                ++stats.errors;
+                stats.issues.push_back("WriteCoordinator flush failed: " +
+                                       flushRes.error().message);
                 break;
             }
         }

@@ -2997,6 +2997,59 @@ public:
         return Result<void>();
     }
 
+    Result<void> deleteNodeById(std::int64_t nodeId) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+        auto stmtR = db.prepareCached("DELETE FROM kg_nodes WHERE id = ?");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+        auto br = stmt.bind(1, nodeId);
+        if (!br)
+            return br.error();
+        return stmt.execute();
+    }
+
+    Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+        std::int64_t totalDeleted = 0;
+
+        std::string docNodeKey = "doc:" + std::string(documentHash);
+        auto docStmtR = db.prepare("DELETE FROM kg_nodes WHERE node_key = ?");
+        if (!docStmtR)
+            return docStmtR.error();
+        auto docStmt = std::move(docStmtR).value();
+        auto br = docStmt.bind(1, docNodeKey);
+        if (!br)
+            return br.error();
+        auto execR = docStmt.execute();
+        if (!execR)
+            return execR.error();
+        totalDeleted += db.changes();
+
+        auto symStmtR = db.prepare(
+            "DELETE FROM kg_nodes WHERE json_extract(properties, '$.document_hash') = ?");
+        if (!symStmtR)
+            return symStmtR.error();
+        auto symStmt = std::move(symStmtR).value();
+        br = symStmt.bind(1, documentHash);
+        if (!br)
+            return br.error();
+        execR = symStmt.execute();
+        if (!execR)
+            return execR.error();
+        totalDeleted += db.changes();
+
+        spdlog::debug("WriteBatch::deleteNodesForDocumentHash: deleted {} nodes for hash {}",
+                      totalDeleted, documentHash);
+        return totalDeleted;
+    }
+
     Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) override {
         if (!transactionStarted_) {
             return Error{ErrorCode::InvalidState, "Transaction not started"};
@@ -3045,6 +3098,102 @@ public:
         spdlog::debug("WriteBatch::deleteEdgesForSourceFile: deleted {} edges for path {}", deleted,
                       filePath);
         return deleted;
+    }
+
+    Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached("DELETE FROM kg_edges WHERE relation = ?");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+        auto br = stmt.bind(1, relation);
+        if (!br)
+            return br.error();
+        auto execR = stmt.execute();
+        if (!execR)
+            return execR.error();
+        auto deleted = db.changes();
+        spdlog::debug("WriteBatch::deleteEdgesByRelation: deleted {} edges for relation {}",
+                      deleted, relation);
+        return deleted;
+    }
+
+    Result<std::int64_t> deleteOrphanedEdges() override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        constexpr std::int64_t kBatchSize = 1000;
+        std::int64_t totalDeleted = 0;
+        while (true) {
+            auto stmtR = db.prepare(R"(
+                DELETE FROM kg_edges WHERE rowid IN (
+                    SELECT rowid FROM kg_edges
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.src_node_id
+                    ) OR NOT EXISTS (
+                        SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.dst_node_id
+                    )
+                    LIMIT ?
+                )
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, kBatchSize);
+            if (!br)
+                return br.error();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            const auto deleted = static_cast<std::int64_t>(db.changes());
+            totalDeleted += deleted;
+            if (deleted < kBatchSize)
+                break;
+        }
+        spdlog::debug("WriteBatch::deleteOrphanedEdges: deleted {} edges", totalDeleted);
+        return totalDeleted;
+    }
+
+    Result<std::int64_t> deleteOrphanedDocEntities() override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        constexpr std::int64_t kBatchSize = 1000;
+        std::int64_t totalDeleted = 0;
+        while (true) {
+            auto stmtR = db.prepare(R"(
+                DELETE FROM kg_doc_entities WHERE rowid IN (
+                    SELECT rowid FROM kg_doc_entities
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM documents d WHERE d.id = kg_doc_entities.document_id
+                    )
+                    LIMIT ?
+                )
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, kBatchSize);
+            if (!br)
+                return br.error();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            const auto deleted = static_cast<std::int64_t>(db.changes());
+            totalDeleted += deleted;
+            if (deleted < kBatchSize)
+                break;
+        }
+        spdlog::debug("WriteBatch::deleteOrphanedDocEntities: deleted {} rows", totalDeleted);
+        return totalDeleted;
     }
 
     Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) override {

@@ -500,6 +500,9 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         if (response_future.wait_for(0ms) == std::future_status::ready) {
             auto result = response_future.get();
             conn->in_use.store(false, std::memory_order_release);
+            if (!opts_.poolEnabled) {
+                retire_connection(conn, "single-use request complete");
+            }
             if (ipc_wait_trace_enabled()) {
                 const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                             std::chrono::steady_clock::now() - wait_start)
@@ -696,6 +699,13 @@ boost::asio::awaitable<Result<void>> AsioTransportAdapter::send_request_streamin
 
             if (done_future.wait_for(0ms) == std::future_status::ready) {
                 auto result = done_future.get();
+                if (!opts_.poolEnabled) {
+                    if (pool) {
+                        pool->retire_connection(conn, "single-use streaming request complete");
+                    } else {
+                        retire_connection(conn, "single-use streaming request complete");
+                    }
+                }
                 if (ipc_wait_trace_enabled()) {
                     const auto elapsed_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(

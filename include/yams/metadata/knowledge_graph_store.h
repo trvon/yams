@@ -197,8 +197,13 @@ public:
         virtual Result<void> addEdgesUnique(const std::vector<KGEdge>& edges) = 0;
         virtual Result<void> addAliases(const std::vector<KGAlias>& aliases) = 0;
         virtual Result<void> addDocEntities(const std::vector<DocEntity>& entities) = 0;
+        virtual Result<void> deleteNodeById(std::int64_t nodeId) = 0;
+        virtual Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) = 0;
         virtual Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) = 0;
         virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
+        virtual Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) = 0;
+        virtual Result<std::int64_t> deleteOrphanedEdges() = 0;
+        virtual Result<std::int64_t> deleteOrphanedDocEntities() = 0;
         virtual Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) = 0;
         virtual Result<void> commit() = 0;
     };

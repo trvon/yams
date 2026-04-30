@@ -810,6 +810,21 @@ else
     source "${CONAN_BUILD_ENV}"
     set -u
   fi
+
+  # Export BOOST_ROOT so meson's auto-detect Boost dep finds the Conan-installed
+  # Boost on platforms with no system Boost (Windows). Read prefix= directly
+  # from Conan's boost.pc — that file's location is the same dir holding
+  # CONAN_BUILD_ENV.
+  if [[ -z "${BOOST_ROOT:-}" ]]; then
+    BOOST_PC="${CONAN_TOOLCHAIN_DIR:-}/boost.pc"
+    if [[ -f "${BOOST_PC}" ]]; then
+      BOOST_ROOT_CANDIDATE=$(awk -F= '/^prefix[[:space:]]*=/ { print $2; exit }' "${BOOST_PC}")
+      if [[ -n "${BOOST_ROOT_CANDIDATE}" && -d "${BOOST_ROOT_CANDIDATE}/include/boost" ]]; then
+        export BOOST_ROOT="${BOOST_ROOT_CANDIDATE}"
+        echo "BOOST_ROOT set to: ${BOOST_ROOT}"
+      fi
+    fi
+  fi
 fi
 YAMS_PROTOC_PATH="${YAMS_PROTOC_PATH:-}"
 

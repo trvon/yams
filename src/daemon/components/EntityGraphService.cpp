@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -53,6 +54,24 @@ std::string makePathFileNodeKey(const std::string& path) {
 
 std::string makePathDirNodeKey(const std::string& path) {
     return "path:dir:" + normalizeGraphPath(path);
+}
+
+void enqueueSymbolExtractionState(ServiceManager* services, std::string documentHash,
+                                  metadata::SymbolExtractionState state, std::string_view source) {
+    if (documentHash.empty()) {
+        return;
+    }
+    auto* coord = services ? services->getWriteCoordinator() : nullptr;
+    if (!coord) {
+        spdlog::debug("EntityGraphService: WriteCoordinator unavailable; cannot record symbol "
+                      "extraction state for {}",
+                      documentHash.substr(0, std::min<std::size_t>(12, documentHash.size())));
+        return;
+    }
+    auto wb = std::make_unique<WriteBatch>();
+    wb->source.assign(source.data(), source.size());
+    wb->ops.emplace_back(UpsertSymbolExtractionStateOp{std::move(documentHash), std::move(state)});
+    coord->enqueue(std::move(wb));
 }
 
 std::string normalizeSymbolRefKey(std::string_view symbol) {
@@ -272,11 +291,8 @@ bool EntityGraphService::process(Job& job) {
             state.status = "failed";
             state.entityCount = 0;
             state.errorMessage = "extract_symbols returned rc=" + std::to_string(rc);
-            auto upsertRes = kg->upsertSymbolExtractionState(job.documentHash, state);
-            if (!upsertRes) {
-                spdlog::debug("EntityGraphService: failed to record extraction failure: {}",
-                              upsertRes.error().message);
-            }
+            enqueueSymbolExtractionState(services_, job.documentHash, std::move(state),
+                                         "EntityGraphService::symbolExtractionFailed");
         }
         return false;
     }
@@ -299,11 +315,8 @@ bool EntityGraphService::process(Job& job) {
         if (!success) {
             state.errorMessage = "populateKnowledgeGraph failed";
         }
-        auto upsertRes = kg->upsertSymbolExtractionState(job.documentHash, state);
-        if (!upsertRes) {
-            spdlog::debug("EntityGraphService: failed to record extraction state: {}",
-                          upsertRes.error().message);
-        }
+        enqueueSymbolExtractionState(services_, job.documentHash, std::move(state),
+                                     "EntityGraphService::symbolExtractionState");
     }
 
     try {

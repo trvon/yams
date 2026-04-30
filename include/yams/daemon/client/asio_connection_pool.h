@@ -19,8 +19,19 @@ namespace yams::daemon {
 // Supports concurrent access with proper lifecycle management and stale connection removal.
 class AsioConnectionPool : public std::enable_shared_from_this<AsioConnectionPool> {
 public:
+    struct RegistryStats {
+        std::size_t pools = 0;
+        std::size_t sharedPools = 0;
+        std::size_t trackedConnections = 0;
+        std::size_t liveConnections = 0;
+        std::size_t aliveConnections = 0;
+        std::size_t inUseConnections = 0;
+        std::size_t openSockets = 0;
+    };
+
     static std::shared_ptr<AsioConnectionPool> get_or_create(const TransportOptions& opts);
     static void shutdown_all(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
+    static RegistryStats registry_stats();
 
     boost::asio::awaitable<Result<std::shared_ptr<AsioConnection>>> acquire();
     void release(const std::shared_ptr<AsioConnection>& conn);

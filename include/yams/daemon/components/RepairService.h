@@ -276,17 +276,6 @@ private:
     };
     KgCleanupStats cleanOrphanedKgEntries(bool dryRun, bool verbose, const ProgressFn& progress);
 
-    struct PathNodeMigrationStats {
-        uint64_t nodesScanned{0};
-        uint64_t nodesMigrated{0};
-        uint64_t edgesRewired{0};
-        uint64_t skipped{0};
-        uint64_t errors{0};
-        std::vector<std::string> issues;
-    };
-    PathNodeMigrationStats repairLegacyPathNodesInPlace(bool dryRun, bool verbose,
-                                                        ProgressFn progress);
-
     // ── Symbol extraction scheduling (ported from RepairCoordinator) ──
     virtual std::shared_ptr<GraphComponent> getGraphComponentForScheduling() const;
     virtual std::shared_ptr<metadata::KnowledgeGraphStore> getKgStoreForScheduling() const;

@@ -122,8 +122,32 @@ void EmbeddingService::enqueueRepairStatusUpdate(std::vector<std::string> hashes
         coord->enqueue(std::move(batch));
         return;
     }
-    // Transitional fallback for tests/standalone wiring that has not installed the coordinator.
-    (void)meta_->batchUpdateDocumentRepairStatuses(hashes, status);
+    spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} repair-status "
+                 "updates from {}",
+                 hashes.size(), source);
+}
+
+void EmbeddingService::enqueueEmbeddingStatusUpdate(std::vector<std::string> hashes, bool embedded,
+                                                    std::string modelName, std::string source) {
+    if (hashes.empty() || !meta_) {
+        return;
+    }
+    if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = source.empty() ? "EmbeddingService::embeddingStatus" : std::move(source);
+        if (hashes.size() == 1) {
+            batch->ops.emplace_back(UpdateEmbeddingStatusByHashOp{std::move(hashes.front()),
+                                                                  embedded, std::move(modelName)});
+        } else {
+            batch->ops.emplace_back(
+                UpdateEmbeddingStatusByHashesOp{std::move(hashes), embedded, std::move(modelName)});
+        }
+        coord->enqueue(std::move(batch));
+        return;
+    }
+    spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} embedding-status "
+                 "updates from {}",
+                 hashes.size(), source);
 }
 
 void EmbeddingService::shutdown() {
@@ -768,15 +792,12 @@ void EmbeddingService::updateSemanticNeighborGraph(
             semanticEdgesCreated_.fetch_add(enqueuedCount, std::memory_order_relaxed);
             return;
         }
-        auto edgeResult = kgStore->addEdgesUnique(semanticEdges);
         recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
-        if (!edgeResult) {
-            semanticUpdateErrors_.fetch_add(1, std::memory_order_relaxed);
-            spdlog::warn("EmbeddingService: failed to add {} semantic_neighbor edges: {}",
-                         semanticEdges.size(), edgeResult.error().message);
-            return;
-        }
-        semanticEdgesCreated_.fetch_add(semanticEdges.size(), std::memory_order_relaxed);
+        semanticUpdateErrors_.fetch_add(1, std::memory_order_relaxed);
+        spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} streaming "
+                     "semantic_neighbor edges",
+                     semanticEdges.size());
+        return;
         spdlog::debug(
             "EmbeddingService: streaming semantic neighbor graph added {} edges "
             "(processed_docs={} candidate_docs={} similarity_pairs={} candidate_neighbors={} "
@@ -1036,16 +1057,12 @@ void EmbeddingService::updateSemanticNeighborGraph(
         semanticEdgesCreated_.fetch_add(enqueuedCount, std::memory_order_relaxed);
         return;
     }
-    auto edgeResult = kgStore->addEdgesUnique(semanticEdges);
     recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
-    if (!edgeResult) {
-        semanticUpdateErrors_.fetch_add(1, std::memory_order_relaxed);
-        spdlog::warn("EmbeddingService: failed to add {} semantic_neighbor edges: {}",
-                     semanticEdges.size(), edgeResult.error().message);
-        return;
-    }
-
-    semanticEdgesCreated_.fetch_add(semanticEdges.size(), std::memory_order_relaxed);
+    semanticUpdateErrors_.fetch_add(1, std::memory_order_relaxed);
+    spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} corpus "
+                 "semantic_neighbor edges",
+                 semanticEdges.size());
+    return;
     spdlog::debug(
         "EmbeddingService: semantic neighbor graph added {} edges (processed_docs={} "
         "candidate_docs={} similarity_pairs={} candidate_neighbors={} missing_src_nodes={} "
@@ -1065,13 +1082,23 @@ EmbeddingService::rebuildSemanticNeighborGraphForCorpus(const std::string& model
                      "rebuildSemanticNeighborGraphForCorpus: kg store or vector db unavailable"};
     }
 
-    auto deleted = kgStore->deleteEdgesByRelation("semantic_neighbor");
-    if (!deleted) {
-        return deleted.error();
+    auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr;
+    if (!coord) {
+        return Error{ErrorCode::InvalidState,
+                     "rebuildSemanticNeighborGraphForCorpus: WriteCoordinator unavailable"};
+    }
+    {
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "EmbeddingService::clearSemanticNeighborGraph";
+        batch->ops.emplace_back(DeleteEdgesByRelationOp{"semantic_neighbor"});
+        coord->enqueue(std::move(batch));
+        auto flushRes = coord->flush();
+        if (!flushRes) {
+            return flushRes.error();
+        }
     }
     spdlog::info(
-        "EmbeddingService: cleared {} existing semantic_neighbor edges before corpus rebuild",
-        deleted.value());
+        "EmbeddingService: cleared existing semantic_neighbor edges before corpus rebuild");
 
     const auto before = semanticEdgesCreated_.load(std::memory_order_relaxed);
     updateSemanticNeighborGraph(kgStore, vdb, modelName, {}, true);
@@ -2611,7 +2638,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         docPreviews[docIdx].clear();
 
         failed_.fetch_add(1, std::memory_order_relaxed);
-        (void)meta_->updateDocumentEmbeddingStatusByHash(doc.hash, false, modelName);
+        enqueueEmbeddingStatusUpdate(std::vector<std::string>{doc.hash}, false, modelName,
+                                     "EmbeddingService::embeddingStatusFailed");
         enqueueRepairStatusUpdate(std::vector<std::string>{doc.hash},
                                   metadata::RepairStatus::Failed,
                                   "EmbeddingService::embeddingFailed");
@@ -2940,18 +2968,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             successHashes.push_back(docsToEmbed[docIdx].hash);
         }
     }
-    auto embeddingStatusResult =
-        meta_->batchUpdateDocumentEmbeddingStatusByHashes(successHashes, true, modelName);
-    if (!embeddingStatusResult) {
-        spdlog::warn("EmbeddingService: failed to mark {} documents embedded: {}",
-                     successHashes.size(), embeddingStatusResult.error().message);
-        auto reconcileResult =
-            meta_->reconcileDocumentEmbeddingStatusByHashes(successHashes, modelName);
-        if (!reconcileResult) {
-            spdlog::warn("EmbeddingService: reconcileDocumentEmbeddingStatusByHashes failed: {}",
-                         reconcileResult.error().message);
-        }
-    }
+    enqueueEmbeddingStatusUpdate(successHashes, true, modelName,
+                                 "EmbeddingService::embeddingStatusCompleted");
 
     const auto successCount = successHashes.size();
     enqueueRepairStatusUpdate(successHashes, metadata::RepairStatus::Completed,

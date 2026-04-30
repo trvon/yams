@@ -126,6 +126,8 @@ private:
     void recordPhaseTiming(const std::string& phase, std::chrono::steady_clock::time_point start);
     void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
                                    std::string source);
+    void enqueueEmbeddingStatusUpdate(std::vector<std::string> hashes, bool embedded,
+                                      std::string modelName, std::string source);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
