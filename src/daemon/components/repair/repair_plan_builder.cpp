@@ -22,6 +22,7 @@ RepairRequest RepairPlanBuilder::buildWarm(const RepairHealthSnapshot& health, i
     (void)health.missingFts5;
     (void)health.missingEmbeddings;
     req.repairGraph = (!health.graphIntegrityOk || health.graphDocNodeGap > 0);
+    req.repairTopology = health.semanticNeighborEdgeGap > 0;
     req.repairStuckDocs = true;
     if (maxRetries > 0)
         req.maxRetries = maxRetries;

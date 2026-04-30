@@ -426,6 +426,13 @@ public:
                                                           std::string_view relation,
                                                           std::size_t limit = 1000) = 0;
 
+    // Find nodes of a given type that have NO outbound edges of the specified relation.
+    // Used to drive bounded backfill (e.g. semantic_neighbor edges that were never built
+    // for older docs). Result is bounded by `limit`.
+    virtual Result<std::vector<KGNode>> findNodesLackingOutboundEdges(std::string_view nodeType,
+                                                                      std::string_view relation,
+                                                                      std::size_t limit = 1000) = 0;
+
     // Get all distinct node types with their counts, ordered by count descending.
     // Used for node type discovery in CLI (e.g., `yams graph --list-types`).
     virtual Result<std::vector<std::pair<std::string, std::size_t>>> getNodeTypeCounts() = 0;

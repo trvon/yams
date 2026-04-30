@@ -1041,6 +1041,45 @@ EmbeddingService::rebuildSemanticNeighborGraphForCorpus(const std::string& model
     return static_cast<std::size_t>(after >= before ? after - before : 0);
 }
 
+Result<std::size_t> EmbeddingService::backfillSemanticNeighborGraph(const std::string& modelName,
+                                                                    std::size_t batchLimit) {
+    if (batchLimit == 0) {
+        return std::size_t{0};
+    }
+    auto kgStore = getKgStore_ ? getKgStore_() : nullptr;
+    auto vdb = getVectorDatabase_ ? getVectorDatabase_() : nullptr;
+    if (!kgStore || !vdb) {
+        return Error{ErrorCode::InvalidState,
+                     "backfillSemanticNeighborGraph: kg store or vector db unavailable"};
+    }
+
+    auto missing = kgStore->findNodesLackingOutboundEdges(
+        std::string_view{"document"}, std::string_view{"semantic_neighbor"}, batchLimit);
+    if (!missing) {
+        return missing.error();
+    }
+    if (missing.value().empty()) {
+        return std::size_t{0};
+    }
+
+    constexpr std::string_view kDocPrefix{"doc:"};
+    std::vector<std::pair<std::string, std::string>> sources;
+    sources.reserve(missing.value().size());
+    for (const auto& node : missing.value()) {
+        if (node.nodeKey.size() <= kDocPrefix.size() ||
+            node.nodeKey.compare(0, kDocPrefix.size(), kDocPrefix) != 0) {
+            continue;
+        }
+        sources.emplace_back(node.nodeKey.substr(kDocPrefix.size()), std::string{});
+    }
+    if (sources.empty()) {
+        return std::size_t{0};
+    }
+
+    updateSemanticNeighborGraph(kgStore, vdb, modelName, sources, /*sourceAllCorpus=*/false);
+    return sources.size();
+}
+
 boost::asio::awaitable<void> EmbeddingService::channelPoller() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
@@ -1451,7 +1490,29 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 
         if (didWork) {
             idleDelay = std::chrono::milliseconds(5);
+            semanticBackfillIdleTicks_ = 0;
             continue; // Check for more work immediately
+        }
+
+        ++semanticBackfillIdleTicks_;
+        if (semanticBackfillIdleTicks_ >= kSemanticBackfillIdleTickThreshold &&
+            inFlight_.load(std::memory_order_acquire) == 0 &&
+            pendingApprox_.load(std::memory_order_relaxed) == 0) {
+            const auto snap = TuningSnapshotRegistry::instance().get();
+            const bool daemonIdle = snap && snap->daemonIdle;
+            if (daemonIdle && getPreferredModel_) {
+                std::string model = getPreferredModel_();
+                if (!model.empty()) {
+                    auto drained =
+                        backfillSemanticNeighborGraph(model, kSemanticBackfillBatchLimit);
+                    if (drained && drained.value() > 0) {
+                        spdlog::debug(
+                            "[EmbeddingService] semantic_neighbor backfill drained {} docs",
+                            drained.value());
+                    }
+                }
+            }
+            semanticBackfillIdleTicks_ = 0;
         }
 
         // Idle - wait before polling again

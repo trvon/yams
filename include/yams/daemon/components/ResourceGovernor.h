@@ -211,6 +211,14 @@ public:
     /// no memory budget (caller should fall back to a conservative literal).
     [[nodiscard]] std::uint64_t recommendLexicalCorpusBytes() const noexcept;
 
+    /// Recommend the maximum working-set byte budget for the SPQ vector index
+    /// rebuild (training set + per-row encoded codes scratch). Scales with the
+    /// daemon memory budget and current pressure so the rebuild does not push
+    /// a small machine over its limit during a backfill of a large corpus.
+    /// Callers should derive simeon_pq_train_limit and per-batch row counts
+    /// from this cap when it is tighter than their static defaults.
+    [[nodiscard]] std::uint64_t recommendVectorRebuildBudgetBytes() const noexcept;
+
     // ========================================================================
     // Pressure Response Actions (called based on level transitions)
     // ========================================================================

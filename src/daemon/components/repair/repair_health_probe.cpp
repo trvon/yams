@@ -154,6 +154,15 @@ RepairHealthSnapshot RepairHealthProbe::probe(const RepairHealthOptions& options
         snapshot.graphDocNodeGap = snapshot.documentsScanned - snapshot.graphDocNodes;
     }
 
+    if (checkGraph && kgStore_ && options.semanticNeighborGapProbeLimit > 0) {
+        auto missing = kgStore_->findNodesLackingOutboundEdges(
+            std::string_view{"document"}, std::string_view{"semantic_neighbor"},
+            options.semanticNeighborGapProbeLimit);
+        if (missing) {
+            snapshot.semanticNeighborEdgeGap = static_cast<std::uint64_t>(missing.value().size());
+        }
+    }
+
     return snapshot;
 }
 

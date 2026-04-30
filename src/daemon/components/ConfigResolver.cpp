@@ -734,27 +734,6 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
         }
 
         auto kv = parseSimpleTomlFlat(cfgPath);
-
-        auto parseBool = [](std::string v) -> std::optional<bool> {
-            for (auto& c : v)
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if (v == "true" || v == "1" || v == "yes" || v == "on")
-                return true;
-            if (v == "false" || v == "0" || v == "no" || v == "off")
-                return false;
-            return std::nullopt;
-        };
-
-        if (auto it = kv.find("search.topology.enable_weak_query_routing"); it != kv.end()) {
-            policy.enableWeakQueryRouting = parseBool(it->second);
-        }
-        auto parseSize = [](const std::string& s) -> std::optional<std::size_t> {
-            try {
-                return static_cast<std::size_t>(std::stoul(s));
-            } catch (const std::exception&) {
-                return std::nullopt;
-            }
-        };
         auto parseFloat = [](const std::string& s) -> std::optional<float> {
             try {
                 return std::stof(s);
@@ -762,45 +741,8 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
                 return std::nullopt;
             }
         };
-        if (auto it = kv.find("search.topology.max_clusters"); it != kv.end()) {
-            policy.maxClusters = parseSize(it->second);
-        }
-        if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
-            policy.maxDocs = parseSize(it->second);
-        }
-        if (auto it = kv.find("search.topology.medoid_boost"); it != kv.end()) {
-            policy.medoidBoost = parseFloat(it->second);
-        }
-        if (auto it = kv.find("search.topology.bridge_boost"); it != kv.end()) {
-            policy.bridgeBoost = parseFloat(it->second);
-        }
-        if (auto it = kv.find("search.topology.routed_base_multiplier"); it != kv.end()) {
-            policy.routedBaseMultiplier = parseFloat(it->second);
-        }
-        if (auto it = kv.find("search.topology.routing_variant"); it != kv.end()) {
-            if (!it->second.empty())
-                policy.routingVariant = it->second;
-        }
-        if (auto it = kv.find("search.topology.integration"); it != kv.end()) {
-            if (!it->second.empty())
-                policy.integration = it->second;
-        }
-        if (auto it = kv.find("search.topology.recall_expand_per_cluster"); it != kv.end()) {
-            policy.recallExpandPerCluster = parseSize(it->second);
-        }
         if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
             policy.rrfK = parseFloat(it->second);
-        }
-        if (auto it = kv.find("search.topology.route_scoring"); it != kv.end()) {
-            if (!it->second.empty())
-                policy.routeScoring = it->second;
-        }
-        if (auto it = kv.find("search.topology.enable_semantic_neighbor_expansion");
-            it != kv.end()) {
-            policy.enableSemanticNeighborExpansion = parseBool(it->second);
-        }
-        if (auto it = kv.find("search.topology.semantic_neighbor_expansion_k"); it != kv.end()) {
-            policy.semanticNeighborExpansionK = parseSize(it->second);
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology routing policy: {}", e.what());

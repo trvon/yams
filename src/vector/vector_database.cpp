@@ -286,6 +286,8 @@ public:
         return cachedVectorCount_.load(std::memory_order_relaxed);
     }
 
+    size_t getEmbeddingDim() const { return config_.embedding_dim; }
+
     void initializeCounter() {
         if (counterInitialized_.exchange(true, std::memory_order_acquire)) {
             return; // Already initialized
@@ -1282,6 +1284,10 @@ void VectorDatabase::dropTable() {
 
 size_t VectorDatabase::getVectorCount() const {
     return pImpl->getVectorCount();
+}
+
+size_t VectorDatabase::getEmbeddingDim() const {
+    return pImpl->getEmbeddingDim();
 }
 
 bool VectorDatabase::insertVector(const VectorRecord& record) {

@@ -55,6 +55,20 @@ void CheckpointManager::stop() {
     if (checkpointThread_.joinable()) {
         checkpointThread_.join();
     }
+
+    if (deps_.metadataRepository) {
+        try {
+            auto result = deps_.metadataRepository->checkpointWalTruncate();
+            if (result) {
+                spdlog::info("[CheckpointManager] Shutdown WAL checkpoint (TRUNCATE) completed");
+            } else {
+                spdlog::warn("[CheckpointManager] Shutdown WAL TRUNCATE failed: {}",
+                             result.error().message);
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("[CheckpointManager] Shutdown WAL TRUNCATE threw: {}", e.what());
+        }
+    }
 }
 
 bool CheckpointManager::checkpointNow() {
@@ -218,7 +232,7 @@ bool CheckpointManager::checkpointWal() {
     // traverses the unflushed WAL. PASSIVE can't reclaim pages held by
     // writers, so at that point TRUNCATE's brief exclusive lock is the
     // lesser evil.
-    constexpr std::uint64_t kTruncateWatermarkBytes = 1024ULL * 1024ULL * 1024ULL; // 1 GiB
+    constexpr std::uint64_t kTruncateWatermarkBytes = 256ULL * 1024ULL * 1024ULL; // 256 MiB
     bool wantsTruncate = false;
     if (!config_.data_dir.empty()) {
         std::error_code ec;

@@ -95,6 +95,13 @@ public:
     // order; a corpus-wide pass is deterministic.
     Result<std::size_t> rebuildSemanticNeighborGraphForCorpus(const std::string& modelName);
 
+    // Bounded backfill: finds up to `batchLimit` document nodes that have no
+    // outbound semantic_neighbor edges and runs the per-doc edge-construction
+    // path for them. Does NOT wipe existing edges. Returns the number of
+    // source docs processed (i.e. how big the next batch should be smaller).
+    Result<std::size_t> backfillSemanticNeighborGraph(const std::string& modelName,
+                                                      std::size_t batchLimit);
+
     void start();
 
 private:
@@ -145,6 +152,13 @@ private:
     std::atomic<uint64_t> semanticEdgesCreated_{0};
     std::atomic<uint64_t> semanticDocsProcessed_{0};
     std::atomic<uint64_t> semanticUpdateErrors_{0};
+
+    // Idle-tick semantic_neighbor backfill: counts consecutive idle ticks since
+    // the last drain attempt. Bounded — not actually unbounded growth, just used
+    // to throttle the call frequency.
+    std::size_t semanticBackfillIdleTicks_{0};
+    static constexpr std::size_t kSemanticBackfillIdleTickThreshold{4};
+    static constexpr std::size_t kSemanticBackfillBatchLimit{64};
     std::atomic<uint64_t> inferTokenCounter_{0};
     mutable std::mutex phaseTimingsMutex_;
     std::unordered_map<std::string, PhaseTiming> phaseTimings_;

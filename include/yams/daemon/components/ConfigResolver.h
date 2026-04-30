@@ -51,19 +51,7 @@ public:
     };
 
     struct TopologyRoutingPolicy {
-        std::optional<bool> enableWeakQueryRouting;
-        std::optional<std::size_t> maxClusters;
-        std::optional<std::size_t> maxDocs;
-        std::optional<float> medoidBoost;
-        std::optional<float> bridgeBoost;
-        std::optional<float> routedBaseMultiplier;
-        std::optional<std::string> routingVariant;
-        std::optional<std::string> integration;
-        std::optional<std::size_t> recallExpandPerCluster;
         std::optional<float> rrfK;
-        std::optional<std::string> routeScoring;
-        std::optional<bool> enableSemanticNeighborExpansion;
-        std::optional<std::size_t> semanticNeighborExpansionK;
     };
 
     struct TopologyEnginePolicy {

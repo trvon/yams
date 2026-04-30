@@ -28,6 +28,11 @@ struct RepairHealthSnapshot {
     uint64_t missingEmbeddings{0};
     uint64_t graphDocNodes{0};
     uint64_t graphDocNodeGap{0};
+    // Bounded probe of doc-nodes that have no outbound semantic_neighbor
+    // edges. Capped by RepairHealthOptions::semanticNeighborGapProbeLimit so a
+    // probe never scans the full corpus. Saturates at the limit (i.e.
+    // gap == limit means "at least this many").
+    uint64_t semanticNeighborEdgeGap{0};
     bool graphIntegrityOk{true};
     std::vector<std::string> issues;
 };
@@ -37,6 +42,8 @@ struct RepairHealthOptions {
     bool checkEmbeddings{true};
     bool checkGraph{true};
     bool scanDocuments{true};
+    // Upper bound on the bounded semantic_neighbor gap probe. 0 disables it.
+    std::size_t semanticNeighborGapProbeLimit{256};
 };
 
 class RepairHealthProbe {

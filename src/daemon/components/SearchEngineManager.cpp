@@ -224,6 +224,10 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             if (auto governorCap = ResourceGovernor::instance().recommendLexicalCorpusBytes();
                 governorCap > 0) {
                 lexicalCfg.max_corpus_bytes = static_cast<std::size_t>(governorCap);
+                constexpr std::size_t kAvgDocBytes = 4096;
+                const std::size_t docsFromBudget = std::max<std::size_t>(
+                    1024, static_cast<std::size_t>(governorCap) / kAvgDocBytes);
+                lexicalCfg.max_corpus_docs = std::min(lexicalCfg.max_corpus_docs, docsFromBudget);
             }
             if (bm25Policy.variant && *bm25Policy.variant == "atire") {
                 lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
@@ -274,103 +278,13 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
     }
 
-    // Apply topology routing policy from config file. Env vars
-    // (YAMS_SEARCH_TOPOLOGY_*) still override inside SearchEngineBuilder.
+    // Topology routing policy was removed in the search-engine debloat;
+    // rrfK can still be tuned via the topology-routing config block.
     {
         auto tp = ConfigResolver::resolveTopologyRoutingPolicy();
-        if (tp.enableWeakQueryRouting) {
-            opts.config.enableTopologyWeakQueryRouting = *tp.enableWeakQueryRouting;
-            spdlog::info("SearchEngine enableTopologyWeakQueryRouting applied via config: {}",
-                         *tp.enableWeakQueryRouting);
-        }
-        if (tp.maxClusters) {
-            opts.config.topologyWeakQueryMaxClusters = *tp.maxClusters;
-            spdlog::info("SearchEngine topologyWeakQueryMaxClusters applied via config: {}",
-                         *tp.maxClusters);
-        }
-        if (tp.maxDocs) {
-            opts.config.topologyWeakQueryMaxDocs = *tp.maxDocs;
-            spdlog::info("SearchEngine topologyWeakQueryMaxDocs applied via config: {}",
-                         *tp.maxDocs);
-        }
-        if (tp.medoidBoost) {
-            opts.config.topologyMedoidBoost = std::max(0.0f, *tp.medoidBoost);
-            spdlog::info("SearchEngine topologyMedoidBoost applied via config: {:.3f}",
-                         opts.config.topologyMedoidBoost);
-        }
-        if (tp.bridgeBoost) {
-            opts.config.topologyBridgeBoost = std::max(0.0f, *tp.bridgeBoost);
-            spdlog::info("SearchEngine topologyBridgeBoost applied via config: {:.3f}",
-                         opts.config.topologyBridgeBoost);
-        }
-        if (tp.routedBaseMultiplier) {
-            opts.config.topologyRoutedBaseMultiplier = std::max(0.0f, *tp.routedBaseMultiplier);
-            spdlog::info("SearchEngine topologyRoutedBaseMultiplier applied via config: {:.3f}",
-                         opts.config.topologyRoutedBaseMultiplier);
-        }
-        if (tp.routingVariant) {
-            using V = yams::search::SearchEngineConfig::TopologyRoutingVariant;
-            const auto& raw = *tp.routingVariant;
-            if (raw == "vector_seed")
-                opts.config.topologyRoutingVariant = V::VectorSeed;
-            else if (raw == "kg_walk")
-                opts.config.topologyRoutingVariant = V::KgWalk;
-            else if (raw == "score_replace")
-                opts.config.topologyRoutingVariant = V::ScoreReplace;
-            else if (raw == "medoid_promote")
-                opts.config.topologyRoutingVariant = V::MedoidPromote;
-            else
-                opts.config.topologyRoutingVariant = V::Baseline;
-            spdlog::info("SearchEngine topologyRoutingVariant applied via config: {}", raw);
-        }
-        if (tp.integration) {
-            using I = yams::search::SearchEngineConfig::TopologyIntegration;
-            std::string raw = *tp.integration;
-            std::transform(raw.begin(), raw.end(), raw.begin(), [](char c) {
-                return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            });
-            if (raw == "recall_expand")
-                opts.config.topologyIntegration = I::RecallExpand;
-            else if (raw == "rrf")
-                opts.config.topologyIntegration = I::Rrf;
-            else if (raw == "both")
-                opts.config.topologyIntegration = I::Both;
-            else
-                opts.config.topologyIntegration = I::Boost;
-            spdlog::info("SearchEngine topologyIntegration applied via config: {}", raw);
-        }
-        if (tp.recallExpandPerCluster) {
-            opts.config.topologyRecallExpandPerCluster =
-                std::min<std::size_t>(*tp.recallExpandPerCluster, 512);
-            spdlog::info("SearchEngine topologyRecallExpandPerCluster applied via config: {}",
-                         opts.config.topologyRecallExpandPerCluster);
-        }
         if (tp.rrfK) {
             opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);
             spdlog::info("SearchEngine rrfK applied via config: {:.3f}", opts.config.rrfK);
-        }
-        if (tp.routeScoring) {
-            using RS = yams::search::SearchEngineConfig::TopologyRouteScoring;
-            std::string raw = *tp.routeScoring;
-            std::transform(raw.begin(), raw.end(), raw.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (raw == "size_weighted")
-                opts.config.topologyRouteScoring = RS::SizeWeighted;
-            else if (raw == "seed_coverage")
-                opts.config.topologyRouteScoring = RS::SeedCoverage;
-            else
-                opts.config.topologyRouteScoring = RS::Current;
-            spdlog::info("SearchEngine topologyRouteScoring applied via config: {}", raw);
-        }
-        if (tp.enableSemanticNeighborExpansion) {
-            opts.config.enableSemanticNeighborExpansion = *tp.enableSemanticNeighborExpansion;
-            spdlog::info("SearchEngine enableSemanticNeighborExpansion applied via config: {}",
-                         *tp.enableSemanticNeighborExpansion);
-        }
-        if (tp.semanticNeighborExpansionK) {
-            opts.config.semanticNeighborExpansionK = *tp.semanticNeighborExpansionK;
-            spdlog::info("SearchEngine semanticNeighborExpansionK applied via config: {}",
-                         *tp.semanticNeighborExpansionK);
         }
     }
 

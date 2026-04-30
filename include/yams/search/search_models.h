@@ -88,7 +88,6 @@ inline float componentSourceWeight(const SearchEngineConfig& config,
         case ComponentResult::Source::Metadata:
             return config.metadataWeight;
         case ComponentResult::Source::Anchor:
-            return config.anchorWeight;
         case ComponentResult::Source::Symbol:
         case ComponentResult::Source::Unknown:
             return 0.0f;

@@ -37,6 +37,7 @@ public:
     bool tableExists() const;
     void dropTable();
     size_t getVectorCount() const;
+    size_t getEmbeddingDim() const;
 
     bool insertVector(const VectorRecord& record);
     bool insertVectorsBatch(const std::vector<VectorRecord>& records);

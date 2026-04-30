@@ -5,6 +5,7 @@
 #include <chrono>
 #include <limits>
 #if defined(__APPLE__)
+#include <mach/mach.h>
 #include <malloc/malloc.h>
 #elif defined(__GLIBC__)
 #include <malloc.h>
@@ -63,8 +64,17 @@ void updateRepairHysteresis(bool isBusy, std::chrono::steady_clock::time_point n
 
 void releaseFreedSlabsToOs() noexcept {
 #if defined(__APPLE__)
-    if (auto* zone = malloc_default_zone()) {
-        malloc_zone_pressure_relief(zone, 0);
+    vm_address_t* zoneAddrs = nullptr;
+    unsigned zoneCount = 0;
+    if (malloc_get_all_zones(mach_task_self(), nullptr, &zoneAddrs, &zoneCount) == KERN_SUCCESS &&
+        zoneAddrs && zoneCount > 0) {
+        for (unsigned i = 0; i < zoneCount; ++i) {
+            if (auto* z = reinterpret_cast<malloc_zone_t*>(zoneAddrs[i])) {
+                malloc_zone_pressure_relief(z, 0);
+            }
+        }
+    } else if (auto* z = malloc_default_zone()) {
+        malloc_zone_pressure_relief(z, 0);
     }
 #elif defined(__GLIBC__)
     (void)malloc_trim(0);

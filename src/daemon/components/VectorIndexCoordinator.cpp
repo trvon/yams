@@ -1,6 +1,8 @@
 #include <yams/daemon/components/VectorIndexCoordinator.h>
 
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
@@ -88,6 +90,36 @@ getVdbLocked(std::mutex& mu, const std::shared_ptr<vector::VectorDatabase>& vdb)
     return vdb;
 }
 
+static void
+warnIfRebuildExceedsBudget(const std::shared_ptr<vector::VectorDatabase>& vdb) noexcept {
+    if (!vdb) {
+        return;
+    }
+    const std::uint64_t budget = ResourceGovernor::instance().recommendVectorRebuildBudgetBytes();
+    if (budget == 0) {
+        return;
+    }
+    std::size_t count = 0;
+    std::size_t dim = 0;
+    try {
+        count = vdb->getVectorCount();
+        dim = vdb->getEmbeddingDim();
+    } catch (...) {
+        return;
+    }
+    if (count == 0 || dim == 0) {
+        return;
+    }
+    const std::uint64_t rawBytes =
+        static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(dim) * sizeof(float);
+    const std::uint64_t predictedBytes = rawBytes + (rawBytes / 2);
+    if (predictedBytes > budget) {
+        spdlog::warn("[VectorIndexCoordinator] SPQ rebuild may exceed memory budget "
+                     "(predicted={}MB budget={}MB count={} dim={})",
+                     predictedBytes >> 20, budget >> 20, count, dim);
+    }
+}
+
 // Post a telemetry refresh onto the strand (single-writer seqlock invariant).
 // All publishTelemetry() calls MUST originate from the strand.
 void VectorIndexCoordinator::postTelemetryRefresh() noexcept {
@@ -156,6 +188,7 @@ void VectorIndexCoordinator::doFinalizeOnStrand() {
                          "instrumentation profile");
         } else {
             try {
+                warnIfRebuildExceedsBudget(vdb);
                 vdb->buildIndex();
                 if (!vdb->persistIndex()) {
                     spdlog::warn("[VectorIndexCoordinator] persistIndex returned failure: {}",
@@ -252,6 +285,7 @@ void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
                              "instrumentation profile");
             } else {
                 try {
+                    warnIfRebuildExceedsBudget(vdb);
                     vdb->buildIndex();
                     if (!vdb->persistIndex()) {
                         spdlog::warn(

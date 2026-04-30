@@ -102,24 +102,6 @@ TEST_CASE("forProfile CUSTOM also uses defaults", "[search][config][catch2]") {
     CHECK(cfg.corpusProfile == CP::CUSTOM);
 }
 
-TEST_CASE("topology weak query routing defaults stay opt-in", "[search][config][catch2]") {
-    SearchEngineConfig cfg;
-
-    CHECK_FALSE(cfg.enableTopologyWeakQueryRouting);
-    CHECK(cfg.topologyWeakQueryMaxClusters == 2);
-    CHECK(cfg.topologyWeakQueryMaxDocs == 64);
-}
-
-TEST_CASE("Phase J topology all-query routing defaults stay opt-in", "[search][config][catch2]") {
-    SearchEngineConfig cfg;
-
-    // Default off; weak-only routing semantics unchanged.
-    CHECK_FALSE(cfg.enableTopologyAllQueryRouting);
-    // Gate threshold matches the relaxed-vector-retry calibration regime
-    // documented in Phase J (docs/benchmarks/phase_j_hierarchical_routing.md).
-    CHECK(cfg.topologyRoutingMinMedoidCosine == 0.40f);
-}
-
 // ────────────────────────────────────────────────────────────────────────────────
 // detectProfile
 // ────────────────────────────────────────────────────────────────────────────────
