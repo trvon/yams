@@ -797,6 +797,7 @@ boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
     cfg.opTable = opTable;
     cfg.stepProjector = projections::queryStepProjection;
     cfg.finalResultBuilder = projections::queryFinalResult;
+    cfg.dispatchErrorsAreFatal = false;
     cfg.singleStepUnwrap = true;
 
     cfg.normalize = [prevResultPtr](const std::string& op,

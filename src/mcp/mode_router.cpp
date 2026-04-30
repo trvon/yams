@@ -70,6 +70,8 @@ boost::asio::awaitable<json> ModeRouter::handle(const json& args, std::string_vi
         json projectedSteps = json::array();
         std::size_t succeeded = 0;
         std::size_t failed = 0;
+        std::size_t routerFailed = 0;
+        std::size_t dispatchFailed = 0;
 
         const auto& stepProjector =
             config_.stepProjector ? config_.stepProjector : projections::executeStepProjection;
@@ -77,8 +79,8 @@ boost::asio::awaitable<json> ModeRouter::handle(const json& args, std::string_vi
                                              ? config_.finalResultBuilder
                                              : projections::executeFinalResult;
 
-        auto projectFailure = [&stepProjector, &projectedSteps,
-                               &failed](std::size_t stepIndex, std::string op, std::string error) {
+        auto projectFailure = [&stepProjector, &projectedSteps, &failed, &routerFailed](
+                                  std::size_t stepIndex, std::string op, std::string error) {
             ModeRouterStepResult step;
             step.stepIndex = stepIndex;
             step.op = std::move(op);
@@ -87,6 +89,7 @@ boost::asio::awaitable<json> ModeRouter::handle(const json& args, std::string_vi
             step.data = json{{"error", std::move(error)}};
             projectedSteps.push_back(stepProjector(step));
             ++failed;
+            ++routerFailed;
         };
 
         for (std::size_t i = 0; i < steps.size(); ++i) {
@@ -135,6 +138,7 @@ boost::asio::awaitable<json> ModeRouter::handle(const json& args, std::string_vi
 
             if (stepResult.isError) {
                 ++failed;
+                ++dispatchFailed;
             } else {
                 ++succeeded;
             }
@@ -145,6 +149,9 @@ boost::asio::awaitable<json> ModeRouter::handle(const json& args, std::string_vi
                 break;
             }
         }
+
+        const bool topLevelError =
+            routerFailed > 0 || (config_.dispatchErrorsAreFatal && dispatchFailed > 0);
 
         if (config_.singleStepUnwrap && steps.size() == 1 && projectedSteps.size() == 1) {
             const auto& onlyStep = projectedSteps[0];
@@ -181,7 +188,7 @@ boost::asio::awaitable<json> ModeRouter::handle(const json& args, std::string_vi
                 structured = json{{"type", "tool_result"}, {"data", unwrapped}};
             }
 
-            co_return wrapToolResultStructured(contentItems, structured, failed > 0);
+            co_return wrapToolResultStructured(contentItems, structured, topLevelError);
         }
 
         json finalResult =
@@ -233,7 +240,7 @@ boost::asio::awaitable<json> ModeRouter::handle(const json& args, std::string_vi
             structured = json{{"type", "tool_result"}, {"data", finalResult}};
         }
 
-        co_return wrapToolResultStructured(contentItems, structured, failed > 0);
+        co_return wrapToolResultStructured(contentItems, structured, topLevelError);
     } catch (const json::exception& e) {
         co_return errorResultWrap(std::string("JSON error: ") + e.what());
     } catch (const std::exception& e) {

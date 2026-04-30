@@ -1090,6 +1090,33 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "query - multi-step with describe ret
     }
 }
 
+TEST_CASE_METHOD(CompositeDispatchFixture, "query - partial pipeline failures stay in tool result",
+                 "[mcp][composite][pipeline]") {
+    json args = {{"steps", json::array({{{"op", "describe"}},
+                                        {{"op", "search"}, {"params", {{"query", "test"}}}}})}};
+
+    auto result = callTool("query", args);
+
+    INFO("result: " << result.dump(2));
+    REQUIRE_FALSE(result.contains("error"));
+    REQUIRE(result.contains("structuredContent"));
+
+    const auto& text = result["content"][0]["text"].get_ref<const std::string&>();
+    CHECK_THAT(text, ContainsSubstring("1 succeeded, 1 failed"));
+    CHECK_THAT(text, ContainsSubstring("Daemon socket not found for test harness"));
+
+    const auto& data = result["structuredContent"]["data"];
+    REQUIRE(data["totalSteps"] == 2);
+    REQUIRE(data["completedSteps"] == 2);
+    REQUIRE(data["steps"].is_array());
+    REQUIRE(data["steps"].size() == 2);
+    CHECK(data["steps"][0]["op"] == "describe");
+    CHECK_FALSE(data["steps"][0]["isError"].get<bool>());
+    CHECK(data["steps"][1]["op"] == "search");
+    CHECK(data["steps"][1]["isError"].get<bool>());
+    CHECK(data["steps"][1]["result"]["error"] == "Daemon socket not found for test harness");
+}
+
 TEST_CASE_METHOD(CompositeDispatchFixture, "query - single-step returns direct result",
                  "[mcp][composite][pipeline]") {
     // Single describe step should NOT wrap in steps array
