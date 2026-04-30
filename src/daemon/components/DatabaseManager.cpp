@@ -211,8 +211,7 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     std::map<std::string, uint64_t> fallbackDurations;
     auto& durations = deps_.state ? deps_.state->initDurationsMs : fallbackDurations;
 
-    metadata::ConnectionPoolConfig dbPoolCfg;
-    size_t rec = [&]() {
+    size_t readRecommended = [&]() {
         try {
             return std::max<size_t>(1, TuneAdvisor::recommendedThreads(0.25));
         } catch (...) {
@@ -220,13 +219,13 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
             return std::max<size_t>(1, hw / 2);
         }
     }();
-    dbPoolCfg.minConnections = std::min<size_t>(std::max<size_t>(2, rec), 8);
-    dbPoolCfg.maxConnections = 64;
+    size_t readPoolMin = std::min<size_t>(std::max<size_t>(2, readRecommended), 8);
+    size_t readPoolMax = 64;
     if (const char* envMax = std::getenv("YAMS_DB_POOL_MAX"); envMax && *envMax) {
         try {
             auto v = static_cast<size_t>(std::stoul(envMax));
-            if (v >= dbPoolCfg.minConnections)
-                dbPoolCfg.maxConnections = v;
+            if (v >= readPoolMin)
+                readPoolMax = v;
         } catch (...) {
         }
     }
@@ -234,10 +233,14 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
         try {
             auto v = static_cast<size_t>(std::stoul(envMin));
             if (v > 0)
-                dbPoolCfg.minConnections = v;
+                readPoolMin = v;
         } catch (...) {
         }
     }
+
+    metadata::ConnectionPoolConfig dbPoolCfg;
+    dbPoolCfg.minConnections = 1;
+    dbPoolCfg.maxConnections = 1;
 
     std::shared_ptr<metadata::ConnectionPool> writePool;
     {
@@ -245,7 +248,7 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
         connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), dbPoolCfg);
         writePool = connectionPool_;
     }
-    TuneAdvisor::setStoragePoolSize(static_cast<uint32_t>(dbPoolCfg.maxConnections));
+    TuneAdvisor::setStoragePoolSize(static_cast<uint32_t>(readPoolMax));
     TuneAdvisor::setEnableParallelIngest(true);
 
     auto poolInit =
@@ -266,7 +269,9 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     }
 
     if (dualPoolEnabled) {
-        auto readCfg = dbPoolCfg;
+        metadata::ConnectionPoolConfig readCfg;
+        readCfg.minConnections = readPoolMin;
+        readCfg.maxConnections = readPoolMax;
         readCfg.readOnly = true;
         {
             const size_t kMaxReadConnections =

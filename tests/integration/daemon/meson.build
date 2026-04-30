@@ -539,7 +539,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'onnx', 'tuning'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: 120,  # 2 minutes for multiple daemon restarts
+      timeout: 300,  # 5 sections, ~32s/section (EmbeddingService quiesce dominates)
       args: ['OnnxConcurrencyRegistry respects TuneAdvisor env settings', '--allow-running-no-tests'],
     )
 

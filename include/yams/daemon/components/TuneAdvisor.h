@@ -3181,11 +3181,7 @@ public:
         uint32_t ov = onnxMaxConcurrentOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_MAX_CONCURRENT", 1u, 64u);
-#else
-        static const auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_MAX_CONCURRENT", 1u, 64u);
-#endif
         if (envValue)
             return static_cast<uint32_t>(*envValue * profileScale());
         uint32_t hw = daemonThreadCapacity(hardwareConcurrency());
@@ -3212,11 +3208,7 @@ public:
         uint32_t ov = onnxGlinerReservedOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_GLINER_RESERVED", 0u, 8u);
-#else
-        static const auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_GLINER_RESERVED", 0u, 8u);
-#endif
         if (envValue)
             return *envValue;
         return 1;
@@ -3232,11 +3224,7 @@ public:
         uint32_t ov = onnxEmbedReservedOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_EMBED_RESERVED", 0u, 8u);
-#else
-        static const auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_EMBED_RESERVED", 0u, 8u);
-#endif
         if (envValue)
             return *envValue;
         return 1;
@@ -3251,11 +3239,7 @@ public:
         uint32_t ov = onnxRerankerReservedOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_RERANKER_RESERVED", 0u, 8u);
-#else
-        static const auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_RERANKER_RESERVED", 0u, 8u);
-#endif
         if (envValue)
             return *envValue;
         // Efficient profile with tight budget: reranker gets no reserved slot
