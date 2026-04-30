@@ -1921,6 +1921,8 @@ struct OptimizationRunResult {
     std::uintmax_t persistedHnswMetaRows = 0;
     std::uintmax_t persistedVec0Tables = 0;
     std::uintmax_t persistedVec0Rows = 0;
+    std::uintmax_t persistedPqCodes = 0;
+    std::uintmax_t persistedPqMeta = 0;
     bool success = false;
     std::string errorMessage;
 };
@@ -1950,6 +1952,8 @@ struct BenchCacheMetadata {
     std::uintmax_t persistedHnswMetaRows = 0;
     std::uintmax_t persistedVec0Tables = 0;
     std::uintmax_t persistedVec0Rows = 0;
+    std::uintmax_t persistedPqCodes = 0;
+    std::uintmax_t persistedPqMeta = 0;
 };
 
 struct PersistedHnswState {
@@ -1960,10 +1964,15 @@ struct PersistedHnswState {
     std::uintmax_t metaRows = 0;
     std::uintmax_t vec0Tables = 0;
     std::uintmax_t vec0Rows = 0;
+    std::uintmax_t pqCodeRows = 0;
+    std::uintmax_t pqMetaRows = 0;
 
     bool reusable(yams::vector::VectorSearchEngine engine) const {
         if (engine == yams::vector::VectorSearchEngine::Vec0L2) {
             return vec0Tables > 0 && vec0Rows > 0;
+        }
+        if (engine == yams::vector::VectorSearchEngine::SimeonPqAdc) {
+            return pqCodeRows > 0 && pqMetaRows > 0;
         }
         return nodeRows > 0 && metaRows > 0;
     }
@@ -2131,7 +2140,9 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
         "SELECT name FROM sqlite_master WHERE type='table' AND "
         "(name='vectors_hnsw_meta' OR name='vectors_hnsw_nodes' OR "
         " name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
-        " name LIKE 'vectors_%_vec0')";
+        " name LIKE 'vectors_%_vec0' OR "
+        " name='simeon_pq_codes' OR name='simeon_pq_meta' OR "
+        " name LIKE 'vectors_%_simeon_pq_codes' OR name LIKE 'vectors_%_simeon_pq_meta')";
     if (sqlite3_prepare_v2(db, tableSql, -1, &stmt, nullptr) != SQLITE_OK) {
         spdlog::warn("[Bench] Failed to inspect persisted HNSW tables in {}: {}",
                      vectorsDbPath.string(), sqlite3_errmsg(db));
@@ -2170,6 +2181,10 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
             } else if (table.find("_vec0") != std::string::npos) {
                 state.vec0Tables += 1;
                 state.vec0Rows += count;
+            } else if (table.find("simeon_pq_codes") != std::string::npos) {
+                state.pqCodeRows += count;
+            } else if (table.find("simeon_pq_meta") != std::string::npos) {
+                state.pqMetaRows += count;
             }
         }
         sqlite3_finalize(stmt);
@@ -2205,6 +2220,8 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
         {"persisted_hnsw_meta_rows", std::to_string(metadata.persistedHnswMetaRows)},
         {"persisted_vec0_tables", std::to_string(metadata.persistedVec0Tables)},
         {"persisted_vec0_rows", std::to_string(metadata.persistedVec0Rows)},
+        {"persisted_pq_codes", std::to_string(metadata.persistedPqCodes)},
+        {"persisted_pq_meta", std::to_string(metadata.persistedPqMeta)},
     };
 }
 
@@ -2239,6 +2256,8 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
     metadata.persistedHnswMetaRows = j.value("persisted_hnsw_meta_rows", std::uintmax_t{0});
     metadata.persistedVec0Tables = j.value("persisted_vec0_tables", std::uintmax_t{0});
     metadata.persistedVec0Rows = j.value("persisted_vec0_rows", std::uintmax_t{0});
+    metadata.persistedPqCodes = j.value("persisted_pq_codes", std::uintmax_t{0});
+    metadata.persistedPqMeta = j.value("persisted_pq_meta", std::uintmax_t{0});
     return metadata;
 }
 
@@ -2365,6 +2384,8 @@ preferStrongerBenchCacheMetadata(BenchCacheMetadata preferred,
         std::max(preferred.persistedHnswMetaRows, c.persistedHnswMetaRows);
     preferred.persistedVec0Tables = std::max(preferred.persistedVec0Tables, c.persistedVec0Tables);
     preferred.persistedVec0Rows = std::max(preferred.persistedVec0Rows, c.persistedVec0Rows);
+    preferred.persistedPqCodes = std::max(preferred.persistedPqCodes, c.persistedPqCodes);
+    preferred.persistedPqMeta = std::max(preferred.persistedPqMeta, c.persistedPqMeta);
     if (preferred.status != "primed" && c.status == "primed") {
         preferred.status = c.status;
     }
@@ -2388,6 +2409,8 @@ static BenchCacheMetadata currentBenchCacheMetadata(BenchCacheMetadata metadata,
     metadata.persistedHnswMetaRows = persistedHnsw.metaRows;
     metadata.persistedVec0Tables = persistedHnsw.vec0Tables;
     metadata.persistedVec0Rows = persistedHnsw.vec0Rows;
+    metadata.persistedPqCodes = persistedHnsw.pqCodeRows;
+    metadata.persistedPqMeta = persistedHnsw.pqMetaRows;
     metadata.embeddedDocs = static_cast<int>(getCount("documents_embedded"));
     metadata.vectorCount = getCount("vector_count");
     const bool queueDrained = getCount("embed_svc_queued") == 0 && getCount("embed_in_flight") == 0;
@@ -3888,6 +3911,8 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     j["persisted_hnsw_meta_rows"] = result.persistedHnswMetaRows;
     j["persisted_vec0_tables"] = result.persistedVec0Tables;
     j["persisted_vec0_rows"] = result.persistedVec0Rows;
+    j["persisted_pq_codes"] = result.persistedPqCodes;
+    j["persisted_pq_meta"] = result.persistedPqMeta;
     j["tuning_state"] = result.tuningState;
     j["tuning_reason"] = result.tuningReason;
     j["error"] = result.errorMessage;
@@ -7181,6 +7206,8 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
             result.persistedHnswMetaRows = persisted.metaRows;
             result.persistedVec0Tables = persisted.vec0Tables;
             result.persistedVec0Rows = persisted.vec0Rows;
+            result.persistedPqCodes = persisted.pqCodeRows;
+            result.persistedPqMeta = persisted.pqMetaRows;
         }
 
         g_debugRunContext->dataset =
@@ -7554,6 +7581,10 @@ int main(int argc, char** argv) {
               << g_final_vector_index_state.vec0Tables << "\n";
     std::cout << "  persisted_vec0_rows:             " << std::setw(10)
               << g_final_vector_index_state.vec0Rows << "\n";
+    std::cout << "  persisted_simeon_pq_codes:       " << std::setw(10)
+              << g_final_vector_index_state.pqCodeRows << "\n";
+    std::cout << "  persisted_simeon_pq_meta:        " << std::setw(10)
+              << g_final_vector_index_state.pqMetaRows << "\n";
 
     // Keyword-only search results (FTS5 isolation)
     std::cout << "\n  --- KEYWORD SEARCH (FTS5 only) ---\n";

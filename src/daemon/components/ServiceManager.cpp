@@ -1886,6 +1886,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (kgRes) {
                 auto kgStore =
                     std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgRes).value());
+                if (auto readPool = getReadConnectionPool()) {
+                    kgStore->setReadPool(readPool.get());
+                }
                 if (databaseManager_) {
                     databaseManager_->setKgStore(kgStore);
                 }
@@ -2049,6 +2052,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
             if (piq) {
                 piq->setKgWriteQueue(kgWriteQueue_.get());
+            }
+            if (auto emb =
+                    std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire)) {
+                emb->setKgWriteQueueGetter([this]() { return kgWriteQueue_.get(); });
             }
             spdlog::debug("[ServiceManager] KGWriteQueue started");
         }

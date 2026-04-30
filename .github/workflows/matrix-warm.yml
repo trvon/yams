@@ -155,7 +155,7 @@ jobs:
             fi
           fi
           "$VENV_PYTHON" -m pip install --upgrade pip
-          "$VENV_PYTHON" -m pip install --upgrade 'conan==2.5.*' 'meson==1.4.*' 'ninja==1.11.*'
+          "$VENV_PYTHON" -m pip install --upgrade 'conan==2.18.*' 'meson==1.4.*' 'ninja==1.11.*'
           echo "$TOOL_BIN" >> "$GITHUB_PATH"
           export PATH="$TOOL_BIN:$PATH"
           conan --version

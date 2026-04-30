@@ -2999,6 +2999,23 @@ public:
     /// When enabled, post-ingest stages automatically tune their concurrency
     /// based on measured latency feedback (replaces static thresholds).
     /// Environment: YAMS_ENABLE_GRADIENT_LIMITERS
+    static bool enableSemanticNeighborBackfill() {
+        int ov = enableSemanticNeighborBackfillOverride_.load(std::memory_order_relaxed);
+        if (ov >= 0)
+            return ov > 0;
+        if (const char* s = std::getenv("YAMS_ENABLE_SEMANTIC_NEIGHBOR_BACKFILL")) {
+            std::string v{s};
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (v == "0" || v == "false" || v == "off" || v == "no")
+                return false;
+        }
+        return true;
+    }
+    static void setEnableSemanticNeighborBackfill(bool en) {
+        enableSemanticNeighborBackfillOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
+    }
+
     static bool enableGradientLimiters() {
         int ov = enableGradientLimitersOverride_.load(std::memory_order_relaxed);
         if (ov >= 0)
@@ -3529,6 +3546,9 @@ private:
     static inline std::atomic<uint32_t> cpuLevelHysteresisMsOverride_{0};
     static inline std::atomic<uint32_t> modelEvictionCooldownMsOverride_{0};
     static inline std::atomic<uint32_t> governorWarningScalePctOverride_{0};
+
+    // Semantic-neighbor backfill (idle-time KG edge maintenance)
+    static inline std::atomic<int> enableSemanticNeighborBackfillOverride_{-1};
 
     // Gradient limiter overrides
     static inline std::atomic<int> enableGradientLimitersOverride_{-1};

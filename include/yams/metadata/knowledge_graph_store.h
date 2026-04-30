@@ -14,6 +14,8 @@
 
 namespace yams::metadata {
 
+class ConnectionPool;
+
 /**
  * KnowledgeGraphStoreConfig controls caching and behavior of the KG store.
  * The implementation should treat all caches as best-effort and thread-safe for reads.
@@ -206,6 +208,8 @@ public:
     // Configuration
     virtual void setConfig(const KnowledgeGraphStoreConfig& cfg) = 0;
     virtual const KnowledgeGraphStoreConfig& getConfig() const = 0;
+
+    virtual void setReadPool(ConnectionPool* readPool) { (void)readPool; }
 
     virtual Result<std::unique_ptr<WriteBatch>> beginWriteBatch() = 0;
     virtual KGEntityCountSnapshot getEntityCountSnapshot() const = 0;

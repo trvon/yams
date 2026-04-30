@@ -227,7 +227,8 @@ void ConnectionPool::shutdown() {
 }
 
 Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::milliseconds timeout,
-                                                                  ConnectionPriority priority) {
+                                                                  ConnectionPriority priority,
+                                                                  std::string_view callerTag) {
     YAMS_ZONE_SCOPED_N("MetadataPool::acquire");
     std::unique_lock<std::mutex> lock(mutex_);
 
@@ -302,6 +303,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
                     [this](PooledConnection* conn) { returnConnection(conn); },
                     currentGeneration_.load());
 
+                pooledConn->markAcquired(callerTag);
                 totalConnections_++;
                 activeConnections_++;
                 totalAcquired_++;
@@ -389,6 +391,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
     }
 
     conn->touch();
+    conn->markAcquired(callerTag);
     activeConnections_++;
     totalAcquired_++;
     leased_.insert(conn.get());
@@ -401,16 +404,22 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
 ConnectionPool::Stats ConnectionPool::getStats() const {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    return {.totalConnections = totalConnections_,
-            .availableConnections = available_.size(),
-            .activeConnections = activeConnections_,
-            .waitingRequests = waitingRequests_,
-            .maxObservedWaiting = maxWaitingRequests_.load(std::memory_order_relaxed),
-            .totalWaitMicros = totalWaitMicros_.load(std::memory_order_relaxed),
-            .timeoutCount = timeoutCount_.load(std::memory_order_relaxed),
-            .totalAcquired = totalAcquired_,
-            .totalReleased = totalReleased_,
-            .failedAcquisitions = failedAcquisitions_};
+    Stats out{.totalConnections = totalConnections_,
+              .availableConnections = available_.size(),
+              .activeConnections = activeConnections_,
+              .waitingRequests = waitingRequests_,
+              .maxObservedWaiting = maxWaitingRequests_.load(std::memory_order_relaxed),
+              .totalWaitMicros = totalWaitMicros_.load(std::memory_order_relaxed),
+              .timeoutCount = timeoutCount_.load(std::memory_order_relaxed),
+              .totalAcquired = totalAcquired_,
+              .totalReleased = totalReleased_,
+              .failedAcquisitions = failedAcquisitions_};
+    for (std::size_t i = 0; i < kHolderHistogramBucketCount; ++i) {
+        out.holderDurationBuckets[i] = holderDurationBuckets_[i].load(std::memory_order_relaxed);
+    }
+    out.slowHolderCount = slowHolderCount_.load(std::memory_order_relaxed);
+    out.maxHolderMicros = maxHolderMicros_.load(std::memory_order_relaxed);
+    return out;
 }
 
 Result<void> ConnectionPool::healthCheck() {
@@ -648,6 +657,32 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     YAMS_ZONE_SCOPED_N("MetadataPool::returnConnection");
     if (!conn || !conn->db_)
         return;
+
+    const auto holdMicros =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - conn->acquiredAt())
+                                       .count());
+    {
+        std::size_t bucket = kHolderHistogramBucketCount - 1;
+        for (std::size_t i = 0; i < kHolderHistogramBucketCount; ++i) {
+            if (holdMicros <= kHolderBucketUpperMicros[i]) {
+                bucket = i;
+                break;
+            }
+        }
+        holderDurationBuckets_[bucket].fetch_add(1, std::memory_order_relaxed);
+        std::uint64_t prevMax = maxHolderMicros_.load(std::memory_order_relaxed);
+        while (holdMicros > prevMax && !maxHolderMicros_.compare_exchange_weak(
+                                           prevMax, holdMicros, std::memory_order_relaxed)) {
+        }
+        const auto threshold = slowHolderThresholdMicros_.load(std::memory_order_relaxed);
+        if (threshold > 0 && holdMicros > threshold) {
+            slowHolderCount_.fetch_add(1, std::memory_order_relaxed);
+            const auto& tag = conn->holderTag();
+            spdlog::warn("[ConnectionPool] slow write-connection hold: tag='{}' duration_ms={}",
+                         tag.empty() ? "<untagged>" : tag.c_str(), holdMicros / 1000ULL);
+        }
+    }
 
     // Perform validation outside the lock (SQL queries should not block pool)
     // First, rollback any pending transaction

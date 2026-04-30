@@ -1,4 +1,5 @@
 #include <yams/daemon/components/EmbeddingService.h>
+#include <yams/daemon/components/KGWriteQueue.h>
 
 #include <spdlog/spdlog.h>
 
@@ -740,6 +741,16 @@ void EmbeddingService::updateSemanticNeighborGraph(
         }
 
         const auto tEdgeUpsert = std::chrono::steady_clock::now();
+        if (auto* queue = getKgWriteQueue_ ? getKgWriteQueue_() : nullptr) {
+            auto batch = std::make_unique<DeferredKGBatch>();
+            batch->sourceFile = "EmbeddingService::semanticNeighborStream";
+            batch->edges = std::move(semanticEdges);
+            const auto enqueuedCount = batch->edges.size();
+            queue->enqueue(std::move(batch));
+            recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
+            semanticEdgesCreated_.fetch_add(enqueuedCount, std::memory_order_relaxed);
+            return;
+        }
         auto edgeResult = kgStore->addEdgesUnique(semanticEdges);
         recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
         if (!edgeResult) {
@@ -998,6 +1009,16 @@ void EmbeddingService::updateSemanticNeighborGraph(
     }
 
     const auto tEdgeUpsert = std::chrono::steady_clock::now();
+    if (auto* queue = getKgWriteQueue_ ? getKgWriteQueue_() : nullptr) {
+        auto batch = std::make_unique<DeferredKGBatch>();
+        batch->sourceFile = "EmbeddingService::semanticNeighborCorpus";
+        batch->edges = std::move(semanticEdges);
+        const auto enqueuedCount = batch->edges.size();
+        queue->enqueue(std::move(batch));
+        recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
+        semanticEdgesCreated_.fetch_add(enqueuedCount, std::memory_order_relaxed);
+        return;
+    }
     auto edgeResult = kgStore->addEdgesUnique(semanticEdges);
     recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
     if (!edgeResult) {
@@ -1495,7 +1516,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         }
 
         ++semanticBackfillIdleTicks_;
-        if (semanticBackfillIdleTicks_ >= kSemanticBackfillIdleTickThreshold &&
+        if (TuneAdvisor::enableSemanticNeighborBackfill() &&
+            semanticBackfillIdleTicks_ >= kSemanticBackfillIdleTickThreshold &&
             inFlight_.load(std::memory_order_acquire) == 0 &&
             pendingApprox_.load(std::memory_order_relaxed) == 0) {
             const auto snap = TuningSnapshotRegistry::instance().get();

@@ -818,6 +818,17 @@ bool TuningManager::tick_once() {
 
             // Override with gradient limiter values if enabled
             if (TuneAdvisor::enableGradientLimiters()) {
+                const auto budget = TuneAdvisor::postIngestBudgetAll(/*includeDynamicCaps=*/true);
+                auto refreshLimiterMax = [](GradientLimiter* lim, uint32_t cap) {
+                    if (lim && cap > 0)
+                        lim->setMaxLimit(static_cast<double>(cap));
+                };
+                refreshLimiterMax(pq->extractionLimiter(), budget.extraction);
+                refreshLimiterMax(pq->kgLimiter(), budget.kg);
+                refreshLimiterMax(pq->symbolLimiter(), budget.symbol);
+                refreshLimiterMax(pq->entityLimiter(), budget.entity);
+                refreshLimiterMax(pq->titleLimiter(), budget.title);
+
                 // Propagate governor pressure to limiters before reading
                 const auto pressureLevel = static_cast<uint8_t>(govSnap.level);
                 auto applyPressureToLimiter = [pressureLevel](GradientLimiter* lim) {

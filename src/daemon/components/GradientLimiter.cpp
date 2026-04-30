@@ -12,10 +12,11 @@ namespace yams::daemon {
 GradientLimiter::GradientLimiter(std::string name)
     : name_(std::move(name)), config_(Config{}) // Default config
       ,
-      limit_(config_.initialLimit) {}
+      limit_(config_.initialLimit), dynamicMaxLimit_(config_.maxLimit) {}
 
 GradientLimiter::GradientLimiter(std::string name, Config config)
-    : name_(std::move(name)), config_(config), limit_(config_.initialLimit) {}
+    : name_(std::move(name)), config_(config), limit_(config_.initialLimit),
+      dynamicMaxLimit_(config_.maxLimit) {}
 
 bool GradientLimiter::tryAcquire() {
     const uint32_t currentLimit = static_cast<uint32_t>(limit_.load(std::memory_order_relaxed));
@@ -136,13 +137,14 @@ void GradientLimiter::updateLimit(double rttNanos, uint32_t inFlightSnapshot) {
     // Limit smoothing
     newLimit = currentLimit * (1.0 - config_.limitSmoothing) + newLimit * config_.limitSmoothing;
 
-    newLimit = std::clamp(newLimit, config_.minLimit, config_.maxLimit);
+    const double effectiveMax = dynamicMaxLimit_.load(std::memory_order_relaxed);
+    newLimit = std::clamp(newLimit, config_.minLimit, effectiveMax);
 
     // Pressure ceiling
     uint8_t pressure = pressureLevel_.load(std::memory_order_relaxed);
     switch (pressure) {
         case 1: {
-            double warningCap = config_.maxLimit * 0.75;
+            double warningCap = effectiveMax * 0.75;
             newLimit = std::min(newLimit, warningCap);
             break;
         }
@@ -196,12 +198,13 @@ void GradientLimiter::applyPressure(uint8_t level) {
 
                 double current = limit_.load(std::memory_order_relaxed);
                 double recovered = std::max(current, config_.initialLimit);
-                recovered = std::clamp(recovered, config_.minLimit, config_.maxLimit);
+                const double effectiveMax = dynamicMaxLimit_.load(std::memory_order_relaxed);
+                recovered = std::clamp(recovered, config_.minLimit, effectiveMax);
                 limit_.store(recovered, std::memory_order_relaxed);
             }
             return;
         case 1: {
-            double cap = config_.maxLimit * 0.75;
+            double cap = dynamicMaxLimit_.load(std::memory_order_relaxed) * 0.75;
             double current = limit_.load(std::memory_order_relaxed);
             if (current > cap) {
                 limit_.store(cap, std::memory_order_relaxed);
@@ -219,6 +222,7 @@ void GradientLimiter::applyPressure(uint8_t level) {
 
 void GradientLimiter::reset() {
     limit_.store(config_.initialLimit, std::memory_order_relaxed);
+    dynamicMaxLimit_.store(config_.maxLimit, std::memory_order_relaxed);
     inFlight_.store(0, std::memory_order_relaxed);
     minRtt_.store(0.0, std::memory_order_relaxed);
     smoothedRtt_.store(0.0, std::memory_order_relaxed);
@@ -229,6 +233,26 @@ void GradientLimiter::reset() {
     pressureLevel_.store(0, std::memory_order_relaxed);
     acquireCount_.store(0, std::memory_order_relaxed);
     rejectCount_.store(0, std::memory_order_relaxed);
+}
+
+void GradientLimiter::setMaxLimit(double newMax) {
+    newMax = std::max(newMax, config_.minLimit);
+    const double oldMax = dynamicMaxLimit_.exchange(newMax, std::memory_order_relaxed);
+    if (newMax > oldMax) {
+        const double current = limit_.load(std::memory_order_relaxed);
+        if (current < newMax) {
+            limit_.store(newMax, std::memory_order_relaxed);
+        }
+        minRtt_.store(0.0, std::memory_order_relaxed);
+        smoothedRtt_.store(0.0, std::memory_order_relaxed);
+        longRtt_.store(0.0, std::memory_order_relaxed);
+        gradient_.store(1.0, std::memory_order_relaxed);
+    } else if (newMax < oldMax) {
+        const double current = limit_.load(std::memory_order_relaxed);
+        if (current > newMax) {
+            limit_.store(newMax, std::memory_order_relaxed);
+        }
+    }
 }
 
 } // namespace yams::daemon

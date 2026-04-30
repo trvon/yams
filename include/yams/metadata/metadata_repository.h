@@ -1030,7 +1030,7 @@ private:
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
             const auto attemptStart = std::chrono::steady_clock::now();
             const auto acquireStart = attemptStart;
-            auto connResult = pool.acquire(std::chrono::milliseconds(30000), priority);
+            auto connResult = pool.acquire(std::chrono::milliseconds(30000), priority, opTag);
             const auto acquireEnd = std::chrono::steady_clock::now();
             const auto acquireMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(acquireEnd - acquireStart)
