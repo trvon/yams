@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iomanip>
+#include <iterator>
 #include <regex>
 #include <sstream>
 
@@ -24,6 +25,21 @@ enum class FieldType : uint8_t {
     StringMap = 4
 };
 
+bool hasBytes(const std::byte* ptr, const std::byte* end, size_t count) noexcept {
+    return ptr <= end && static_cast<size_t>(end - ptr) >= count;
+}
+
+template <typename T> T readPod(const std::byte*& ptr, const std::byte* end) {
+    if (!hasBytes(ptr, end, sizeof(T))) {
+        throw std::runtime_error("Runtime error reading POD value");
+    }
+
+    T value{};
+    std::memcpy(&value, ptr, sizeof(T));
+    ptr = std::next(ptr, static_cast<std::ptrdiff_t>(sizeof(T)));
+    return value;
+}
+
 [[maybe_unused]] void writeString(std::vector<std::byte>& buffer, const std::string& str) {
     uint32_t len = static_cast<uint32_t>(str.size());
     buffer.insert(buffer.end(), reinterpret_cast<const std::byte*>(&len),
@@ -33,20 +49,14 @@ enum class FieldType : uint8_t {
 }
 
 std::string readString(const std::byte*& ptr, const std::byte* end) {
-    if (ptr + sizeof(uint32_t) > end) {
-        throw std::runtime_error("Buffer underflow reading string length");
-    }
+    uint32_t len = readPod<uint32_t>(ptr, end);
 
-    uint32_t len;
-    std::memcpy(&len, ptr, sizeof(len));
-    ptr += sizeof(len);
-
-    if (ptr + len > end) {
+    if (!hasBytes(ptr, end, len)) {
         throw std::runtime_error("Buffer underflow reading string data");
     }
 
     std::string result(reinterpret_cast<const char*>(ptr), len);
-    ptr += len;
+    ptr = std::next(ptr, static_cast<std::ptrdiff_t>(len));
     return result;
 }
 
@@ -59,13 +69,7 @@ std::string readString(const std::byte*& ptr, const std::byte* end) {
 }
 
 std::chrono::system_clock::time_point readTimestamp(const std::byte*& ptr, const std::byte* end) {
-    if (ptr + sizeof(int64_t) > end) {
-        throw std::runtime_error("Buffer underflow reading timestamp");
-    }
-
-    int64_t millis;
-    std::memcpy(&millis, ptr, sizeof(millis));
-    ptr += sizeof(millis);
+    int64_t millis = readPod<int64_t>(ptr, end);
 
     return std::chrono::system_clock::time_point(std::chrono::milliseconds(millis));
 }
@@ -77,46 +81,34 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
     try {
         ContentMetadata metadata;
         const std::byte* ptr = data.data();
-        const std::byte* end = ptr + data.size();
+        const std::byte* end = std::next(ptr, static_cast<std::ptrdiff_t>(data.size()));
 
         // Read version
-        if (ptr + sizeof(uint32_t) > end) {
-            return Result<ContentMetadata>(ErrorCode::CorruptedData);
-        }
-        uint32_t version;
-        std::memcpy(&version, ptr, sizeof(version));
-        ptr += sizeof(version);
+        uint32_t version = readPod<uint32_t>(ptr, end);
 
         if (version != 1) {
             return Result<ContentMetadata>(ErrorCode::InvalidArgument);
         }
 
         // Read field count
-        if (ptr + sizeof(uint32_t) > end) {
-            return Result<ContentMetadata>(ErrorCode::CorruptedData);
-        }
-        uint32_t fieldCount;
-        std::memcpy(&fieldCount, ptr, sizeof(fieldCount));
-        ptr += sizeof(fieldCount);
+        uint32_t fieldCount = readPod<uint32_t>(ptr, end);
 
         // Read fields
         for (uint32_t i = 0; i < fieldCount; ++i) {
-            if (ptr + 1 + sizeof(uint16_t) > end) {
+            if (!hasBytes(ptr, end, 1 + sizeof(uint16_t))) {
                 return Result<ContentMetadata>(ErrorCode::CorruptedData);
             }
 
             FieldType type = static_cast<FieldType>(*ptr++);
 
-            uint16_t nameLen;
-            std::memcpy(&nameLen, ptr, sizeof(nameLen));
-            ptr += sizeof(nameLen);
+            uint16_t nameLen = readPod<uint16_t>(ptr, end);
 
-            if (ptr + nameLen > end) {
+            if (!hasBytes(ptr, end, nameLen)) {
                 return Result<ContentMetadata>(ErrorCode::CorruptedData);
             }
 
             std::string fieldName(reinterpret_cast<const char*>(ptr), nameLen);
-            ptr += nameLen;
+            ptr = std::next(ptr, static_cast<std::ptrdiff_t>(nameLen));
 
             // Read field data based on type
             switch (type) {
@@ -145,27 +137,15 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
                 }
 
                 case FieldType::UInt32: {
-                    if (ptr + sizeof(uint32_t) > end) {
-                        return Result<ContentMetadata>(ErrorCode::CorruptedData);
-                    }
+                    uint32_t value = readPod<uint32_t>(ptr, end);
                     if (fieldName == "size") {
-                        uint64_t value;
-                        std::memcpy(&value, ptr, sizeof(uint32_t));
-                        ptr += sizeof(uint32_t);
                         metadata.size = value;
-                    } else {
-                        ptr += sizeof(uint32_t);
                     }
                     break;
                 }
 
                 case FieldType::StringVector: {
-                    if (ptr + sizeof(uint32_t) > end) {
-                        return Result<ContentMetadata>(ErrorCode::CorruptedData);
-                    }
-                    uint32_t count;
-                    std::memcpy(&count, ptr, sizeof(count));
-                    ptr += sizeof(count);
+                    uint32_t count = readPod<uint32_t>(ptr, end);
 
                     // Skip unknown vector fields
                     for (uint32_t j = 0; j < count; ++j) {
@@ -175,12 +155,7 @@ Result<ContentMetadata> ContentMetadata::deserialize(std::span<const std::byte> 
                 }
 
                 case FieldType::StringMap: {
-                    if (ptr + sizeof(uint32_t) > end) {
-                        return Result<ContentMetadata>(ErrorCode::CorruptedData);
-                    }
-                    uint32_t count;
-                    std::memcpy(&count, ptr, sizeof(count));
-                    ptr += sizeof(count);
+                    uint32_t count = readPod<uint32_t>(ptr, end);
 
                     if (fieldName == "tags") {
                         metadata.tags.clear();

@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <iomanip>
+#include <iterator>
 #include <sstream>
 
 // CRC32 implementation (simplified - in production use a library)
@@ -205,10 +206,11 @@ std::vector<std::byte> WALEntry::UpdateMetadataData::encode(const std::string& h
     data->valueSize = static_cast<uint32_t>(value.size());
 
     // Copy key and value
-    auto* keyPtr = result.data() + sizeof(UpdateMetadataData);
+    auto* keyPtr =
+        std::next(result.data(), static_cast<std::ptrdiff_t>(sizeof(UpdateMetadataData)));
     std::memcpy(keyPtr, key.data(), key.size());
 
-    auto* valuePtr = keyPtr + key.size();
+    auto* valuePtr = std::next(keyPtr, static_cast<std::ptrdiff_t>(key.size()));
     std::memcpy(valuePtr, value.data(), value.size());
 
     return result;
