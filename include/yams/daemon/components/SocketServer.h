@@ -14,7 +14,6 @@
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
-#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -138,6 +137,14 @@ private:
                                       std::memory_order_release);
         }
     };
+
+    struct AcceptLoopState {
+        mutable std::mutex mutex;
+        std::condition_variable cv;
+        bool done{true};
+        std::exception_ptr error;
+    };
+
     boost::asio::awaitable<void> handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
                                                    uint64_t conn_token, bool isProxy = false);
 
@@ -154,11 +161,11 @@ private:
 
     // Boost.ASIO components (use IOCoordinator's io_context)
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
-    std::future<void> acceptLoopFuture_;
+    std::shared_ptr<AcceptLoopState> acceptLoopState_;
 
     // Proxy acceptor (second listen socket for multiplexed CLI connections)
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> proxyAcceptor_;
-    std::future<void> proxyAcceptLoopFuture_;
+    std::shared_ptr<AcceptLoopState> proxyAcceptLoopState_;
     std::atomic<size_t> proxyActiveConnections_{0};
     std::filesystem::path proxySocketPath_;
 
@@ -223,6 +230,9 @@ private:
     void close_acceptor_on_executor();
     std::size_t
     close_sockets_on_executor(const std::vector<std::shared_ptr<TrackedSocket>>& tracked_sockets);
+    std::shared_ptr<AcceptLoopState> schedule_accept_loop(bool isProxy);
+    bool wait_accept_loop(const std::shared_ptr<AcceptLoopState>& state,
+                          std::chrono::milliseconds timeout, std::string_view label);
 };
 
 } // namespace yams::daemon

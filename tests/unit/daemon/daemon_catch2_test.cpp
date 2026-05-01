@@ -530,6 +530,11 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon concurrent start attempts", "[daemon][co
     auto startedFuture = startedPromise.get_future().share();
     std::promise<void> releasePromise;
     auto releaseFuture = releasePromise.get_future().share();
+    std::promise<void> attemptGatePromise;
+    auto attemptGateFuture = attemptGatePromise.get_future().share();
+    std::mutex readyMutex;
+    std::condition_variable readyCv;
+    int readyCount = 0;
 
     std::vector<std::thread> threads;
     constexpr int kAttempts = 5;
@@ -537,7 +542,15 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon concurrent start attempts", "[daemon][co
 
     for (int i = 0; i < kAttempts; ++i) {
         threads.emplace_back([this, &successCount, &failCount, &startedFlag, startedFuture,
-                              &startedPromise, releaseFuture]() {
+                              &startedPromise, releaseFuture, attemptGateFuture, &readyMutex,
+                              &readyCv, &readyCount]() {
+            {
+                std::lock_guard<std::mutex> lock(readyMutex);
+                ++readyCount;
+            }
+            readyCv.notify_one();
+            attemptGateFuture.wait();
+
             YamsDaemon local(config_);
             auto result = local.start();
             if (result) {
@@ -552,8 +565,20 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon concurrent start attempts", "[daemon][co
         });
     }
 
+    {
+        std::unique_lock<std::mutex> lock(readyMutex);
+        REQUIRE(readyCv.wait_for(lock, std::chrono::seconds(1),
+                                 [&] { return readyCount == kAttempts; }));
+    }
+    attemptGatePromise.set_value();
+
     if (startedFuture.wait_for(std::chrono::seconds(1)) != std::future_status::ready) {
-        startedPromise.set_value();
+        std::call_once(startedFlag, [&]() { startedPromise.set_value(); });
+    }
+    const auto failDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (failCount.load(std::memory_order_relaxed) < kAttempts - 1 &&
+           std::chrono::steady_clock::now() < failDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     releasePromise.set_value();
 

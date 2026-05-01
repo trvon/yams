@@ -716,30 +716,36 @@ void DaemonMetrics::startPolling() {
 }
 
 void DaemonMetrics::stopPolling() {
-    // Check if polling was ever started
+    bool shouldStopPolling = true;
     {
         std::lock_guard<std::mutex> lk(pollingMutex_);
         if (pollingStopped_) {
-            return; // Not running or already stopped
+            shouldStopPolling = false; // Not running or already stopped.
         }
     }
 
-    // Signal the polling loop to stop
-    pollingActive_.store(false, std::memory_order_release);
+    if (shouldStopPolling) {
+        // Signal the polling loop to stop
+        pollingActive_.store(false, std::memory_order_release);
 
-    // Cancel the timer via the strand to wake up the coroutine
-    // This must be done on the strand to avoid racing with async_wait
-    boost::asio::post(strand_, [this]() {
-        if (pollingTimer_) {
-            pollingTimer_->cancel();
+        // Cancel the timer via the strand to wake up the coroutine
+        // This must be done on the strand to avoid racing with async_wait
+        boost::asio::post(strand_, [this]() {
+            if (pollingTimer_) {
+                pollingTimer_->cancel();
+            }
+        });
+
+        {
+            std::unique_lock<std::mutex> lk(pollingMutex_);
+            pollingCv_.wait(lk, [this]() { return pollingStopped_; });
         }
-    });
-
-    {
-        std::unique_lock<std::mutex> lk(pollingMutex_);
-        pollingCv_.wait(lk, [this]() { return pollingStopped_; });
     }
 
+    // getSnapshot()/refresh() may dispatch off-strand collectors even when the
+    // polling loop was never started.  Always wait for those collectors before
+    // allowing the metrics object to be destroyed; their lambdas update this
+    // object's caches and guard atomics.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
     while (std::chrono::steady_clock::now() < deadline) {
         const bool anyInFlight = physicalWalkInFlight_.load(std::memory_order_acquire) ||

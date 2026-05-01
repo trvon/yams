@@ -5,8 +5,10 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <boost/asio/local/stream_protocol.hpp>
@@ -260,15 +262,27 @@ TEST_CASE("DaemonClient status uses a fresh connection for each call",
     boost::asio::local::stream_protocol::acceptor acceptor(
         serverIo, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
 
-    std::promise<void> firstAccepted;
-    std::promise<void> secondAccepted;
+    std::mutex acceptedMutex;
+    std::condition_variable acceptedCv;
+    std::size_t acceptedCount = 0;
+    auto recordAccepted = [&] {
+        {
+            std::lock_guard<std::mutex> lock(acceptedMutex);
+            ++acceptedCount;
+        }
+        acceptedCv.notify_all();
+    };
+    auto waitAccepted = [&](std::size_t expected) {
+        std::unique_lock<std::mutex> lock(acceptedMutex);
+        return acceptedCv.wait_for(lock, 1s, [&] { return acceptedCount >= expected; });
+    };
     std::atomic<bool> stop{false};
 
     std::thread firstServerThread([&] {
         try {
             boost::asio::local::stream_protocol::socket sock(serverIo);
             acceptor.accept(sock);
-            firstAccepted.set_value();
+            recordAccepted();
 
             while (!stop.load(std::memory_order_acquire)) {
                 auto frame = readFrame(sock);
@@ -293,7 +307,7 @@ TEST_CASE("DaemonClient status uses a fresh connection for each call",
         try {
             boost::asio::local::stream_protocol::socket sock(serverIo);
             acceptor.accept(sock);
-            secondAccepted.set_value();
+            recordAccepted();
 
             auto frame = readFrame(sock);
             MessageFramer framer;
@@ -322,11 +336,11 @@ TEST_CASE("DaemonClient status uses a fresh connection for each call",
     DaemonClient client(cfg);
 
     auto first = yams::cli::run_sync(client.status(), 5s);
-    REQUIRE(firstAccepted.get_future().wait_for(1s) == std::future_status::ready);
+    REQUIRE(waitAccepted(1));
     REQUIRE(first.has_value());
 
     auto second = yams::cli::run_sync(client.status(), 5s);
-    REQUIRE(secondAccepted.get_future().wait_for(1s) == std::future_status::ready);
+    REQUIRE(waitAccepted(2));
     REQUIRE(second.has_value());
 
     stop.store(true, std::memory_order_release);

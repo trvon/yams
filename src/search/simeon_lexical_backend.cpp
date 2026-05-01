@@ -605,7 +605,8 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
             geomCfg.top_fragments_per_doc =
                 std::max<std::uint32_t>(geomCfg.top_fragments_per_doc, 8u);
             if (qualityRecipe == simeon::QualityRecipe::FragmentRichCovPhssApproxMax) {
-                geomCfg.doc_aggregator = simeon::FragmentGeometryConfig::DocAggregator::Max;
+                geomCfg.outer_maxsim = true;
+                geomCfg.doc_scorer_kind = simeon::FragmentGeometryConfig::DocScorerKind::MaxSim;
             }
             recipe_label = simeon::quality_recipe_name(qualityRecipe);
             full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,

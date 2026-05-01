@@ -39,7 +39,6 @@ bool stream_trace_enabled() {
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 
 #include <algorithm>
@@ -48,6 +47,7 @@ bool stream_trace_enabled() {
 #include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
+#include <exception>
 
 #ifndef _WIN32
 #include <strings.h>
@@ -427,13 +427,7 @@ Result<void> SocketServer::start() {
             initialBudget = 256ULL * 1024;
         setWriterBudget(initialBudget);
 
-        acceptLoopFuture_ = co_spawn(
-            ioCoordinator_->getExecutor(),
-            [this]() -> awaitable<void> {
-                co_await accept_loop(false);
-                co_return;
-            },
-            boost::asio::use_future);
+        acceptLoopState_ = schedule_accept_loop(false);
         spdlog::info("SocketServer: accept_loop scheduled on IOCoordinator");
 
         // Start proxy acceptor if configured
@@ -487,13 +481,7 @@ Result<void> SocketServer::start() {
                     proxySocketPath_ = proxySockPath;
                 }
 
-                proxyAcceptLoopFuture_ = co_spawn(
-                    ioCoordinator_->getExecutor(),
-                    [this]() -> awaitable<void> {
-                        co_await accept_loop(true);
-                        co_return;
-                    },
-                    boost::asio::use_future);
+                proxyAcceptLoopState_ = schedule_accept_loop(true);
                 spdlog::info("SocketServer: proxy accept_loop scheduled on {}",
                              proxySockPath.string());
             }
@@ -592,38 +580,18 @@ Result<void> SocketServer::stop() {
                 spdlog::warn("SocketServer: failed to close proxy acceptor: {}", e.what());
             }
         }
-        if (proxyAcceptLoopFuture_.valid()) {
-            try {
-                auto status = proxyAcceptLoopFuture_.wait_for(std::chrono::seconds(2));
-                if (status == std::future_status::ready) {
-                    proxyAcceptLoopFuture_.get();
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("Proxy accept_loop terminated: {}", e.what());
-            }
-            proxyAcceptLoopFuture_ = {};
+        if (proxyAcceptLoopState_) {
+            (void)wait_accept_loop(proxyAcceptLoopState_, std::chrono::seconds(2), "proxy");
+            proxyAcceptLoopState_.reset();
         }
         proxyAcceptor_.reset();
 
         // Close acceptor on executor thread and wait for accept loop completion
         close_acceptor_on_executor();
 
-        if (acceptLoopFuture_.valid()) {
-            try {
-                // Wait longer for accept loop to complete gracefully
-                auto status = acceptLoopFuture_.wait_for(std::chrono::seconds(3));
-                if (status == std::future_status::ready) {
-                    acceptLoopFuture_.get();
-                    spdlog::info("SocketServer: accept_loop completed");
-                } else {
-                    spdlog::warn("SocketServer: accept_loop timed out during shutdown after 3s");
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("SocketServer: accept_loop terminated with exception: {}", e.what());
-            } catch (...) {
-                spdlog::warn("SocketServer: accept_loop terminated with unknown exception");
-            }
-            acceptLoopFuture_ = {};
+        if (acceptLoopState_) {
+            (void)wait_accept_loop(acceptLoopState_, std::chrono::seconds(3), "main");
+            acceptLoopState_.reset();
         }
 
         // Destroy acceptor while WorkCoordinator is still alive to avoid dangling
@@ -1150,6 +1118,72 @@ void SocketServer::register_socket(std::shared_ptr<TrackedSocket> tracked_socket
                                         [](const auto& weak) { return weak.expired(); }),
                          activeSockets_.end());
     activeSockets_.push_back(tracked_socket);
+}
+
+std::shared_ptr<SocketServer::AcceptLoopState> SocketServer::schedule_accept_loop(bool isProxy) {
+    auto state = std::make_shared<AcceptLoopState>();
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->done = false;
+        state->error = nullptr;
+    }
+
+    co_spawn(
+        ioCoordinator_->getExecutor(),
+        [this, state, isProxy]() -> awaitable<void> {
+            try {
+                co_await accept_loop(isProxy);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->error = std::current_exception();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->done = true;
+            }
+            state->cv.notify_all();
+            co_return;
+        },
+        boost::asio::detached);
+
+    return state;
+}
+
+bool SocketServer::wait_accept_loop(const std::shared_ptr<AcceptLoopState>& state,
+                                    std::chrono::milliseconds timeout, std::string_view label) {
+    if (!state) {
+        return true;
+    }
+
+    bool completed = false;
+    std::exception_ptr error;
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        completed = state->cv.wait_for(lock, timeout, [&state]() { return state->done; });
+        if (completed) {
+            error = state->error;
+        }
+    }
+
+    if (!completed) {
+        spdlog::warn("SocketServer: {} accept_loop timed out during shutdown after {}ms", label,
+                     timeout.count());
+        return false;
+    }
+
+    if (error) {
+        try {
+            std::rethrow_exception(error);
+        } catch (const std::exception& e) {
+            spdlog::warn("SocketServer: {} accept_loop terminated with exception: {}", label,
+                         e.what());
+        } catch (...) {
+            spdlog::warn("SocketServer: {} accept_loop terminated with unknown exception", label);
+        }
+    }
+
+    return true;
 }
 
 void SocketServer::execute_on_io_context(std::function<void()> fn) {
