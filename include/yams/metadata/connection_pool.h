@@ -189,6 +189,8 @@ public:
 
     [[nodiscard]] Stats getStats() const;
 
+    [[nodiscard]] const std::string& dbPath() const { return dbPath_; }
+
     void setSlowHolderThreshold(std::chrono::milliseconds threshold) {
         slowHolderThresholdMicros_.store(static_cast<std::uint64_t>(threshold.count()) * 1000ULL,
                                          std::memory_order_relaxed);

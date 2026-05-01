@@ -766,26 +766,96 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
 
         if (!dryRun) {
             auto* coord = serviceManager_ ? serviceManager_->getWriteCoordinator() : nullptr;
-            if (!coord) {
-                ++stats.errors;
-                stats.issues.push_back("WriteCoordinator unavailable for graph repair batch");
-                break;
-            }
-            auto wb = std::make_unique<WriteBatch>();
-            wb->source = "GraphComponent::repairGraph";
-            if (!nodes.empty()) {
-                wb->ops.emplace_back(UpsertNodesOp{std::move(nodes)});
-            }
-            if (!edges.empty()) {
-                wb->ops.emplace_back(AddDeferredEdgesOp{std::move(edges)});
-            }
-            coord->enqueue(std::move(wb));
-            auto flushRes = coord->flush();
-            if (!flushRes) {
-                ++stats.errors;
-                stats.issues.push_back("WriteCoordinator flush failed: " +
-                                       flushRes.error().message);
-                break;
+            if (coord) {
+                auto wb = std::make_unique<WriteBatch>();
+                wb->source = "GraphComponent::repairGraph";
+                if (!nodes.empty()) {
+                    wb->ops.emplace_back(UpsertNodesOp{std::move(nodes)});
+                }
+                if (!edges.empty()) {
+                    wb->ops.emplace_back(AddDeferredEdgesOp{std::move(edges)});
+                }
+                coord->enqueue(std::move(wb));
+                auto flushRes = coord->flush();
+                if (!flushRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("WriteCoordinator flush failed: " +
+                                           flushRes.error().message);
+                    break;
+                }
+            } else {
+                // Standalone unit-test/components path: production daemon runs through
+                // WriteCoordinator via ServiceManager, but GraphComponent is also constructible
+                // without the manager. Keep that path functional without silently reporting a
+                // successful repair that wrote nothing.
+                auto batchRes = kgStore_->beginWriteBatch();
+                if (!batchRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("beginWriteBatch failed: " + batchRes.error().message);
+                    break;
+                }
+                auto& kgBatch = *batchRes.value();
+
+                std::unordered_map<std::string, std::int64_t> nodeKeyToId;
+                nodeKeyToId.reserve(nodes.size());
+                if (!nodes.empty()) {
+                    std::vector<std::string> keys;
+                    keys.reserve(nodes.size());
+                    for (const auto& node : nodes) {
+                        keys.push_back(node.nodeKey);
+                    }
+                    auto idsRes = kgBatch.upsertNodes(nodes);
+                    if (!idsRes) {
+                        ++stats.errors;
+                        stats.issues.push_back("upsertNodes failed: " + idsRes.error().message);
+                        break;
+                    }
+                    for (std::size_t i = 0; i < keys.size() && i < idsRes.value().size(); ++i) {
+                        nodeKeyToId.emplace(std::move(keys[i]), idsRes.value()[i]);
+                    }
+                }
+
+                std::vector<metadata::KGEdge> resolvedEdges;
+                resolvedEdges.reserve(edges.size());
+                auto resolveKey = [&](const std::string& key) -> std::optional<std::int64_t> {
+                    auto it = nodeKeyToId.find(key);
+                    if (it != nodeKeyToId.end()) {
+                        return it->second;
+                    }
+                    auto nodeRes = kgStore_->getNodeByKey(key);
+                    if (nodeRes && nodeRes.value().has_value()) {
+                        return nodeRes.value()->id;
+                    }
+                    return std::nullopt;
+                };
+                for (const auto& edge : edges) {
+                    auto src = resolveKey(edge.srcNodeKey);
+                    auto dst = resolveKey(edge.dstNodeKey);
+                    if (!src || !dst) {
+                        continue;
+                    }
+                    metadata::KGEdge kgEdge;
+                    kgEdge.srcNodeId = *src;
+                    kgEdge.dstNodeId = *dst;
+                    kgEdge.relation = edge.relation;
+                    kgEdge.weight = edge.weight;
+                    kgEdge.properties = edge.properties;
+                    resolvedEdges.push_back(std::move(kgEdge));
+                }
+                if (!resolvedEdges.empty()) {
+                    auto edgeRes = kgBatch.addEdgesUnique(resolvedEdges);
+                    if (!edgeRes) {
+                        ++stats.errors;
+                        stats.issues.push_back("addEdgesUnique failed: " + edgeRes.error().message);
+                        break;
+                    }
+                }
+                auto commitRes = kgBatch.commit();
+                if (!commitRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("commit failed: " + commitRes.error().message);
+                    break;
+                }
             }
         }
 

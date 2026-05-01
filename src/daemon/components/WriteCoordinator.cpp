@@ -69,6 +69,11 @@ Result<void> WriteCoordinator::flush(std::chrono::milliseconds timeout) {
     if (!drained) {
         return Error{ErrorCode::Timeout, "WriteCoordinator::flush timed out"};
     }
+    if (lastApplyError_) {
+        Error error = *lastApplyError_;
+        lastApplyError_.reset();
+        return error;
+    }
     return Result<void>();
 }
 
@@ -111,6 +116,7 @@ WriteCoordinator::Stats WriteCoordinator::getStats() const {
                                      .errors = timing.errors,
                                      .totalQueueWaitMs = timing.totalQueueWaitMs,
                                      .maxQueueWaitMs = timing.maxQueueWaitMs,
+                                     .maxExcessQueueWaitMs = timing.maxExcessQueueWaitMs,
                                      .totalApplyMs = timing.totalApplyMs,
                                      .maxApplyMs = timing.maxApplyMs});
     }
@@ -128,10 +134,16 @@ WriteCoordinator::Stats WriteCoordinator::getStats() const {
 void WriteCoordinator::recordSourceQueueWait(const std::string& source, std::uint64_t queueWaitMs) {
     std::lock_guard<std::mutex> lock(statsMutex_);
     auto& timing = sourceTimings_[source.empty() ? std::string{"<unknown>"} : source];
+    const auto expectedBatchDelay =
+        static_cast<std::uint64_t>(std::max<std::int64_t>(0, config_.maxBatchDelayMs.count()));
+    const auto excessWaitMs =
+        queueWaitMs > expectedBatchDelay ? queueWaitMs - expectedBatchDelay : 0;
     timing.batches++;
     timing.totalQueueWaitMs += queueWaitMs;
     timing.maxQueueWaitMs = std::max(timing.maxQueueWaitMs, queueWaitMs);
+    timing.maxExcessQueueWaitMs = std::max(timing.maxExcessQueueWaitMs, excessWaitMs);
     stats_.maxBatchQueueWaitMs = std::max(stats_.maxBatchQueueWaitMs, queueWaitMs);
+    stats_.maxBatchExcessQueueWaitMs = std::max(stats_.maxBatchExcessQueueWaitMs, excessWaitMs);
 }
 
 void WriteCoordinator::recordSourceApply(const std::string& source, std::uint64_t opCount,
@@ -190,13 +202,17 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
         inFlight_.store(batchesToProcess.size());
         spdlog::debug("[WriteCoordinator] Processing {} batches", batchesToProcess.size());
         auto result = applyBatches(batchesToProcess);
+        if (!result) {
+            {
+                std::lock_guard<std::mutex> lock(queueMutex_);
+                lastApplyError_ = result.error();
+            }
+            spdlog::warn("[WriteCoordinator] Batch apply failed: {}", result.error().message);
+        }
         inFlight_.store(0);
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
             drainCv_.notify_all();
-        }
-        if (!result) {
-            spdlog::warn("[WriteCoordinator] Batch apply failed: {}", result.error().message);
         }
 
         pollTimer.expires_after(std::chrono::milliseconds(1));
@@ -250,6 +266,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
     }
 
     std::unordered_map<std::string, std::int64_t> nodeKeyToId;
+    std::optional<Error> firstOpError;
 
     if (hasKgOps && kg_) {
         auto batchResult = kg_->beginWriteBatch();
@@ -293,6 +310,9 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             r = applyOp(kgBatch, concrete);
                         }
                         if (!r) {
+                            if (!firstOpError) {
+                                firstOpError = r.error();
+                            }
                             sourceError = true;
                             spdlog::warn("[WriteCoordinator] op '{}' failed: {}", batch->source,
                                          r.error().message);
@@ -325,6 +345,9 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             stats_.commitErrors++;
             TuneAdvisor::reportDbLockError();
             return commitResult.error();
+        }
+        if (firstOpError) {
+            return *firstOpError;
         }
     }
 

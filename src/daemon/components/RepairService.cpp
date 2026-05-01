@@ -332,8 +332,9 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
                                               const std::vector<std::string>& hashes) {
         return services->rebuildTopologyArtifacts(reason, dryRun, hashes);
     };
-    ctx.rebuildSemanticNeighborGraph = [services](const std::string& reason) {
-        return services->rebuildSemanticNeighborGraph(reason);
+    ctx.rebuildSemanticNeighborGraph = [services](const std::string& reason,
+                                                  const std::string& modelName) {
+        return services->rebuildSemanticNeighborGraph(reason, modelName);
     };
     ctx.vectorIndexCoordinator = services->getVectorIndexCoordinator().get();
     ctx.getWriteCoordinator = [services] { return services->getWriteCoordinator(); };
@@ -3315,7 +3316,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         // No explicit finalize needed — the coordinator manages the bulk window.
         if (req.repairTopology && result.succeeded > 0 && ctx_.rebuildSemanticNeighborGraph) {
             auto semanticResult =
-                ctx_.rebuildSemanticNeighborGraph("repair_service.embedding_batch");
+                ctx_.rebuildSemanticNeighborGraph("repair_service.embedding_batch", modelName);
             if (!semanticResult) {
                 spdlog::warn("RepairService: deferred semantic neighbor rebuild failed: {}",
                              semanticResult.error().message);

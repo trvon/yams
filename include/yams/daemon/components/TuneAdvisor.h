@@ -1897,11 +1897,13 @@ public:
             activeStages += (m & 1u);
         }
 
-        // Clamp to hardware capacity then re-apply per-stage floor (preserves
-        // ≥1 slot per active stage even when hw < activeStages).
+        // Clamp to hardware capacity, then re-apply a per-stage floor only
+        // when the host has enough capacity. Small systems should not be
+        // inflated to six post-ingest slots merely because all stages are
+        // enabled.
         total = std::clamp(total, 2u, std::max(2u, hw));
         if (activeStages > 0) {
-            total = std::max(total, activeStages);
+            total = std::max(total, std::min(activeStages, std::max(2u, hw)));
         }
         return total;
     }
@@ -2606,14 +2608,6 @@ private:
                 if (dyn[i] != UINT32_MAX) {
                     caps[i] = std::min(caps[i], std::min(dyn[i], kMaxCaps[i]));
                     hasDynamicCap = true;
-                }
-            }
-            // Floor active stages to ≥1: a stale dynamic cap of 0 from a prior
-            // idle-tick must not starve a stage that has since become active
-            // (e.g., title stage after plugin autoload completes mid-bench).
-            for (std::size_t i = 0; i < kStageCount; ++i) {
-                if ((activeMask & (1u << i)) != 0u && caps[i] == 0) {
-                    caps[i] = 1;
                 }
             }
         }

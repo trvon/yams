@@ -87,7 +87,6 @@ TEST_CASE("resolve_transport_mode probe-permitted defaults to socket", "[daemon]
     yams::test::ScopedEnvVar configEnv("YAMS_CONFIG",
                                        std::string("/nonexistent/yams-test-config.toml"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
-
     ClientConfig cfg;
     cfg.transportMode = ClientTransportMode::Auto;
     CHECK(yams::daemon::resolve_transport_mode(cfg) == ClientTransportMode::Socket);

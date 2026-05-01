@@ -80,7 +80,8 @@ struct RepairServiceContext {
     std::function<Result<TopologyManager::RebuildStats>(const std::string&, bool,
                                                         const std::vector<std::string>&)>
         rebuildTopologyArtifacts;
-    std::function<Result<std::size_t>(const std::string&)> rebuildSemanticNeighborGraph;
+    std::function<Result<std::size_t>(const std::string&, const std::string&)>
+        rebuildSemanticNeighborGraph;
     // Coordinator for vector-index mutations (may be nullptr in tests / CLI contexts).
     VectorIndexCoordinator* vectorIndexCoordinator{nullptr};
     std::function<WriteCoordinator*()> getWriteCoordinator;

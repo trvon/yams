@@ -57,6 +57,28 @@ std::atomic<int> g_documentsEnqueueFailuresBeforeSuccess{0};
 std::string g_forceListExceptionMessage;
 std::mutex g_forceListExceptionMutex;
 
+void atomicMax(std::atomic<uint64_t>& target, uint64_t value) {
+    auto current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
+void recordAddDispatchTiming(StateComponent* state, uint64_t totalUs, uint64_t fingerprintUs,
+                             uint64_t enqueueUs) {
+    if (!state) {
+        return;
+    }
+    state->stats.addDispatchSamples.fetch_add(1, std::memory_order_relaxed);
+    state->stats.addDispatchTotalUs.fetch_add(totalUs, std::memory_order_relaxed);
+    atomicMax(state->stats.addDispatchMaxUs, totalUs);
+    state->stats.addFingerprintTotalUs.fetch_add(fingerprintUs, std::memory_order_relaxed);
+    atomicMax(state->stats.addFingerprintMaxUs, fingerprintUs);
+    state->stats.addEnqueueTotalUs.fetch_add(enqueueUs, std::memory_order_relaxed);
+    atomicMax(state->stats.addEnqueueMaxUs, enqueueUs);
+}
+
 std::string lowercaseCopy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
@@ -725,7 +747,19 @@ ImmediateAddFingerprint computeImmediateAddFingerprint(const AddDocumentRequest&
 
 AddDocumentResponse makeQueuedAddResponse(const AddDocumentRequest& req,
                                           const ImmediateAddFingerprint& fingerprint,
-                                          std::string_view message) {
+                                          std::string_view message, StateComponent* state,
+                                          std::chrono::steady_clock::time_point requestStart,
+                                          std::chrono::steady_clock::time_point fingerprintStart,
+                                          std::chrono::steady_clock::time_point enqueueStart) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto fingerprintUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(enqueueStart - fingerprintStart)
+            .count());
+    const auto enqueueUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(now - enqueueStart).count());
+    const auto totalUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(now - requestStart).count());
+    recordAddDispatchTiming(state, totalUs, fingerprintUs, enqueueUs);
     AddDocumentResponse response;
     response.path = req.path.empty() ? req.name : req.path;
     response.documentsAdded = 0;
@@ -739,12 +773,16 @@ boost::asio::awaitable<Response>
 enqueueAddDocumentOrReject(ServiceManager* serviceManager, StateComponent* state,
                            const AddDocumentRequest& req, std::size_t channelCapacity,
                            std::string_view message, bool countDeferred, bool isDir) {
+    const auto requestStart = std::chrono::steady_clock::now();
+    const auto fingerprintStart = requestStart;
     const auto fingerprint = computeImmediateAddFingerprint(req, isDir);
+    const auto enqueueStart = std::chrono::steady_clock::now();
     if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, fingerprint, channelCapacity)) {
         if (countDeferred) {
             state->stats.addRequestsDeferred.fetch_add(1, std::memory_order_acq_rel);
         }
-        co_return makeQueuedAddResponse(req, fingerprint, message);
+        co_return makeQueuedAddResponse(req, fingerprint, message, state, requestStart,
+                                        fingerprintStart, enqueueStart);
     }
 
     state->stats.addRequestsRejected.fetch_add(1, std::memory_order_acq_rel);
@@ -1326,6 +1364,7 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     YAMS_ZONE_SCOPED_N("handleAddDocumentRequest");
     co_return co_await yams::daemon::dispatch::guard_await(
         "add_document", [this, req]() -> boost::asio::awaitable<Response> {
+            const auto requestStart = std::chrono::steady_clock::now();
             const auto channelCapacity =
                 static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
 
@@ -1429,6 +1468,10 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             response.size = serviceResp.bytesStored;
             response.extractionStatus = "pending";
             response.message = "Document stored successfully.";
+            const auto now = std::chrono::steady_clock::now();
+            const auto totalUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now - requestStart).count());
+            recordAddDispatchTiming(state_, totalUs, 0, 0);
             co_return response;
         });
 }

@@ -708,7 +708,7 @@ MetadataRepository::~MetadataRepository() {
 void MetadataRepository::shutdown() {
     std::lock_guard<std::mutex> lock(symspellInitMutex_);
     symspellIndex_.reset();
-    symspellConn_.reset();
+    symspellDb_.reset();
     symspellInitialized_.store(false, std::memory_order_release);
     graphComponent_.reset();
     kgStore_.reset();
@@ -4064,30 +4064,19 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
         return {};
     }
 
-    // Keep a dedicated pooled connection alive for SymSpell. SymSpellSearch stores
-    // a raw sqlite3* pointer and assumes it remains valid for its entire lifetime.
-    //
-    // Important: when the daemon runs with a single write connection, this permanent lease must
-    // not come from the write pool or it starves all metadata/KG writes. Prefer the read pool
-    // when available; it is still a normal SQLite handle, just configured for read-heavy access.
-    auto& symspellPool = readPool_ != nullptr ? *readPool_ : pool_;
-    auto connResult =
-        symspellPool.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal,
-                             "MetadataRepository::SymSpell");
-    if (!connResult) {
-        return Error{ErrorCode::ResourceExhausted,
-                     "Failed to acquire database connection for SymSpell"};
+    // SymSpellSearch stores a raw sqlite3* pointer and assumes it remains valid
+    // for its entire lifetime. Do not satisfy that lifetime by permanently
+    // leasing a pooled connection: single-connection pools would be starved for
+    // the rest of the process. Instead open a small dedicated handle to the same
+    // metadata DB.
+    auto db = std::make_unique<Database>();
+    auto openResult = db->open(pool_.dbPath(), ConnectionMode::Create);
+    if (!openResult) {
+        return openResult.error();
     }
 
-    symspellConn_ = std::move(connResult).value();
-    if (!symspellConn_ || !symspellConn_->isValid()) {
-        symspellConn_.reset();
-        return Error{ErrorCode::DatabaseError, "Invalid database connection for SymSpell"};
-    }
-
-    sqlite3* rawDb = (*symspellConn_)->rawHandle();
+    sqlite3* rawDb = db->rawHandle();
     if (!rawDb) {
-        symspellConn_.reset();
         return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
     }
 
@@ -4095,11 +4084,11 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
     auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
     if (!schemaResult) {
         spdlog::error("SymSpell schema initialization failed: {}", schemaResult.error().message);
-        symspellConn_.reset();
         return schemaResult;
     }
 
     // Create the search index instance
+    symspellDb_ = std::move(db);
     symspellIndex_ = std::make_unique<search::SymSpellSearch>(rawDb);
     symspellInitialized_.store(true, std::memory_order_release);
 

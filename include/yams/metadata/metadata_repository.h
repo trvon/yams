@@ -875,10 +875,10 @@ private:
 
     // SymSpell fuzzy search (SQLite-backed)
     // Note: SymSpellSearch stores a raw sqlite3* that must remain valid for its lifetime.
-    // We keep a dedicated pooled connection alive for the SymSpell index to avoid
-    // holding a pointer to a pooled handle that can be returned to the pool.
+    // Use a dedicated Database handle instead of leasing from the shared pool; holding a pooled
+    // connection here can starve tests and single-connection daemon configurations.
     mutable std::mutex symspellInitMutex_;
-    mutable std::unique_ptr<PooledConnection> symspellConn_;
+    mutable std::unique_ptr<Database> symspellDb_;
     mutable std::unique_ptr<search::SymSpellSearch> symspellIndex_;
     mutable std::atomic<bool> symspellInitialized_{false};
 

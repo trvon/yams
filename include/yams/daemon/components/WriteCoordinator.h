@@ -208,6 +208,7 @@ public:
             std::uint64_t errors = 0;
             std::uint64_t totalQueueWaitMs = 0;
             std::uint64_t maxQueueWaitMs = 0;
+            std::uint64_t maxExcessQueueWaitMs = 0;
             std::uint64_t totalApplyMs = 0;
             std::uint64_t maxApplyMs = 0;
         };
@@ -233,6 +234,7 @@ public:
         std::uint64_t docEntitiesDeleted = 0;
         std::uint64_t maxBatchApplyMs = 0;
         std::uint64_t maxBatchQueueWaitMs = 0;
+        std::uint64_t maxBatchExcessQueueWaitMs = 0;
         std::vector<Hotspot> hotSources;
     };
 
@@ -306,6 +308,7 @@ private:
         std::uint64_t errors = 0;
         std::uint64_t totalQueueWaitMs = 0;
         std::uint64_t maxQueueWaitMs = 0;
+        std::uint64_t maxExcessQueueWaitMs = 0;
         std::uint64_t totalApplyMs = 0;
         std::uint64_t maxApplyMs = 0;
     };
@@ -318,6 +321,7 @@ private:
     mutable std::mutex queueMutex_;
     mutable std::condition_variable drainCv_;
     std::vector<std::unique_ptr<WriteBatch>> pendingBatches_;
+    std::optional<Error> lastApplyError_;
 
     std::atomic<bool> stop_{false};
     std::atomic<std::size_t> inFlight_{0};

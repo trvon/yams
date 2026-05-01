@@ -117,6 +117,13 @@ struct DaemonStats {
     std::atomic<uint64_t> searchRequestsRejected{0};
     std::atomic<uint64_t> addRequestsDeferred{0};
     std::atomic<uint64_t> addRequestsRejected{0};
+    std::atomic<uint64_t> addDispatchSamples{0};
+    std::atomic<uint64_t> addDispatchTotalUs{0};
+    std::atomic<uint64_t> addDispatchMaxUs{0};
+    std::atomic<uint64_t> addFingerprintTotalUs{0};
+    std::atomic<uint64_t> addFingerprintMaxUs{0};
+    std::atomic<uint64_t> addEnqueueTotalUs{0};
+    std::atomic<uint64_t> addEnqueueMaxUs{0};
 };
 
 /**

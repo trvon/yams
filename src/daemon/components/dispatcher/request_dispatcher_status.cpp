@@ -487,15 +487,36 @@ void populateStatusFromSnapshot(StatusResponse& res, const MetricsSnapshot& snap
     for (const auto& [key, value] : snap.diagnosticCounters) {
         res.requestCounts[std::string{"status_diag_"} + key] = static_cast<size_t>(value);
     }
+    if (state) {
+        res.requestCounts["add_phase_dispatch_samples"] =
+            static_cast<size_t>(state->stats.addDispatchSamples.load(std::memory_order_relaxed));
+        res.requestCounts["add_phase_dispatch_total_us"] =
+            static_cast<size_t>(state->stats.addDispatchTotalUs.load(std::memory_order_relaxed));
+        res.requestCounts["add_phase_dispatch_max_us"] =
+            static_cast<size_t>(state->stats.addDispatchMaxUs.load(std::memory_order_relaxed));
+        res.requestCounts["add_phase_fingerprint_total_us"] =
+            static_cast<size_t>(state->stats.addFingerprintTotalUs.load(std::memory_order_relaxed));
+        res.requestCounts["add_phase_fingerprint_max_us"] =
+            static_cast<size_t>(state->stats.addFingerprintMaxUs.load(std::memory_order_relaxed));
+        res.requestCounts["add_phase_enqueue_total_us"] =
+            static_cast<size_t>(state->stats.addEnqueueTotalUs.load(std::memory_order_relaxed));
+        res.requestCounts["add_phase_enqueue_max_us"] =
+            static_cast<size_t>(state->stats.addEnqueueMaxUs.load(std::memory_order_relaxed));
+    }
 }
 
 } // namespace
 
 boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const StatusRequest& req) {
     // Minimal and safe status path using centralized DaemonMetrics when available
+    const auto requestStart = std::chrono::steady_clock::now();
     StatusResponse res;
     const bool includeExtendedStatus = req.detailed;
     auto finalizeStatusResponse = [&]() -> Response {
+        const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - requestStart)
+                                 .count();
+        res.requestCounts["phase_dispatch_total_us"] = static_cast<size_t>(totalUs);
         try {
             if (state_) {
                 const auto currentCount =
@@ -1101,19 +1122,33 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                         std::to_string(stats.maxBatchApplyMs);
                     response.additionalStats["write_max_batch_queue_wait_ms"] =
                         std::to_string(stats.maxBatchQueueWaitMs);
+                    response.additionalStats["write_max_batch_excess_queue_wait_ms"] =
+                        std::to_string(stats.maxBatchExcessQueueWaitMs);
                     std::string hotspotSummary;
                     for (std::size_t i = 0; i < stats.hotSources.size(); ++i) {
                         const auto& h = stats.hotSources[i];
                         if (i > 0)
                             hotspotSummary += ";";
-                        hotspotSummary += h.source + "|ops=" + std::to_string(h.ops) +
-                                          "|batches=" + std::to_string(h.batches) +
-                                          "|apply_ms=" + std::to_string(h.totalApplyMs) +
-                                          "|max_apply_ms=" + std::to_string(h.maxApplyMs) +
-                                          "|max_wait_ms=" + std::to_string(h.maxQueueWaitMs) +
-                                          "|errors=" + std::to_string(h.errors);
+                        hotspotSummary +=
+                            h.source + "|ops=" + std::to_string(h.ops) +
+                            "|batches=" + std::to_string(h.batches) +
+                            "|apply_ms=" + std::to_string(h.totalApplyMs) +
+                            "|max_apply_ms=" + std::to_string(h.maxApplyMs) +
+                            "|max_wait_ms=" + std::to_string(h.maxQueueWaitMs) +
+                            "|max_excess_wait_ms=" + std::to_string(h.maxExcessQueueWaitMs) +
+                            "|errors=" + std::to_string(h.errors);
                     }
                     response.additionalStats["write_hot_sources"] = std::move(hotspotSummary);
+                }
+                if (auto piq = serviceManager_->getPostIngestQueue()) {
+                    const auto snapshot = piq->metricsSnapshot();
+                    for (const auto& [phase, timing] : snapshot.timings) {
+                        const auto prefix = std::string{"post_timing_"} + phase;
+                        response.additionalStats[prefix + "_calls"] = std::to_string(timing.calls);
+                        response.additionalStats[prefix + "_total_ms"] =
+                            std::to_string(timing.totalMs);
+                        response.additionalStats[prefix + "_max_ms"] = std::to_string(timing.maxMs);
+                    }
                 }
             }
         } catch (...) {

@@ -706,6 +706,17 @@ inline bool& cli_pool_initialized() {
     return initialized;
 }
 
+inline void shutdown_cli_daemon_client_pool() {
+    std::shared_ptr<DaemonClientPool> oldPool;
+    {
+        std::lock_guard<std::mutex> lk(cli_pool_mutex());
+        oldPool = std::move(cli_pool_instance());
+        cli_pool_initialized() = false;
+        cli_pool_config() = yams::daemon::ClientConfig{};
+    }
+    oldPool.reset();
+}
+
 enum class CliDaemonAccessPolicy {
     AllowInProcessFallback,
     RequireSocket,

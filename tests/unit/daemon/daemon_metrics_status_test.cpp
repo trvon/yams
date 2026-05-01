@@ -685,6 +685,15 @@ struct GraphDispatcherFixture {
     }
 
     ~GraphDispatcherFixture() {
+        dispatcher.reset();
+        svc.reset();
+        if (writeWork) {
+            writeWork.reset();
+        }
+        writeIo.stop();
+        if (writeThread.joinable()) {
+            writeThread.join();
+        }
         kgStore.reset();
         repo.reset();
         pool.reset();
@@ -711,6 +720,15 @@ struct GraphDispatcherFixture {
             REQUIRE(kgResult.has_value());
             kgStore = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgResult).value());
             repo->setKnowledgeGraphStore(kgStore);
+
+            writeIo.restart();
+            writeWork = std::make_unique<
+                boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+                writeIo.get_executor());
+            writeThread = std::thread([this] { writeIo.run(); });
+            auto writeCoord = std::make_unique<WriteCoordinator>(writeIo, kgStore, repo);
+            writeCoord->start();
+            svc->__test_setWriteCoordinator(std::move(writeCoord));
         }
     }
 
@@ -757,6 +775,10 @@ struct GraphDispatcherFixture {
     DaemonLifecycleFsm lifecycleFsm;
     std::unique_ptr<ServiceManager> svc;
     std::unique_ptr<RequestDispatcher> dispatcher;
+    boost::asio::io_context writeIo;
+    std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
+        writeWork;
+    std::thread writeThread;
     std::shared_ptr<metadata::ConnectionPool> pool;
     std::shared_ptr<metadata::MetadataRepository> repo;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;

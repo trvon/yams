@@ -347,6 +347,11 @@ public:
 
     // Write Coordinator - unified single-writer entry point for all metadata writes
     WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
+#ifdef YAMS_TESTING
+    void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
+        writeCoordinator_ = std::move(coordinator);
+    }
+#endif
 
     // Graph Component (PBI-009)
     std::shared_ptr<GraphComponent> getGraphComponent() const { return loadGraphComponent(); }
@@ -388,7 +393,8 @@ public:
     // Deterministic corpus-wide rebuild of the semantic_neighbor edges in the KG.
     // Clears existing edges then rebuilds against every doc-level vector in vdb.
     // Returns the number of new edges created.
-    Result<std::size_t> rebuildSemanticNeighborGraph(const std::string& reason);
+    Result<std::size_t> rebuildSemanticNeighborGraph(const std::string& reason,
+                                                     const std::string& modelName = {});
     void requestTopologyRebuild(const std::string& reason,
                                 const std::vector<std::string>& documentHashes = {});
     void requestSemanticTopologyMaintenance(const std::string& reason);
@@ -521,6 +527,9 @@ public:
     boost::asio::awaitable<void> preloadPreferredModelIfConfigured();
 
     std::string resolvePreferredModel() const {
+        if (shutdownInvoked_.load(std::memory_order_acquire)) {
+            return {};
+        }
         return embeddingLifecycle_.resolvePreferredModel();
     }
 
@@ -648,7 +657,7 @@ private:
     boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
     bool detectEmbeddingPreloadFlag() const { return embeddingLifecycle_.detectPreloadFlag(); }
 
-    const DaemonConfig& config_;
+    DaemonConfig config_;
     StateComponent& state_;
 
     // All the services managed by this component

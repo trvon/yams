@@ -7,6 +7,7 @@
 #include <sstream>
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/command_catalog.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/env_utils.h>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/plugin_util.h>
@@ -293,6 +294,8 @@ YamsCLI::~YamsCLI() {
         }
         database_.reset();
     }
+    yams::cli::shutdown_cli_daemon_client_pool();
+    (void)yams::daemon::GlobalIOContext::safe_restart();
 }
 
 bool YamsCLI::hasExplicitDataDir() const {

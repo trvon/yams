@@ -1102,6 +1102,12 @@ EmbeddingService::rebuildSemanticNeighborGraphForCorpus(const std::string& model
 
     const auto before = semanticEdgesCreated_.load(std::memory_order_relaxed);
     updateSemanticNeighborGraph(kgStore, vdb, modelName, {}, true);
+    if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
+        auto flushRes = coord->flush();
+        if (!flushRes) {
+            return flushRes.error();
+        }
+    }
     const auto after = semanticEdgesCreated_.load(std::memory_order_relaxed);
     return static_cast<std::size_t>(after >= before ? after - before : 0);
 }

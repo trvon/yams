@@ -447,6 +447,28 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
         auto wb = std::make_unique<WriteBatch>();
         wb->source = "RPC::ingestGraph";
 
+        std::unordered_set<std::string> knownNodeKeys;
+        knownNodeKeys.reserve(req.nodes.size() + req.edges.size() * 2 + req.aliases.size());
+        for (const auto& n : req.nodes) {
+            if (!n.nodeKey.empty()) {
+                knownNodeKeys.insert(n.nodeKey);
+            }
+        }
+        auto nodeExists = [&](const std::string& nodeKey) -> bool {
+            if (nodeKey.empty()) {
+                return false;
+            }
+            if (knownNodeKeys.contains(nodeKey)) {
+                return true;
+            }
+            auto nodeRes = kgStore->getNodeByKey(nodeKey);
+            if (nodeRes && nodeRes.value().has_value()) {
+                knownNodeKeys.insert(nodeKey);
+                return true;
+            }
+            return false;
+        };
+
         if (!req.nodes.empty()) {
             std::vector<KGNode> nodes;
             nodes.reserve(req.nodes.size());
@@ -466,6 +488,19 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
             std::vector<DeferredEdgeOp> deferred;
             deferred.reserve(req.edges.size());
             for (const auto& edge : req.edges) {
+                const bool srcOk = nodeExists(edge.srcNodeKey);
+                const bool dstOk = nodeExists(edge.dstNodeKey);
+                if (!srcOk || !dstOk) {
+                    ++resp.edgesSkipped;
+                    if (!srcOk) {
+                        resp.errors.push_back("Edge source node not found: " + edge.srcNodeKey);
+                    }
+                    if (!dstOk) {
+                        resp.errors.push_back("Edge destination node not found: " +
+                                              edge.dstNodeKey);
+                    }
+                    continue;
+                }
                 DeferredEdgeOp op;
                 op.srcNodeKey = edge.srcNodeKey;
                 op.dstNodeKey = edge.dstNodeKey;
@@ -482,6 +517,11 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
             std::vector<KGAlias> aliases;
             aliases.reserve(req.aliases.size());
             for (const auto& a : req.aliases) {
+                if (!nodeExists(a.nodeKey)) {
+                    ++resp.aliasesSkipped;
+                    resp.errors.push_back("Alias node not found: " + a.nodeKey);
+                    continue;
+                }
                 KGAlias alias;
                 alias.nodeId = 0;
                 alias.alias = a.alias;
@@ -497,12 +537,23 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
         auto fr = coord->flush();
         if (!fr) {
             resp.success = false;
-            resp.errors.push_back("Flush failed: " + fr.error().message);
+            const auto validEdges = req.edges.size() - resp.edgesSkipped;
+            const auto validAliases = req.aliases.size() - resp.aliasesSkipped;
+            if (!req.nodes.empty()) {
+                resp.errors.push_back("Node upsert failed: " + fr.error().message);
+            } else if (validEdges > 0) {
+                resp.errors.push_back("Edge insert failed: " + fr.error().message);
+            } else if (validAliases > 0) {
+                resp.success = true;
+                resp.errors.push_back("Alias insert failed: " + fr.error().message);
+            } else {
+                resp.errors.push_back("Flush failed: " + fr.error().message);
+            }
         } else {
             resp.success = true;
             resp.nodesInserted = static_cast<uint32_t>(req.nodes.size());
-            resp.edgesInserted = static_cast<uint32_t>(req.edges.size());
-            resp.aliasesInserted = static_cast<uint32_t>(req.aliases.size());
+            resp.edgesInserted = static_cast<uint32_t>(req.edges.size() - resp.edgesSkipped);
+            resp.aliasesInserted = static_cast<uint32_t>(req.aliases.size() - resp.aliasesSkipped);
         }
         spdlog::info("KgIngest (via WriteCoordinator) completed: {} nodes, {} edges, {} aliases",
                      resp.nodesInserted, resp.edgesInserted, resp.aliasesInserted);

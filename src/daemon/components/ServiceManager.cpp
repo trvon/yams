@@ -1999,20 +1999,42 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
         auto initRes = embeddingService->initialize();
         if (initRes) {
+            auto weakSelf = weak_from_this();
             embeddingService->setProviders(
-                [this]() { return this->loadModelProvider(); },
-                [this]() { return this->resolvePreferredModel(); },
-                [this]() { return this->getVectorDatabase(); },
-                [this]() { return this->getKgStore(); },
-                [this](const std::string& model,
-                       std::function<void(const ModelLoadEvent&)> progress) {
-                    return this->ensureEmbeddingModelReadySync(model, std::move(progress),
+                [weakSelf]() {
+                    auto self = weakSelf.lock();
+                    return self ? self->loadModelProvider() : std::shared_ptr<IModelProvider>{};
+                },
+                [weakSelf]() {
+                    auto self = weakSelf.lock();
+                    return self ? self->resolvePreferredModel() : std::string{};
+                },
+                [weakSelf]() {
+                    auto self = weakSelf.lock();
+                    return self ? self->getVectorDatabase()
+                                : std::shared_ptr<yams::vector::VectorDatabase>{};
+                },
+                [weakSelf]() {
+                    auto self = weakSelf.lock();
+                    return self ? self->getKgStore()
+                                : std::shared_ptr<metadata::KnowledgeGraphStore>{};
+                },
+                [weakSelf](const std::string& model,
+                           std::function<void(const ModelLoadEvent&)> progress) {
+                    auto self = weakSelf.lock();
+                    if (!self) {
+                        return Result<std::string>(
+                            Error{ErrorCode::InvalidState, "ServiceManager unavailable"});
+                    }
+                    return self->ensureEmbeddingModelReadySync(model, std::move(progress),
                                                                /*timeoutMs=*/0,
                                                                /*keepHot=*/true, /*warmup=*/true);
                 });
             embeddingService->setTopologyRebuildRequester(
-                [this](const std::vector<std::string>& hashes) {
-                    this->requestTopologyRebuild("embedding_batch_complete", hashes);
+                [weakSelf](const std::vector<std::string>& hashes) {
+                    if (auto self = weakSelf.lock()) {
+                        self->requestTopologyRebuild("embedding_batch_complete", hashes);
+                    }
                 });
             embeddingService->start();
             std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
@@ -3322,13 +3344,18 @@ ServiceManager::rebuildTopologyArtifacts(const std::string& reason, bool dryRun,
                                              tuningConfig_.topologyAlgorithm);
 }
 
-Result<std::size_t> ServiceManager::rebuildSemanticNeighborGraph(const std::string& reason) {
+Result<std::size_t>
+ServiceManager::rebuildSemanticNeighborGraph(const std::string& reason,
+                                             const std::string& requestedModel) {
     auto embSvc = std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
     if (!embSvc) {
         return Error{ErrorCode::InvalidState,
                      "rebuildSemanticNeighborGraph: embedding service unavailable"};
     }
-    std::string modelName = embeddingLifecycle_.modelName();
+    std::string modelName = requestedModel;
+    if (modelName.empty()) {
+        modelName = embeddingLifecycle_.modelName();
+    }
     if (modelName.empty()) {
         modelName = "simeon-default";
     }
