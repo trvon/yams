@@ -25,6 +25,11 @@
 
 namespace {
 
+#ifndef YAMS_TEST_TIMEOUT_SCALE
+#define YAMS_TEST_TIMEOUT_SCALE 1
+#endif
+constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
+
 void clear_current_session_state() {
     ::unsetenv("YAMS_SESSION_CURRENT");
     auto sessionSvc = yams::app::services::makeSessionService(nullptr);
@@ -100,7 +105,8 @@ struct LocalDaemonFixture {
         yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
     }
 
-    bool startDaemon(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    bool startDaemon(std::chrono::milliseconds timeout = std::chrono::seconds(10) *
+                                                         kTestTimeoutScale) {
         yams::daemon::DaemonConfig cfg;
         cfg.dataDir = storageDir_;
         cfg.socketPath = socketPath_;
@@ -182,7 +188,7 @@ Result<void> wait_for_daemon_ready(const std::filesystem::path& socketPath) {
         return connectRes.error();
 
     std::string statusErr;
-    for (int attempt = 0; attempt < 120; ++attempt) {
+    for (int attempt = 0; attempt < 120 * kTestTimeoutScale; ++attempt) {
         auto statusRes = yams::cli::run_sync(statusClient.status(), 1s);
         if (statusRes) {
             const auto& s = statusRes.value();

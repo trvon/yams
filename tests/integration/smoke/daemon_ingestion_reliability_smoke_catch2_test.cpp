@@ -17,6 +17,11 @@
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
+#ifndef YAMS_TEST_TIMEOUT_SCALE
+#define YAMS_TEST_TIMEOUT_SCALE 1
+#endif
+constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
+
 // This smoke test exercises transient IPC unavailability during daemon startup
 // and validates the retriable ingestion path does not surface I/O errors.
 struct DaemonIngestionReliabilitySmoke {
@@ -132,7 +137,7 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
 
     // Wait for daemon to reach Ready state before allowing client requests to complete
     // Without this, the client might connect before services are fully initialized
-    auto deadline = std::chrono::steady_clock::now() + 10s;
+    auto deadline = std::chrono::steady_clock::now() + (10s * kTestTimeoutScale);
     while (std::chrono::steady_clock::now() < deadline) {
         auto lifecycle = daemon.getLifecycle().snapshot();
         if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
@@ -142,7 +147,7 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     }
 
     // Wait for result (bounded)
-    REQUIRE(fut.wait_for(5s) == std::future_status::ready);
+    REQUIRE(fut.wait_for(5s * kTestTimeoutScale) == std::future_status::ready);
     auto addRes = fut.get();
 
     // Join worker before assertions complete

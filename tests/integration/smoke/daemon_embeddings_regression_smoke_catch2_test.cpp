@@ -36,6 +36,16 @@ using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
 namespace {
+
+#ifndef YAMS_TEST_TIMEOUT_SCALE
+#define YAMS_TEST_TIMEOUT_SCALE 1
+#endif
+constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
+
+constexpr std::chrono::milliseconds scale_timeout(std::chrono::milliseconds timeout) {
+    return timeout * kTestTimeoutScale;
+}
+
 using yams::cli::run_sync;
 using StatusClock = std::chrono::steady_clock;
 
@@ -427,7 +437,7 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
     client.setStreamingEnabled(false);
 
     std::string status;
-    bool ready = wait_for_daemon_ready(client, 30s, &status, &daemon);
+    bool ready = wait_for_daemon_ready(client, scale_timeout(30s), &status, &daemon);
     if (!ready) {
         auto statusRes = yams::cli::run_sync(client.status(), 2s);
         if (statusRes) {
@@ -468,7 +478,7 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
 
     std::string reason;
     INFO("Embeddings provider unavailable: " << reason);
-    REQUIRE(ensure_embeddings_provider(client, 30s, modelName, &reason, &daemon));
+    REQUIRE(ensure_embeddings_provider(client, scale_timeout(30s), modelName, &reason, &daemon));
 
     yams::app::services::DocumentIngestionService ingestion;
     yams::app::services::AddOptions baseOpts;
@@ -500,7 +510,7 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
 
     std::string ingestDrainReason;
     INFO("Post-ingest queue did not drain: " << ingestDrainReason);
-    REQUIRE(wait_for_post_ingest_idle(client, 20s, &ingestDrainReason));
+    REQUIRE(wait_for_post_ingest_idle(client, scale_timeout(20s), &ingestDrainReason));
 
     // Collect the document hashes directly from the fixtures so we can explicitly
     // request embeddings for the known corpus.
@@ -526,7 +536,8 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
 
     std::string documentReadyDetail;
     INFO("Ingested documents not yet retrievable: " << documentReadyDetail);
-    REQUIRE(wait_for_documents_available(client, corpusHashes, 15s, &documentReadyDetail));
+    REQUIRE(wait_for_documents_available(client, corpusHashes, scale_timeout(15s),
+                                         &documentReadyDetail));
 
     yams::daemon::GetStatsRequest statsReq;
     auto statsBaseline = yams::cli::run_sync(client.getStats(statsReq), 5s);
@@ -552,15 +563,16 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
     CHECK(embedRes.value().embedded >= expectedDocs);
 
     std::string vectorGrowthDetail;
-    bool vectorGrowthObserved = wait_for_vector_index_growth(
-        client, baseVectorBytes, baseVectorRows, baseEmbedConsumed, 20s, &vectorGrowthDetail);
+    bool vectorGrowthObserved =
+        wait_for_vector_index_growth(client, baseVectorBytes, baseVectorRows, baseEmbedConsumed,
+                                     scale_timeout(20s), &vectorGrowthDetail);
     if (!vectorGrowthObserved) {
         INFO("Vector growth not observed: " + vectorGrowthDetail);
     }
 
     // Wait for vector scoring to become active so semantic queries leverage embeddings.
     bool vectorReady = false;
-    for (int i = 0; i < 120; ++i) {
+    for (int i = 0; i < 120 * kTestTimeoutScale; ++i) {
         auto stRes = yams::cli::run_sync(client.status(), 500ms);
         if (stRes) {
             const auto& st = stRes.value();
@@ -578,7 +590,7 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
     // Poll stats until embeddings appear in the vector index.
     // Run representative semantic queries drawn from the shared preset.
     auto queries = yams::test::defaultSearchQueries();
-    const int maxSearchAttempts = 20;
+    const int maxSearchAttempts = 20 * kTestTimeoutScale;
     std::size_t semanticHits = 0;
     bool searchReady = false;
     for (int attempt = 0; attempt < maxSearchAttempts && !searchReady; ++attempt) {

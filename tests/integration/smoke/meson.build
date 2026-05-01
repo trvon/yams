@@ -35,15 +35,16 @@ endif
 dbg = (get_option('buildtype') == 'debug')
 if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-smoke') or dbg) and integration_smoke_srcs.length() > 0 and catch2_dep.found()
   smoke_test_args = []
-  if get_option('enable-tsan')
+  if _test_thread_sanitizer
     smoke_test_args += ['~[mcpdocopsfixture]']
   endif
+  smoke_test_timeout = get_option('integration-smoke-timeout') * _test_timeout_scale
 
   integ_exe = executable('yams_integration_smoke_tests',
     integration_smoke_srcs + files('test_main_smoke_catch2.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, test_deps],
-    cpp_args: ['-DYAMS_TESTING=1'],
+    cpp_args: ['-DYAMS_TESTING=1', _test_timeout_cpp_arg],
     install: false,
   )
 
@@ -56,7 +57,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
       'TSAN_OPTIONS': _test_tsan_options,
     },
     is_parallel: false,
-    timeout: get_option('integration-smoke-timeout'),
+    timeout: smoke_test_timeout,
   )
 else
   if not catch2_dep.found()

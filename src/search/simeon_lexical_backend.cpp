@@ -249,24 +249,48 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         build_thread_.join();
     }
 
-    build_thread_ = yams::compat::jthread([this, repo = std::move(repo)](
+    auto idsResult = repo->getAllFts5IndexedDocumentIds();
+    if (!idsResult) {
+        spdlog::warn("[simeon-lexical] enumerate doc ids failed: {}", idsResult.error().message);
+        building_.store(false, std::memory_order_release);
+        return Result<void>{};
+    }
+
+    auto ids = std::move(idsResult.value());
+    if (ids.size() > cfg_.max_corpus_docs) {
+        spdlog::info("[simeon-lexical] corpus {} docs > cap {} — staying on FTS5 only", ids.size(),
+                     cfg_.max_corpus_docs);
+        building_.store(false, std::memory_order_release);
+        return Result<void>{};
+    }
+
+    if (ids.empty()) {
+        simeon::Bm25Config bcfg;
+        bcfg.variant = toSimeonVariant(cfg_.variant);
+        bcfg.subword_gamma = cfg_.subword_gamma;
+        auto primary = std::make_unique<simeon::Bm25Index>(bcfg);
+        primary->finalize();
+        index_ = std::move(primary);
+        atire_index_.reset();
+        router_.reset();
+        pmi_.reset();
+        fragment_encoder_.reset();
+        doc_frags_.clear();
+        doc_id_to_index_.clear();
+        doc_count_ = 0;
+        ready_.store(true, std::memory_order_release);
+        building_.store(false, std::memory_order_release);
+        spdlog::info("[simeon-lexical] ready: variant={} router={} fragment_geometry=off docs=0 "
+                     "missing=0 raw_bytes=0 processed_bytes=0 chunked_docs=0 build_ms=0",
+                     variantLabel(cfg_.variant), cfg_.router_enabled ? "on" : "off");
+        releaseTransientPages("post-build");
+        return Result<void>{};
+    }
+
+    build_thread_ = yams::compat::jthread([this, repo = std::move(repo), ids = std::move(ids)](
                                               yams::compat::stop_token stop) mutable {
         const auto t0 = std::chrono::steady_clock::now();
 
-        auto idsResult = repo->getAllFts5IndexedDocumentIds();
-        if (!idsResult) {
-            spdlog::warn("[simeon-lexical] enumerate doc ids failed: {}",
-                         idsResult.error().message);
-            building_.store(false, std::memory_order_release);
-            return;
-        }
-        const auto& ids = idsResult.value();
-        if (ids.size() > cfg_.max_corpus_docs) {
-            spdlog::info("[simeon-lexical] corpus {} docs > cap {} — staying on FTS5 only",
-                         ids.size(), cfg_.max_corpus_docs);
-            building_.store(false, std::memory_order_release);
-            return;
-        }
         if (stop.stop_requested()) {
             building_.store(false, std::memory_order_release);
             return;
