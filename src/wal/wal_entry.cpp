@@ -4,8 +4,10 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <span>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 
 // CRC32 implementation (simplified - in production use a library)
 namespace {
@@ -32,6 +34,17 @@ uint32_t checkedMetadataPartSize(size_t size, const char* field) {
     return static_cast<uint32_t>(size);
 }
 
+template <typename T> std::span<const std::byte> objectBytes(const T& value) noexcept {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "WAL serialization only supports trivially-copyable POD payloads");
+    return std::as_bytes(std::span<const T>(&value, 1));
+}
+
+template <typename T> void appendObjectBytes(std::vector<std::byte>& out, const T& value) {
+    const auto bytes = objectBytes(value);
+    out.insert(out.end(), bytes.begin(), bytes.end());
+}
+
 } // anonymous namespace
 
 namespace yams::wal {
@@ -44,29 +57,29 @@ std::vector<std::byte> WALEntry::serialize() const {
     auto headerCopy = header;
     headerCopy.checksum = 0; // Zero out for calculation
 
-    const auto* headerBytes = reinterpret_cast<const std::byte*>(&headerCopy);
-    result.insert(result.end(), headerBytes, headerBytes + sizeof(Header));
+    appendObjectBytes(result, headerCopy);
 
     // Copy data
     result.insert(result.end(), data.begin(), data.end());
 
     // Calculate and set checksum
     uint32_t checksum = crc32(result.data(), result.size());
-    auto* checksumPtr = reinterpret_cast<uint32_t*>(result.data() + offsetof(Header, checksum));
-    *checksumPtr = checksum;
+    std::memcpy(result.data() + offsetof(Header, checksum), &checksum, sizeof(checksum));
 
     return result;
 }
 
 std::optional<WALEntry> WALEntry::deserialize(std::span<const std::byte> buffer) {
+    constexpr size_t headerSize = sizeof(Header);
+
     // Check minimum size
-    if (buffer.size() < sizeof(Header)) {
+    if (buffer.size() < headerSize) {
         return std::nullopt;
     }
 
     // Read header
     WALEntry entry;
-    std::memcpy(&entry.header, buffer.data(), sizeof(Header));
+    std::memcpy(&entry.header, buffer.data(), headerSize);
 
     // Validate header
     if (!entry.header.isValid()) {
@@ -74,13 +87,14 @@ std::optional<WALEntry> WALEntry::deserialize(std::span<const std::byte> buffer)
     }
 
     // Check buffer has enough data
-    if (buffer.size() < sizeof(Header) + entry.header.dataSize) {
+    if (buffer.size() < headerSize + entry.header.dataSize) {
         return std::nullopt;
     }
 
     // Read data
-    entry.data.assign(buffer.begin() + sizeof(Header),
-                      buffer.begin() + sizeof(Header) + entry.header.dataSize);
+    const auto dataBegin = std::next(buffer.begin(), static_cast<std::ptrdiff_t>(headerSize));
+    entry.data.assign(dataBegin,
+                      std::next(dataBegin, static_cast<std::ptrdiff_t>(entry.header.dataSize)));
 
     // Verify checksum
     if (!entry.verifyChecksum()) {
@@ -98,8 +112,7 @@ void WALEntry::updateChecksum() {
     std::vector<std::byte> temp;
     temp.reserve(totalSize());
 
-    const auto* headerBytes = reinterpret_cast<const std::byte*>(&header);
-    temp.insert(temp.end(), headerBytes, headerBytes + sizeof(Header));
+    appendObjectBytes(temp, header);
     temp.insert(temp.end(), data.begin(), data.end());
 
     header.checksum = crc32(temp.data(), temp.size());
@@ -117,8 +130,7 @@ bool WALEntry::verifyChecksum() const {
     std::vector<std::byte> temp;
     temp.reserve(totalSize());
 
-    const auto* headerBytes = reinterpret_cast<const std::byte*>(&headerCopy);
-    temp.insert(temp.end(), headerBytes, headerBytes + sizeof(Header));
+    appendObjectBytes(temp, headerCopy);
     temp.insert(temp.end(), data.begin(), data.end());
 
     uint32_t calculatedChecksum = crc32(temp.data(), temp.size());
