@@ -264,7 +264,10 @@ IndexingResult IndexingPipeline::processTask(IndexingTask& task) {
                     (void)gc->submitEntityExtraction(std::move(j));
                 }
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("IndexingPipeline: entity extraction submit skipped: {}", e.what());
         } catch (...) {
+            spdlog::debug("IndexingPipeline: entity extraction submit skipped: unknown exception");
         }
 
         task.stage = PipelineStage::Completed;

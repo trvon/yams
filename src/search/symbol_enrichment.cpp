@@ -199,7 +199,11 @@ SymbolEnricher::extractSymbolInfoFromNode(const yams::metadata::KGNode& node) {
             if (props.contains("documentation")) {
                 info.documentation = props["documentation"].get<std::string>();
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("SymbolEnricher: ignoring malformed entity properties: {}", e.what());
         } catch (...) {
+            spdlog::debug(
+                "SymbolEnricher: ignoring malformed entity properties: unknown exception");
         }
     }
 

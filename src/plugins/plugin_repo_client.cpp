@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -39,6 +40,18 @@ public:
 private:
     CURL* curl_;
 };
+
+bool isLoopbackOrLocalhostUrl(std::string_view url) {
+    constexpr std::string_view kHttpLocalhost = "http://localhost";
+    constexpr std::string_view kHttpsLocalhost = "https://localhost";
+    constexpr std::string_view kHttp127 = "http://127.";
+    constexpr std::string_view kHttps127 = "https://127.";
+    constexpr std::string_view kHttpIpv6Loopback = "http://[::1]";
+    constexpr std::string_view kHttpsIpv6Loopback = "https://[::1]";
+    return url.starts_with(kHttpLocalhost) || url.starts_with(kHttpsLocalhost) ||
+           url.starts_with(kHttp127) || url.starts_with(kHttps127) ||
+           url.starts_with(kHttpIpv6Loopback) || url.starts_with(kHttpsIpv6Loopback);
+}
 
 } // namespace
 
@@ -173,7 +186,14 @@ private:
         curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
 
         if (!config_.verifyTls) {
+            if (!isLoopbackOrLocalhostUrl(url)) {
+                return Error{ErrorCode::InvalidArgument,
+                             "Disabling plugin repository TLS verification is only allowed for "
+                             "loopback/localhost test repositories"};
+            }
+            // nosemgrep: yams.cpp.curl-tls-verification-disabled -- guarded to loopback test repos.
             curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
+            // nosemgrep: yams.cpp.curl-tls-verification-disabled -- guarded to loopback test repos.
             curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
         }
 
@@ -209,6 +229,7 @@ private:
                     msg << ": " << json["error"].get<std::string>();
                 }
             } catch (...) {
+                // Error bodies are best-effort diagnostics; keep the HTTP status error.
             }
             return Error{ErrorCode::NetworkError, msg.str()};
         }
