@@ -818,16 +818,159 @@ public:
     }
 
     // Verify integrity
-    Result<void> verify([[maybe_unused]] ProgressCallback progress) override {
+    Result<void> verify(ProgressCallback progress) override {
         spdlog::info("Starting content store verification");
 
-        // TODO: Implement full verification
-        // This would involve:
-        // 1. Checking all manifests
-        // 2. Verifying all chunks exist and match their hashes
-        // 3. Checking reference counts
+        size_t checkedItems = 0;
+        size_t errors = 0;
 
-        return Result<void>();
+        auto fail = [&errors](const std::string& message) {
+            ++errors;
+            spdlog::warn("Content store verification failed: {}", message);
+        };
+
+        if (auto* concreteStorage = dynamic_cast<storage::StorageEngine*>(storage_.get())) {
+            auto storageVerify = concreteStorage->verify();
+            if (!storageVerify) {
+                fail("storage engine object verification failed: " + storageVerify.error().message);
+            }
+        }
+
+        if (auto* concreteRefCounter =
+                dynamic_cast<storage::ReferenceCounter*>(refCounter_.get())) {
+            auto refIntegrity = concreteRefCounter->verifyIntegrity();
+            if (!refIntegrity || !refIntegrity.value()) {
+                fail("reference counter integrity check failed");
+            }
+        }
+
+        std::vector<std::string> knownHashes;
+        {
+            std::shared_lock lock(metadataMutex_);
+            knownHashes.reserve(metadataStore_.size());
+            for (const auto& [hash, _] : metadataStore_) {
+                knownHashes.push_back(hash);
+            }
+        }
+
+        for (const auto& hash : knownHashes) {
+            ++checkedItems;
+            if (progress) {
+                Progress p;
+                p.bytesProcessed = checkedItems;
+                p.totalBytes = knownHashes.size();
+                p.percentage = knownHashes.empty() ? 100.0
+                                                   : (static_cast<double>(checkedItems) * 100.0 /
+                                                      static_cast<double>(knownHashes.size()));
+                p.currentOperation = "verify";
+                progress(p);
+            }
+
+            const auto manifestHash = hash + ".manifest";
+            auto manifestExists = storage_->exists(manifestHash);
+            if (!manifestExists) {
+                fail("manifest existence check failed for " + hash + ": " +
+                     manifestExists.error().message);
+                continue;
+            }
+
+            if (!manifestExists.value()) {
+                auto direct = storage_->retrieve(hash);
+                if (!direct) {
+                    fail("direct object missing for " + hash + ": " + direct.error().message);
+                    continue;
+                }
+                const auto actualHash = crypto::SHA256Hasher::hash(
+                    std::span<const std::byte>(direct.value().data(), direct.value().size()));
+                if (actualHash != hash) {
+                    fail("direct object hash mismatch for " + hash + ": calculated " + actualHash);
+                }
+                continue;
+            }
+
+            auto manifestBytes = storage_->retrieve(manifestHash);
+            if (!manifestBytes) {
+                fail("manifest retrieve failed for " + hash + ": " + manifestBytes.error().message);
+                continue;
+            }
+
+            auto manifest = manifestManager_->deserialize(std::span<const std::byte>(
+                manifestBytes.value().data(), manifestBytes.value().size()));
+            if (!manifest) {
+                fail("manifest deserialize failed for " + hash + ": " + manifest.error().message);
+                continue;
+            }
+
+            auto validManifest = manifestManager_->validateManifest(manifest.value());
+            if (!validManifest || !validManifest.value()) {
+                fail("manifest validation failed for " + hash);
+                continue;
+            }
+
+            if (manifest.value().fileHash != hash) {
+                fail("manifest file hash mismatch for " + hash + ": manifest has " +
+                     manifest.value().fileHash);
+                continue;
+            }
+
+            std::vector<std::byte> reconstructed;
+            if (manifest.value().fileSize <=
+                static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                reconstructed.reserve(static_cast<size_t>(manifest.value().fileSize));
+            }
+
+            for (const auto& chunk : manifest.value().chunks) {
+                auto exists = storage_->exists(chunk.hash);
+                if (!exists || !exists.value()) {
+                    fail("chunk missing for " + hash + ": " + chunk.hash);
+                    continue;
+                }
+
+                auto chunkBytes = storage_->retrieve(chunk.hash);
+                if (!chunkBytes) {
+                    fail("chunk retrieve failed for " + chunk.hash + ": " +
+                         chunkBytes.error().message);
+                    continue;
+                }
+                if (chunkBytes.value().size() != chunk.size) {
+                    fail("chunk size mismatch for " + chunk.hash);
+                    continue;
+                }
+
+                const auto actualChunkHash = crypto::SHA256Hasher::hash(std::span<const std::byte>(
+                    chunkBytes.value().data(), chunkBytes.value().size()));
+                if (actualChunkHash != chunk.hash) {
+                    fail("chunk hash mismatch for " + chunk.hash + ": calculated " +
+                         actualChunkHash);
+                    continue;
+                }
+
+                auto refCount = refCounter_->getRefCount(chunk.hash);
+                if (!refCount || refCount.value() == 0) {
+                    fail("chunk has no reference count for " + chunk.hash);
+                    continue;
+                }
+
+                reconstructed.insert(reconstructed.end(), chunkBytes.value().begin(),
+                                     chunkBytes.value().end());
+            }
+
+            if (reconstructed.size() != manifest.value().fileSize) {
+                fail("reconstructed size mismatch for " + hash);
+                continue;
+            }
+
+            const auto reconstructedHash = crypto::SHA256Hasher::hash(
+                std::span<const std::byte>(reconstructed.data(), reconstructed.size()));
+            if (reconstructedHash != hash) {
+                fail("reconstructed content hash mismatch for " + hash + ": calculated " +
+                     reconstructedHash);
+            }
+        }
+
+        spdlog::info("Content store verification complete: {} known objects checked, {} errors",
+                     checkedItems, errors);
+        return errors == 0 ? Result<void>{} : Result<void>(ErrorCode::CorruptedData);
     }
 
     // Compact storage

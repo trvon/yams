@@ -530,13 +530,21 @@ Result<void> StorageEngine::verify() const {
                 continue;
             }
 
-            const auto expectedHash = storageHashFromObjectPath(objectsRoot, entry.path());
-            if (!isHexHash(expectedHash)) {
+            const auto expectedKey = storageHashFromObjectPath(objectsRoot, entry.path());
+            if (!isValidStorageKey(expectedKey)) {
                 spdlog::warn("Storage verification found invalid object path: {}",
                              entry.path().string());
                 ++errorCount;
                 continue;
             }
+            if (expectedKey.ends_with(".manifest")) {
+                // Manifest integrity is content-store scoped: the manifest payload is not named by
+                // its own content hash. ContentStore::verify() deserializes and validates manifests
+                // against chunk objects and reference counts.
+                ++verifiedCount;
+                continue;
+            }
+            const auto expectedHash = expectedKey;
 
             std::ifstream file(entry.path(), std::ios::binary | std::ios::ate);
             if (!file) {

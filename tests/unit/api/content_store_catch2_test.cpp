@@ -548,6 +548,69 @@ TEST_CASE("ContentStore: Health check", "[api][content-store][health]") {
     }
 }
 
+TEST_CASE("ContentStore: Verify detects storage integrity issues",
+          "[api][content-store][verify][integrity]") {
+    ContentStoreFixture fixture;
+
+    SECTION("Verify succeeds for direct and chunked content") {
+        std::vector<std::byte> small(1024, std::byte{0x21});
+        auto smallStore = fixture.store_->storeBytes(small);
+        REQUIRE(smallStore.has_value());
+
+        std::vector<std::byte> large(DEFAULT_CHUNK_SIZE + 32768, std::byte{0x42});
+        auto largeStore = fixture.store_->storeBytes(large);
+        REQUIRE(largeStore.has_value());
+
+        auto verify = fixture.store_->verify();
+        REQUIRE(verify.has_value());
+    }
+
+    SECTION("Verify detects direct object corruption") {
+        std::vector<std::byte> data(1024, std::byte{0x33});
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        const auto& hash = stored.value().contentHash;
+        auto objectPath = fixture.testDir_ / "objects" / hash.substr(0, 2) / hash.substr(2);
+        {
+            std::fstream file(objectPath, std::ios::binary | std::ios::in | std::ios::out);
+            REQUIRE(static_cast<bool>(file));
+            file.seekp(0);
+            const char corrupt = static_cast<char>(0xff);
+            file.write(&corrupt, 1);
+            REQUIRE(static_cast<bool>(file));
+        }
+
+        auto verify = fixture.store_->verify();
+        REQUIRE_FALSE(verify.has_value());
+        CHECK(verify.error() == ErrorCode::CorruptedData);
+    }
+
+    SECTION("Verify detects missing chunk from manifest") {
+        std::vector<std::byte> large(DEFAULT_CHUNK_SIZE + 32768, std::byte{0x44});
+        for (size_t i = 0; i < large.size(); ++i) {
+            large[i] = static_cast<std::byte>(i & 0xff);
+        }
+        auto stored = fixture.store_->storeBytes(large);
+        REQUIRE(stored.has_value());
+
+        bool removedObject = false;
+        const auto objectsRoot = fixture.testDir_ / "objects";
+        for (const auto& entry : fs::recursive_directory_iterator(objectsRoot)) {
+            if (entry.is_regular_file()) {
+                fs::remove(entry.path());
+                removedObject = true;
+                break;
+            }
+        }
+        REQUIRE(removedObject);
+
+        auto verify = fixture.store_->verify();
+        REQUIRE_FALSE(verify.has_value());
+        CHECK(verify.error() == ErrorCode::CorruptedData);
+    }
+}
+
 // =============================================================================
 // Statistics Tests
 // =============================================================================

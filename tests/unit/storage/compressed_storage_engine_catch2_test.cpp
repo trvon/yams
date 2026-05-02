@@ -40,6 +40,18 @@ std::vector<std::byte> generateCompressibleData(size_t size) {
     return data;
 }
 
+std::vector<std::byte> generateHighEntropyData(size_t size) {
+    std::vector<std::byte> data(size);
+    uint64_t state = 0x9e3779b97f4a7c15ULL;
+    for (size_t i = 0; i < size; ++i) {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        data[i] = static_cast<std::byte>((state * 0x2545F4914F6CDD1DULL) >> 56);
+    }
+    return data;
+}
+
 struct CompressedStorageFixture {
     CompressedStorageFixture() {
         testDir = std::filesystem::temp_directory_path() /
@@ -346,4 +358,28 @@ TEST_CASE_METHOD(CompressedStorageFixture,
 
     auto verifyResult = underlying->verify();
     REQUIRE(verifyResult.has_value());
+}
+
+TEST_CASE_METHOD(CompressedStorageFixture,
+                 "CompressedStorageEngine stores original bytes when compression is not smaller",
+                 "[storage][compressed][optimality][catch2]") {
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    auto engine = std::make_unique<CompressedStorageEngine>(underlying, config);
+
+    auto data = generateHighEntropyData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    auto storeResult = engine->store(hash, data);
+    REQUIRE(storeResult.has_value());
+
+    auto raw = underlying->retrieveRaw(hash);
+    REQUIRE(raw.has_value());
+    CHECK_FALSE(raw.value().header.has_value());
+    CHECK(raw.value().data.size() == data.size());
+    CHECK(raw.value().data == data);
 }
