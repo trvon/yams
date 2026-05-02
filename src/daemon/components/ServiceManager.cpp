@@ -1727,7 +1727,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     yams::api::ContentStoreBuilder builder;
                     builder.withStoragePath(storeRoot)
                         .withStorageEngine(storageDecision.value().storageEngineOverride)
-                        .withCompression(false)
+                        .withCompression(true)
                         .withDeduplication(true)
                         .withIntegrityChecks(true);
                     return builder.build();

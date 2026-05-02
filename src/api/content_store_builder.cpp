@@ -1,8 +1,8 @@
 #define _CRT_SECURE_NO_WARNINGS
-#include <yams/common/fs_utils.h>
 #include <yams/api/content_store_builder.h>
 #include <yams/api/content_store_error.h>
 #include <yams/chunking/streaming_chunker.h>
+#include <yams/common/fs_utils.h>
 #include <yams/compression/compression_policy.h>
 #include <yams/storage/compressed_storage_engine.h>
 
@@ -50,6 +50,42 @@ struct ContentStoreBuilder::Impl {
     }
 
     Result<void> createDefaultComponents() {
+        auto makeCompressionConfig = [&]() {
+            // Configure compression policy
+            compression::CompressionPolicy::Rules policyRules;
+
+            // Load compression settings from config if available
+            bool hasNeverCompressBelow = false;
+            bool hasAlwaysCompressAbove = false;
+            loadCompressionSettings(policyRules, hasNeverCompressBelow, hasAlwaysCompressAbove);
+
+            // Only apply eager compression defaults if config didn't specify thresholds
+            if (!hasNeverCompressBelow) {
+                policyRules.neverCompressBelow = 0;
+            }
+            if (!hasAlwaysCompressAbove) {
+                policyRules.alwaysCompressAbove = 1;
+            }
+            if (policyRules.preferZstdBelow == 0) {
+                policyRules.preferZstdBelow = std::numeric_limits<uint64_t>::max();
+            }
+            if (policyRules.compressAfterAge.count() == 0) {
+                policyRules.compressAfterAge = std::chrono::hours(0);
+            }
+            if (policyRules.archiveAfterAge.count() == 0) {
+                policyRules.archiveAfterAge = std::chrono::hours(24 * 30);
+            }
+
+            return storage::CompressedStorageEngine::Config{
+                .enableCompression = true,
+                .compressExisting = false, // Don't compress existing data on startup
+                .policyRules = policyRules,
+                .compressionThreshold = 0,
+                .asyncCompression = false,
+                .maxAsyncQueue = 0,
+                .metadataCacheTTL = std::chrono::seconds(300)};
+        };
+
         // Create storage engine if not provided
         if (!storageEngine) {
             storage::StorageConfig storageConfig{
@@ -57,65 +93,18 @@ struct ContentStoreBuilder::Impl {
                 .enableCompression = false // We'll wrap with CompressedStorageEngine instead
             };
             auto baseStorage = storage::createStorageEngine(storageConfig);
+            storageEngine = std::shared_ptr<storage::IStorageEngine>(baseStorage.release());
+        }
 
-            // Wrap with compression if enabled
-            if (config.enableCompression) {
-                // Configure compression policy
-                compression::CompressionPolicy::Rules policyRules;
+        // Wrap either default local storage or an injected storage engine (for example R2/S3) so
+        // data is compressed before it is handed to the underlying backend.
+        if (config.enableCompression &&
+            !std::dynamic_pointer_cast<storage::CompressedStorageEngine>(storageEngine)) {
+            storageEngine = std::make_shared<storage::CompressedStorageEngine>(
+                storageEngine, makeCompressionConfig());
 
-                // Load compression settings from config if available
-                bool hasNeverCompressBelow = false;
-                bool hasAlwaysCompressAbove = false;
-                loadCompressionSettings(policyRules, hasNeverCompressBelow, hasAlwaysCompressAbove);
-
-                // Only apply eager compression defaults if config didn't specify thresholds
-                if (!hasNeverCompressBelow) {
-                    policyRules.neverCompressBelow = 0;
-                }
-                if (!hasAlwaysCompressAbove) {
-                    policyRules.alwaysCompressAbove = 1;
-                }
-                if (policyRules.preferZstdBelow == 0) {
-                    policyRules.preferZstdBelow = std::numeric_limits<uint64_t>::max();
-                }
-                if (policyRules.compressAfterAge.count() == 0) {
-                    policyRules.compressAfterAge = std::chrono::hours(0);
-                }
-                if (policyRules.archiveAfterAge.count() == 0) {
-                    policyRules.archiveAfterAge = std::chrono::hours(24 * 30);
-                }
-
-                // Configure compressed storage
-                storage::CompressedStorageEngine::Config compressConfig{
-                    .enableCompression = true,
-                    .compressExisting = false, // Don't compress existing data on startup
-                    .policyRules = policyRules,
-                    .compressionThreshold = 0,
-                    .asyncCompression = false,
-                    .maxAsyncQueue = 0,
-                    .metadataCacheTTL = std::chrono::seconds(300)};
-
-                // Convert unique_ptr to shared_ptr and cast to concrete type
-                auto sharedStorage =
-                    std::shared_ptr<storage::IStorageEngine>(baseStorage.release());
-                auto concreteStorage =
-                    std::dynamic_pointer_cast<storage::StorageEngine>(sharedStorage);
-
-                if (!concreteStorage) {
-                    return Error{ErrorCode::InvalidArgument,
-                                 "Base storage engine is not a StorageEngine type"};
-                }
-
-                // Wrap the base storage with compression
-                storageEngine = std::make_shared<storage::CompressedStorageEngine>(concreteStorage,
-                                                                                   compressConfig);
-
-                spdlog::debug("Storage engine wrapped with compression support (Zstandard for "
-                              "active, LZMA for archived)");
-            } else {
-                // Convert unique_ptr to shared_ptr
-                storageEngine = std::shared_ptr<storage::IStorageEngine>(baseStorage.release());
-            }
+            spdlog::debug("Storage engine wrapped with compression support (Zstandard for active, "
+                          "LZMA for archived)");
         }
 
         // Create chunker if not provided

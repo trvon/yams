@@ -31,11 +31,18 @@ public:
     };
 
     /**
-     * @brief Construct with underlying storage and configuration
+     * @brief Construct with concrete local storage and configuration
      * @param underlying The storage engine to wrap
      * @param config Configuration parameters
      */
     CompressedStorageEngine(std::shared_ptr<StorageEngine> underlying, Config config);
+
+    /**
+     * @brief Construct with any storage engine implementation and configuration
+     * @param underlying The storage engine to wrap
+     * @param config Configuration parameters
+     */
+    CompressedStorageEngine(std::shared_ptr<IStorageEngine> underlying, Config config);
 
     ~CompressedStorageEngine() override;
 

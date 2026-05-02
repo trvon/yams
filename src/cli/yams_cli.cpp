@@ -1,15 +1,15 @@
 #include <spdlog/spdlog.h>
+#include <array>
 #include <fstream>
 #include <future>
 #include <iostream>
-#include <array>
 #include <map>
 #include <sstream>
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/command_catalog.h>
+#include <yams/cli/command_registry.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/env_utils.h>
-#include <yams/cli/command_registry.h>
 #include <yams/cli/plugin_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
@@ -1045,15 +1045,17 @@ Result<void> YamsCLI::initializeStorage() {
         // Build content store
         api::ContentStoreBuilder builder;
         builder.withStoragePath(dataPath_ / "storage").withChunkSize(DEFAULT_CHUNK_SIZE);
+        auto compressionConfig = loadCompressionConfig();
 
         if (storageDecision.value().storageEngineOverride) {
             builder.withStorageEngine(storageDecision.value().storageEngineOverride)
-                .withCompression(false)
+                .withCompression(compressionConfig.enable)
+                .withCompressionType(compressionConfig.algorithm)
+                .withCompressionLevel(compressionConfig.level)
                 .withDeduplication(true)
                 .withIntegrityChecks(true);
         } else {
             // Load compression settings from config
-            auto compressionConfig = loadCompressionConfig();
             builder.withCompression(compressionConfig.enable)
                 .withCompressionType(compressionConfig.algorithm)
                 .withCompressionLevel(compressionConfig.level)

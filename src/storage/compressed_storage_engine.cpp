@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <condition_variable>
 #include <cstring>
+#include <filesystem>
 #include <future>
 #include <limits>
 #include <mutex>
@@ -63,7 +64,7 @@ uint32_t calculateCRC32(std::span<const std::byte> data) {
  */
 class CompressedStorageEngine::Impl {
 public:
-    Impl(std::shared_ptr<StorageEngine> underlying, Config config)
+    Impl(std::shared_ptr<IStorageEngine> underlying, Config config)
         : underlying_(std::move(underlying)), config_(std::move(config)),
           policy_(config_.policyRules), compressionEnabled_(config_.enableCompression),
           shutdownFlag_(false) {
@@ -325,7 +326,7 @@ private:
         std::string key;
     };
 
-    std::shared_ptr<StorageEngine> underlying_;
+    std::shared_ptr<IStorageEngine> underlying_;
     Config config_;
     compression::CompressionPolicy policy_;
     std::atomic<bool> compressionEnabled_;
@@ -586,10 +587,25 @@ private:
 
 // Public interface implementation
 
+namespace {
+
+std::filesystem::path wrapperBasePath(const std::shared_ptr<StorageEngine>& underlying) {
+    return underlying ? underlying->getBasePath()
+                      : (std::filesystem::temp_directory_path() / "yams-compressed-wrapper");
+}
+
+} // namespace
+
 CompressedStorageEngine::CompressedStorageEngine(std::shared_ptr<StorageEngine> underlying,
                                                  Config config)
+    : StorageEngine({.basePath = wrapperBasePath(underlying)}),
+      pImpl(std::make_unique<Impl>(std::static_pointer_cast<IStorageEngine>(std::move(underlying)),
+                                   std::move(config))) {}
+
+CompressedStorageEngine::CompressedStorageEngine(std::shared_ptr<IStorageEngine> underlying,
+                                                 Config config)
     : StorageEngine(
-          {.basePath = underlying ? underlying->getBasePath() : std::filesystem::path{"/tmp"}}),
+          {.basePath = std::filesystem::temp_directory_path() / "yams-compressed-wrapper"}),
       pImpl(std::make_unique<Impl>(std::move(underlying), std::move(config))) {}
 
 CompressedStorageEngine::~CompressedStorageEngine() = default;
