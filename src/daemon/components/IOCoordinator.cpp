@@ -86,7 +86,11 @@ void IOCoordinator::start() {
             if (thread.joinable()) {
                 try {
                     thread.join();
+                } catch (const std::exception& e) {
+                    spdlog::debug("[IOCoordinator] thread join failed during cleanup: {}",
+                                  e.what());
                 } catch (...) {
+                    spdlog::debug("[IOCoordinator] thread join failed during cleanup");
                 }
             }
         }

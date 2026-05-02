@@ -156,6 +156,14 @@ TEST_CASE_METHOD(PluginInstallerFixture, "installedVersion behavior",
         REQUIRE(result.value().has_value());
         CHECK(*result.value() == "unknown");
     }
+
+    SECTION("rejects path traversal names") {
+        auto installer = makePluginInstaller(stubClient, installDir, trustFile);
+        auto result = installer->installedVersion("../test-plugin");
+
+        CHECK_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::InvalidArgument);
+    }
 }
 
 // =============================================================================
@@ -181,6 +189,20 @@ TEST_CASE_METHOD(PluginInstallerFixture, "uninstall behavior", "[plugins][instal
 
         CHECK_FALSE(result.has_value());
         CHECK(result.error().code == ErrorCode::NotFound);
+    }
+
+    SECTION("rejects path traversal names without deleting outside install root") {
+        auto outside = testDir / "outside";
+        fs::create_directories(outside);
+        std::ofstream(outside / "sentinel.txt") << "keep";
+        REQUIRE(fs::exists(outside / "sentinel.txt"));
+
+        auto installer = makePluginInstaller(stubClient, installDir, trustFile);
+        auto result = installer->uninstall("../outside");
+
+        CHECK_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::InvalidArgument);
+        CHECK(fs::exists(outside / "sentinel.txt"));
     }
 
 #if !defined(_WIN32)

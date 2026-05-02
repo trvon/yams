@@ -9,12 +9,14 @@
 #include <yams/plugins/plugin_installer.hpp>
 
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <regex>
 #include <set>
 #include <sstream>
+#include <string_view>
 
 #ifdef _WIN32
 #include <ShlObj.h>
@@ -67,6 +69,96 @@ size_t curlWriteToFile(char* ptr, size_t size, size_t nmemb, void* userdata) {
         return size * nmemb;
     }
     return 0;
+}
+
+bool isSafePathSegment(std::string_view value, bool allowPlus = false) {
+    if (value.empty() || value == "." || value == "..") {
+        return false;
+    }
+    for (unsigned char ch : value) {
+        if (std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.' || (allowPlus && ch == '+')) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+Result<void> validatePluginName(std::string_view name) {
+    if (!isSafePathSegment(name)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Invalid plugin name. Use only letters, numbers, '.', '_' and '-'."};
+    }
+    return {};
+}
+
+Result<void> validatePluginVersion(std::string_view version) {
+    if (!isSafePathSegment(version, true)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Invalid plugin version. Use only letters, numbers, '.', '_', '-' and '+'."};
+    }
+    return {};
+}
+
+bool isRelativePathSafe(const fs::path& path) {
+    if (path.empty() || path.is_absolute()) {
+        return false;
+    }
+    for (const auto& part : path) {
+        if (part == "." || part == ".." || part.empty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fs::path absoluteLexical(const fs::path& path) {
+    std::error_code ec;
+    auto absolute = fs::absolute(path, ec);
+    if (ec) {
+        return path.lexically_normal();
+    }
+    return absolute.lexically_normal();
+}
+
+bool isPathWithin(const fs::path& root, const fs::path& child) {
+    const auto rootNorm = absoluteLexical(root);
+    const auto childNorm = absoluteLexical(child);
+    auto rootIt = rootNorm.begin();
+    auto childIt = childNorm.begin();
+    for (; rootIt != rootNorm.end(); ++rootIt, ++childIt) {
+        if (childIt == childNorm.end() || *rootIt != *childIt) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Result<void> removeAllScoped(const fs::path& path, const fs::path& root,
+                             std::string_view description) {
+    const auto rootNorm = absoluteLexical(root);
+    const auto pathNorm = absoluteLexical(path);
+    if (pathNorm == rootNorm || !isPathWithin(rootNorm, pathNorm)) {
+        return Error{ErrorCode::InvalidPath, "Refusing recursive delete outside scoped " +
+                                                 std::string(description) +
+                                                 " root: " + path.string()};
+    }
+
+    std::error_code ec;
+    fs::remove_all(pathNorm, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError,
+                     "Failed to remove " + std::string(description) + ": " + ec.message()};
+    }
+    return {};
+}
+
+Result<fs::path> makePluginTempDir(const std::string& name, const std::string& version) {
+    auto tempDir = yams::common::createTempDirectory("yams-plugin-" + name + "-" + version + "-");
+    if (tempDir.empty()) {
+        return Error{ErrorCode::IOError, "Failed to create plugin temp directory"};
+    }
+    return tempDir;
 }
 
 // Compute SHA-256 hash of a file using modern EVP API
@@ -122,7 +214,8 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
     archive_read_support_filter_gzip(a);
 
     archive_write_disk_set_options(ext, ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM |
-                                            ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_FFLAGS);
+                                            ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_FFLAGS |
+                                            ARCHIVE_EXTRACT_SECURE_NODOTDOT);
 
     r = archive_read_open_filename(a, archivePath.string().c_str(), 10240);
     if (r != ARCHIVE_OK) {
@@ -141,7 +234,28 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
 
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
         // Construct full path in destination
-        fs::path entryPath = destDir / archive_entry_pathname(entry);
+        const char* rawName = archive_entry_pathname(entry);
+        if (rawName == nullptr) {
+            archive_read_free(a);
+            archive_write_free(ext);
+            return Error{ErrorCode::CorruptedData, "Archive entry is missing a path"};
+        }
+
+        fs::path relativeEntryPath{rawName};
+        if (!isRelativePathSafe(relativeEntryPath)) {
+            archive_read_free(a);
+            archive_write_free(ext);
+            return Error{ErrorCode::InvalidPath,
+                         "Archive entry escapes extraction root: " + std::string(rawName)};
+        }
+
+        fs::path entryPath = (destDir / relativeEntryPath).lexically_normal();
+        if (!isPathWithin(destDir, entryPath)) {
+            archive_read_free(a);
+            archive_write_free(ext);
+            return Error{ErrorCode::InvalidPath,
+                         "Archive entry escapes extraction root: " + std::string(rawName)};
+        }
         archive_entry_set_pathname(entry, entryPath.string().c_str());
 
         r = archive_write_header(ext, entry);
@@ -235,6 +349,13 @@ public:
             info = infoRes.value();
         }
 
+        if (auto nameValidation = validatePluginName(info.name); !nameValidation) {
+            return nameValidation.error();
+        }
+        if (auto versionValidation = validatePluginVersion(info.version); !versionValidation) {
+            return versionValidation.error();
+        }
+
         result.pluginName = info.name;
         result.version = info.version;
 
@@ -263,21 +384,21 @@ public:
             return result;
         }
 
-        // Create temp directory for download
-        fs::path tempDir =
-            fs::temp_directory_path() / ("yams-plugin-" + info.name + "-" + info.version);
-        std::error_code ec;
-        if (!yams::common::ensureDirectories(tempDir)) {
-            fs::remove_all(tempDir, ec);
-            return Error{ErrorCode::IOError, "Failed to create temp directory"};
+        // Create a unique scoped temp directory for download/extract.
+        auto tempDirRes = makePluginTempDir(info.name, info.version);
+        if (!tempDirRes) {
+            return tempDirRes.error();
         }
+        fs::path tempDir = tempDirRes.value();
+        const fs::path tempRoot = fs::temp_directory_path();
+        std::error_code ec;
         fs::path archivePath = tempDir / (info.name + "-" + info.version + ".tar.gz");
 
         // Download
         notifyProgress(InstallProgress::Stage::Downloading, "Downloading " + info.name + "...");
         auto downloadRes = downloadFile(info.downloadUrl, archivePath, options);
         if (!downloadRes) {
-            fs::remove_all(tempDir, ec);
+            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return downloadRes.error();
         }
 
@@ -287,7 +408,7 @@ public:
         if (!expectedChecksum.empty()) {
             std::string actualChecksum = computeSha256(archivePath);
             if (actualChecksum != expectedChecksum) {
-                fs::remove_all(tempDir, ec);
+                (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
                 return Error{ErrorCode::HashMismatch, "Checksum mismatch: expected " +
                                                           expectedChecksum + ", got " +
                                                           actualChecksum};
@@ -302,7 +423,7 @@ public:
         fs::path extractDir = tempDir / "extracted";
         auto extractRes = extractArchive(archivePath, extractDir);
         if (!extractRes) {
-            fs::remove_all(tempDir, ec);
+            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return extractRes.error();
         }
 
@@ -311,10 +432,15 @@ public:
 
         // Remove existing installation if upgrading
         if (result.wasUpgrade) {
-            fs::remove_all(pluginDir, ec);
+            auto removeRes = removeAllScoped(pluginDir, targetDir, "plugin install");
+            if (!removeRes) {
+                (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
+                return removeRes.error();
+            }
         }
 
         if (!yams::common::ensureDirectories(targetDir)) {
+            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return Error{ErrorCode::IOError, "Failed to create plugin directory"};
         }
 
@@ -334,7 +460,7 @@ public:
             // If rename fails (cross-device), fall back to copy
             fs::copy(sourceDir, pluginDir, fs::copy_options::recursive, ec);
             if (ec) {
-                fs::remove_all(tempDir, ec);
+                (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
                 return Error{ErrorCode::IOError, "Failed to install plugin: " + ec.message()};
             }
         }
@@ -348,7 +474,7 @@ public:
         }
 
         // Cleanup temp directory
-        fs::remove_all(tempDir, ec);
+        (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
 
         // Add to trust list
         if (options.autoTrust) {
@@ -372,6 +498,9 @@ public:
     }
 
     Result<void> uninstall(const std::string& name, bool removeFromTrust) override {
+        if (auto nameValidation = validatePluginName(name); !nameValidation) {
+            return nameValidation.error();
+        }
         fs::path pluginDir = installDir_ / name;
 
         if (!fs::exists(pluginDir)) {
@@ -382,10 +511,9 @@ public:
             removeFromTrustList(pluginDir);
         }
 
-        std::error_code ec;
-        fs::remove_all(pluginDir, ec);
-        if (ec) {
-            return Error{ErrorCode::IOError, "Failed to remove plugin: " + ec.message()};
+        auto removeRes = removeAllScoped(pluginDir, installDir_, "plugin install");
+        if (!removeRes) {
+            return removeRes.error();
         }
 
         return {};
@@ -408,6 +536,9 @@ public:
     }
 
     Result<std::optional<std::string>> installedVersion(const std::string& name) override {
+        if (auto nameValidation = validatePluginName(name); !nameValidation) {
+            return nameValidation.error();
+        }
         fs::path pluginDir = installDir_ / name;
 
         if (!fs::exists(pluginDir)) {
@@ -424,6 +555,7 @@ public:
                     file >> manifest;
                     return std::optional<std::string>(manifest.value("version", "unknown"));
                 } catch (...) {
+                    // Malformed manifests fall through to the conservative "unknown" version.
                 }
             }
         }
