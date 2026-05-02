@@ -369,6 +369,7 @@ boost::asio::any_io_executor RequestDispatcher::getCliExecutor() const {
             return serviceManager_->getCliExecutor();
         }
     } catch (...) {
+        // Service manager may be tearing down; fall back to worker executor.
     }
     return getWorkerExecutor();
 }

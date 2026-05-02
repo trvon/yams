@@ -733,6 +733,7 @@ ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
         try {
             rollback();
         } catch (...) {
+            // Move assignment is noexcept; rollback failures are best-effort cleanup here.
         }
 
         std::scoped_lock lock(stateMutex_, other.stateMutex_);
