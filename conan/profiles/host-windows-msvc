@@ -1,10 +1,14 @@
+{% set compiler_version = os.getenv("YAMS_CONAN_COMPILER_VERSION", "195") %}
+{% set compiler_version_int = compiler_version | int %}
+{% set inferred_vs_version = "18" if compiler_version_int >= 195 else "17" %}
+{% set vs_version = os.getenv("YAMS_MSBUILD_VS_VERSION", inferred_vs_version) %}
 [settings]
 os=Windows
 arch=x86_64
 compiler=msvc
-# MSVC 194 = VS 2022 17.10+ (14.4x toolset), compatible with Boost 1.85
-# Note: 193 = VS 2022 17.0-17.9 (14.3x), 194 = VS 2022 17.10+ (14.4x)
-compiler.version=194
+# Defaults track the newest supported Windows runner toolset.
+# Override locally or in CI with YAMS_CONAN_COMPILER_VERSION / YAMS_MSBUILD_VS_VERSION.
+compiler.version={{ compiler_version }}
 compiler.runtime=dynamic
 compiler.cppstd=20
 build_type=Release
@@ -13,5 +17,6 @@ build_type=Release
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Ninja
+tools.microsoft.msbuild:vs_version={{ vs_version }}
 
 [tool_requires]
