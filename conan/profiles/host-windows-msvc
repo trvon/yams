@@ -1,7 +1,9 @@
 {% set compiler_version = os.getenv("YAMS_CONAN_COMPILER_VERSION", "195") %}
 {% set compiler_version_int = compiler_version | int %}
-{% set inferred_vs_version = "18" if compiler_version_int >= 195 else "17" %}
-{% set vs_version = os.getenv("YAMS_MSBUILD_VS_VERSION", inferred_vs_version) %}
+{# MSVC 14.5 toolset (compiler.version=195) ships inside VS 2022 17.10+; only #}
+{# pin vs_version=18 when YAMS_MSBUILD_VS_VERSION is set explicitly. Default #}
+{# stays on VS 17 because that's what GitHub windows-latest runners install. #}
+{% set vs_version = os.getenv("YAMS_MSBUILD_VS_VERSION", "17") %}
 [settings]
 os=Windows
 arch=x86_64
