@@ -15,6 +15,7 @@
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_policy.h>
 #include <yams/compression/compression_stats.h>
+#include <yams/crypto/hasher.h>
 #include <yams/storage/compressed_storage_engine.h>
 #include <yams/storage/storage_engine.h>
 
@@ -211,6 +212,15 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine policy rules
     auto updatedRules = engine->getPolicyRules();
     CHECK(updatedRules.neverCompressBelow == 8192);
     CHECK(updatedRules.alwaysCompressAbove == 5 * 1024 * 1024);
+
+    auto data = generateCompressibleData(4096);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+    REQUIRE(engine->store(hash, data).has_value());
+
+    auto raw = underlying->retrieveRaw(hash);
+    REQUIRE(raw.has_value());
+    CHECK_FALSE(raw.value().header.has_value());
+    CHECK(raw.value().data == data);
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine concurrent access",
@@ -314,4 +324,26 @@ TEST_CASE_METHOD(CompressedStorageFixture,
     auto retrieveResult = engine->retrieve(hash);
     REQUIRE(retrieveResult.has_value());
     CHECK(retrieveResult.value() == data);
+}
+
+TEST_CASE_METHOD(CompressedStorageFixture,
+                 "CompressedStorageEngine stores blocks that base StorageEngine can verify",
+                 "[storage][compressed][integrity][catch2]") {
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    auto engine = std::make_unique<CompressedStorageEngine>(underlying, config);
+
+    auto data = generateCompressibleData(8192);
+    auto hasher = yams::crypto::createSHA256Hasher();
+    auto hash = hasher->hash(data);
+
+    auto storeResult = engine->store(hash, data);
+    REQUIRE(storeResult.has_value());
+
+    auto verifyResult = underlying->verify();
+    REQUIRE(verifyResult.has_value());
 }

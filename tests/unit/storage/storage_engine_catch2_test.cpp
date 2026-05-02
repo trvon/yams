@@ -404,3 +404,24 @@ TEST_CASE("StorageEngine rejects path traversal storage keys", "[storage][securi
 
     cleanup();
 }
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine verify detects content hash mismatch",
+                 "[storage][integrity][catch2]") {
+    auto [hash, data] = generateTestData(1024);
+    REQUIRE(storage->store(hash, data).has_value());
+    REQUIRE(storage->verify().has_value());
+
+    auto objectPath = storagePath / "objects" / hash.substr(0, 2) / hash.substr(2);
+    {
+        std::fstream file(objectPath, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(static_cast<bool>(file));
+        file.seekp(0);
+        const char corrupt = static_cast<char>(0xff);
+        file.write(&corrupt, 1);
+        REQUIRE(static_cast<bool>(file));
+    }
+
+    auto verifyResult = storage->verify();
+    REQUIRE_FALSE(verifyResult.has_value());
+    CHECK(verifyResult.error().code == ErrorCode::CorruptedData);
+}

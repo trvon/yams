@@ -88,7 +88,7 @@ public:
         }
 
         const auto compressionFloor =
-            std::max(config_.compressionThreshold, config_.policyRules.neverCompressBelow);
+            std::max(config_.compressionThreshold, policy_.rules().neverCompressBelow);
         if (data.size() < compressionFloor) {
             return underlying_->store(hash, data);
         }

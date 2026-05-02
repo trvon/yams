@@ -314,6 +314,27 @@ endif
 if not tbb_resolved_dep.found()
   tbb_resolved_dep = dependency('onetbb', required: false)
 endif
+if host_machine.system() == 'darwin' and tbb_resolved_dep.found()
+  tbb_normalized = false
+  tbb_cpp = meson.get_compiler('cpp')
+  foreach brew_tbb_prefix : ['/opt/homebrew/opt/tbb', '/usr/local/opt/tbb']
+    if not tbb_normalized
+      brew_tbb_incdir = brew_tbb_prefix / 'include'
+      brew_tbb_libdir = brew_tbb_prefix / 'lib'
+      if fs.exists(brew_tbb_incdir) and fs.exists(brew_tbb_libdir)
+        tbb_link_dep = tbb_cpp.find_library('tbb', dirs: [brew_tbb_libdir], required: false)
+        if tbb_link_dep.found()
+          tbb_resolved_dep = declare_dependency(
+            include_directories: include_directories(brew_tbb_incdir),
+            dependencies: [tbb_link_dep],
+          )
+          tbb_normalized = true
+          message('TBB linkage normalized via Homebrew opt prefix')
+        endif
+      endif
+    endif
+  endforeach
+endif
 
 # --- Windows DLL deployment ---
 # On Windows, DLLs must be in the same directory as the executable or in PATH.
