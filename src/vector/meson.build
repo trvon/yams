@@ -56,7 +56,20 @@ vec_simd_cppargs = []
 # Enable SIMD for sqlite-vec-cpp when supported
 cpp_comp = meson.get_compiler('cpp')
 host_cpu = host_machine.cpu_family()
-if host_cpu == 'x86_64' or host_cpu == 'x86'
+target_is_x86 = cpp_comp.compiles('''
+#if !defined(__i386__) && !defined(__x86_64__) && !defined(_M_IX86) && !defined(_M_X64)
+#error not x86
+#endif
+int main() { return 0; }
+''', name: 'compiler target is x86/x64')
+target_is_arm = cpp_comp.compiles('''
+#if !defined(__arm__) && !defined(__aarch64__) && !defined(_M_ARM) && !defined(_M_ARM64)
+#error not arm
+#endif
+int main() { return 0; }
+''', name: 'compiler target is ARM/ARM64')
+
+if target_is_x86
   if cpp_comp.has_argument('-mavx') and cpp_comp.has_argument('-mfma')
     sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_AVX']
     vec_simd_cppargs += ['-mavx', '-mfma']
@@ -65,7 +78,7 @@ if host_cpu == 'x86_64' or host_cpu == 'x86'
       vec_simd_cppargs += ['-mavx2']
     endif
   endif
-elif host_cpu == 'aarch64' or host_cpu == 'arm'
+elif target_is_arm
   # NEON is baseline on aarch64; on 32-bit arm it may depend on sub-arch
   sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_NEON']
   # DotProd (ARMv8.2+): compile-test vdotq_s32; all Apple Silicon supports this
@@ -164,7 +177,7 @@ simeon_core_srcs = [
 # compiled in.
 simeon_simd_defines = []
 simeon_extra_libs = []
-if host_cpu == 'aarch64' or host_cpu == 'arm'
+if target_is_arm
   simeon_simd_defines += '-DSIMEON_HAS_NEON=1'
   simeon_neon_lib = static_library('yams_simeon_neon',
     [join_paths(simeon_dir, 'src', 'arch', 'neon.cpp')],
@@ -173,7 +186,7 @@ if host_cpu == 'aarch64' or host_cpu == 'arm'
     install: false,
   )
   simeon_extra_libs += simeon_neon_lib
-elif host_cpu == 'x86_64' or host_cpu == 'x86'
+elif target_is_x86
   if cpp_comp.has_argument('-mavx2') and cpp_comp.has_argument('-mfma')
     simeon_simd_defines += '-DSIMEON_HAS_AVX2=1'
     simeon_avx_args = ['-mavx2', '-mfma']
