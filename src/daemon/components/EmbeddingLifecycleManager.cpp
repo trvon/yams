@@ -1,8 +1,10 @@
 #include <yams/daemon/components/EmbeddingLifecycleManager.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
+#include <string_view>
 
 #include <spdlog/spdlog.h>
 
@@ -13,12 +15,25 @@
 
 namespace {
 
+std::optional<int> parseInt(std::string_view raw) {
+    if (raw.empty()) {
+        return std::nullopt;
+    }
+    int value{};
+    const char* begin = raw.data();
+    const char* end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
 int resolveEmbeddingLoadTimeoutMs(int requestedMs) {
     int timeoutMs = requestedMs > 0 ? requestedMs : 30000;
     if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
-        try {
-            timeoutMs = std::stoi(env);
-        } catch (...) {
+        if (auto parsed = parseInt(env)) {
+            timeoutMs = *parsed;
         }
     }
     return std::max(1000, timeoutMs);
@@ -63,10 +78,7 @@ EmbeddingLifecycleManager::ensureModelReadySync(const std::string& requestedMode
 
     std::string model = requestedModel;
     if (model.empty()) {
-        try {
-            model = resolvePreferredModel();
-        } catch (...) {
-        }
+        model = resolvePreferredModel();
     }
     if (model.empty()) {
         model = modelName_;
@@ -77,7 +89,10 @@ EmbeddingLifecycleManager::ensureModelReadySync(const std::string& requestedMode
             if (!loaded.empty()) {
                 model = loaded.front();
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("EmbeddingLifecycleManager: getLoadedModels failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("EmbeddingLifecycleManager: getLoadedModels failed: unknown exception");
         }
     }
     if (model.empty()) {
@@ -148,7 +163,12 @@ EmbeddingLifecycleManager::ensureModelReadySync(const std::string& requestedMode
         reinterpret_cast<void*>(1), [provider](void*) {
             try {
                 provider->setProgressCallback({});
+            } catch (const std::exception& e) {
+                spdlog::debug("EmbeddingLifecycleManager: progress callback reset failed: {}",
+                              e.what());
             } catch (...) {
+                spdlog::debug(
+                    "EmbeddingLifecycleManager: progress callback reset failed: unknown exception");
             }
         });
 

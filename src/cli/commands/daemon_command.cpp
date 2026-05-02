@@ -1419,12 +1419,21 @@ private:
 #endif
         }
 
-        // Final verification: check if daemon is actually still running
-        // This catches cases where the daemon stopped between our attempts
+        // Final verification: poll for daemon exit since slow shutdown
+        // (WAL flush, vector index commit, maintenance tasks) can outlast the
+        // intermediate timeouts above. Replaces a one-shot check that raced
+        // shutdown completion when the daemon needed >~18s to fully exit.
 #ifndef _WIN32
-        if (!stopped && !isDaemonProcessRunningForSocket(effectiveSocket)) {
-            spdlog::debug("Daemon not running after stop attempts - treating as success");
-            stopped = true;
+        if (!stopped) {
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (!isDaemonProcessRunningForSocket(effectiveSocket) && !pidAlive()) {
+                    spdlog::debug("Daemon exited during extended grace; treating as success");
+                    stopped = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
         }
 #endif
 

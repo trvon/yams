@@ -509,13 +509,18 @@ endif
 
 # Boost is a core requirement (e.g., Boost.Asio for daemon communication).
 # Resolution order:
-#   1. $BOOST_ROOT (exported by setup.sh / setup.ps1 from conan_meson_native.ini's
-#      cmake_prefix_path) — primary path on Windows where there is no system Boost.
-#   2. system Boost (apt libboost-all-dev / brew install boost) — Linux/macOS fallback.
-# Auto-detect handles both; do not specify method:'cmake' (Conan 2.18 reorganized
-# BoostConfig.cmake layout and meson silently falls back to 'system' on Windows,
-# which has no system Boost installed).
-boost_dep = dependency('boost', modules: ['system', 'thread'], required: true)
+#   1. CMake config files via Conan's CMakeDeps generator (BoostConfig.cmake under
+#      the generators dir on cmake_prefix_path written by MesonToolchain). Required
+#      path on Windows since there is no system Boost and the boost.pc shipped by
+#      Conan 2.x PkgConfigDeps uses ${pcfiledir}/.. which PowerShell can't expand
+#      to a real BOOST_ROOT.
+#   2. System Boost (apt libboost-all-dev / brew install boost) — Linux/macOS
+#      fallback if the cmake method doesn't find a config.
+boost_dep = dependency('boost', method: 'cmake', modules: ['system', 'thread'],
+                       required: false)
+if not boost_dep.found()
+  boost_dep = dependency('boost', modules: ['system', 'thread'], required: true)
+endif
 meson.override_dependency('boost', boost_dep)
 
 # --- RE2 regex engine (optional, for high-performance grep) ---

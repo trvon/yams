@@ -13,9 +13,12 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
+#include <string_view>
 #include <thread>
 
 #ifdef _WIN32
@@ -28,6 +31,49 @@
 #endif
 
 namespace yams::daemon {
+
+namespace {
+
+template <typename T> std::optional<T> parseUnsigned(std::string_view raw) {
+    if (raw.empty() || raw.front() == '-') {
+        return std::nullopt;
+    }
+    T value{};
+    const char* begin = raw.data();
+    const char* end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::optional<int> parseInt(std::string_view raw) {
+    if (raw.empty()) {
+        return std::nullopt;
+    }
+    int value{};
+    const char* begin = raw.data();
+    const char* end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+void markVectorInitAttempted(StateComponent* state, bool attempted) noexcept {
+    if (!state) {
+        return;
+    }
+    try {
+        state->readiness.vectorDbInitAttempted = attempted;
+    } catch (...) {
+        // State publication is best-effort during initialization/shutdown races.
+    }
+}
+
+} // namespace
 
 VectorSystemManager::VectorSystemManager(Dependencies deps) : deps_(std::move(deps)) {}
 
@@ -60,12 +106,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     // In-process guard (first-wins)
     if (initAttempted_.exchange(true, std::memory_order_acq_rel)) {
         spdlog::debug("[VectorInit] skipped (already attempted in this process)");
-        if (deps_.state) {
-            try {
-                deps_.state->readiness.vectorDbInitAttempted = true;
-            } catch (...) {
-            }
-        }
+        markVectorInitAttempted(deps_.state, true);
         return Result<bool>(false);
     }
 
@@ -151,18 +192,20 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
                 auto it = kv.find("embeddings.embedding_dim");
                 if (it != kv.end() && !it->second.empty()) {
-                    dim = static_cast<size_t>(std::stoul(it->second));
-                    spdlog::info("[VectorInit] probe: config dim={}", *dim);
+                    if (auto parsed = parseUnsigned<size_t>(it->second)) {
+                        dim = *parsed;
+                        spdlog::info("[VectorInit] probe: config dim={}", *dim);
+                    }
                 }
             } catch (...) {
+                // Config dimension is a fallback probe only; keep trying other sources.
             }
         }
 
         if (!dim) {
             if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
-                try {
-                    dim = static_cast<size_t>(std::stoul(envd));
-                } catch (...) {
+                if (auto parsed = parseUnsigned<size_t>(envd)) {
+                    dim = *parsed;
                 }
             }
         }
@@ -239,12 +282,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 
     if (!dim) {
         spdlog::info("[VectorInit] deferring initialization (provider dim unresolved)");
-        if (deps_.state) {
-            try {
-                deps_.state->readiness.vectorDbInitAttempted = false;
-            } catch (...) {
-            }
-        }
+        markVectorInitAttempted(deps_.state, false);
         initAttempted_.store(false, std::memory_order_release);
         return Result<bool>(false);
     }
@@ -279,19 +317,17 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                      cfg.quantized_primary_storage);
     }
     if (const char* env = std::getenv("YAMS_VECTOR_TURBOQUANT_BITS")) {
-        try {
-            cfg.turboquant_bits = static_cast<uint8_t>(std::clamp(std::stoi(env), 1, 8));
+        if (auto bits = parseInt(env)) {
+            cfg.turboquant_bits = static_cast<uint8_t>(std::clamp(*bits, 1, 8));
             spdlog::info("[VectorInit] turboquant bits overridden to {} via env",
                          static_cast<int>(cfg.turboquant_bits));
-        } catch (...) {
         }
     }
     if (const char* env = std::getenv("YAMS_VECTOR_TURBOQUANT_SEED")) {
-        try {
-            cfg.turboquant_seed = static_cast<uint64_t>(std::stoull(env));
+        if (auto seed = parseUnsigned<uint64_t>(env)) {
+            cfg.turboquant_seed = *seed;
             spdlog::info("[VectorInit] turboquant seed overridden to {} via env",
                          cfg.turboquant_seed);
-        } catch (...) {
         }
     }
 
@@ -321,15 +357,14 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
             }
             if (auto it = kv.find("vector_database.vec0_phss_candidates");
                 it != kv.end() && !it->second.empty()) {
-                try {
-                    cfg.vec0_phss_candidates =
-                        static_cast<size_t>(std::max(1, std::stoi(it->second)));
+                if (auto candidates = parseInt(it->second)) {
+                    cfg.vec0_phss_candidates = static_cast<size_t>(std::max(1, *candidates));
                     spdlog::info("[VectorInit] vec0 PHSS candidates configured as {} from {}",
                                  cfg.vec0_phss_candidates, cfgPath.string());
-                } catch (...) {
                 }
             }
         } catch (...) {
+            // Optional vector config overrides are best-effort; defaults remain valid.
         }
     }
 
@@ -353,11 +388,10 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                      cfg.vec0_phss_enabled ? "enabled" : "disabled");
     }
     if (const char* env = std::getenv("YAMS_VECTOR_VEC0_PHSS_CANDIDATES")) {
-        try {
-            cfg.vec0_phss_candidates = static_cast<size_t>(std::max(1, std::stoi(env)));
+        if (auto candidates = parseInt(env)) {
+            cfg.vec0_phss_candidates = static_cast<size_t>(std::max(1, *candidates));
             spdlog::info("[VectorInit] vec0 PHSS candidates overridden to {} via env",
                          cfg.vec0_phss_candidates);
-        } catch (...) {
         }
     }
 
