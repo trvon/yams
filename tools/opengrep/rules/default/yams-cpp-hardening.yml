@@ -1,0 +1,58 @@
+rules:
+  - id: yams.cpp.suspicious-add-sizeof
+    languages: [cpp]
+    severity: INFO
+    message: >-
+      Pointer arithmetic with sizeof(). This is correct only when the pointer element type is
+      byte-sized or when the expression is size arithmetic. Prefer hasBytes(), std::next(), or an
+      explicitly byte-oriented helper for serialization/deserialization code.
+    metadata:
+      category: correctness
+      cwe: "CWE-682"
+      confidence: low
+      precision: low
+      source: codeql cpp/suspicious-add-sizeof parity
+      yams_triage: audit
+    pattern-either:
+      - pattern: $PTR + sizeof($TYPE)
+      - pattern: sizeof($TYPE) + $PTR
+    paths:
+      include:
+        - /src/**/*.cpp
+        - /src/**/*.h
+        - /include/**/*.h
+        - /tools/opengrep/tests/**/*.cpp
+        - tools/opengrep/tests/**/*.cpp
+        - /tests/**/*.cpp
+      exclude:
+        - /third_party/**
+        - /external/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.cpp.size-to-u32-cast
+    languages: [cpp]
+    severity: INFO
+    message: >-
+      size_t/string size cast to uint32_t. Verify the value is bounded before serialization so large
+      inputs cannot truncate length fields.
+    metadata:
+      category: correctness
+      cwe: "CWE-190"
+      confidence: low
+      precision: low
+      yams_triage: serialization-boundary
+    pattern: static_cast<uint32_t>($X.size())
+    paths:
+      include:
+        - /src/**/*.cpp
+        - /include/**/*.h
+        - /tools/opengrep/tests/**/*.cpp
+        - tools/opengrep/tests/**/*.cpp
+      exclude:
+        - /tests/**
+        - /third_party/**
+        - /external/**
+        - /build/**
+        - /build*/**
+

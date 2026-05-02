@@ -3,7 +3,9 @@
 #include <cstring>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <sstream>
+#include <stdexcept>
 
 // CRC32 implementation (simplified - in production use a library)
 namespace {
@@ -20,6 +22,14 @@ uint32_t crc32(const void* data, size_t length) {
     }
 
     return ~crc;
+}
+
+uint32_t checkedMetadataPartSize(size_t size, const char* field) {
+    if (size > std::numeric_limits<uint32_t>::max()) {
+        throw std::length_error(std::string("WAL metadata ") + field +
+                                " exceeds uint32 size limit");
+    }
+    return static_cast<uint32_t>(size);
 }
 
 } // anonymous namespace
@@ -202,8 +212,8 @@ std::vector<std::byte> WALEntry::UpdateMetadataData::encode(const std::string& h
     std::memset(data->hash, 0, HASH_SIZE);
     std::memcpy(data->hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
 
-    data->keySize = static_cast<uint32_t>(key.size());
-    data->valueSize = static_cast<uint32_t>(value.size());
+    data->keySize = checkedMetadataPartSize(key.size(), "key");
+    data->valueSize = checkedMetadataPartSize(value.size(), "value");
 
     // Copy key and value
     auto* keyPtr =

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Opportunistic local OpenGrep gate. The hook is intentionally dependency-light:
+# - skips cleanly when opengrep is not installed;
+# - skips cleanly when local rules/scripts are absent;
+# - scans only staged source files by default to avoid blocking on legacy backlog;
+# - blocks only when YAMS_OPENGREP_STRICT=1 is set.
+if ! command -v opengrep >/dev/null 2>&1; then
+  echo "[opengrep] opengrep not installed; skipping local static-analysis hook" >&2
+  exit 0
+fi
+
+if [[ ! -x scripts/dev/run_opengrep.sh || ! -d tools/opengrep/rules/default ]]; then
+  echo "[opengrep] local OpenGrep wrapper/rules not found; skipping" >&2
+  exit 0
+fi
+
+staged=()
+while IFS= read -r path; do
+  [[ -n "$path" && -f "$path" ]] && staged+=("$path")
+done < <(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|cc|cpp|cxx|h|hh|hpp)$' || true)
+
+rules_changed=0
+if git diff --cached --name-only --diff-filter=ACM | grep -qE '^(tools/opengrep/rules/|scripts/dev/run_opengrep\.sh|\.opengrepignore)'; then
+  rules_changed=1
+fi
+
+if [[ $rules_changed -eq 1 ]]; then
+  echo "[opengrep] validating local rule profiles"
+  opengrep scan --validate --config tools/opengrep/rules/default
+  opengrep scan --validate --config tools/opengrep/rules/audit
+fi
+
+if [[ ${#staged[@]} -eq 0 ]]; then
+  echo "[opengrep] no staged C/C++ files; skipping scan"
+  exit 0
+fi
+
+echo "[opengrep] scanning ${#staged[@]} staged C/C++ file(s) with local default profile"
+if [[ "${YAMS_OPENGREP_STRICT:-0}" == "1" ]]; then
+  OPENGREP_BIN=opengrep OPENGREP_STRICT=1 OPENGREP_PROFILE=default \
+    OPENGREP_OUT_DIR=.artifacts/opengrep/pre-commit \
+    scripts/dev/run_opengrep.sh "${staged[@]}"
+else
+  if ! OPENGREP_BIN=opengrep OPENGREP_PROFILE=default \
+      OPENGREP_OUT_DIR=.artifacts/opengrep/pre-commit \
+      scripts/dev/run_opengrep.sh "${staged[@]}"; then
+    echo "[opengrep] scan failed; continuing because YAMS_OPENGREP_STRICT is not set" >&2
+  fi
+fi

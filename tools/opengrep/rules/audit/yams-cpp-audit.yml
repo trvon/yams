@@ -1,0 +1,61 @@
+rules:
+  - id: yams.cpp.raw-yams-getenv
+    languages: [cpp]
+    severity: WARNING
+    message: >-
+      Direct YAMS_* environment lookup outside tests. Repo policy prefers typed config/resolvers for
+      tuning surfaces; keep env overlays test-only or document why runtime env is required.
+    metadata:
+      category: maintainability
+      confidence: medium
+      precision: medium
+      yams_triage: config-surface
+    patterns:
+      - pattern-either:
+          - pattern: std::getenv($NAME)
+          - pattern: getenv($NAME)
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: '"YAMS_.*"'
+    paths:
+      include:
+        - /src/**/*.cpp
+        - /src/**/*.h
+        - /include/**/*.h
+        - /tools/opengrep/tests/**/*.cpp
+        - tools/opengrep/tests/**/*.cpp
+      exclude:
+        - /tests/**
+        - /third_party/**
+        - /external/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.cpp.vector-data-reinterpret-struct
+    languages: [cpp]
+    severity: INFO
+    message: >-
+      reinterpret_cast over vector/span data. In binary codecs, prefer memcpy/readPod/writePod helpers
+      and explicit bounds checks to avoid alignment, aliasing, and truncation hazards.
+    metadata:
+      category: correctness
+      cwe: "CWE-704"
+      confidence: low
+      precision: low
+      yams_triage: binary-codec
+    pattern-either:
+      - pattern: reinterpret_cast<$T*>($V.data())
+      - pattern: reinterpret_cast<const $T*>($V.data())
+    paths:
+      include:
+        - /src/**/*.cpp
+        - /include/**/*.h
+        - /tools/opengrep/tests/**/*.cpp
+        - tools/opengrep/tests/**/*.cpp
+      exclude:
+        - /tests/**
+        - /third_party/**
+        - /external/**
+        - /build/**
+        - /build*/**
+

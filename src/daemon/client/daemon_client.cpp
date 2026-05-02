@@ -2014,7 +2014,7 @@ DaemonClient::streamingBatchEmbeddings(const BatchEmbeddingRequest& req) {
                     value->embeddings.reserve(value->embeddings.size() + fin->embeddings.size());
                     for (auto& v : fin->embeddings)
                         value->embeddings.push_back(std::move(v));
-                    value->successCount += static_cast<uint32_t>(fin->embeddings.size());
+                    value->successCount += fin->embeddings.size();
                     return true;
                 }
                 // Last chunk – may be summary only; ensure value is set

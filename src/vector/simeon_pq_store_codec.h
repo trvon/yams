@@ -16,7 +16,7 @@ template <typename T> inline void appendSimeonPod(std::vector<std::uint8_t>& blo
 
 template <typename T>
 inline bool readSimeonPod(const std::vector<std::uint8_t>& blob, std::size_t& offset, T& value) {
-    if (offset + sizeof(T) > blob.size()) {
+    if (offset > blob.size() || blob.size() - offset < sizeof(T)) {
         return false;
     }
     std::memcpy(&value, blob.data() + offset, sizeof(T));

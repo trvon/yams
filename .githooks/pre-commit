@@ -12,6 +12,12 @@ files=()
 while IFS= read -r line; do
   [[ -n "$line" ]] && files+=("$line")
 done < <(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|cc|cpp|cxx|h|hh|hpp)$' || true)
+
+# Opportunistic local OpenGrep scan for staged C/C++ files and rule changes.
+if [[ -x "$REPO_ROOT/.githooks/opengrep-pre-commit" ]]; then
+  "$REPO_ROOT/.githooks/opengrep-pre-commit"
+fi
+
 if [[ ${#files[@]} -eq 0 ]]; then
   exit 0
 fi

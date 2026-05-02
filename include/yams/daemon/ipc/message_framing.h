@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -140,10 +141,14 @@ public:
                                                      bool header_only = false) {
         // Serialize message
         auto payload = message.serialize();
+        const auto payloadSize = payload.size();
+        if (payloadSize > std::numeric_limits<uint32_t>::max()) {
+            return Error{ErrorCode::InvalidData, "Frame payload exceeds uint32 size limit"};
+        }
 
         // Create header
         FrameHeader header;
-        header.payload_size = static_cast<uint32_t>(payload.size());
+        header.payload_size = static_cast<uint32_t>(payloadSize);
         header.checksum = calculate_crc32(payload);
         header.set_chunked(chunked);
         header.set_last_chunk(last_chunk);
