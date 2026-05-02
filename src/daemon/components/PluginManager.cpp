@@ -227,7 +227,10 @@ void PluginManager::shutdown() {
         for (const auto& d : getActivePluginHost()->listLoaded()) {
             try {
                 getActivePluginHost()->unload(d.name);
+            } catch (const std::exception& e) {
+                spdlog::debug("[PluginManager] unload failed for '{}': {}", d.name, e.what());
             } catch (...) {
+                spdlog::debug("[PluginManager] unload failed for '{}': unknown exception", d.name);
             }
         }
     }
@@ -691,6 +694,7 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                     if (stem == name)
                         return d.path.string();
                 } catch (...) {
+                    // Path stem fallback is best-effort; continue scanning descriptors.
                 }
             }
             return {};
@@ -852,6 +856,7 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                         return true;
                     }
                 } catch (...) {
+                    // Alternate path-stem adoption is best-effort.
                 }
             }
             spdlog::warn("[PluginManager] ONNX Runtime embeddings requested, but no usable ONNX "
@@ -891,6 +896,7 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                         return Result<bool>(true);
                 }
             } catch (...) {
+                // Alternate path-stem adoption is best-effort.
             }
         }
 
@@ -1184,11 +1190,13 @@ void PluginManager::refreshStatusSnapshot() {
     try {
         snap.hostState = pluginHostFsm_.snapshot();
     } catch (...) {
+        // Status snapshots are best-effort; retain default host state.
     }
 
     try {
         snap.providerState = embeddingFsm_.snapshot();
     } catch (...) {
+        // Status snapshots are best-effort; retain default provider state.
     }
 
     // Helper lambda to add plugin records

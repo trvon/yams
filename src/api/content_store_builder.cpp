@@ -7,10 +7,12 @@
 #include <yams/storage/compressed_storage_engine.h>
 
 #include <spdlog/spdlog.h>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -25,6 +27,21 @@ std::unique_ptr<IContentStore> createContentStore(
 }
 
 namespace yams::api {
+
+namespace {
+
+template <typename T> std::optional<T> parseIntegralConfig(const std::string& raw) {
+    T value{};
+    auto begin = raw.data();
+    auto end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+} // namespace
 
 // Builder implementation
 struct ContentStoreBuilder::Impl {
@@ -168,73 +185,60 @@ struct ContentStoreBuilder::Impl {
         auto configMap = parseSimpleToml(configPath);
 
         // Load compression levels
-        if (configMap.find("compression.zstd_level") != configMap.end()) {
-            try {
-                rules.defaultZstdLevel = std::stoi(configMap["compression.zstd_level"]);
-                rules.archiveZstdLevel = rules.defaultZstdLevel + 3; // Higher for archives
-                if (rules.archiveZstdLevel > 22)
-                    rules.archiveZstdLevel = 22;
-            } catch (...) {
+        if (auto it = configMap.find("compression.zstd_level"); it != configMap.end()) {
+            if (auto level = parseIntegralConfig<int>(it->second)) {
+                rules.defaultZstdLevel = *level;
+                rules.archiveZstdLevel =
+                    std::min(22, rules.defaultZstdLevel + 3); // Higher for archives
             }
         }
 
-        if (configMap.find("compression.lzma_level") != configMap.end()) {
-            try {
-                rules.defaultLzmaLevel = std::stoi(configMap["compression.lzma_level"]);
-            } catch (...) {
+        if (auto it = configMap.find("compression.lzma_level"); it != configMap.end()) {
+            if (auto level = parseIntegralConfig<int>(it->second)) {
+                rules.defaultLzmaLevel = *level;
             }
         }
 
         // Load size thresholds
-        if (configMap.find("compression.chunk_threshold") != configMap.end()) {
-            try {
-                rules.neverCompressBelow = std::stoull(configMap["compression.chunk_threshold"]);
+        if (auto it = configMap.find("compression.chunk_threshold"); it != configMap.end()) {
+            if (auto threshold = parseIntegralConfig<std::uint64_t>(it->second)) {
+                rules.neverCompressBelow = *threshold;
                 hasNeverCompressBelow = true;
-            } catch (...) {
             }
         }
 
-        if (configMap.find("compression.always_compress_above") != configMap.end()) {
-            try {
-                rules.alwaysCompressAbove =
-                    std::stoull(configMap["compression.always_compress_above"]);
+        if (auto it = configMap.find("compression.always_compress_above"); it != configMap.end()) {
+            if (auto threshold = parseIntegralConfig<std::uint64_t>(it->second)) {
+                rules.alwaysCompressAbove = *threshold;
                 hasAlwaysCompressAbove = true;
-            } catch (...) {
             }
         }
 
-        if (configMap.find("compression.never_compress_below") != configMap.end()) {
-            try {
-                rules.neverCompressBelow =
-                    std::stoull(configMap["compression.never_compress_below"]);
+        if (auto it = configMap.find("compression.never_compress_below"); it != configMap.end()) {
+            if (auto threshold = parseIntegralConfig<std::uint64_t>(it->second)) {
+                rules.neverCompressBelow = *threshold;
                 hasNeverCompressBelow = true;
-            } catch (...) {
             }
         }
 
         // Load age-based policies
-        if (configMap.find("compression.compress_after_days") != configMap.end()) {
-            try {
-                int days = std::stoi(configMap["compression.compress_after_days"]);
-                rules.compressAfterAge = std::chrono::hours(24 * days);
-            } catch (...) {
+        if (auto it = configMap.find("compression.compress_after_days"); it != configMap.end()) {
+            if (auto days = parseIntegralConfig<int>(it->second)) {
+                rules.compressAfterAge = std::chrono::hours(24 * *days);
             }
         }
 
-        if (configMap.find("compression.archive_after_days") != configMap.end()) {
-            try {
-                int days = std::stoi(configMap["compression.archive_after_days"]);
-                rules.archiveAfterAge = std::chrono::hours(24 * days);
-            } catch (...) {
+        if (auto it = configMap.find("compression.archive_after_days"); it != configMap.end()) {
+            if (auto days = parseIntegralConfig<int>(it->second)) {
+                rules.archiveAfterAge = std::chrono::hours(24 * *days);
             }
         }
 
         // Load performance settings
-        if (configMap.find("compression.max_concurrent_compressions") != configMap.end()) {
-            try {
-                rules.maxConcurrentCompressions =
-                    std::stoull(configMap["compression.max_concurrent_compressions"]);
-            } catch (...) {
+        if (auto it = configMap.find("compression.max_concurrent_compressions");
+            it != configMap.end()) {
+            if (auto maxConcurrent = parseIntegralConfig<std::uint64_t>(it->second)) {
+                rules.maxConcurrentCompressions = *maxConcurrent;
             }
         }
 

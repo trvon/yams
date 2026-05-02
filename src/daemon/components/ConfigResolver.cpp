@@ -10,6 +10,8 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
 #include <cctype>
 #include <cstdlib>
 #include <ctime>
@@ -21,26 +23,56 @@ namespace yams::daemon {
 
 namespace {
 
-std::optional<std::size_t> parseSize(const std::string& raw) {
-    try {
-        if (raw.empty()) {
-            return std::nullopt;
-        }
-        return static_cast<std::size_t>(std::stoull(raw));
-    } catch (...) {
-        return std::nullopt;
+std::string_view trimView(std::string_view raw) {
+    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front())) != 0) {
+        raw.remove_prefix(1);
     }
+    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back())) != 0) {
+        raw.remove_suffix(1);
+    }
+    return raw;
 }
 
-std::optional<bool> parseBool01(const std::string& raw) {
-    try {
-        if (raw.empty()) {
-            return std::nullopt;
-        }
-        return std::stoll(raw) != 0;
-    } catch (...) {
+template <typename T> std::optional<T> parseUnsignedIntegral(std::string_view raw) {
+    raw = trimView(raw);
+    if (raw.empty() || raw.front() == '-') {
         return std::nullopt;
     }
+    T value{};
+    const char* begin = raw.data();
+    const char* end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+template <typename T> std::optional<T> parseSignedIntegral(std::string_view raw) {
+    raw = trimView(raw);
+    if (raw.empty()) {
+        return std::nullopt;
+    }
+    T value{};
+    const char* begin = raw.data();
+    const char* end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::optional<std::size_t> parseSize(std::string_view raw) {
+    return parseUnsignedIntegral<std::size_t>(raw);
+}
+
+std::optional<bool> parseBool01(std::string_view raw) {
+    auto parsed = parseSignedIntegral<long long>(raw);
+    if (!parsed) {
+        return std::nullopt;
+    }
+    return *parsed != 0;
 }
 
 std::optional<bool> parseBoolValue(std::string raw) {
@@ -59,14 +91,18 @@ std::optional<bool> parseBoolValue(std::string raw) {
 }
 
 std::optional<double> parseDouble(const std::string& raw) {
-    try {
-        if (raw.empty()) {
-            return std::nullopt;
-        }
-        return std::stod(raw);
-    } catch (...) {
+    auto view = trimView(raw);
+    if (view.empty()) {
         return std::nullopt;
     }
+    std::string value{view};
+    char* end = nullptr;
+    errno = 0;
+    double parsed = std::strtod(value.c_str(), &end);
+    if (errno != 0 || end == value.c_str() || *end != '\0') {
+        return std::nullopt;
+    }
+    return parsed;
 }
 
 std::optional<yams::vector::ChunkingStrategy> parseChunkingStrategy(const std::string& raw) {
@@ -768,24 +804,12 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
                 policy.engine = it->second;
             }
         }
-        if (auto it = kv.find("topology.hdbscan_min_points"); it != kv.end()) {
-            try {
-                policy.hdbscanMinPoints = static_cast<std::size_t>(std::stoul(it->second));
-            } catch (const std::exception&) {
-            }
-        }
-        if (auto it = kv.find("topology.hdbscan_min_cluster_size"); it != kv.end()) {
-            try {
-                policy.hdbscanMinClusterSize = static_cast<std::size_t>(std::stoul(it->second));
-            } catch (const std::exception&) {
-            }
-        }
-        if (auto it = kv.find("topology.feature_smoothing_hops"); it != kv.end()) {
-            try {
-                policy.featureSmoothingHops = static_cast<std::size_t>(std::stoul(it->second));
-            } catch (const std::exception&) {
-            }
-        }
+        if (auto it = kv.find("topology.hdbscan_min_points"); it != kv.end())
+            policy.hdbscanMinPoints = parseSize(it->second);
+        if (auto it = kv.find("topology.hdbscan_min_cluster_size"); it != kv.end())
+            policy.hdbscanMinClusterSize = parseSize(it->second);
+        if (auto it = kv.find("topology.feature_smoothing_hops"); it != kv.end())
+            policy.featureSmoothingHops = parseSize(it->second);
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology engine policy: {}", e.what());
     }
@@ -805,29 +829,13 @@ ConfigResolver::TopologyTunerPolicy ConfigResolver::resolveTopologyTunerPolicy()
 
         auto kv = parseSimpleTomlFlat(cfgPath);
 
-        auto parseDouble = [](const std::string& v) -> std::optional<double> {
-            try {
-                return std::stod(v);
-            } catch (const std::exception&) {
-                return std::nullopt;
-            }
-        };
-
         if (auto it = kv.find("topology.tuner.enabled"); it != kv.end()) {
             policy.enabled = ConfigResolver::envTruthy(it->second.c_str());
         }
-        if (auto it = kv.find("topology.tuner.cooldown_minutes"); it != kv.end()) {
-            try {
-                policy.cooldownMinutes = static_cast<std::uint32_t>(std::stoul(it->second));
-            } catch (const std::exception&) {
-            }
-        }
-        if (auto it = kv.find("topology.tuner.doc_count_delta"); it != kv.end()) {
-            try {
-                policy.docCountDelta = static_cast<std::size_t>(std::stoul(it->second));
-            } catch (const std::exception&) {
-            }
-        }
+        if (auto it = kv.find("topology.tuner.cooldown_minutes"); it != kv.end())
+            policy.cooldownMinutes = parseUnsignedIntegral<std::uint32_t>(it->second);
+        if (auto it = kv.find("topology.tuner.doc_count_delta"); it != kv.end())
+            policy.docCountDelta = parseSize(it->second);
         if (auto it = kv.find("topology.tuner.reward.alpha_singleton"); it != kv.end()) {
             policy.rewardAlphaSingleton = parseDouble(it->second);
         }
@@ -845,12 +853,8 @@ ConfigResolver::TopologyTunerPolicy ConfigResolver::resolveTopologyTunerPolicy()
                 policy.rewardMode = it->second;
             }
         }
-        if (auto it = kv.find("topology.tuner.persistence_sample_size"); it != kv.end()) {
-            try {
-                policy.persistenceSampleSize = static_cast<std::size_t>(std::stoul(it->second));
-            } catch (const std::exception&) {
-            }
-        }
+        if (auto it = kv.find("topology.tuner.persistence_sample_size"); it != kv.end())
+            policy.persistenceSampleSize = parseSize(it->second);
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology tuner policy: {}", e.what());
     }
@@ -871,46 +875,34 @@ std::optional<std::uint32_t> readEnvU32(const char* name) {
     const char* raw = std::getenv(name);
     if (!raw || !*raw)
         return std::nullopt;
-    try {
-        return static_cast<std::uint32_t>(std::stoul(raw));
-    } catch (const std::exception&) {
-        return std::nullopt;
-    }
+    return parseUnsignedIntegral<std::uint32_t>(raw);
 }
 
 std::optional<float> readEnvFloat(const char* name) {
     const char* raw = std::getenv(name);
     if (!raw || !*raw)
         return std::nullopt;
-    try {
-        return std::stof(raw);
-    } catch (const std::exception&) {
+    auto parsed = parseDouble(raw);
+    if (!parsed) {
         return std::nullopt;
     }
+    return static_cast<float>(*parsed);
 }
 
 std::optional<std::uint32_t> parseTomlU32(const std::string& s) {
-    try {
-        return static_cast<std::uint32_t>(std::stoul(s));
-    } catch (const std::exception&) {
-        return std::nullopt;
-    }
+    return parseUnsignedIntegral<std::uint32_t>(s);
 }
 
 std::optional<std::size_t> parseTomlSize(const std::string& s) {
-    try {
-        return static_cast<std::size_t>(std::stoul(s));
-    } catch (const std::exception&) {
-        return std::nullopt;
-    }
+    return parseSize(s);
 }
 
 std::optional<float> parseTomlFloat(const std::string& s) {
-    try {
-        return std::stof(s);
-    } catch (const std::exception&) {
+    auto parsed = parseDouble(s);
+    if (!parsed) {
         return std::nullopt;
     }
+    return static_cast<float>(*parsed);
 }
 
 std::optional<bool> parseTomlBool(const std::string& s) {
@@ -1032,58 +1024,26 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
         policy.variant = std::move(v);
     if (auto v = readEnvFloat("YAMS_SIMEON_BM25_SUBWORD_GAMMA"))
         policy.subwordGamma = v;
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_MAX_CORPUS_DOCS")) {
-        try {
-            policy.maxCorpusDocs = static_cast<std::size_t>(std::stoul(raw));
-        } catch (const std::exception&) {
-        }
-    }
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_MAX_CORPUS_BYTES")) {
-        try {
-            policy.maxCorpusBytes = static_cast<std::size_t>(std::stoull(raw));
-        } catch (const std::exception&) {
-        }
-    }
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_BUILD_DOC_CHUNK_BYTES")) {
-        try {
-            policy.buildDocChunkBytes = static_cast<std::size_t>(std::stoull(raw));
-        } catch (const std::exception&) {
-        }
-    }
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_BUILD_DOC_MAX_CHUNKS")) {
-        try {
-            policy.buildDocMaxChunks = static_cast<std::size_t>(std::stoull(raw));
-        } catch (const std::exception&) {
-        }
-    }
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"))
+        policy.maxCorpusDocs = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_MAX_CORPUS_BYTES"))
+        policy.maxCorpusBytes = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_BUILD_DOC_CHUNK_BYTES"))
+        policy.buildDocChunkBytes = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_BUILD_DOC_MAX_CHUNKS"))
+        policy.buildDocMaxChunks = parseSize(*v);
     if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_ENABLED")) {
         if (auto b = parseTomlBool(std::string(raw)))
             policy.fragmentGeometryEnabled = b;
     }
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_DOCS")) {
-        try {
-            policy.fragmentGeometryMaxDocs = static_cast<std::size_t>(std::stoull(raw));
-        } catch (const std::exception&) {
-        }
-    }
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_CORPUS_BYTES")) {
-        try {
-            policy.fragmentGeometryMaxCorpusBytes = static_cast<std::size_t>(std::stoull(raw));
-        } catch (const std::exception&) {
-        }
-    }
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_DOCS")) {
-        try {
-            policy.fragmentGeometryPmiSampleDocs = static_cast<std::size_t>(std::stoull(raw));
-        } catch (const std::exception&) {
-        }
-    }
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_BYTES")) {
-        try {
-            policy.fragmentGeometryPmiSampleBytes = static_cast<std::size_t>(std::stoull(raw));
-        } catch (const std::exception&) {
-        }
-    }
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_DOCS"))
+        policy.fragmentGeometryMaxDocs = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_CORPUS_BYTES"))
+        policy.fragmentGeometryMaxCorpusBytes = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_DOCS"))
+        policy.fragmentGeometryPmiSampleDocs = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_BYTES"))
+        policy.fragmentGeometryPmiSampleBytes = parseSize(*v);
     if (const char* raw = std::getenv("YAMS_SIMEON_BM25_ROUTER_ENABLED")) {
         if (auto b = parseTomlBool(std::string(raw)))
             policy.routerEnabled = b;
@@ -1323,12 +1283,10 @@ bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
 }
 
 int ConfigResolver::readTimeoutMs(const char* envName, int defaultMs, int minMs) {
-    try {
-        if (const char* v = std::getenv(envName)) {
-            int val = std::stoi(v);
-            return std::max(minMs, val);
+    if (const char* v = std::getenv(envName)) {
+        if (auto val = parseSignedIntegral<int>(v)) {
+            return std::max(minMs, *val);
         }
-    } catch (...) {
     }
     return defaultMs;
 }

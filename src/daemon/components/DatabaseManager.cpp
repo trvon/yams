@@ -25,6 +25,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -36,11 +37,23 @@ namespace yams::daemon {
 
 namespace {
 
+std::optional<size_t> parseSizeEnv(const char* raw) {
+    if (!raw || !*raw || *raw == '-') {
+        return std::nullopt;
+    }
+    size_t value{};
+    const char* end = raw + std::char_traits<char>::length(raw);
+    auto [ptr, ec] = std::from_chars(raw, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
 size_t readPoolPrewarmTarget(size_t defaultTarget) {
     if (const char* env = std::getenv("YAMS_DB_READ_POOL_PREWARM"); env && *env) {
-        try {
-            return static_cast<size_t>(std::stoul(env));
-        } catch (...) {
+        if (auto parsed = parseSizeEnv(env)) {
+            return *parsed;
         }
     }
     return defaultTarget;
@@ -81,6 +94,7 @@ void prewarmReadPool(const std::shared_ptr<metadata::ConnectionPool>& readPool,
             }
             ++warmed;
         } catch (...) {
+            // Prewarm probes are best-effort; the pool remains usable if a probe fails.
         }
     }
 
@@ -130,6 +144,8 @@ void DatabaseManager::shutdown() {
         } catch (const std::exception& e) {
             spdlog::debug("[DatabaseManager] ReadConnectionPool shutdown failed: {}", e.what());
         } catch (...) {
+            spdlog::debug(
+                "[DatabaseManager] ReadConnectionPool shutdown failed: unknown exception");
         }
     }
     if (writePool) {
@@ -145,7 +161,10 @@ void DatabaseManager::shutdown() {
     if (database_) {
         try {
             database_->close();
+        } catch (const std::exception& e) {
+            spdlog::debug("[DatabaseManager] database close failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("[DatabaseManager] database close failed: unknown exception");
         }
         database_.reset();
     }
@@ -223,19 +242,13 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     size_t readPoolMin = std::min<size_t>(std::max<size_t>(2, readRecommended), 8);
     size_t readPoolMax = 64;
     if (const char* envMax = std::getenv("YAMS_DB_POOL_MAX"); envMax && *envMax) {
-        try {
-            auto v = static_cast<size_t>(std::stoul(envMax));
-            if (v >= readPoolMin)
-                readPoolMax = v;
-        } catch (...) {
+        if (auto v = parseSizeEnv(envMax); v && *v >= readPoolMin) {
+            readPoolMax = *v;
         }
     }
     if (const char* envMin = std::getenv("YAMS_DB_POOL_MIN"); envMin && *envMin) {
-        try {
-            auto v = static_cast<size_t>(std::stoul(envMin));
-            if (v > 0)
-                readPoolMin = v;
-        } catch (...) {
+        if (auto v = parseSizeEnv(envMin); v && *v > 0) {
+            readPoolMin = *v;
         }
     }
 
@@ -290,20 +303,14 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
         }
         if (const char* envReadMax = std::getenv("YAMS_DB_READ_POOL_MAX");
             envReadMax && *envReadMax) {
-            try {
-                auto v = static_cast<size_t>(std::stoul(envReadMax));
-                if (v >= readCfg.minConnections)
-                    readCfg.maxConnections = v;
-            } catch (...) {
+            if (auto v = parseSizeEnv(envReadMax); v && *v >= readCfg.minConnections) {
+                readCfg.maxConnections = *v;
             }
         }
         if (const char* envReadMin = std::getenv("YAMS_DB_READ_POOL_MIN");
             envReadMin && *envReadMin) {
-            try {
-                auto v = static_cast<size_t>(std::stoul(envReadMin));
-                if (v > 0)
-                    readCfg.minConnections = v;
-            } catch (...) {
+            if (auto v = parseSizeEnv(envReadMin); v && *v > 0) {
+                readCfg.minConnections = *v;
             }
         }
 
