@@ -123,11 +123,14 @@ class YamsConan(ConanFile):
                 self.conf.append("tools.build:cxxflags", "-Wno-unused-but-set-variable")
                 self.conf.append("tools.build:cxxflags", "-Wno-unused-function")
                 self.conf.append("tools.build:cxxflags", "-Wno-deprecated-declarations")
-            # Ensure TBB is available (required by ONNX Runtime)
-            try:
-                self.requires("onetbb/2021.12.0")
-            except Exception:
-                pass
+            # Windows uses the packaged ONNX Runtime binaries directly and does
+            # not need the extra oneTBB/hwloc graph that breaks local MSVC 195
+            # builds in Conan Center's hwloc recipe.
+            if self.settings.os != "Windows":  # type: ignore
+                try:
+                    self.requires("onetbb/2021.12.0")
+                except Exception:
+                    pass
 
         self.requires("xz_utils/5.8.3")
 
@@ -226,8 +229,9 @@ class YamsConan(ConanFile):
         if self.options.enable_onnx:  # type: ignore
             self.options["onnxruntime"].fPIC = True
             self.options["onnxruntime"].shared = True
-            # OneTBB requires hwloc with shared=True
-            self.options["hwloc"].shared = True
+            if self.settings.os != "Windows":  # type: ignore
+                # oneTBB requires hwloc with shared=True on non-Windows builds.
+                self.options["hwloc"].shared = True
 
     def validate(self):
         check_min_cppstd(self, "20")
@@ -241,10 +245,6 @@ class YamsConan(ConanFile):
             from conan.tools.gnu import PkgConfigDeps
             from conan.tools.cmake import CMakeDeps
             from conan.tools.env import VirtualBuildEnv
-
-            # Ensure PowerShell scripts are generated on Windows for setup.ps1
-            if self.settings.os == "Windows":
-                self.conf.define("tools.env.virtualenv:powershell", True)
 
             VirtualBuildEnv(self).generate()
             tc = MesonToolchain(self)
