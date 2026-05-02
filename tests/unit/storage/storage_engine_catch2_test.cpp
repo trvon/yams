@@ -376,3 +376,31 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine storage size", "[storage][
     REQUIRE(sizeResult.has_value());
     CHECK(sizeResult.value() == totalSize);
 }
+
+TEST_CASE("StorageEngine rejects path traversal storage keys", "[storage][security][catch2]") {
+    auto testDir = std::filesystem::temp_directory_path() /
+                   std::format("yams_storage_traversal_{}",
+                               std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove_all(testDir, ec);
+    };
+
+    StorageConfig config{.basePath = testDir / "storage", .shardDepth = 2, .mutexPoolSize = 64};
+    StorageEngine engine(std::move(config));
+    std::vector<std::byte> data{std::byte{0x01}, std::byte{0x02}};
+
+    const std::string traversalKey = std::string("..") + std::string(62, 'a');
+    auto storeResult = engine.store(traversalKey, data);
+    CHECK_FALSE(storeResult.has_value());
+    CHECK(storeResult.error().code == ErrorCode::InvalidArgument);
+    CHECK_FALSE(std::filesystem::exists((testDir / std::string(62, 'a'))));
+
+    const std::string manifestTraversalKey = std::string("..") + std::string(62, 'b') + ".manifest";
+    auto manifestResult = engine.store(manifestTraversalKey, data);
+    CHECK_FALSE(manifestResult.has_value());
+    CHECK(manifestResult.error().code == ErrorCode::InvalidArgument);
+
+    cleanup();
+}

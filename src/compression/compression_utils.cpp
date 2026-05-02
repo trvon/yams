@@ -58,7 +58,7 @@ bool isLikelyCompressed(std::span<const std::byte> data) {
     }
 
     // Check for common compressed file signatures
-    const auto* bytes = reinterpret_cast<const uint8_t*>(data.data());
+    const auto* bytes = static_cast<const uint8_t*>(static_cast<const void*>(data.data()));
 
     // gzip
     if (data.size() >= 2 && bytes[0] == 0x1F && bytes[1] == 0x8B) {
@@ -101,7 +101,8 @@ bool isLikelyCompressed(std::span<const std::byte> data) {
 
     // zstd
     if (data.size() >= 4) {
-        const uint32_t magic = *reinterpret_cast<const uint32_t*>(bytes);
+        uint32_t magic = 0;
+        std::memcpy(&magic, bytes, sizeof(magic));
         if (magic == 0xFD2FB528U || magic == 0x28B52FFDU) { // Little/big endian
             return true;
         }

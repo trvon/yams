@@ -1,6 +1,6 @@
 #include <spdlog/spdlog.h>
-#include <yams/core/atomic_utils.h>
 #include <yams/common/fs_utils.h>
+#include <yams/core/atomic_utils.h>
 #include <yams/storage/storage_engine.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -12,12 +12,33 @@ namespace yamsfmt = fmt;
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <fstream>
 #include <random>
 #include <source_location>
 #include <thread>
 
 namespace yams::storage {
+
+namespace {
+
+bool isHexHash(std::string_view hash) noexcept {
+    return hash.size() == HASH_STRING_SIZE &&
+           std::ranges::all_of(hash, [](unsigned char c) { return std::isxdigit(c) != 0; });
+}
+
+bool isValidStorageKey(std::string_view key) noexcept {
+    if (isHexHash(key)) {
+        return true;
+    }
+    constexpr std::string_view manifestSuffix = ".manifest";
+    if (!key.ends_with(manifestSuffix)) {
+        return false;
+    }
+    return isHexHash(key.substr(0, key.size() - manifestSuffix.size()));
+}
+
+} // namespace
 
 // Constants
 constexpr size_t TEMP_NAME_LENGTH = 16;
@@ -182,11 +203,12 @@ std::filesystem::path StorageEngine::getBasePath() const {
 }
 
 Result<void> StorageEngine::store(std::string_view hash, std::span<const std::byte> data) {
-    // Allow manifest keys (hash.manifest) and regular hashes
-    bool isManifest = hash.ends_with(".manifest");
-    if (!isManifest && hash.length() != HASH_STRING_SIZE) {
-        spdlog::error("Invalid hash length for store: expected {} characters, got {} for hash '{}'",
-                      HASH_STRING_SIZE, hash.length(), hash);
+    // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+    // to keep sharded paths below the storage root.
+    if (!isValidStorageKey(hash)) {
+        spdlog::error(
+            "Invalid storage key for store: expected hex hash or hex hash manifest, got '{}'",
+            hash);
         return Result<void>(ErrorCode::InvalidArgument);
     }
 
@@ -225,12 +247,12 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
 }
 
 Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view hash) const {
-    // Allow manifest keys (hash.manifest) and regular hashes
-    bool isManifest = hash.ends_with(".manifest");
-    if (!isManifest && hash.length() != HASH_STRING_SIZE) {
+    // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+    // to keep sharded paths below the storage root.
+    if (!isValidStorageKey(hash)) {
         spdlog::error(
-            "Invalid hash length for retrieve: expected {} characters, got {} for hash '{}'",
-            HASH_STRING_SIZE, hash.length(), hash);
+            "Invalid storage key for retrieve: expected hex hash or hex hash manifest, got '{}'",
+            hash);
         return Result<IStorageEngine::RawObject>(ErrorCode::InvalidArgument);
     }
 
@@ -249,6 +271,10 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     }
 
     auto fileSize = file.tellg();
+    if (fileSize < 0) {
+        pImpl->stats.failedOperations.fetch_add(1);
+        return Result<IStorageEngine::RawObject>(ErrorCode::IOError);
+    }
     file.seekg(0, std::ios::beg);
 
     std::vector<std::byte> data(static_cast<size_t>(fileSize));
@@ -278,12 +304,12 @@ Result<std::vector<std::byte>> StorageEngine::retrieve(std::string_view hash) co
 
 Result<bool> StorageEngine::exists(std::string_view hash) const noexcept {
     try {
-        // Allow manifest keys (hash.manifest) and regular hashes
-        bool isManifest = hash.ends_with(".manifest");
-        if (!isManifest && hash.length() != HASH_STRING_SIZE) {
+        // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+        // to keep sharded paths below the storage root.
+        if (!isValidStorageKey(hash)) {
             spdlog::error(
-                "Invalid hash length for exists: expected {} characters, got {} for hash '{}'",
-                HASH_STRING_SIZE, hash.length(), hash);
+                "Invalid storage key for exists: expected hex hash or hex hash manifest, got '{}'",
+                hash);
             return Result<bool>(ErrorCode::InvalidArgument);
         }
 
@@ -299,12 +325,12 @@ Result<bool> StorageEngine::exists(std::string_view hash) const noexcept {
 }
 
 Result<void> StorageEngine::remove(std::string_view hash) {
-    // Allow manifest keys (hash.manifest) and regular hashes
-    bool isManifest = hash.ends_with(".manifest");
-    if (!isManifest && hash.length() != HASH_STRING_SIZE) {
+    // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+    // to keep sharded paths below the storage root.
+    if (!isValidStorageKey(hash)) {
         spdlog::error(
-            "Invalid hash length for remove: expected {} characters, got {} for hash '{}'",
-            HASH_STRING_SIZE, hash.length(), hash);
+            "Invalid storage key for remove: expected hex hash or hex hash manifest, got '{}'",
+            hash);
         return Result<void>(ErrorCode::InvalidArgument);
     }
 
@@ -340,12 +366,12 @@ Result<void> StorageEngine::remove(std::string_view hash) {
 }
 
 Result<uint64_t> StorageEngine::getBlockSize(std::string_view hash) const {
-    // Allow manifest keys (hash.manifest) and regular hashes
-    bool isManifest = hash.ends_with(".manifest");
-    if (!isManifest && hash.length() != HASH_STRING_SIZE) {
-        spdlog::error(
-            "Invalid hash length for getBlockSize: expected {} characters, got {} for hash '{}'",
-            HASH_STRING_SIZE, hash.length(), hash);
+    // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+    // to keep sharded paths below the storage root.
+    if (!isValidStorageKey(hash)) {
+        spdlog::error("Invalid storage key for getBlockSize: expected hex hash or hex hash "
+                      "manifest, got '{}'",
+                      hash);
         return Result<uint64_t>(ErrorCode::InvalidArgument);
     }
 

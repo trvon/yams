@@ -293,3 +293,25 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine batch operat
     }
     CHECK(successCount == static_cast<int>(items.size()));
 }
+
+TEST_CASE_METHOD(CompressedStorageFixture,
+                 "CompressedStorageEngine does not treat KRNC-prefixed raw data as compressed",
+                 "[storage][compressed][header][catch2]") {
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+
+    auto engine = std::make_unique<CompressedStorageEngine>(underlying, config);
+
+    std::string hash = std::format("{:064x}", 0xabc123);
+    std::vector<std::byte> data(CompressionHeader::SIZE, std::byte{0x42});
+    const uint32_t magic = CompressionHeader::MAGIC;
+    std::memcpy(data.data(), &magic, sizeof(magic));
+
+    auto storeResult = engine->store(hash, data);
+    REQUIRE(storeResult.has_value());
+
+    auto retrieveResult = engine->retrieve(hash);
+    REQUIRE(retrieveResult.has_value());
+    CHECK(retrieveResult.value() == data);
+}

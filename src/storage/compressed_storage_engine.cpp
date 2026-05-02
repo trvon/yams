@@ -2,7 +2,9 @@
 #include <condition_variable>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <thread>
 #include <zstd.h>
@@ -17,14 +19,29 @@ namespace yams::storage {
 // Internal utilities
 namespace {
 
-bool isCompressedData(std::span<const std::byte> data) {
-    if (data.size() < compression::CompressionHeader::SIZE) {
-        return false;
+std::optional<compression::CompressionHeader>
+parseStoredCompressionHeader(std::span<const std::byte> data) {
+    auto parsed = compression::CompressionHeader::parse(data);
+    if (!parsed) {
+        return std::nullopt;
     }
 
-    compression::CompressionHeader header;
-    std::memcpy(&header, data.data(), sizeof(header));
-    return header.magic == compression::CompressionHeader::MAGIC;
+    const auto& header = parsed.value();
+    if (header.compressedSize >
+        std::numeric_limits<size_t>::max() - compression::CompressionHeader::SIZE) {
+        return std::nullopt;
+    }
+    const auto expectedSize =
+        compression::CompressionHeader::SIZE + static_cast<size_t>(header.compressedSize);
+    if (data.size() != expectedSize) {
+        return std::nullopt;
+    }
+
+    return header;
+}
+
+bool isCompressedData(std::span<const std::byte> data) {
+    return parseStoredCompressionHeader(data).has_value();
 }
 
 uint32_t calculateCRC32(std::span<const std::byte> data) {
@@ -70,7 +87,9 @@ public:
             return underlying_->store(hash, data);
         }
 
-        if (data.size() < config_.policyRules.neverCompressBelow) {
+        const auto compressionFloor =
+            std::max(config_.compressionThreshold, config_.policyRules.neverCompressBelow);
+        if (data.size() < compressionFloor) {
             return underlying_->store(hash, data);
         }
 
@@ -88,10 +107,8 @@ public:
         }
 
         // Store compressed data
-        std::span<const std::byte> compressedSpan{
-            reinterpret_cast<const std::byte*>(compressedResult.value().data()),
-            compressedResult.value().size()};
-        return underlying_->store(hash, compressedSpan);
+        const auto& compressed = compressedResult.value();
+        return underlying_->store(hash, std::span<const std::byte>(compressed));
     }
 
     Result<IStorageEngine::RawObject> retrieveRaw(std::string_view hash) const {
@@ -103,10 +120,8 @@ public:
         auto obj = std::move(raw.value());
         std::span<const std::byte> data{obj.data.data(), obj.data.size()};
 
-        if (!obj.header && isCompressedData(data)) {
-            compression::CompressionHeader header;
-            std::memcpy(&header, data.data(), sizeof(header));
-            obj.header = header;
+        if (!obj.header) {
+            obj.header = parseStoredCompressionHeader(data);
         }
 
         return obj;
@@ -247,10 +262,8 @@ public:
         }
 
         // Replace with compressed version
-        std::span<const std::byte> compressedSpan{
-            reinterpret_cast<const std::byte*>(compressedResult.value().data()),
-            compressedResult.value().size()};
-        return underlying_->store(hash, compressedSpan);
+        const auto& compressed = compressedResult.value();
+        return underlying_->store(hash, std::span<const std::byte>(compressed));
     }
 
     Result<void> decompressExisting(std::string_view hash) {
@@ -274,10 +287,8 @@ public:
         }
 
         // Replace with decompressed version
-        std::span<const std::byte> decompressedSpan{
-            reinterpret_cast<const std::byte*>(decompressedResult.value().data()),
-            decompressedResult.value().size()};
-        return underlying_->store(hash, decompressedSpan);
+        const auto& decompressed = decompressedResult.value();
+        return underlying_->store(hash, std::span<const std::byte>(decompressed));
     }
 
     void setPolicyRules(compression::CompressionPolicy::Rules rules) {
@@ -366,8 +377,10 @@ private:
             return result.error();
         }
 
+        const auto& compressionResult = result.value();
+
         // If compressor returned None (compression was ineffective), return original data
-        if (result.value().algorithm == compression::CompressionAlgorithm::None) {
+        if (compressionResult.algorithm == compression::CompressionAlgorithm::None) {
             return std::vector<std::byte>(data.begin(), data.end());
         }
 
@@ -378,11 +391,9 @@ private:
         header.algorithm = static_cast<uint8_t>(decision.algorithm);
         header.level = decision.level;
         header.uncompressedSize = data.size();
-        header.compressedSize = result.value().compressedSize;
+        header.compressedSize = compressionResult.compressedSize;
         header.uncompressedCRC32 = calculateCRC32(data);
-        header.compressedCRC32 = calculateCRC32(std::span<const std::byte>{
-            reinterpret_cast<const std::byte*>(result.value().data.data()),
-            result.value().data.size()});
+        header.compressedCRC32 = calculateCRC32(std::span<const std::byte>(compressionResult.data));
         const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 std::chrono::system_clock::now().time_since_epoch())
                                 .count();
@@ -394,10 +405,16 @@ private:
 
         // Combine header and compressed data
         std::vector<std::byte> output;
-        output.resize(sizeof(header) + result.value().data.size());
+        output.resize(sizeof(header) + compressionResult.data.size());
         std::memcpy(output.data(), &header, sizeof(header));
-        std::memcpy(output.data() + sizeof(header), result.value().data.data(),
-                    result.value().data.size());
+        std::memcpy(output.data() + sizeof(header), compressionResult.data.data(),
+                    compressionResult.data.size());
+
+        // Store the original bytes when header overhead erases the compression win. This avoids
+        // negative/underflowed savings and keeps content-addressed storage smaller.
+        if (output.size() >= data.size()) {
+            return std::vector<std::byte>(data.begin(), data.end());
+        }
 
         // Update local statistics
         updateStats([&](compression::CompressionStats& stats) {
@@ -405,7 +422,7 @@ private:
             stats.totalCompressedBytes += output.size();
             stats.totalUncompressedBytes += data.size();
             stats.totalSpaceSaved += data.size() - output.size();
-            stats.algorithmStats[decision.algorithm].recordCompression(result.value());
+            stats.algorithmStats[decision.algorithm].recordCompression(compressionResult);
             stats.onDemandCompressions++;
         });
 
@@ -428,13 +445,12 @@ private:
             return Error(ErrorCode::CorruptedData, "Data too small for compressed format");
         }
 
-        // Parse header
-        compression::CompressionHeader header;
-        std::memcpy(&header, data.data(), sizeof(header));
-
-        if (header.magic != compression::CompressionHeader::MAGIC) {
-            return Error(ErrorCode::CorruptedData, "Invalid compression header magic");
+        // Parse and validate header
+        auto parsedHeader = parseStoredCompressionHeader(data);
+        if (!parsedHeader) {
+            return Error(ErrorCode::CorruptedData, "Invalid compression block header or size");
         }
+        const auto header = *parsedHeader;
 
         if (header.version != compression::CompressionHeader::VERSION) {
             return Error(ErrorCode::InvalidArgument,
@@ -442,8 +458,9 @@ private:
         }
 
         // Extract compressed data
-        std::span<const std::byte> compressedData{data.data() + sizeof(header),
-                                                  data.size() - sizeof(header)};
+        std::span<const std::byte> compressedData{data.data() +
+                                                      compression::CompressionHeader::SIZE,
+                                                  static_cast<size_t>(header.compressedSize)};
 
         // Optional compressed CRC check (can be disabled with YAMS_SKIP_DECOMPRESS_CRC)
         uint32_t actualCRC = 0;
@@ -481,8 +498,7 @@ private:
 
         // Optional uncompressed CRC verification (can be disabled with YAMS_SKIP_DECOMPRESS_CRC)
         if (std::getenv("YAMS_SKIP_DECOMPRESS_CRC") == nullptr) {
-            actualCRC = calculateCRC32(std::span<const std::byte>{
-                reinterpret_cast<const std::byte*>(result.value().data()), result.value().size()});
+            actualCRC = calculateCRC32(std::span<const std::byte>(result.value()));
             if (actualCRC != header.uncompressedCRC32) {
                 return Error(ErrorCode::HashMismatch, "Decompressed data CRC mismatch");
             }

@@ -1,9 +1,17 @@
+#include <array>
+#include <bit>
 #include <chrono>
 #include <cstring>
+#include <type_traits>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_utils.h>
 
 namespace yams::compression {
+
+namespace {
+static_assert(std::is_trivially_copyable_v<CompressionHeader>,
+              "CompressionHeader must remain trivially copyable for wire serialization");
+}
 
 //-----------------------------------------------------------------------------
 // CompressionHeader
@@ -21,8 +29,9 @@ Result<CompressionHeader> CompressionHeader::parse(std::span<const std::byte> da
                          " bytes, need " + std::to_string(SIZE)};
     }
 
-    CompressionHeader header;
-    std::memcpy(&header, data.data(), SIZE);
+    std::array<std::byte, SIZE> headerBytes{};
+    std::memcpy(headerBytes.data(), data.data(), headerBytes.size());
+    CompressionHeader header = std::bit_cast<CompressionHeader>(headerBytes);
 
     // Convert from little-endian if necessary
     // (Assuming little-endian storage format)
@@ -35,12 +44,8 @@ Result<CompressionHeader> CompressionHeader::parse(std::span<const std::byte> da
 }
 
 std::vector<std::byte> CompressionHeader::serialize() const {
-    std::vector<std::byte> data(SIZE);
-
-    // Copy header to buffer (assuming little-endian storage)
-    std::memcpy(data.data(), this, SIZE);
-
-    return data;
+    auto headerBytes = std::bit_cast<std::array<std::byte, SIZE>>(*this);
+    return {headerBytes.begin(), headerBytes.end()};
 }
 
 bool CompressionHeader::validate() const noexcept {
@@ -64,8 +69,9 @@ bool CompressionHeader::validate() const noexcept {
         if (compressedSize == 0 || uncompressedSize == 0) {
             return false;
         }
-        if (compressedSize > uncompressedSize * 2) {
-            // Compression should not make data larger than 2x
+        if (compressedSize / 2 > uncompressedSize) {
+            // Compression should not make data larger than 2x. Use division to avoid
+            // overflowing uncompressedSize * 2 on corrupt headers.
             return false;
         }
     }
@@ -158,7 +164,7 @@ ExtendedCompressionHeader::parse(std::span<const std::byte> data) {
 
     // Read custom metadata
     if (header.metadataSize > 0) {
-        if (data.size() < offset + header.metadataSize) {
+        if (header.metadataSize > data.size() - offset) {
             return Error{ErrorCode::InvalidData,
                          "Extended header specifies more metadata than available"};
         }
