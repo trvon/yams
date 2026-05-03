@@ -44,7 +44,7 @@ test_deps = [
   dependency('OpenSSL'),
 
   cli11_dep,
-  dependency('boost', required: true),
+  boost_dep,
   dependency('libcurl', required: false),
   dependency('zlib'),
   dependency('fmt', required: false),

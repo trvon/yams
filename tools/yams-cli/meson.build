@@ -38,7 +38,7 @@ yams_cli_exe_deps = [
   dependency('yams_extraction'),
   dependency('yams_config'),
   dependency('yams_core'),
-  dependency('boost'),
+  boost_dep,
   dependency('spdlog'),
   dependency('fmt'),
 ]

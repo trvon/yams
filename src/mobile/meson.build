@@ -17,7 +17,7 @@ mobile_deps = [
   dependency('yams_chunking'),
   dependency('yams_crypto'),
   dependency('yams_daemon'),
-  dependency('boost'),
+  boost_dep,
   dependency('nlohmann_json'),
   dependency('sqlite3'),
   dependency('spdlog'),

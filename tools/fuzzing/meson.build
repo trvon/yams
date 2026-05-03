@@ -29,7 +29,7 @@ message('AFL++ compiler detected - building fuzzers')
 # are present when compiling the harnesses (static libraries don't propagate
 # include dirs to consumers).
 fuzz_deps = [
-  dependency('boost'),
+  boost_dep,
   dependency('threads'),
   dependency('zlib'),
   dependency('OpenSSL'),

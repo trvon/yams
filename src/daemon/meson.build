@@ -237,7 +237,7 @@ yams_daemon_lib = static_library('yams_daemon',
     # Direct Boost dependency required because daemon sources
     # various IPC components) include boost/asio headers directly. Relying on the
     # daemon_client's transitive usage isn't sufficient for include paths at compile time.
-    dependency('boost'),
+    boost_dep,
     dependency('spdlog'),
     dependency('threads'),
     dependency('libcurl', required: false),
@@ -277,7 +277,7 @@ yams_daemon_exe = executable('yams-daemon',
     yams_daemon_dep,
     cli11_dep,
     dependency('spdlog'),
-    dependency('boost'),
+    boost_dep,
     dependency('OpenSSL'),
     dependency('threads'),
     dependency('zlib'),

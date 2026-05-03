@@ -1,6 +1,8 @@
 spdlog_dep = dependency('spdlog', required: true)
 nlohmann_json_dep = dependency('nlohmann_json', required: true)
-boost_dep = dependency('boost', required: true)
+# boost_dep is defined at top-level meson.build; do not re-invoke
+# dependency('boost') here — it bypasses meson's override_dependency on
+# the modules: form (see meson #14146).
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
 yams_topology = dependency('yams_topology', required: false)

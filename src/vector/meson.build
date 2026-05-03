@@ -2,7 +2,9 @@ spdlog_dep = dependency('spdlog', required: true)
 sqlite_dep = dependency('sqlite3', required: true)
 json_dep = dependency('nlohmann_json', required: true)
 fmt_dep = dependency('fmt', required: false)
-boost_dep = dependency('boost', required: true)
+# boost_dep inherited from top-level meson.build (per-library pkg-config probes).
+# Re-invoking dependency('boost', ...) here would bypass the override on the
+# modules: form (meson #14146).
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
 tl_expected_dep = dependency('tl-expected', required: true)
