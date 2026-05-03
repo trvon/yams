@@ -509,16 +509,27 @@ endif
 
 # Boost is a core requirement (e.g., Boost.Asio for daemon communication).
 # Resolution order:
-#   1. $BOOST_ROOT (exported by setup.sh / setup.ps1 from Conan's boost.pc) —
-#      primary path on Windows where there is no system Boost. The PowerShell
-#      side resolves ${pcfiledir}/.. via pkg-config when available and falls
-#      back to manual placeholder expansion.
-#   2. System Boost (apt libboost-all-dev / brew install boost) — Linux/macOS
-#      fallback. Auto-detect handles both.
-# Do NOT pass `method: 'cmake'` here — meson special-cases dependency('boost')
-# and silently overrides the method hint with its built-in Boost finder, so
-# the cmake path is a no-op for Boost specifically. Keep the auto-detect form.
-boost_dep = dependency('boost', modules: ['system', 'thread'], required: true)
+#   1. Per-library pkg-config probes against Conan's emitted boost_*.pc.
+#      Required path on Windows: meson 1.4's built-in Boost finder rejects
+#      Conan's MSVC layout (libs are named libboost_<comp>.lib, not the
+#      auto-link form boost_<comp>-vc14x-mt-x64-1_85.lib that meson scans
+#      for). pkg-config bypasses meson's Boost special-case entirely.
+#   2. System Boost auto-detect — Linux/macOS fallback when no .pc files
+#      are on PKG_CONFIG_PATH (apt/brew Boost ships no pkg-config files).
+# NOTE: Conan PkgConfigDeps emits per-component .pc files using HYPHEN
+# separators (boost-system.pc, boost-thread.pc), not underscores. pkg-config
+# resolves dependency names against the .pc filename, so we must match.
+boost_system_dep = dependency('boost-system', method: 'pkg-config',
+                              required: false)
+boost_thread_dep = dependency('boost-thread', method: 'pkg-config',
+                              required: false)
+if boost_system_dep.found() and boost_thread_dep.found()
+  boost_dep = declare_dependency(
+    dependencies: [boost_system_dep, boost_thread_dep])
+else
+  boost_dep = dependency('boost', modules: ['system', 'thread'],
+                         required: true)
+endif
 meson.override_dependency('boost', boost_dep)
 
 # --- RE2 regex engine (optional, for high-performance grep) ---
