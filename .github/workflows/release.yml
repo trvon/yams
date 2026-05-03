@@ -844,7 +844,9 @@ jobs:
             set -u
           fi
           meson --version
-          meson install -C "$BD" --destdir "$BD/stage"
+          # --no-rebuild: setup.sh + a prior `meson compile` already built;
+          # this step only stages files, never re-triggers the compiler.
+          meson install -C "$BD" --destdir "$BD/stage" --no-rebuild
           if [ ! -d "$BD/stage" ]; then
             echo "Stage directory missing after meson install" >&2
             ls -al "$BD" >&2 || true
@@ -945,8 +947,10 @@ jobs:
               }
           }
 
-          # Install to stage directory
-          meson install -C $buildDir --destdir $stageDir
+          # Install to stage directory.
+          # --no-rebuild: setup.ps1's release build already compiled; this
+          # step only stages files, never re-triggers the compiler.
+          meson install -C $buildDir --destdir $stageDir --no-rebuild
           if ($LASTEXITCODE -ne 0) {
               Write-Error "Meson install failed"
               exit 1

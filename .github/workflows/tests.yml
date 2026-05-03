@@ -508,6 +508,25 @@ jobs:
         run: |
           .\setup.ps1 Debug
 
+      # Diagnostic for Windows Boost lookup. Reads BOOST_* env vars set by
+      # setup.ps1 (persisted to GITHUB_ENV) and lists the actual Conan boost
+      # lib filenames so we can pattern-match meson's expected naming if the
+      # build above fails. continue-on-error + always() so it never blocks.
+      - name: (diag) Boost env + Conan lib layout (Windows)
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "BOOST_ROOT=$env:BOOST_ROOT"
+          Write-Host "BOOST_INCLUDEDIR=$env:BOOST_INCLUDEDIR"
+          Write-Host "BOOST_LIBRARYDIR=$env:BOOST_LIBRARYDIR"
+          if ($env:BOOST_LIBRARYDIR -and (Test-Path $env:BOOST_LIBRARYDIR)) {
+              Write-Host "--- $env:BOOST_LIBRARYDIR contents (boost_*) ---"
+              Get-ChildItem $env:BOOST_LIBRARYDIR -Filter 'boost_*' | Select Name | Format-Table -AutoSize | Out-String
+              Write-Host "--- $env:BOOST_LIBRARYDIR contents (libboost_*) ---"
+              Get-ChildItem $env:BOOST_LIBRARYDIR -Filter 'libboost_*' -ErrorAction SilentlyContinue | Select Name | Format-Table -AutoSize | Out-String
+          }
+
       - name: ccache stats (post-build)
         if: always() && runner.os != 'Windows'
         shell: bash

@@ -694,7 +694,20 @@ if ((-not $SystemDeps) -and (-not $env:BOOST_ROOT)) {
         }
         if ($boostPath -and (Test-Path (Join-Path $boostPath 'include/boost'))) {
             $env:BOOST_ROOT = $boostPath
-            Write-Host "BOOST_ROOT set to: $boostPath"
+            $env:BOOST_INCLUDEDIR = (Join-Path $boostPath 'include')
+            $env:BOOST_LIBRARYDIR = (Join-Path $boostPath 'lib')
+            Write-Host "BOOST_ROOT       set to: $boostPath"
+            Write-Host "BOOST_INCLUDEDIR set to: $($env:BOOST_INCLUDEDIR)"
+            Write-Host "BOOST_LIBRARYDIR set to: $($env:BOOST_LIBRARYDIR)"
+            # Persist to GITHUB_ENV so any downstream workflow step (e.g.
+            # 'Run Tests with Meson (Windows)') still sees the same hints.
+            # No-op when not running under GitHub Actions.
+            if ($env:GITHUB_ENV) {
+                Add-Content -Path $env:GITHUB_ENV -Value "BOOST_ROOT=$boostPath"
+                Add-Content -Path $env:GITHUB_ENV -Value "BOOST_INCLUDEDIR=$($env:BOOST_INCLUDEDIR)"
+                Add-Content -Path $env:GITHUB_ENV -Value "BOOST_LIBRARYDIR=$($env:BOOST_LIBRARYDIR)"
+                Write-Host "Persisted Boost env hints to GITHUB_ENV"
+            }
         } elseif ($boostPath) {
             Write-Warning "boost.pc resolved prefix '$boostPath' has no include/boost subdir; not exporting BOOST_ROOT"
         } else {
@@ -1039,8 +1052,9 @@ if ($Package) {
     }
     New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
-    # Install to stage directory (destdir prepends to prefix, build-msi.ps1 handles finding files)
-    meson install -C $buildDir --destdir $stageDir
+    # Install to stage directory (destdir prepends to prefix, build-msi.ps1 handles finding files).
+    # --no-rebuild: skip the implicit recompile; setup.ps1 already built above.
+    meson install -C $buildDir --destdir $stageDir --no-rebuild
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Meson install failed"
         exit 1
