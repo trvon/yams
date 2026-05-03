@@ -39,7 +39,8 @@ public:
         cmd->add_flag("--chunks", repairChunks_, "Clean orphaned chunk files");
         cmd->add_flag("--embeddings", repairEmbeddings_, "Generate missing vector embeddings");
         cmd->add_flag("--fts5", repairFts5_, "Rebuild FTS5 index for documents (best-effort)");
-        cmd->add_flag("--optimize", optimizeDb_, "Optimize and vacuum database");
+        cmd->add_flag("--optimize", optimizeDb_,
+                      "Run safe database optimization (checkpoint + PRAGMA optimize)");
         cmd->add_flag("--downloads", repairDownloads_,
                       "Repair download documents: add tags/metadata and normalize names");
         cmd->add_flag("--path-tree", repairPathTree_,
@@ -103,9 +104,9 @@ public:
         }
 
         // Build the RPC request
-        // NOTE: --all intentionally excludes block_refs and topology for now because they can be
-        // slow on large stores. Use --refs / --topology (or --all with either flag) to include
-        // them explicitly.
+        // NOTE: --all intentionally excludes block_refs, topology, and optimize for now because
+        // they can be slow or disruptive on large live stores. Use --refs / --topology /
+        // --optimize explicitly when you want those operations.
         const bool effectiveAll = repairAll_;
         RepairRequest req;
         req.repairOrphans = repairOrphans_ || effectiveAll;
@@ -120,7 +121,7 @@ public:
         req.repairGraph = repairGraph_ || effectiveAll;
         req.repairTopology = repairTopology_;
         req.repairDedupe = repairDedupe_ || effectiveAll;
-        req.optimizeDb = optimizeDb_ || effectiveAll;
+        req.optimizeDb = optimizeDb_;
         req.repairAll = false;
         req.dryRun = dryRun_;
         req.verbose = verbose_;
@@ -167,7 +168,8 @@ public:
         // fast/warm/cold tier), fail fast with a clear message instead of sitting on a
         // silently-queued RPC that may not emit progress for minutes.
         if (auto repairState = probeDaemonRepairState(**leaseHandle); repairState) {
-            if (repairState.value().inProgress) {
+            const auto& state = repairState.value();
+            if (state.inProgress) {
                 std::cout << "\n"
                           << ui::status_info(
                                  "A repair operation is already running. "
