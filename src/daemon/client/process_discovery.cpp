@@ -282,7 +282,9 @@ discoverLiveDaemonSocket(const std::filesystem::path& preferredSocket,
     std::set<int> seen;
 
     if (auto pidFromFile = readPidFromFile(pidFilePath);
-        pidFromFile && kill(*pidFromFile, 0) == 0) {
+        pidFromFile && kill(*pidFromFile, 0) ==
+                           0) { // nosemgrep: yams.cpp.kill-zero-one-shot -- snapshot candidate
+                                // filter; callers perform bounded connection attempts.
         candidatePids.push_back(*pidFromFile);
         seen.insert(*pidFromFile);
     }

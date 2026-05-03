@@ -157,13 +157,16 @@ std::string bestEffortMimeForDocument(const metadata::DocumentInfo& doc,
                               : detection::FileTypeDetector::getMimeTypeFromExtension(extension);
 
         if (store) {
-            auto bytesResult = store->retrieveBytes(doc.sha256Hash);
+            // MIME repair only needs the leading magic bytes. Avoid materializing full objects
+            // here: `repair --all` can scan large corpora and full reads can stall streaming
+            // progress or exhaust daemon memory, surfacing to the CLI as an IPC EOF if the daemon
+            // is killed.
+            constexpr std::size_t kMimeSniffBytes = 8192;
+            auto bytesResult = store->retrieveBytesPrefix(doc.sha256Hash, kMimeSniffBytes);
             if (bytesResult && !bytesResult.value().empty()) {
-                constexpr std::size_t kMimeSniffBytes = 8192;
                 const auto& bytes = bytesResult.value();
-                const std::size_t sniffSize = std::min(bytes.size(), kMimeSniffBytes);
-                auto detected =
-                    detector.detectFromBuffer(std::span<const std::byte>(bytes.data(), sniffSize));
+                auto detected = detector.detectFromBuffer(
+                    std::span<const std::byte>(bytes.data(), bytes.size()));
                 if (detected) {
                     std::string mime = detected.value().mimeType;
                     if (!hintedMime.empty() && hintedMime != "application/octet-stream") {
@@ -195,7 +198,10 @@ std::string bestEffortMimeForDocument(const metadata::DocumentInfo& doc,
             if (!mime.empty())
                 return mime;
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("RepairService: MIME sniff failed for {}: {}", doc.sha256Hash, e.what());
     } catch (...) {
+        spdlog::debug("RepairService: MIME sniff failed for {}: unknown exception", doc.sha256Hash);
     }
 
     return "application/octet-stream";

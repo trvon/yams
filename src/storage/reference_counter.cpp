@@ -172,8 +172,14 @@ Result<void> ReferenceCounter::initializeDatabase() {
             pImpl->db->execute("PRAGMA journal_mode = WAL");
         }
 
-        pImpl->db->execute(yamsfmt::format("PRAGMA cache_size = {}", pImpl->config.cacheSize));
-        pImpl->db->execute(yamsfmt::format("PRAGMA busy_timeout = {}", pImpl->config.busyTimeout));
+        pImpl->db->execute(
+            yamsfmt::format("PRAGMA cache_size = {}",
+                            pImpl->config.cacheSize)); // nosemgrep: yams.cpp.dynamic-sql-execute --
+                                                       // numeric PRAGMA from typed storage config.
+        pImpl->db->execute(yamsfmt::format(
+            "PRAGMA busy_timeout = {}",
+            pImpl->config.busyTimeout)); // nosemgrep: yams.cpp.dynamic-sql-execute -- numeric
+                                         // PRAGMA from typed storage config.
         pImpl->db->execute("PRAGMA synchronous = NORMAL");
         pImpl->db->execute("PRAGMA temp_store = MEMORY");
 

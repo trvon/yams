@@ -509,18 +509,16 @@ endif
 
 # Boost is a core requirement (e.g., Boost.Asio for daemon communication).
 # Resolution order:
-#   1. CMake config files via Conan's CMakeDeps generator (BoostConfig.cmake under
-#      the generators dir on cmake_prefix_path written by MesonToolchain). Required
-#      path on Windows since there is no system Boost and the boost.pc shipped by
-#      Conan 2.x PkgConfigDeps uses ${pcfiledir}/.. which PowerShell can't expand
-#      to a real BOOST_ROOT.
+#   1. $BOOST_ROOT (exported by setup.sh / setup.ps1 from Conan's boost.pc) —
+#      primary path on Windows where there is no system Boost. The PowerShell
+#      side resolves ${pcfiledir}/.. via pkg-config when available and falls
+#      back to manual placeholder expansion.
 #   2. System Boost (apt libboost-all-dev / brew install boost) — Linux/macOS
-#      fallback if the cmake method doesn't find a config.
-boost_dep = dependency('boost', method: 'cmake', modules: ['system', 'thread'],
-                       required: false)
-if not boost_dep.found()
-  boost_dep = dependency('boost', modules: ['system', 'thread'], required: true)
-endif
+#      fallback. Auto-detect handles both.
+# Do NOT pass `method: 'cmake'` here — meson special-cases dependency('boost')
+# and silently overrides the method hint with its built-in Boost finder, so
+# the cmake path is a no-op for Boost specifically. Keep the auto-detect form.
+boost_dep = dependency('boost', modules: ['system', 'thread'], required: true)
 meson.override_dependency('boost', boost_dep)
 
 # --- RE2 regex engine (optional, for high-performance grep) ---

@@ -131,7 +131,7 @@ rules:
           try { spdlog::$LEVEL(...); } catch ($TYPE& $E) { }
       - pattern-not: |
           try { spdlog::$LEVEL(...); } catch ($TYPE&) { }
-      - pattern-not-regex: 'catch\s*\([^)]*\)\s*\{\s*//[^\n]*(?:\n\s*)?\}'
+      - pattern-not-regex: 'catch\s*\([^)]*\)\s*\{\s*//[^\n]*(?:\n\s*//[^\n]*)*\s*\}'
       - pattern-not-regex: 'catch\s*\([^)]*\)\s*\{\s*/\*.*?\*/\s*\}'
     paths:
       include:

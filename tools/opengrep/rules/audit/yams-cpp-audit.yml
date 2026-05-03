@@ -17,6 +17,9 @@ rules:
       - metavariable-regex:
           metavariable: $NAME
           regex: '"YAMS_.*"'
+      # Existing centralized compatibility/debug wrappers are allowed via path
+      # exclusions below. New runtime tuning surfaces should still flow through
+      # typed config/resolvers.
     paths:
       include:
         - /src/**/*.cpp
@@ -30,6 +33,9 @@ rules:
         - /external/**
         - /build/**
         - /build*/**
+        - /include/yams/cli/daemon_helpers.h
+        - /include/yams/common/test_utils.h
+        - /include/yams/daemon/components/TuneAdvisor.h
 
   - id: yams.cpp.vector-data-reinterpret-struct
     languages: [cpp]
@@ -43,9 +49,15 @@ rules:
       confidence: low
       precision: low
       yams_triage: binary-codec
-    pattern-either:
-      - pattern: reinterpret_cast<$T*>($V.data())
-      - pattern: reinterpret_cast<const $T*>($V.data())
+    patterns:
+      - pattern-either:
+          - pattern: reinterpret_cast<$T*>($V.data())
+          - pattern: reinterpret_cast<const $T*>($V.data())
+      # Ignore byte/character view casts used for stream/plugin APIs. The audit
+      # target is struct/typed reinterpretation over container storage.
+      - metavariable-regex:
+          metavariable: $T
+          regex: '^(?!.*(?:char|byte|Byte|uint8_t|std::byte)).*$'
     paths:
       include:
         - /src/**/*.cpp

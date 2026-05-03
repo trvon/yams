@@ -590,7 +590,11 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     if (!timeoutResult) {
         return timeoutResult.error();
     }
-    db.execute("PRAGMA busy_timeout = " + std::to_string(effectiveBusyTimeout.count()));
+    db.execute(
+        "PRAGMA busy_timeout = " +
+        std::to_string(effectiveBusyTimeout
+                           .count())); // nosemgrep: yams.cpp.dynamic-sql-execute -- numeric PRAGMA
+                                       // from clamped chrono duration, not external SQL.
 
     // Enable WAL mode if requested.
     if (config_.enableWAL) {
@@ -677,7 +681,9 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
         }
     }
     int cacheSizeKB = -(defaultCacheMB * 1024); // negative = KiB for SQLite
-    db.execute("PRAGMA cache_size = " + std::to_string(cacheSizeKB));
+    db.execute("PRAGMA cache_size = " +
+               std::to_string(cacheSizeKB)); // nosemgrep: yams.cpp.dynamic-sql-execute -- numeric
+                                             // PRAGMA from bounded cache size calculation.
     db.execute("PRAGMA wal_autocheckpoint = 0");
 
     if (sqlite_profile_trace_enabled()) {

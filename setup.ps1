@@ -654,21 +654,51 @@ if (-not $SystemDeps) {
     }
 }
 
-# Export BOOST_ROOT so meson's auto-detect Boost dep finds the Conan-installed
-# Boost (Windows has no system Boost fallback). Read prefix= from Conan's
-# boost.pc, which sits next to the generated Conan environment scripts.
+# Export BOOST_ROOT so meson's built-in Boost dep finds the Conan-installed
+# Boost (Windows has no system Boost fallback). Resolve the prefix from Conan's
+# boost.pc. Conan 2.x writes a relocatable form (`prefix=${pcfiledir}/..`)
+# which pkg-config substitutes at query time — a naive Select-String capture
+# yields the literal placeholder, so call pkgconf when available, otherwise
+# expand `${pcfiledir}` manually.
 if ((-not $SystemDeps) -and (-not $env:BOOST_ROOT)) {
-    $boostPc = Join-Path $buildDir "$conanSubdir/conan/boost.pc"
+    $conanGenDir = (Join-Path $buildDir "$conanSubdir/conan")
+    $boostPc = Join-Path $conanGenDir 'boost.pc'
     if (Test-Path $boostPc) {
-        $prefixLine = Select-String -Path $boostPc `
-            -Pattern '^\s*prefix\s*=' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($prefixLine) {
-            $boostPath = ($prefixLine.Line -replace '^\s*prefix\s*=\s*', '').Trim()
-            if ($boostPath -and (Test-Path (Join-Path $boostPath 'include/boost'))) {
-                $env:BOOST_ROOT = $boostPath
-                Write-Host "BOOST_ROOT set to: $boostPath"
+        $boostPath = $null
+        # Preferred: ask pkgconf to do the substitution. Conan installs a
+        # pkgconf binary alongside the generators; meson's PkgConfigDeps also
+        # points PKG_CONFIG_PATH at this dir.
+        $pkgconf = Get-Command pkg-config -ErrorAction SilentlyContinue
+        if (-not $pkgconf) { $pkgconf = Get-Command pkgconf -ErrorAction SilentlyContinue }
+        if ($pkgconf) {
+            $env:PKG_CONFIG_PATH = "$conanGenDir;$($env:PKG_CONFIG_PATH)"
+            try {
+                $resolved = & $pkgconf.Source --variable=prefix boost 2>$null
+                if ($LASTEXITCODE -eq 0 -and $resolved) {
+                    $boostPath = $resolved.Trim()
+                }
+            } catch {}
+        }
+        # Fallback: parse `prefix=` line and expand ${pcfiledir} ourselves.
+        if (-not $boostPath) {
+            $prefixLine = Select-String -Path $boostPc `
+                -Pattern '^\s*prefix\s*=' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($prefixLine) {
+                $raw = ($prefixLine.Line -replace '^\s*prefix\s*=\s*', '').Trim()
+                $raw = $raw -replace '\$\{pcfiledir\}', $conanGenDir
+                try {
+                    $boostPath = [System.IO.Path]::GetFullPath($raw)
+                } catch { $boostPath = $raw }
             }
+        }
+        if ($boostPath -and (Test-Path (Join-Path $boostPath 'include/boost'))) {
+            $env:BOOST_ROOT = $boostPath
+            Write-Host "BOOST_ROOT set to: $boostPath"
+        } elseif ($boostPath) {
+            Write-Warning "boost.pc resolved prefix '$boostPath' has no include/boost subdir; not exporting BOOST_ROOT"
+        } else {
+            Write-Warning "boost.pc found at $boostPc but prefix could not be resolved"
         }
     }
 }

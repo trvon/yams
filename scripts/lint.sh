@@ -247,7 +247,28 @@ lint_opengrep() {
   if [[ "$SCOPE" =~ ^(git|diff)$ && ${#target[@]} -eq 0 ]]; then
     ok "opengrep: no files in scope"; return 0
   fi
+  local json_out=".artifacts/opengrep/opengrep-yams-audit.json"
   if env "${env_pfx[@]}" "$REPO_ROOT/scripts/dev/run_opengrep.sh" "${target[@]}"; then
+    local findings=0
+    if [[ -f "$json_out" ]]; then
+      findings=$(python3 - "$json_out" <<'PYCOUNT'
+import json, sys
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as fh:
+        print(len(json.load(fh).get('results', [])))
+except Exception:
+    print(0)
+PYCOUNT
+)
+    fi
+    if (( findings > 0 )); then
+      if (( STRICT )); then
+        err "opengrep: ${findings} finding(s) reported (see $json_out)"
+        return 1
+      fi
+      warn "opengrep: ${findings} finding(s) reported (non-strict; see $json_out)"
+      return 0
+    fi
     ok "opengrep: clean"; return 0
   else
     err "opengrep: findings reported"; return 1

@@ -45,6 +45,19 @@ template <typename T> void appendObjectBytes(std::vector<std::byte>& out, const 
     out.insert(out.end(), bytes.begin(), bytes.end());
 }
 
+template <typename T> std::optional<T> readObject(std::span<const std::byte> in) {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "WAL deserialization only supports trivially-copyable POD payloads");
+    if (in.size() < sizeof(T)) {
+        return std::nullopt;
+    }
+    T result{};
+    std::memcpy(&result, in.data(),
+                sizeof(T)); // nosemgrep: yams.cpp.memcpy-non-pod-object -- centralized POD WAL
+                            // payload decoder with static_assert.
+    return result;
+}
+
 } // anonymous namespace
 
 namespace yams::wal {
@@ -79,7 +92,11 @@ std::optional<WALEntry> WALEntry::deserialize(std::span<const std::byte> buffer)
 
     // Read header
     WALEntry entry;
-    std::memcpy(&entry.header, buffer.data(), headerSize);
+    auto header = readObject<Header>(buffer);
+    if (!header) {
+        return std::nullopt;
+    }
+    entry.header = *header;
 
     // Validate header
     if (!entry.header.isValid()) {
@@ -141,16 +158,18 @@ bool WALEntry::verifyChecksum() const {
 // StoreBlockData implementation
 std::vector<std::byte> WALEntry::StoreBlockData::encode(const std::string& hash, uint32_t size,
                                                         uint32_t refCount) {
-    std::vector<std::byte> result(sizeof(StoreBlockData));
-    auto* data = reinterpret_cast<StoreBlockData*>(result.data());
+    StoreBlockData data{};
 
     // Copy hash (truncate if needed)
-    std::memset(data->hash, 0, HASH_SIZE);
-    std::memcpy(data->hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
+    std::memset(data.hash, 0, HASH_SIZE);
+    std::memcpy(data.hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
 
-    data->size = size;
-    data->refCount = refCount;
+    data.size = size;
+    data.refCount = refCount;
 
+    std::vector<std::byte> result;
+    result.reserve(sizeof(StoreBlockData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -160,19 +179,19 @@ WALEntry::StoreBlockData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    StoreBlockData result;
-    std::memcpy(&result, data.data(), sizeof(StoreBlockData));
-    return result;
+    return readObject<StoreBlockData>(data);
 }
 
 // DeleteBlockData implementation
 std::vector<std::byte> WALEntry::DeleteBlockData::encode(const std::string& hash) {
-    std::vector<std::byte> result(sizeof(DeleteBlockData));
-    auto* data = reinterpret_cast<DeleteBlockData*>(result.data());
+    DeleteBlockData data{};
 
-    std::memset(data->hash, 0, HASH_SIZE);
-    std::memcpy(data->hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
+    std::memset(data.hash, 0, HASH_SIZE);
+    std::memcpy(data.hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
 
+    std::vector<std::byte> result;
+    result.reserve(sizeof(DeleteBlockData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -182,22 +201,22 @@ WALEntry::DeleteBlockData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    DeleteBlockData result;
-    std::memcpy(&result, data.data(), sizeof(DeleteBlockData));
-    return result;
+    return readObject<DeleteBlockData>(data);
 }
 
 // UpdateReferenceData implementation
 std::vector<std::byte> WALEntry::UpdateReferenceData::encode(const std::string& hash,
                                                              int32_t delta) {
-    std::vector<std::byte> result(sizeof(UpdateReferenceData));
-    auto* data = reinterpret_cast<UpdateReferenceData*>(result.data());
+    UpdateReferenceData data{};
 
-    std::memset(data->hash, 0, HASH_SIZE);
-    std::memcpy(data->hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
+    std::memset(data.hash, 0, HASH_SIZE);
+    std::memcpy(data.hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
 
-    data->delta = delta;
+    data.delta = delta;
 
+    std::vector<std::byte> result;
+    result.reserve(sizeof(UpdateReferenceData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -207,33 +226,31 @@ WALEntry::UpdateReferenceData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    UpdateReferenceData result;
-    std::memcpy(&result, data.data(), sizeof(UpdateReferenceData));
-    return result;
+    return readObject<UpdateReferenceData>(data);
 }
 
 // UpdateMetadataData implementation
 std::vector<std::byte> WALEntry::UpdateMetadataData::encode(const std::string& hash,
                                                             const std::string& key,
                                                             const std::string& value) {
-    size_t totalSize = sizeof(UpdateMetadataData) + key.size() + value.size();
-    std::vector<std::byte> result(totalSize);
+    UpdateMetadataData data{};
 
-    auto* data = reinterpret_cast<UpdateMetadataData*>(result.data());
+    std::memset(data.hash, 0, HASH_SIZE);
+    std::memcpy(data.hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
 
-    std::memset(data->hash, 0, HASH_SIZE);
-    std::memcpy(data->hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
+    data.keySize = checkedMetadataPartSize(key.size(), "key");
+    data.valueSize = checkedMetadataPartSize(value.size(), "value");
 
-    data->keySize = checkedMetadataPartSize(key.size(), "key");
-    data->valueSize = checkedMetadataPartSize(value.size(), "value");
+    std::vector<std::byte> result;
+    result.reserve(sizeof(UpdateMetadataData) + key.size() + value.size());
+    appendObjectBytes(result, data);
 
     // Copy key and value
-    auto* keyPtr =
-        std::next(result.data(), static_cast<std::ptrdiff_t>(sizeof(UpdateMetadataData)));
-    std::memcpy(keyPtr, key.data(), key.size());
+    const auto* keyPtr = reinterpret_cast<const std::byte*>(key.data());
+    result.insert(result.end(), keyPtr, keyPtr + key.size());
 
-    auto* valuePtr = std::next(keyPtr, static_cast<std::ptrdiff_t>(key.size()));
-    std::memcpy(valuePtr, value.data(), value.size());
+    const auto* valuePtr = reinterpret_cast<const std::byte*>(value.data());
+    result.insert(result.end(), valuePtr, valuePtr + value.size());
 
     return result;
 }
@@ -244,11 +261,13 @@ WALEntry::UpdateMetadataData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    UpdateMetadataData result;
-    std::memcpy(&result, data.data(), sizeof(UpdateMetadataData));
+    auto result = readObject<UpdateMetadataData>(data);
+    if (!result) {
+        return std::nullopt;
+    }
 
     // Verify size
-    size_t expectedSize = sizeof(UpdateMetadataData) + result.keySize + result.valueSize;
+    size_t expectedSize = sizeof(UpdateMetadataData) + result->keySize + result->valueSize;
     if (data.size() < expectedSize) {
         return std::nullopt;
     }
@@ -258,12 +277,13 @@ WALEntry::UpdateMetadataData::decode(std::span<const std::byte> data) {
 
 // TransactionData implementation
 std::vector<std::byte> WALEntry::TransactionData::encode(uint64_t txnId, uint32_t count) {
-    std::vector<std::byte> result(sizeof(TransactionData));
-    auto* data = reinterpret_cast<TransactionData*>(result.data());
+    TransactionData data{};
+    data.transactionId = txnId;
+    data.participantCount = count;
 
-    data->transactionId = txnId;
-    data->participantCount = count;
-
+    std::vector<std::byte> result;
+    result.reserve(sizeof(TransactionData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -273,19 +293,18 @@ WALEntry::TransactionData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    TransactionData result;
-    std::memcpy(&result, data.data(), sizeof(TransactionData));
-    return result;
+    return readObject<TransactionData>(data);
 }
 
 // CheckpointData implementation
 std::vector<std::byte> WALEntry::CheckpointData::encode(uint64_t seqNum, uint64_t timestamp) {
-    std::vector<std::byte> result(sizeof(CheckpointData));
-    auto* data = reinterpret_cast<CheckpointData*>(result.data());
+    CheckpointData data{};
+    data.sequenceNum = seqNum;
+    data.timestamp = timestamp;
 
-    data->sequenceNum = seqNum;
-    data->timestamp = timestamp;
-
+    std::vector<std::byte> result;
+    result.reserve(sizeof(CheckpointData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -295,9 +314,7 @@ WALEntry::CheckpointData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    CheckpointData result;
-    std::memcpy(&result, data.data(), sizeof(CheckpointData));
-    return result;
+    return readObject<CheckpointData>(data);
 }
 
 // Stream operators
