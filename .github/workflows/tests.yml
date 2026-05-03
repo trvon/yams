@@ -73,9 +73,9 @@ jobs:
           fi
 
           if [[ -n "$BASE" ]]; then
-            scripts/check-quality.sh --profile ci --format human --parallel --diff-base "$BASE"
+            scripts/lint.sh cppcheck --diff "$BASE"
           else
-            scripts/check-quality.sh --profile ci --format human --parallel
+            scripts/lint.sh cppcheck
           fi
 
       - name: Run clang-tidy on changed files (PR only)

@@ -98,6 +98,7 @@ public:
                         _write(fd_, stamp.data(), static_cast<unsigned int>(stamp.size()));
                         _lseek(fd_, 0, SEEK_SET);
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
             } else {
@@ -128,6 +129,7 @@ public:
                     (void)::write(fd_, stamp.data(), stamp.size());
                     (void)lseek(fd_, 0, SEEK_SET);
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
         }
@@ -234,6 +236,7 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
             return Error{ErrorCode::InvalidState, msg};
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Get documents to process
@@ -533,6 +536,7 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                 try {
                     timeout_ms = std::stoull(std::string(env_ms));
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
             const auto deadline = now + std::chrono::milliseconds(timeout_ms);

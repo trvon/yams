@@ -122,6 +122,7 @@ struct FileLock {
                         _write(fd, stamp.data(), static_cast<unsigned int>(stamp.size()));
                         _lseek(fd, 0, SEEK_SET);
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
             } else {
@@ -151,6 +152,7 @@ struct FileLock {
                     (void)::write(fd, stamp.data(), stamp.size());
                     (void)lseek(fd, 0, SEEK_SET);
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
         }
@@ -612,6 +614,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                     targetDbDim = probeDb->getConfig().embedding_dim;
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
 
@@ -763,6 +766,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 return Error{ErrorCode::InvalidState, ss.str()};
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
 
         // 4. Process documents using dynamic batching (use model-reported seq length)
@@ -772,6 +776,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             try {
                 advisoryDocCap = static_cast<std::size_t>(std::stoul(adv));
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         DynamicBatcherConfig bcfg;
@@ -948,6 +953,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                         try {
                             timeout_ms = std::stoull(std::string(env_ms));
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
                     auto deadline =
@@ -996,6 +1002,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                             spdlog::error("[vectordb] batch insert failed: {}",
                                           vectorDb->getLastError());
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
                     // Optional pause between dynamic batches (cooperative throttling)

@@ -132,6 +132,7 @@ inline void detectLinuxGpu(GpuInfo& info) {
             }
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // NVIDIA: /proc/driver/nvidia/gpus/*/information
@@ -162,6 +163,7 @@ inline void detectLinuxGpu(GpuInfo& info) {
             }
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // NVIDIA VRAM: nvidia-smi (proc information file does NOT contain memory info)
@@ -178,11 +180,13 @@ inline void detectLinuxGpu(GpuInfo& info) {
                         if (mib > 0)
                             info.vramBytes = mib * 1024ULL * 1024ULL;
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
                 pclose(pipe);
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 }
@@ -280,6 +284,7 @@ inline void detectMacGpu(GpuInfo& info) {
                         info.detected = true;
                         info.provider = "coreml";
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
             }
@@ -288,6 +293,7 @@ inline void detectMacGpu(GpuInfo& info) {
                 return;
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Tier 3: Intel fallback — estimate from CPU brand when system_profiler fails
@@ -332,6 +338,7 @@ inline void detectWindowsGpu(GpuInfo& info) {
                             nullptr, nullptr);
         info.name = narrowName;
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
 #endif // _WIN32
@@ -439,6 +446,7 @@ inline const GpuInfo& detectGpu() {
                         info.name = "GPU (env override)";
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
     });

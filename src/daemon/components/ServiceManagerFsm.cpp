@@ -251,6 +251,7 @@ ServiceManagerSnapshot ServiceManagerFsm::waitForTerminalState(int timeoutSecond
                              timeoutSeconds,
                              static_cast<int>(detail::ServiceManagerMachine::snap.state));
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         return detail::ServiceManagerMachine::snap;
@@ -264,6 +265,7 @@ void ServiceManagerFsm::cancelWait() noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         cv_.notify_all();
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
 
@@ -273,6 +275,7 @@ void ServiceManagerFsm::reset() noexcept {
         detail::ServiceManagerMachine::snap = {};
         detail::ServiceManagerMachine::start();
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
 

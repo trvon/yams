@@ -202,6 +202,7 @@ public:
                             }
                         }
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
 
                     // Allow extended preload timeout via env (default 30s)
@@ -212,6 +213,7 @@ public:
                             if (v > 0)
                                 preload_timeout = std::chrono::milliseconds(v);
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
 
@@ -253,6 +255,7 @@ public:
             try {
                 fallback_provider_->shutdown();
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
             fallback_provider_.reset();
         }
@@ -843,6 +846,7 @@ private:
             try {
                 cap = static_cast<int>(yams::daemon::TuneAdvisor::getEmbedMaxConcurrency());
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
             if (cap <= 0) {
                 cap = std::max(1u, std::thread::hardware_concurrency());

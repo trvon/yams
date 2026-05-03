@@ -110,6 +110,7 @@ SocketServer::backoffAfterReject(std::chrono::milliseconds delay) const {
     try {
         co_await timer.async_wait(use_awaitable);
     } catch (const boost::system::system_error&) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
 
@@ -236,6 +237,7 @@ RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
             handlerConfig.cli_executor = dispatcher->getCliExecutor();
             handlerConfig.worker_job_signal = dispatcher->getWorkerJobSignal();
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -437,6 +439,7 @@ Result<void> SocketServer::start() {
                 try {
                     proxySockPath = std::filesystem::absolute(proxySockPath);
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
 
@@ -501,6 +504,7 @@ Result<void> SocketServer::start() {
                               .count();
                 state_->initDurationsMs.emplace("ipc_server", static_cast<uint64_t>(ms));
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
 
@@ -529,6 +533,7 @@ Result<void> SocketServer::stop() {
         try {
             stop_source_.request_stop();
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
 
         // Close all active sockets IMMEDIATELY for deterministic shutdown
@@ -786,6 +791,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                     try {
                         co_await timer.async_wait(use_awaitable);
                     } catch (const boost::system::system_error&) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                     if (!running_ || stopping_)
                         break;

@@ -171,11 +171,13 @@ void TuningManager::stop() {
         try {
             wakeDrain->set_value();
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     });
     try {
         wakeDrainFuture.wait();
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     try {

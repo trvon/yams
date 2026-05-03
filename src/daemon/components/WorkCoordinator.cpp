@@ -40,6 +40,7 @@ WorkCoordinator::~WorkCoordinator() {
         try {
             spdlog::debug("[WorkCoordinator] Destructor called with active threads, stopping...");
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         stop();
 
@@ -51,6 +52,7 @@ WorkCoordinator::~WorkCoordinator() {
                 try {
                     worker.join();
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
         }
@@ -60,6 +62,7 @@ WorkCoordinator::~WorkCoordinator() {
     try {
         spdlog::debug("[WorkCoordinator] Destroyed");
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
 
@@ -107,6 +110,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                 try {
                     spdlog::trace("[WorkCoordinator] Worker {} starting io_context.run()", i);
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
                 for (;;) {
                     try {
@@ -116,11 +120,13 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                         try {
                             spdlog::error("[WorkCoordinator] Worker {} exception: {}", i, e.what());
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     } catch (...) {
                         try {
                             spdlog::error("[WorkCoordinator] Worker {} unknown exception", i);
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
 
@@ -131,11 +137,13 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                     try {
                         spdlog::debug("[WorkCoordinator] Worker {} restarting after exception", i);
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
                 try {
                     spdlog::trace("[WorkCoordinator] Worker {} exited io_context.run()", i);
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
                 {
                     std::lock_guard<std::mutex> stateLock(workerStateMutex_);
@@ -178,6 +186,7 @@ void WorkCoordinator::stop() {
         try {
             spdlog::debug("[WorkCoordinator] stop() called but not started (no-op)");
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         return;
     }
@@ -185,6 +194,7 @@ void WorkCoordinator::stop() {
     try {
         spdlog::debug("[WorkCoordinator] Stopping...");
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     {
         std::lock_guard<std::mutex> stateLock(workerStateMutex_);
@@ -196,6 +206,7 @@ void WorkCoordinator::stop() {
     try {
         spdlog::info("[WorkCoordinator] Work guard reset and io_context stopped");
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
 
@@ -204,6 +215,7 @@ void WorkCoordinator::join() {
         try {
             spdlog::debug("[WorkCoordinator] join() called with no workers (no-op)");
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         return;
     }
@@ -211,6 +223,7 @@ void WorkCoordinator::join() {
     try {
         spdlog::debug("[WorkCoordinator] Joining {} worker threads...", workers_.size());
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     for (auto& worker : workers_) {
         if (!worker.joinable()) {
@@ -229,11 +242,13 @@ void WorkCoordinator::join() {
             try {
                 spdlog::warn("[WorkCoordinator] join exception: {}", e.what());
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         } catch (...) {
             try {
                 spdlog::warn("[WorkCoordinator] join unknown exception");
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
     }
@@ -242,6 +257,7 @@ void WorkCoordinator::join() {
     try {
         spdlog::info("[WorkCoordinator] All workers joined");
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
 
@@ -250,6 +266,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
         try {
             spdlog::debug("[WorkCoordinator] joinWithTimeout() called with no workers (no-op)");
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         return true;
     }
@@ -258,6 +275,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
         spdlog::debug("[WorkCoordinator] joinWithTimeout({}ms) waiting for {} workers",
                       timeout.count(), activeWorkers_.load());
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     auto joinStart = std::chrono::steady_clock::now();
@@ -363,6 +381,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
                               snap.index, snap.tidHash, snap.exited, snap.runMs);
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         lock.unlock();
         return false;
@@ -374,6 +393,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
                 try {
                     worker.join();
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
         }
@@ -384,6 +404,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
     try {
         spdlog::info("[WorkCoordinator] joinWithTimeout complete (success={})", completed);
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     return completed;
 }
@@ -392,6 +413,7 @@ void WorkCoordinator::abandonWorkersForShutdown() {
     try {
         spdlog::warn("[WorkCoordinator] Abandoning remaining workers for shutdown");
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     for (auto& worker : workers_) {
@@ -399,6 +421,7 @@ void WorkCoordinator::abandonWorkersForShutdown() {
             try {
                 worker.detach();
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
     }

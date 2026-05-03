@@ -273,6 +273,7 @@ YamsCLI::~YamsCLI() {
         try {
             vectorDatabase_->close();
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         vectorDatabase_.reset();
     }
@@ -283,6 +284,7 @@ YamsCLI::~YamsCLI() {
         try {
             connectionPool_->shutdown();
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         connectionPool_.reset();
     }
@@ -291,6 +293,7 @@ YamsCLI::~YamsCLI() {
         try {
             database_->close();
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         database_.reset();
     }
@@ -515,6 +518,7 @@ void YamsCLI::applyParsedDataDirPrecedence() {
             dataPath_ = fs::path(envDataDir);
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
 
@@ -789,6 +793,7 @@ std::shared_ptr<daemon::IModelProvider> YamsCLI::getLocalModelProvider() {
                 }
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
     if (preferredModel.empty()) {
@@ -1129,10 +1134,13 @@ Result<void> YamsCLI::initializeStorage() {
                             try {
                                 vectorDimension = static_cast<size_t>(std::stoul(it->second));
                             } catch (...) {
+                                // Intentional best-effort path; keep the primary operation
+                                // unaffected.
                             }
                         }
                     }
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
             if (vectorDimension == 0) {
@@ -1140,6 +1148,7 @@ Result<void> YamsCLI::initializeStorage() {
                     try {
                         vectorDimension = static_cast<size_t>(std::stoul(envd));
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
             }
@@ -1151,6 +1160,7 @@ Result<void> YamsCLI::initializeStorage() {
                             vectorDimension = d;
                     }
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
 
@@ -1168,6 +1178,7 @@ Result<void> YamsCLI::initializeStorage() {
                             preferredModel = it->second;
                     }
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
                 if (preferredModel.empty()) {
                     if (const char* p = std::getenv("YAMS_PREFERRED_MODEL"))
@@ -1247,6 +1258,7 @@ Result<void> YamsCLI::initializeStorage() {
                             selectedModel = pref;
                         }
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
 
                     // 2) Known models (MiniLM/mpnet/nomic)

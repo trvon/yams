@@ -289,6 +289,7 @@ std::vector<std::string> AbiModelProviderAdapter::getLoadedModels() const {
                 out.emplace_back(ids[i]);
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     if (table_->free_model_list)
         table_->free_model_list(table_->self, ids, count);
@@ -328,6 +329,7 @@ Result<ModelInfo> AbiModelProviderAdapter::getModelInfo(const std::string& model
                     (void)j["runtime_version"]; // could be surfaced later
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         if (json_c)

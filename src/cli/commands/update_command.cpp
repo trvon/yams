@@ -533,6 +533,7 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
             }
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Glob shortcut: resolve via glob-to-SQL conversion directly
@@ -634,6 +635,7 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
         try {
             stem = std::filesystem::path(nm).stem().string();
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         lr = tryList(std::string("%/") + stem + "%");
     }

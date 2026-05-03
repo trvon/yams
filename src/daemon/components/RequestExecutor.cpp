@@ -23,6 +23,7 @@ RequestExecutor::~RequestExecutor() {
         try {
             spdlog::debug("[RequestExecutor] Destructor: stopping...");
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         stop();
         for (auto& w : workers_) {
@@ -30,6 +31,7 @@ RequestExecutor::~RequestExecutor() {
                 try {
                     w.join();
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
         }
@@ -45,6 +47,7 @@ std::size_t RequestExecutor::defaultThreadCount() {
             if (v >= 1 && v <= 64)
                 return v;
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
     return std::max<std::size_t>(4, std::thread::hardware_concurrency() / 2);
@@ -70,8 +73,10 @@ void RequestExecutor::start(std::optional<std::size_t> numThreads) {
                     try {
                         spdlog::error("[RequestExecutor] Worker {} exception: {}", i, e.what());
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
                 if (ioContext_->stopped())
                     break;

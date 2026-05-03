@@ -87,6 +87,7 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
                     vectorUsable = true;
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         if (lexicalOverlayCoversGrowth && vectorUsable) {
@@ -177,6 +178,7 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
                 return false;
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -188,6 +190,7 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
             return false;
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Rebuild only when ingest/post-ingest/embedding pipelines are drained.
@@ -210,6 +213,7 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
             return false;
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Check for concurrent rebuild

@@ -1,0 +1,145 @@
+rules:
+  - id: yams.cpp.process-liveness-one-shot-flip
+    languages: [cpp]
+    severity: WARNING
+    message: >-
+      One-shot process-liveness check flipping a success flag. Slow shutdown
+      (WAL flush, vector index commit) can race a single check; prefer a
+      bounded poll loop. Reference: stopDaemon final verification fix.
+    metadata:
+      category: correctness
+      cwe: "CWE-362"
+      confidence: medium
+      precision: medium
+      yams_triage: process-race
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if (!$STOPPED && !$ALIVE_FN(...)) {
+                  ...
+                  $STOPPED = true;
+                  ...
+              }
+          - pattern: |
+              if (!$ALIVE_FN(...)) {
+                  ...
+                  $STOPPED = true;
+                  ...
+              }
+      - metavariable-regex:
+          metavariable: $ALIVE_FN
+          regex: '(isDaemon|isProcess|is[A-Z]\w*Running|is[A-Z]\w*Alive|process_running|pidAlive)'
+      - pattern-not-inside: |
+          while (...) {
+              ...
+          }
+      - pattern-not-inside: |
+          for (...) {
+              ...
+          }
+      - pattern-not-inside: |
+          do {
+              ...
+          } while (...);
+
+  - id: yams.cpp.kill-zero-one-shot
+    languages: [cpp]
+    severity: INFO
+    message: >-
+      `kill(pid, 0)` used as one-shot liveness probe. If the boolean drives a
+      success/failure decision, wrap in a bounded poll loop (e.g. 500ms × N)
+      so a slow exit doesn't race the check.
+    metadata:
+      category: correctness
+      cwe: "CWE-362"
+      confidence: low
+      precision: low
+      yams_triage: process-race
+    patterns:
+      - pattern-either:
+          - pattern: kill($PID, 0) == 0
+          - pattern: kill($PID, 0) != 0
+          - pattern: kill($PID, 0) == -1
+      # NOTE: `metavariable-type: pid_t` would be the strongest precision
+      # lever here (semgrep tracks types through `auto`), but opengrep 1.20
+      # does not yet support that key. Falling back to the structural
+      # pattern-not-inside guards below — they alone produced zero false
+      # positives across src/cli + src/daemon at audit time.
+      - pattern-not-inside: |
+          while (...) {
+              ...
+          }
+      - pattern-not-inside: |
+          for (...) {
+              ...
+          }
+      - pattern-not-inside: |
+          do {
+              ...
+          } while (...);
+      # Suppress leaf predicates that exist precisely to be looped by callers
+      # (e.g. bool isProcessRunning(pid_t) / hasProcessExited(pid_t)). We can't
+      # use `return ...kill(...)...;` here — opengrep's cpp parser rejects
+      # ellipsis-in-expression. Match on any `bool $FN(pid_t ...)` body that
+      # contains the kill(pid, 0) construct.
+      - pattern-not-inside: |
+          bool $FN(pid_t $P, ...) {
+              ...
+          }
+      - pattern-not-inside: |
+          bool $FN(pid_t $P) {
+              ...
+          }
+      # Suppress filtering-into-collection style usage (snapshot, not decision).
+      - pattern-not-inside: |
+          if ($COND && kill($PID, 0) == 0) {
+              ...
+              $LIST.push_back(...);
+              ...
+          }
+      # Same as above but the pid is dereferenced from a smart pointer / optional
+      # (e.g. `kill(*pidFromFile, 0)`). The cpp parser treats `*$X` as a distinct
+      # expression so the deref form needs its own pattern-not-inside.
+      - pattern-not-inside: |
+          if ($COND && kill(*$PID, 0) == 0) {
+              ...
+              $LIST.push_back(...);
+              ...
+          }
+      # C++17 init-statement-in-if form (e.g.
+      #   if (auto x = readPidFromFile(...); x && kill(*x, 0) == 0) { ... })
+      # Same intent as above but the parser binds the init differently.
+      - pattern-not-inside: |
+          if ($INIT; $COND && kill(*$PID, 0) == 0) {
+              ...
+              $LIST.push_back(...);
+              ...
+          }
+
+  - id: yams.cpp.sleep-then-check-no-loop
+    languages: [cpp]
+    severity: INFO
+    message: >-
+      `sleep_for(...)` followed by a single liveness/existence check. Slow
+      shutdown can outlast the chosen interval; either replace with a bounded
+      poll loop or document the rationale for the fixed delay.
+    metadata:
+      category: correctness
+      confidence: low
+      precision: low
+      yams_triage: process-race
+    pattern-either:
+      - pattern: |
+          std::this_thread::sleep_for(...);
+          if (!$ALIVE_FN(...)) {
+              ...
+              $S = true;
+          }
+      - pattern: |
+          std::this_thread::sleep_for(...);
+          if ($ALIVE_FN(...)) {
+              ...
+          }
+    metavariable-regex:
+      metavariable: $ALIVE_FN
+      regex: '(isDaemon|isProcess|is[A-Z]\w*Running|is[A-Z]\w*Alive|process_running|pidAlive|kill)'

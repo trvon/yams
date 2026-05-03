@@ -138,6 +138,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 spdlog::info("[VectorInit] probe: ddl dim={}", *ddlDim);
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -151,6 +152,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 spdlog::info("[VectorInit] probe: generator dim={}", g);
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -168,6 +170,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                              modelProvider->getProviderName());
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
     if (!dim && deps_.resolvePreferredModel) {
@@ -181,6 +184,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 }
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -232,6 +236,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 }
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -276,6 +281,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     }
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
     }
@@ -462,6 +468,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 try {
                     vdb->initializeCounter();
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
 
                 bool vectorDbReady = false;
@@ -473,6 +480,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                                      "embedding batch (coordinator owns index readiness)");
                     }
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
 
                 // Update state (DB readiness only; index readiness is managed by coordinator)
@@ -483,6 +491,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                         deps_.state->readiness.vectorDbDim =
                             static_cast<uint32_t>(cfg.embedding_dim);
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
 
@@ -491,6 +500,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     try {
                         deps_.serviceFsm->dispatch(VectorsInitializedEvent{cfg.embedding_dim});
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
 

@@ -101,6 +101,7 @@ public:
                             spdlog::critical("std::terminate called without active exception");
                         }
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                     std::_Exit(1);
                 });

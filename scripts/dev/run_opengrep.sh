@@ -26,6 +26,7 @@ case "$PROFILE" in
   default) CONFIGS=("tools/opengrep/rules/default") ;;
   audit) CONFIGS=("tools/opengrep/rules/audit") ;;
   all) CONFIGS=("tools/opengrep/rules") ;;
+  trailofbits) CONFIGS=("p/trailofbits") ;;
   public) CONFIGS=("p/default" "p/security-audit" "p/trailofbits" "p/c") ;;
   *) CONFIGS=("$PROFILE") ;;
 esac
@@ -72,6 +73,17 @@ fi
 
 if [[ "${OPENGREP_STRICT:-0}" == "1" ]]; then
   COMMON+=(--error)
+fi
+
+# Optional delta-vs-ref mode. Set OPENGREP_BASELINE_COMMIT=<ref> (e.g. HEAD~1
+# or origin/main) to filter results to findings new since that commit. Only
+# wires through when the installed opengrep/semgrep advertises the flag.
+if [[ -n "${OPENGREP_BASELINE_COMMIT:-}" ]]; then
+  if grep -q -- '--baseline-commit' <<<"$HELP"; then
+    COMMON+=(--baseline-commit "$OPENGREP_BASELINE_COMMIT")
+  else
+    echo "[opengrep] $ENGINE has no --baseline-commit; ignoring OPENGREP_BASELINE_COMMIT" >&2
+  fi
 fi
 
 "$ENGINE" "${COMMON[@]}" --json --output "$JSON_OUT" "${TARGETS[@]}"

@@ -136,6 +136,7 @@ public:
             auto dd = cli_->getDataPath();
             std::cout << "  " << ui::key_value("Data directory", dd.string()) << "\n\n";
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
 
         if (dryRun_) {
@@ -278,6 +279,7 @@ public:
                     localWaitTimeout = std::chrono::milliseconds(parsed);
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
 

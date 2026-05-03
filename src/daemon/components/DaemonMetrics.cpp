@@ -562,6 +562,7 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
         try {
             root = services_ ? (services_->getResolvedDataDir() / "storage") : fs::path{};
         } catch (...) {
+            // Metrics collection is best-effort; leave snapshot defaults.
         }
         if (!root.empty() && fs::exists(root, ec)) {
             for (fs::recursive_directory_iterator
@@ -628,6 +629,7 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
                 indexBytes = extIndex;
             }
         } catch (...) {
+            // Metrics collection is best-effort; leave snapshot defaults.
         }
         std::uint64_t metaBytes = refsDbBytes + dbBytes + dbWalBytes + dbShmBytes;
         std::uint64_t vecBytes = vecDbBytes + vecIdxBytes;
@@ -842,6 +844,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                                         (v == "1" || v == "true" || v == "yes" || v == "on");
                                 }
                             } catch (...) {
+                                // Metrics collection is best-effort; leave snapshot defaults.
                             }
                             if (!disableRebuilds) {
                                 searchComp->checkAndTriggerRebuildIfNeeded();
@@ -849,6 +852,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                         }
                     }
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
             }
 
@@ -911,6 +915,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             try {
                 MetricsSnapshotRegistry::instance().set(fastSnapshot);
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
         } catch (const std::exception& e) {
             spdlog::warn("DaemonMetrics: polling iteration failed: {}", e.what());
@@ -1003,6 +1008,7 @@ void DaemonMetrics::publishSnapshotPair(const std::shared_ptr<MetricsSnapshot>& 
     try {
         MetricsSnapshotRegistry::instance().set(fastSnapshot);
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 }
 
@@ -1086,6 +1092,7 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
                 out.workerActive = services_->getWorkerActive();
                 out.workerQueued = services_->getWorkerQueueDepth();
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             try {
                 if (auto pq = services_->getPostIngestQueue()) {
@@ -1105,6 +1112,7 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
                     }
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             try {
                 auto searchLoad = services_->getSearchLoadMetrics();
@@ -1112,6 +1120,7 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
                 out.searchQueued = searchLoad.queued;
                 out.searchExecuted = searchLoad.executed;
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             auto topology = services_->getTopologyTelemetrySnapshot();
             out.topologyRebuildRunning = topology.rebuildRunning;
@@ -1142,6 +1151,7 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
             out.topologyLastAlgorithm = topology.lastAlgorithm;
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
     return out;
 }
@@ -1258,6 +1268,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                 static_cast<uint8_t>(searchPct);
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Lifecycle (authoritative overall status)
@@ -1331,6 +1342,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     out.kgJobsDepth = kgDepth;
                     out.kgJobsCapacity = kgCap;
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
 
                 // High-priority post-ingest channel for repair/stuck-doc recovery.
@@ -1351,6 +1363,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                         }
                     }
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
                 out.postIngestProcessed = pq->processed();
                 out.postIngestFailed = pq->failed();
@@ -1427,6 +1440,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Session watch status (best-effort)
@@ -1450,6 +1464,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // FSM transport metrics (best-effort)
@@ -1467,6 +1482,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         out.ipcPoolSize = fsnap.ipcPoolSize;
         out.ioPoolSize = fsnap.ioPoolSize;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // ResourceGovernor metrics (direct query)
@@ -1477,6 +1493,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         out.governorPressureLevel = static_cast<uint8_t>(govSnap.level);
         out.governorHeadroomPct = static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0);
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // ONNX concurrency metrics (direct query)
@@ -1488,6 +1505,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         out.onnxEmbedUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Embedding)].used;
         out.onnxRerankerUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Reranker)].used;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // DatabaseManager metrics
@@ -1529,6 +1547,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // WorkCoordinator metrics
@@ -1541,6 +1560,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Stream metrics (from StreamMetricsRegistry)
@@ -1553,6 +1573,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             out.streamTtfbAvgMs = ssnap.ttfbSumMs / ssnap.ttfbCount;
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // InternalEventBus metrics (title extraction, FTS5, symbol)
@@ -1583,8 +1604,10 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                 static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
             out.deferredQueueDepth = ch->size_approx();
         } catch (...) {
+            // Metrics collection is best-effort; leave snapshot defaults.
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     try {
@@ -1605,6 +1628,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
     // Shared overload snapshot for retry-after and per-command admission metrics.
     try {
@@ -1630,6 +1654,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             out.addRejected = state_->stats.addRequestsRejected.load(std::memory_order_relaxed);
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // OS resource hints (fast probes)
@@ -1664,6 +1689,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         TracyPlot("daemon.cpu.pct", out.cpuUsagePercent);
 #endif
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Vector DB snapshot (size and exact rows when available)
@@ -1674,6 +1700,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                 out.vectorDbReady = state_->readiness.vectorDbReady.load();
                 out.vectorDbDim = state_->readiness.vectorDbDim.load();
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             // Do not touch the live VectorDatabase handle on the status path.
             // During startup the vector backend may be rebuilding HNSW under its internal mutex,
@@ -1690,6 +1717,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     }
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             // Exact rows via cached value ONLY (updated periodically in background)
             {
@@ -1705,12 +1733,14 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
 #endif
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Ensure readinessStates[vector_db] reflects the final vectorDbReady after healing.
     try {
         out.readinessStates[std::string(readiness::kVectorDb)] = out.vectorDbReady;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Database init phase + recovery + storage warning. Read under recoveryMutex
@@ -1729,6 +1759,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         out.databaseRecoveredFrom = state_->readiness.databaseRecoveredFrom;
         out.storageWarning = state_->readiness.storageWarning;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Centralized service states
@@ -1747,18 +1778,22 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     out.contentStoreRoot = (dd / "storage").string();
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             try {
                 out.metadataDbPath = services_->getMetadataDatabasePath();
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             try {
                 out.vectorDbPath = services_->getVectorDatabasePath();
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             try {
                 out.contentStoreError = services_->getContentStoreError();
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             {
                 std::shared_lock lock(cacheMutex_);
@@ -1828,6 +1863,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     out.lastHotzoneCheckpointTime = epochToIso(cm->lastHotzoneCheckpointEpoch());
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             // Content store stats and sizes (logical always, deep stats when detailed)
             bool disableStoreStats = false;
@@ -1838,6 +1874,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     disableStoreStats = (v == "1" || v == "true" || v == "yes" || v == "on");
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             if (cs) {
                 // Read cached ContentStore stats. cs->getStats() triggers a
@@ -1900,6 +1937,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                         out.volumeUsedBytes = volumeUsed;
                     }
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
             }
             // Search engine and reason when unavailable
@@ -1918,11 +1956,13 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     else
                         reason = "not_initialized";
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
                 out.searchEngineReason = reason;
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
     // Resolved data dir
     try {
@@ -1932,6 +1972,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                 out.dataDir = dd.string();
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Embedding runtime details (best-effort)
@@ -1951,6 +1992,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                             static_cast<uint32_t>(provider->getEmbeddingDim(modelName));
                     }
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
             }
             // Backend label and model details
@@ -1969,6 +2011,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                                         static_cast<uint32_t>(mi.value().embeddingDim);
                             }
                         } catch (...) {
+                            // Metrics collection is best-effort; leave snapshot defaults.
                         }
                     }
                     // Best-effort local model path resolution
@@ -1983,15 +2026,18 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                                     out.embeddingModelPath = p.string();
                             }
                         } catch (...) {
+                            // Metrics collection is best-effort; leave snapshot defaults.
                         }
                     }
                 } else {
                     out.embeddingBackend = "unknown";
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Add component-level memory where available (provider, vector index)
@@ -2003,6 +2049,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     prov = static_cast<std::uint64_t>(mp->getMemoryUsage());
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             if (prov > 0)
                 out.memoryBreakdownBytes["provider_bytes"] = prov;
@@ -2010,6 +2057,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             // Vector memory is reported by VectorDatabase (sqlite-vec).
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Vector diagnostics (uses non-blocking cached snapshots)
@@ -2020,6 +2068,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         out.vectorScoringEnabled = d.scoringEnabled;
         out.searchEngineBuildReason = d.buildReason;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 }
 
@@ -2166,6 +2215,7 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 }
 
@@ -2180,10 +2230,12 @@ EmbeddingServiceInfo DaemonMetrics::getEmbeddingServiceInfo() const {
                     auto loaded = provider->getLoadedModels();
                     info.modelsLoaded = static_cast<int>(loaded.size());
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 #ifdef YAMS_USE_ONNX_RUNTIME
     info.onnxRuntimeEnabled = true;

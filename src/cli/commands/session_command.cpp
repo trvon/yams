@@ -589,6 +589,7 @@ private:
                 if (in.good())
                     in >> j;
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         return j;
@@ -608,6 +609,7 @@ private:
                 if (in.good())
                     in >> idx;
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         idx["current"] = name;

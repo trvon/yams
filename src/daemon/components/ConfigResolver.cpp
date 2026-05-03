@@ -400,6 +400,7 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
             }
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Env overrides (config component owns this precedence)
@@ -506,6 +507,7 @@ ConfigResolver::EmbeddingChunkingPolicy ConfigResolver::resolveEmbeddingChunking
             applyFromKv(parseSimpleTomlFlat(cfgPath));
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Env overrides (backwards compatible with existing embedding pipeline vars).

@@ -53,6 +53,7 @@ AbiPluginHost::AbiPluginHost(ServiceManager* sm, const std::filesystem::path& tr
         else
             pImpl->loader.setNamePolicy(AbiPluginLoader::NamePolicy::Relaxed);
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
 
@@ -133,6 +134,7 @@ std::vector<std::pair<std::filesystem::path, std::string>> AbiPluginHost::getLas
             out.emplace_back(s.path, s.reason);
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     return out;
 }

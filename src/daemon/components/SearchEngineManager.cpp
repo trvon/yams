@@ -322,6 +322,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                         ev.error = "build_timeout";
                         fsm_.dispatch(ev);
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
                         std::move(h)(std::exception_ptr{},
@@ -368,6 +369,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                             fsm_.dispatch(ev);
                             refreshSnapshot();
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                         spdlog::info("[SearchEngineManager] Build completed: vector={}",
                                      vectorEnabled);
@@ -377,6 +379,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                             ev.error = result.error().message;
                             fsm_.dispatch(ev);
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                         spdlog::error("[SearchEngineManager] Build failed: {}",
                                       result.error().message);
