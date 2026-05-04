@@ -2,6 +2,11 @@
 
 ## Solution
 
+## Release Note
+- [ ] Internal only (no user-facing release note)
+- User-facing summary (1-2 bullets, outcome-focused):
+- Migration or operator note (if needed):
+
 ## Breaking Changes
 - [ ] None
 - [ ] Yes — details:

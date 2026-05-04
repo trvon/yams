@@ -426,13 +426,6 @@ jobs:
           if_no_artifact_found: warn
 
 
-      - name: Extract release notes from CHANGELOG.md (stable only)
-        id: changelog
-        if: steps.meta.outputs.channel == 'stable' && github.actor != 'nektos/act'
-        uses: ffurrer2/extract-release-notes@v2
-        with:
-          changelog_file: CHANGELOG.md
-
       # Hosted runners: install and configure Conan (self-hosted must already be configured)
       - name: Install Conan (hosted only)
         if: ${{ matrix.hosted }}
@@ -2062,52 +2055,48 @@ jobs:
         uses: ffurrer2/extract-release-notes@v2
         with:
           changelog_file: CHANGELOG.md
+          release_notes_file: RELEASE_NOTES_EXTRACTED.md
 
-      - name: Extract grouped changelogs for minor version (stable only)
-        id: grouped-changelog
-        if: steps.meta.outputs.channel == 'stable'
+      - name: Prepare release body
+        id: release-body
         shell: bash
+        env:
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          RELEASE_NAME: ${{ steps.meta.outputs.release_name }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          # Extract minor version from current tag
-          CURRENT_VERSION="${{ steps.meta.outputs.version }}"
-          MINOR_VERSION=$(echo "$CURRENT_VERSION" | sed -E 's/^v?([0-9]+\.[0-9]+).*/\1/')
+          set -euo pipefail
 
-          echo "Current version: $CURRENT_VERSION"
-          echo "Extracting all changes for minor version: $MINOR_VERSION"
+          BODY_FILE="RELEASE_BODY.md"
 
-          # Create grouped changelog file
-          GROUPED_FILE="grouped_changelog_${MINOR_VERSION}.md"
+          if [ "$CHANNEL" = "stable" ]; then
+            if [ ! -s "RELEASE_NOTES_EXTRACTED.md" ]; then
+              echo "Expected extracted stable release notes in RELEASE_NOTES_EXTRACTED.md" >&2
+              exit 1
+            fi
 
-          # Extract all entries for this minor version from CHANGELOG.md
-          echo "# Release Notes for v${MINOR_VERSION}.x Series" > "$GROUPED_FILE"
-          echo "" >> "$GROUPED_FILE"
-          echo "This release is part of the v${MINOR_VERSION}.x series. Below are all changes in this series:" >> "$GROUPED_FILE"
-          echo "" >> "$GROUPED_FILE"
+            {
+              echo "## Release Notes"
+              echo
+              cat RELEASE_NOTES_EXTRACTED.md
+              echo
+              echo "Full changelog: [CHANGELOG.md]($REPO_URL/blob/$TAG/CHANGELOG.md)"
+            } > "$BODY_FILE"
+          else
+            FULL_SHA="$(git rev-parse HEAD)"
+            SHORT_SHA="$(git rev-parse --short HEAD)"
 
-          # Parse CHANGELOG.md and extract all sections matching the minor version
-          awk -v minor="$MINOR_VERSION" ' 
-            /^## \[v?[0-9]+\.[0-9]+\.[0-9]+/ {
-              version_str = $2
-              gsub(/ \[v?/, "", version_str)
-              gsub(/ /, "", version_str)
-              split(version_str, version_parts, ".")
-              version_minor = version_parts[1] "." version_parts[2]
+            {
+              echo "## ${RELEASE_NAME}"
+              echo
+              printf -- '- Channel: `%s`\n' "$CHANNEL"
+              printf -- '- Commit: [`%s`](%s/commit/%s)\n' "$SHORT_SHA" "$REPO_URL" "$FULL_SHA"
+              echo "- Changelog: [CHANGELOG.md]($REPO_URL/blob/main/CHANGELOG.md)"
+            } > "$BODY_FILE"
+          fi
 
-              if (version_minor == minor) {
-                in_section = 1
-                print $0
-                next
-              } else {
-                in_section = 0
-              }
-            }
-            /^## \[/ && in_section { in_section = 0 }
-            in_section { print }
-          ' CHANGELOG.md >> "$GROUPED_FILE"
-
-          # Store path for later use
-          echo "grouped_changelog_file=$GROUPED_FILE" >> $GITHUB_OUTPUT
-          echo "minor_version=$MINOR_VERSION" >> $GITHUB_OUTPUT
+          echo "body_file=$BODY_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Prepare release assets
         shell: bash
@@ -2130,14 +2119,12 @@ jobs:
           done
           echo "Collected assets:"
           ls -la assets/
-      # Combine step removed; use CHANGELOG.md directly for release notes
-
       - name: "Dry-run: print release notes (act only)"
         if: ${{ github.actor == 'nektos/act' }}
         shell: bash
         run: |
-          echo "--- CHANGELOG.md (dry-run) ---"
-          cat CHANGELOG.md
+          echo "--- RELEASE_BODY.md (dry-run) ---"
+          cat "${{ steps.release-body.outputs.body_file }}"
 
       - name: Create or update GitHub Release (draft, upload assets first)
         if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' }}
@@ -2145,7 +2132,7 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.release_name }}
-          body_path: CHANGELOG.md
+          body_path: ${{ steps.release-body.outputs.body_file }}
           files: assets/*
           draft: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
@@ -2165,7 +2152,7 @@ jobs:
           fi
           TAG="${{ steps.meta.outputs.tag }}"
           # publish the release after assets are uploaded
-          gh release edit "$TAG" --draft=false --title "${{ steps.meta.outputs.release_name }}" --notes-file CHANGELOG.md \
+          gh release edit "$TAG" --draft=false --title "${{ steps.meta.outputs.release_name }}" --notes-file "${{ steps.release-body.outputs.body_file }}" \
             ${{ steps.meta.outputs.prerelease == 'true' && '--prerelease' || '--latest' }}
 
       - name: Validate Homebrew asset URLs (post-publish)

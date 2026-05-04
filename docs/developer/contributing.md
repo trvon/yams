@@ -126,10 +126,13 @@ SPDX-License-Identifier: GPL-3.0-or-later
 - Expect focused, technical feedback (correctness, clarity, safety, performance).
 - Address comments with additional commits; avoid force-pushing during review unless asked.
 - Maintainers will choose the merge strategy (squash or rebase) to keep history clean.
+- Keep the final merge or squash title concise and user-facing when the change should appear in release notes; `release-please` uses commit subjects as changelog input.
 - Post-merge: maintainers may follow up with minor style/docs adjustments for consistency.
 
 ## Release notes
-- For user-visible changes, propose a concise entry for the changelog/release notes in the PR description.
+- For user-visible changes, include a 1-2 bullet release note in the PR description.
+- Focus on user-visible behavior, impact, and migration steps; do not restate CI, refactors, test-only work, or broad implementation churn.
+- Prefer concise conventional subjects such as `feat:`, `fix:`, `perf:`, or `security:` over checkpoint-style commit titles.
 - Mention migration steps if behavior or configuration changes.
 
 Thank you for keeping contributions precise, tested, and well-documented.
