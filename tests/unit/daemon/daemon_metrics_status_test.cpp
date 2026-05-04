@@ -3491,6 +3491,21 @@ TEST_CASE("RequestDispatcher: download handler enforces daemon policy",
         }
         return latest;
     };
+    auto waitForFollowRedirectsCapture = [](std::chrono::milliseconds timeout =
+                                                std::chrono::seconds(2)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        std::optional<bool> latest;
+        while (std::chrono::steady_clock::now() < deadline) {
+            latest = RequestDispatcher::__test_lastDownloadServiceFollowRedirects();
+            if (latest.has_value()) {
+                return latest;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return latest;
+    };
+
+    RequestDispatcher::__test_resetDownloadServiceRequestCapture();
 
     SECTION("disabled policy returns safe reminder") {
         DaemonConfig cfg;
@@ -3948,6 +3963,44 @@ TEST_CASE("RequestDispatcher: download handler enforces daemon policy",
         CHECK(finalStatus.hash == "sha256:forced-download-success");
         CHECK(finalStatus.localPath.find("forced-download-success.bin") != std::string::npos);
         CHECK(finalStatus.size == 64);
+    }
+
+    SECTION("daemon download disables redirects and surfaces blocked redirect failures") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_redirect_blocked_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.allowedHosts = {"*"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        RequestDispatcher::__test_forceDownloadServiceFailureOnce(
+            "Redirect blocked by policy during probe (follow_redirects=false)");
+
+        auto resp =
+            dispatchDownload(dispatcher, "https://example.com/file.bin", {}, "sha256:abcd1234");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK(dl.state == "queued");
+        CHECK_FALSE(dl.jobId.empty());
+
+        const auto lastFollowRedirects = waitForFollowRedirectsCapture();
+        REQUIRE(lastFollowRedirects.has_value());
+        CHECK_FALSE(*lastFollowRedirects);
+
+        const auto finalStatus = waitForDownloadJob(dispatcher, dl.jobId);
+        CHECK(finalStatus.jobId == dl.jobId);
+        CHECK(finalStatus.state == "failed");
+        CHECK(finalStatus.error ==
+              "Redirect blocked by policy during probe (follow_redirects=false)");
     }
 }
 

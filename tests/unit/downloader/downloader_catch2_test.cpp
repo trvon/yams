@@ -227,6 +227,7 @@ public:
     std::vector<std::byte> payload;
     bool checkCancelBeforeSink{false};
     bool cancelObserved{false};
+    bool lastProbeFollowRedirects{true};
     int probeCallCount{0};
     int fetchCallCount{0};
 
@@ -236,8 +237,10 @@ public:
                          std::optional<std::string>& lastModifiedOut,
                          std::optional<std::string>& contentTypeOut,
                          std::optional<std::string>& suggestedFilenameOut, const TlsConfig&,
-                         const std::optional<std::string>&, std::chrono::milliseconds) override {
+                         const std::optional<std::string>&, bool followRedirects,
+                         std::chrono::milliseconds) override {
         probeCallCount++;
+        lastProbeFollowRedirects = followRedirects;
         resumeSupportedOut = resumeSupported;
         contentLengthOut = contentLength;
         etagOut = etag;
@@ -286,8 +289,11 @@ public:
 
     const fs::path& lastFinalPath() const { return lastFinalPath_; }
 
+    const std::string& lastSessionId() const { return lastSessionId_; }
+
     Expected<fs::path> createStagingFile(const StorageConfig&, std::string_view sessionId,
                                          std::string_view tempExtension) override {
+        lastSessionId_ = std::string(sessionId);
         currentPath_ = stagingPath(sessionId, tempExtension);
         data_.clear();
         writeToFile();
@@ -298,6 +304,7 @@ public:
                                                std::string_view tempExtension,
                                                std::optional<std::uint64_t> expectedSize,
                                                std::uint64_t& currentSize) override {
+        lastSessionId_ = std::string(sessionId);
         currentPath_ = stagingPath(sessionId, tempExtension);
         data_ = initialData_;
         currentSize = data_.size();
@@ -386,6 +393,7 @@ private:
     std::vector<std::byte> data_{};
     fs::path currentPath_{};
     fs::path lastFinalPath_{};
+    std::string lastSessionId_{};
 };
 
 std::vector<std::byte> to_bytes(std::string_view s) {
@@ -615,6 +623,8 @@ TEST_CASE("DownloadManager: Resume functionality", "[downloader][resume]") {
         req.url = "https://example.com/file.bin";
         req.resume = true;
         req.chunkSizeBytes = 5;
+        req.checksum = Checksum{HashAlgo::Sha256,
+                                "0b21b7db59cd154904fac6336fa7d2be1bab38d632794f281549584068cdcb74"};
 
         auto result = dm->download(req);
         REQUIRE(result.ok());
@@ -639,13 +649,132 @@ TEST_CASE("DownloadManager: Resume functionality", "[downloader][resume]") {
                              std::istreambuf_iterator<char>());
         CHECK(contents == "HELLOWORLD");
 
-        CHECK(final.hash.rfind("sha256:", 0) == 0);
+        CHECK(final.hash ==
+              "sha256:0b21b7db59cd154904fac6336fa7d2be1bab38d632794f281549584068cdcb74");
         CHECK(final.sizeBytes == 10);
+    }
+
+    SECTION("Uses a stable resume session id for the same URL") {
+        auto makeResumingManager = [&](FakeDiskWriter*& diskPtr) {
+            auto http = std::make_unique<TestHttpAdapter>();
+            auto* httpPtr = http.get();
+            httpPtr->resumeSupported = true;
+            httpPtr->contentLength = 10;
+            httpPtr->etag = "etag-123";
+            httpPtr->payload = to_bytes("WORLD");
+
+            auto disk = std::make_unique<FakeDiskWriter>(storage);
+            diskPtr = disk.get();
+            diskPtr->setInitialData(to_bytes("HELLO"));
+
+            auto resume = std::make_unique<TrackingResumeStore>();
+            IResumeStore::State initial;
+            initial.totalBytes = 10;
+            initial.completedRanges.emplace_back(0, 5);
+            initial.etag = "etag-123";
+            resume->initialState = initial;
+
+            return makeDownloadManagerWithDependencies(storage, cfg, std::move(http),
+                                                       std::move(disk), nullptr, std::move(resume),
+                                                       nullptr);
+        };
+
+        FakeDiskWriter* firstDisk = nullptr;
+        auto firstManager = makeResumingManager(firstDisk);
+
+        DownloadRequest req;
+        req.url = "https://example.com/file.bin";
+        req.resume = true;
+
+        auto firstResult = firstManager->download(req);
+        REQUIRE(firstResult.ok());
+        REQUIRE_FALSE(firstDisk->lastSessionId().empty());
+
+        FakeDiskWriter* secondDisk = nullptr;
+        auto secondManager = makeResumingManager(secondDisk);
+
+        auto secondResult = secondManager->download(req);
+        REQUIRE(secondResult.ok());
+        REQUIRE_FALSE(secondDisk->lastSessionId().empty());
+        CHECK(secondDisk->lastSessionId() == firstDisk->lastSessionId());
     }
 
     // Cleanup
     std::error_code ec;
     fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("DownloadManager: probe forwards follow_redirects policy", "[downloader][redirect]") {
+    auto tempDir = make_temp_dir();
+    StorageConfig storage{tempDir / "objects", tempDir / "staging"};
+    DownloaderConfig cfg;
+
+    auto http = std::make_unique<TestHttpAdapter>();
+    auto* httpPtr = http.get();
+    httpPtr->resumeSupported = false;
+    httpPtr->contentLength = 5;
+    httpPtr->payload = to_bytes("ABCDE");
+
+    auto disk = std::make_unique<FakeDiskWriter>(storage);
+    auto dm = makeDownloadManagerWithDependencies(storage, cfg, std::move(http), std::move(disk),
+                                                  nullptr, nullptr, nullptr);
+
+    DownloadRequest req;
+    req.url = "https://example.com/no-redirects.bin";
+    req.followRedirects = false;
+
+    auto result = dm->download(req);
+    REQUIRE(result.ok());
+    CHECK_FALSE(httpPtr->lastProbeFollowRedirects);
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("DownloadManager: verifies configured checksum algorithms",
+          "[downloader][checksum][algorithms]") {
+    const auto sha256 =
+        std::string{"f0393febe8baaa55e32f7be2a7cc180bf34e52137d99e056c817a9c07b8f239a"};
+    const auto sha512 =
+        std::string{"9989a8fcbc29044b5883a0a36c146fe7415b1439e995b4d806ea0af7da9ca4390eb92a604b3ecf"
+                    "a3d75f9911c768fbe2aecc59eff1e48dcaeca1957bdde01dfb"};
+    const auto md5 = std::string{"2ecdde3959051d913f61b14579ea136d"};
+
+    auto runCase = [&](HashAlgo algo, const std::string& expectedHex) {
+        auto tempDir = make_temp_dir();
+        StorageConfig storage{tempDir / "objects", tempDir / "staging"};
+        DownloaderConfig cfg;
+
+        auto http = std::make_unique<TestHttpAdapter>();
+        http->resumeSupported = false;
+        http->contentLength = 5;
+        http->payload = to_bytes("ABCDE");
+
+        auto disk = std::make_unique<FakeDiskWriter>(storage);
+        auto dm = makeDownloadManagerWithDependencies(storage, cfg, std::move(http),
+                                                      std::move(disk), nullptr, nullptr, nullptr);
+
+        DownloadRequest req;
+        req.url = "https://example.com/checksum.bin";
+        req.checksum = Checksum{algo, expectedHex};
+
+        auto result = dm->download(req);
+        REQUIRE(result.ok());
+        CHECK(result.value().success);
+
+        std::error_code ec;
+        fs::remove_all(tempDir, ec);
+    };
+
+    SECTION("sha256") {
+        runCase(HashAlgo::Sha256, sha256);
+    }
+    SECTION("sha512") {
+        runCase(HashAlgo::Sha512, sha512);
+    }
+    SECTION("md5") {
+        runCase(HashAlgo::Md5, md5);
+    }
 }
 
 TEST_CASE("DownloadManager: Export with ETag matching", "[downloader][export]") {
@@ -771,7 +900,7 @@ TEST_CASE("TestHttpAdapter: Behavior verification", "[downloader][adapter]") {
         std::optional<std::string> etag, lastModified, contentType, filename;
 
         adapter.probe("http://test.com", {}, resumeSupported, contentLength, etag, lastModified,
-                      contentType, filename, TlsConfig{}, std::nullopt,
+                      contentType, filename, TlsConfig{}, std::nullopt, true,
                       std::chrono::milliseconds{1000});
 
         CHECK(adapter.probeCallCount == 1);

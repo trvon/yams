@@ -17,6 +17,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <thread>
 
 // PyInstaller executables need ~3s to unpack/start on first run (can be slower on CI)
@@ -137,6 +138,19 @@ std::string readStdoutWithTimeout(PluginProcess& process,
     auto data = process.read_stdout();
     return from_bytes(data);
 }
+
+#ifdef _WIN32
+std::string resolvePowerShellExecutable() {
+    auto exists = [](const char* path) { return fs::exists(fs::path(path)); };
+    if (exists(R"(C:\Program Files\PowerShell\7\pwsh.exe)")) {
+        return R"(C:\Program Files\PowerShell\7\pwsh.exe)";
+    }
+    if (exists(R"(C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe)")) {
+        return R"(C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe)";
+    }
+    return "powershell.exe";
+}
+#endif
 
 } // namespace
 
@@ -280,15 +294,13 @@ TEST_CASE("PluginProcess launcher Windows-specific", "[extraction][plugin][launc
     }
 
     SECTION("Spawn powershell with Write-Output") {
-        PluginProcessConfig config{
-            .executable = "powershell.exe",
-            .args = {"-NoProfile", "-Command", "Write-Output 'hello from powershell'"}};
+        PluginProcessConfig config{.executable = resolvePowerShellExecutable(),
+                                   .args = {"-NoProfile", "-Command",
+                                            "[Console]::Out.WriteLine('hello from powershell')"}};
 
         PluginProcess process{std::move(config)};
 
-        std::this_thread::sleep_for(std::chrono::milliseconds{1000});
-
-        auto output = from_bytes(process.read_stdout());
+        auto output = readStdoutWithTimeout(process, std::chrono::seconds{5});
         INFO("Output: " << output);
 
         CHECK(output.find("hello") != std::string::npos);

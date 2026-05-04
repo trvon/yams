@@ -919,7 +919,11 @@ TEST_CASE("CoreML denylisted sessions clamp CPU fallback resources",
         CHECK(session.getExecutionProvider() == "cpu");
 
         const auto [intraThreads, interThreads] = session.getThreading();
+#ifdef _WIN32
+        CHECK(intraThreads == 1);
+#else
         CHECK(intraThreads == 2);
+#endif
         CHECK(interThreads == 1);
         CHECK(session.getLearnedBatchLimit() == 4);
         CHECK(TuneAdvisor::getEmbedDocCap() == 4);

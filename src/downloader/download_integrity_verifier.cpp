@@ -87,9 +87,8 @@ public:
 
     ~OpenSslIntegrityVerifier() override = default;
 
-    void reset([[maybe_unused]] HashAlgo algo) override {
-        // MVP: Only SHA-256 guaranteed. If not Sha256, still initialize with Sha256.
-        _algo = HashAlgo::Sha256;
+    void reset(HashAlgo algo) override {
+        _algo = algo;
 
         _md = resolve_algo(_algo);
         _ctx = EvpMdCtx{};

@@ -1415,10 +1415,12 @@ TEST_CASE("SearchTuner: auto-persist triggers after observe threshold",
     }
     REQUIRE(std::filesystem::exists(path));
 
-    std::ifstream in(path);
-    nlohmann::json j;
-    in >> j;
-    CHECK(j.at("observations").get<std::uint64_t>() >= 20);
+    {
+        std::ifstream in(path);
+        nlohmann::json j;
+        in >> j;
+        CHECK(j.at("observations").get<std::uint64_t>() >= 20);
+    }
 
     std::filesystem::remove(path);
 }

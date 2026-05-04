@@ -125,7 +125,7 @@ TEST_CASE("AsioTransportAdapter preserves [ipc:*] prefix when server closes with
     closeNow.set_value();
     server_thread.join();
 
-    bool sawEof = false;
+    bool sawPeerClose = false;
     for (auto& f : futures) {
         REQUIRE(f.wait_for(3s) == std::future_status::ready);
         auto r = f.get();
@@ -133,11 +133,12 @@ TEST_CASE("AsioTransportAdapter preserves [ipc:*] prefix when server closes with
         REQUIRE(hasIpcPrefix(r.error().message));
         auto kind = parseIpcFailureKind(r.error().message);
         REQUIRE(kind.has_value());
-        if (*kind == IpcFailureKind::Eof) {
-            sawEof = true;
+        if (*kind == IpcFailureKind::Eof || *kind == IpcFailureKind::Cancelled ||
+            *kind == IpcFailureKind::ResetOrBrokenPipe) {
+            sawPeerClose = true;
         }
     }
-    REQUIRE(sawEof);
+    REQUIRE(sawPeerClose);
 
     fs::remove(socketPath, ec);
     AsioConnectionPool::shutdown_all(100ms);

@@ -185,7 +185,9 @@ struct SearchServiceFixture {
         appContext.metadataRepo = metadataRepo;
         appContext.searchEngine = searchEngine;
         appContext.kgStore = kgStore;
-        appContext.workerExecutor = boost::asio::system_executor();
+        workerGuard.emplace(workerIo.get_executor());
+        workerThread = std::thread([this]() { workerIo.run(); });
+        appContext.workerExecutor = workerIo.get_executor();
         searchService = makeSearchService(appContext);
 
         // Test data
@@ -216,6 +218,11 @@ struct SearchServiceFixture {
         searchService.reset();
         searchEngine.reset();
         appContext.searchEngine.reset();
+        workerGuard.reset();
+        if (workerThread.joinable()) {
+            workerThread.join();
+        }
+        appContext.workerExecutor = {};
         appContext.kgStore.reset();
         appContext.store.reset();
         appContext.metadataRepo.reset();
@@ -326,6 +333,10 @@ struct SearchServiceFixture {
     std::shared_ptr<KnowledgeGraphStore> kgStore;
     std::shared_ptr<IContentStore> contentStore;
     std::shared_ptr<search::SearchEngine> searchEngine;
+    boost::asio::io_context workerIo;
+    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
+        workerGuard;
+    std::thread workerThread;
     AppContext appContext;
     std::shared_ptr<ISearchService> searchService;
     std::unique_ptr<yams::test::FixtureManager> fixtureManager;

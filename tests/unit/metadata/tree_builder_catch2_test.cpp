@@ -25,7 +25,9 @@ class MockStorageEngine : public IStorageEngine {
 public:
     Result<void> store(std::string_view hash, std::span<const std::byte> data) override {
         std::vector<uint8_t> uint8Data(data.size());
-        std::memcpy(uint8Data.data(), data.data(), data.size());
+        if (!data.empty()) {
+            std::memcpy(uint8Data.data(), data.data(), data.size());
+        }
         storage_[std::string(hash)] = std::move(uint8Data);
         return {};
     }
@@ -36,7 +38,9 @@ public:
             return Error{ErrorCode::NotFound, "Hash not found"};
         }
         std::vector<std::byte> byteData(it->second.size());
-        std::memcpy(byteData.data(), it->second.data(), it->second.size());
+        if (!it->second.empty()) {
+            std::memcpy(byteData.data(), it->second.data(), it->second.size());
+        }
         return byteData;
     }
 
@@ -47,7 +51,9 @@ public:
         }
         IStorageEngine::RawObject obj;
         obj.data.resize(it->second.size());
-        std::memcpy(obj.data.data(), it->second.data(), it->second.size());
+        if (!it->second.empty()) {
+            std::memcpy(obj.data.data(), it->second.data(), it->second.size());
+        }
         obj.header = std::nullopt;
         return obj;
     }

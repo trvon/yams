@@ -11,11 +11,12 @@
  * - Optional rate limiting and cooperative cancellation
  *
  * NOTE:
- * - Resume is not implemented yet in this MVP beyond a probe; we always download from offset 0.
- * - ETag/Last-Modified are not captured by the current Http adapter MVP; fields will remain empty.
+ * - Resume reuses persisted range metadata plus a stable staging session id when validators match.
+ * - The transport captures ETag/Last-Modified metadata for resume and export decisions.
  */
 
 #include <yams/common/fs_utils.h>
+#include <yams/crypto/hasher.h>
 #include <yams/downloader/downloader.hpp>
 
 #include <nlohmann/json.hpp>
@@ -173,6 +174,41 @@ std::optional<std::string> computeFileSha256(const std::filesystem::path& path) 
     return result.hex;
 }
 
+yams::downloader::Expected<void> hashExistingPrefix(yams::downloader::IIntegrityVerifier& verifier,
+                                                    const std::filesystem::path& path,
+                                                    std::uint64_t bytesToHash) {
+    if (bytesToHash == 0) {
+        return {};
+    }
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return yams::downloader::Error{yams::downloader::ErrorCode::IoError,
+                                       "Failed to reopen staging file for resume hashing: " +
+                                           path.string()};
+    }
+
+    std::array<char, 1 << 16> buffer{};
+    std::uint64_t remaining = bytesToHash;
+    while (remaining > 0) {
+        const auto toRead =
+            static_cast<std::streamsize>(std::min<std::uint64_t>(remaining, buffer.size()));
+        in.read(buffer.data(), toRead);
+        const auto got = in.gcount();
+        if (got <= 0) {
+            return yams::downloader::Error{
+                yams::downloader::ErrorCode::IoError,
+                "Failed to read existing staging bytes for resume hashing: " + path.string()};
+        }
+
+        verifier.update(std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(buffer.data()), static_cast<std::size_t>(got)));
+        remaining -= static_cast<std::uint64_t>(got);
+    }
+
+    return {};
+}
+
 } // namespace
 
 namespace yams::downloader {
@@ -303,21 +339,20 @@ std::unique_ptr<IRateLimiter> makeRateLimiter();
 
 // ---- Utility: simple session id ----
 static std::string makeSessionId(std::string_view url) {
-    using clock = std::chrono::steady_clock;
-    auto now_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now().time_since_epoch())
-            .count();
-    std::string sid{"sess-"};
-    sid.append(std::to_string(now_ns));
-    sid.push_back('-');
+    try {
+        auto hasher = yams::crypto::createSHA256Hasher();
+        if (hasher) {
+            const auto digest = hasher->hash(std::string(url));
+            if (!digest.empty()) {
+                return "sess-" + digest;
+            }
+        }
+    } catch (const std::exception& ex) {
+        spdlog::debug("Falling back to std::hash session id for {}: {}", url, ex.what());
+    }
 
-    // Use a simple hash of the URL to avoid invalid filename characters
-    // This creates a unique identifier without special characters
     std::hash<std::string_view> hasher;
-    auto url_hash = hasher(url);
-    sid.append(std::to_string(url_hash));
-
-    return sid;
+    return "sess-" + std::to_string(hasher(url));
 }
 
 // ---- Utility: bytes to size_t guard ----
@@ -383,10 +418,10 @@ public:
             std::optional<std::string> currentContentType{};
             std::optional<std::string> suggestedFilename{};
             {
-                auto pr =
-                    http_->probe(request.url, request.headers, resumeSupported, contentLength,
-                                 currentEtag, currentLastModified, currentContentType,
-                                 suggestedFilename, request.tls, request.proxy, request.timeout);
+                auto pr = http_->probe(request.url, request.headers, resumeSupported, contentLength,
+                                       currentEtag, currentLastModified, currentContentType,
+                                       suggestedFilename, request.tls, request.proxy,
+                                       request.followRedirects, request.timeout);
                 if (!pr.ok()) {
                     return pr.error();
                 }
@@ -464,8 +499,18 @@ public:
                 completedRanges.clear();
             }
 
-            // Prepare integrity verifier (SHA-256 MVP)
-            integ_->reset(HashAlgo::Sha256);
+            const HashAlgo effectiveHashAlgo =
+                request.checksum ? request.checksum->algo : HashAlgo::Sha256;
+
+            // Prepare integrity verifier for the active checksum policy.
+            integ_->reset(effectiveHashAlgo);
+            if (resumeOffset > 0) {
+                auto hashRes = hashExistingPrefix(*integ_, stagingFile, resumeOffset);
+                if (!hashRes.ok()) {
+                    disk_->cleanup(stagingFile);
+                    return hashRes.error();
+                }
+            }
 
             // Running counters
             std::uint64_t written = resumeOffset;
@@ -589,10 +634,9 @@ public:
             // If a checksum is provided in request, enforce verification
             if (request.checksum.has_value()) {
                 const auto& exp = *request.checksum;
-                // MVP supports SHA-256; if other algo requested, treat as mismatch for now
-                bool algo_ok = (exp.algo == HashAlgo::Sha256);
-                bool hex_ok = algo_ok && (to_lower(exp.hex) == to_lower(digest.hex));
-                if (!algo_ok || !hex_ok) {
+                const bool algoOk = (exp.algo == digest.algo);
+                const bool hexOk = algoOk && (to_lower(exp.hex) == to_lower(digest.hex));
+                if (!algoOk || !hexOk) {
                     disk_->cleanup(stagingFile);
                     return Error{ErrorCode::ChecksumMismatch, "Checksum mismatch (expected " +
                                                                   exp.hex + ", got " + digest.hex +
