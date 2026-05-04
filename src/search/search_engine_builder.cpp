@@ -134,17 +134,17 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         cfg.enableParallelExecution = options.config.enableParallelExecution;
         cfg.includeDebugInfo = options.config.includeDebugInfo;
 
-        spdlog::info(
-            "SearchEngine using override state={} (zoom={}, k={}, text={:.2f}, vector={:.2f}, "
-            "fusion={}, vector_gate={:.2f}/{:.2f}, lexical_floor={}@{:.3f}, "
-            "path_dedup={}, lexical_tiebreak={}, semantic_rescue={}@{:.4f})",
-            tuningStateToString(overrideState),
-            SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel), params.rrfK,
-            cfg.textWeight, cfg.vectorWeight,
-            SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy), cfg.vectorOnlyThreshold,
-            cfg.vectorOnlyPenalty, cfg.lexicalFloorTopN, cfg.lexicalFloorBoost,
-            cfg.enablePathDedupInFusion, cfg.enableLexicalTieBreak, cfg.semanticRescueSlots,
-            cfg.semanticRescueMinVectorScore);
+        spdlog::info("SearchEngine using override state={} (zoom={}, k={}, text={:.2f}, "
+                     "simeon_text={:.2f}, vector={:.2f}, "
+                     "fusion={}, vector_gate={:.2f}/{:.2f}, lexical_floor={}@{:.3f}, "
+                     "path_dedup={}, lexical_tiebreak={}, semantic_rescue={}@{:.4f})",
+                     tuningStateToString(overrideState),
+                     SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel), params.rrfK,
+                     cfg.textWeight, cfg.simeonTextWeight, cfg.vectorWeight,
+                     SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                     cfg.vectorOnlyThreshold, cfg.vectorOnlyPenalty, cfg.lexicalFloorTopN,
+                     cfg.lexicalFloorBoost, cfg.enablePathDedupInFusion, cfg.enableLexicalTieBreak,
+                     cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore);
     } else if (options.autoTune && metadataRepo_) {
         // Get corpus statistics from metadata repository
         auto statsResult = metadataRepo_->getCorpusStats();
@@ -159,22 +159,24 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.includeDebugInfo = options.config.includeDebugInfo;
             {
                 const auto& tp = runtimeTuner->getParams();
-                spdlog::info("SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
-                             "(zoom={}, k={}, "
-                             "text={:.2f}[{}], vector={:.2f}[{}], kg={:.2f}[{}], "
-                             "fusion={}, semantic_rescue={}[{}]@{:.4f})",
-                             tuningStateToString(runtimeTuner->currentState()),
-                             statsResult.value().usedOnlineOverlay,
-                             statsResult.value().reconciledComputedAtMs,
-                             SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
-                             runtimeTuner->getRrfK(), tp.weights.text.value,
-                             tuningLayerToString(tp.weights.text.source), tp.weights.vector.value,
-                             tuningLayerToString(tp.weights.vector.source), tp.weights.kg.value,
-                             tuningLayerToString(tp.weights.kg.source),
-                             SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
-                             tp.semanticRescueSlots.value,
-                             tuningLayerToString(tp.semanticRescueSlots.source),
-                             cfg.semanticRescueMinVectorScore);
+                spdlog::info(
+                    "SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
+                    "(zoom={}, k={}, "
+                    "text={:.2f}[{}], simeon_text={:.2f}[{}], vector={:.2f}[{}], kg={:.2f}[{}], "
+                    "fusion={}, semantic_rescue={}[{}]@{:.4f})",
+                    tuningStateToString(runtimeTuner->currentState()),
+                    statsResult.value().usedOnlineOverlay,
+                    statsResult.value().reconciledComputedAtMs,
+                    SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
+                    runtimeTuner->getRrfK(), tp.weights.text.value,
+                    tuningLayerToString(tp.weights.text.source), tp.weights.simeonText.value,
+                    tuningLayerToString(tp.weights.simeonText.source), tp.weights.vector.value,
+                    tuningLayerToString(tp.weights.vector.source), tp.weights.kg.value,
+                    tuningLayerToString(tp.weights.kg.source),
+                    SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                    tp.semanticRescueSlots.value,
+                    tuningLayerToString(tp.semanticRescueSlots.source),
+                    cfg.semanticRescueMinVectorScore);
             }
         } else {
             spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
@@ -186,6 +188,7 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     // These take precedence over tuning state weights and are pinned so that
     // downstream layers (zoom, intent, community) cannot override them.
     bool envTextPinned = false;
+    bool envSimeonTextPinned = false;
     bool envVectorPinned = false;
     bool envKgPinned = false;
     bool envSimilarityThresholdPinned = false;
@@ -195,6 +198,12 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             envTextPinned = true;
             spdlog::info("SearchEngine textWeight overridden to {:.2f} via env (pinned)",
                          cfg.textWeight);
+        }
+        if (auto simeonTextWeight = getEnvFloat("YAMS_SEARCH_SIMEON_TEXT_WEIGHT")) {
+            cfg.simeonTextWeight = *simeonTextWeight;
+            envSimeonTextPinned = true;
+            spdlog::info("SearchEngine simeonTextWeight overridden to {:.2f} via env (pinned)",
+                         cfg.simeonTextWeight);
         }
         if (auto graphTextWeight = getEnvFloat("YAMS_SEARCH_GRAPH_TEXT_WEIGHT")) {
             cfg.graphTextWeight = *graphTextWeight;
@@ -761,9 +770,10 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
 
     if (runtimeTuner) {
         runtimeTuner->seedRuntimeConfig(cfg);
-        if (envTextPinned || envVectorPinned || envKgPinned || envSimilarityThresholdPinned) {
-            runtimeTuner->pinEnvOverrides(envTextPinned, envVectorPinned, envKgPinned,
-                                          envSimilarityThresholdPinned);
+        if (envTextPinned || envSimeonTextPinned || envVectorPinned || envKgPinned ||
+            envSimilarityThresholdPinned) {
+            runtimeTuner->pinEnvOverrides(envTextPinned, envSimeonTextPinned, envVectorPinned,
+                                          envKgPinned, envSimilarityThresholdPinned);
         }
         if (!options.tunerStatePath.empty()) {
             auto loaded = runtimeTuner->loadAdaptiveState(options.tunerStatePath);

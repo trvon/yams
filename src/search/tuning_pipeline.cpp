@@ -72,9 +72,9 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     TunedParams params;
     params.zoomLevel = config.zoomLevel;
     params.rrfK = static_cast<int>(std::lround(config.rrfK));
-    params.weights.setAll(config.textWeight, config.vectorWeight, config.entityVectorWeight,
-                          config.pathTreeWeight, config.kgWeight, config.tagWeight,
-                          config.metadataWeight, TuningLayer::Default);
+    params.weights.setAll(config.textWeight, config.simeonTextWeight, config.vectorWeight,
+                          config.entityVectorWeight, config.pathTreeWeight, config.kgWeight,
+                          config.tagWeight, config.metadataWeight, TuningLayer::Default);
     params.similarityThreshold =
         TuningSlot<float>(config.similarityThreshold, TuningLayer::Default);
     params.vectorBoostFactor = config.vectorBoostFactor;
@@ -195,6 +195,7 @@ void applyZoomLayer(SearchEngineConfig::NavigationZoomLevel zoom,
 
         case SearchEngineConfig::NavigationZoomLevel::Street:
             params.weights.text.scaleBy(1.10f, TuningLayer::Zoom);
+            params.weights.simeonText.scaleBy(1.10f, TuningLayer::Zoom);
             params.weights.pathTree.scaleBy(1.15f, TuningLayer::Zoom);
             params.weights.entityVector.scaleBy(1.10f, TuningLayer::Zoom);
             params.weights.vector.scaleBy(0.85f, TuningLayer::Zoom);
@@ -250,6 +251,7 @@ void applyIntentLayer(QueryIntent intent, TunedParams& params) {
         case QueryIntent::Path:
             params.weights.pathTree.scaleBy(1.8f, TuningLayer::Intent);
             params.weights.text.scaleBy(0.8f, TuningLayer::Intent);
+            params.weights.simeonText.scaleBy(0.8f, TuningLayer::Intent);
             params.weights.vector.scaleBy(0.7f, TuningLayer::Intent);
             params.weights.entityVector.scaleBy(0.8f, TuningLayer::Intent);
             params.weights.kg.scaleBy(0.8f, TuningLayer::Intent);
@@ -259,11 +261,13 @@ void applyIntentLayer(QueryIntent intent, TunedParams& params) {
             params.weights.pathTree.scaleBy(1.5f, TuningLayer::Intent);
             params.weights.entityVector.scaleBy(1.5f, TuningLayer::Intent);
             params.weights.text.scaleBy(0.8f, TuningLayer::Intent);
+            params.weights.simeonText.scaleBy(0.8f, TuningLayer::Intent);
             params.weights.vector.scaleBy(0.7f, TuningLayer::Intent);
             params.weights.kg.scaleBy(0.9f, TuningLayer::Intent);
             break;
         case QueryIntent::Prose:
             params.weights.text.scaleBy(1.25f, TuningLayer::Intent);
+            params.weights.simeonText.scaleBy(1.25f, TuningLayer::Intent);
             params.weights.vector.scaleBy(0.9f, TuningLayer::Intent);
             params.weights.pathTree.scaleBy(0.6f, TuningLayer::Intent);
             params.weights.entityVector.scaleBy(0.6f, TuningLayer::Intent);
@@ -289,6 +293,8 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
 
     // Slotted fields: 60% toward target, pinned slots unmodified (set() is a no-op when pinned)
     blendSlot(params.weights.text, target.weights.text.value, kBlend, TuningLayer::Community);
+    blendSlot(params.weights.simeonText, target.weights.simeonText.value, kBlend,
+              TuningLayer::Community);
     blendSlot(params.weights.vector, target.weights.vector.value, kBlend, TuningLayer::Community);
     blendSlot(params.weights.entityVector, target.weights.entityVector.value, kBlend,
               TuningLayer::Community);
@@ -355,6 +361,8 @@ void applySemanticOnlyLayer(TunedParams& params) {
     params.similarityThreshold.forceSet(std::min(params.similarityThreshold.value, 0.0f),
                                         TuningLayer::Mode);
     params.weights.text.forceSet(std::min(params.weights.text.value, 0.20f), TuningLayer::Mode);
+    params.weights.simeonText.forceSet(std::min(params.weights.simeonText.value, 0.05f),
+                                       TuningLayer::Mode);
     params.weights.kg.forceSet(0.0f, TuningLayer::Mode);
     params.weights.vector.forceSet(std::max(params.weights.vector.value, 0.45f), TuningLayer::Mode);
     params.weights.entityVector.forceSet(std::max(params.weights.entityVector.value, 0.15f),

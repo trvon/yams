@@ -163,6 +163,7 @@ struct TunedParams {
     void applyTo(SearchEngineConfig& config) const {
         config.zoomLevel = zoomLevel;
         config.textWeight = weights.text.value;
+        config.simeonTextWeight = weights.simeonText.value;
         config.vectorWeight = weights.vector.value;
         config.entityVectorWeight = weights.entityVector.value;
         config.pathTreeWeight = weights.pathTree.value;
@@ -220,6 +221,8 @@ struct TunedParams {
             {"rrf_k", rrfK},
             {"text_weight", weights.text.value},
             {"text_weight_source", tuningLayerToString(weights.text.source)},
+            {"simeon_text_weight", weights.simeonText.value},
+            {"simeon_text_weight_source", tuningLayerToString(weights.simeonText.source)},
             {"vector_weight", weights.vector.value},
             {"vector_weight_source", tuningLayerToString(weights.vector.source)},
             {"entity_vector_weight", weights.entityVector.value},
@@ -329,7 +332,7 @@ struct TunedParams {
             // WEIGHTED_RECIPROCAL avoids COMB_MNZ's mnzBoost penalty which demotes
             // documents found by only one component.
             params.rrfK = 12; // Low k for better top-rank discrimination
-            params.weights.setAll(0.60f, 0.35f, 0.00f, 0.00f, 0.00f, 0.00f, 0.05f,
+            params.weights.setAll(0.50f, 0.10f, 0.35f, 0.00f, 0.00f, 0.00f, 0.00f, 0.05f,
                                   TuningLayer::Profile);
             // F3b's top-k unfiltered (0.0) regressed on scifact under COMB_MNZ; reverted to
             // 0.30 (E7 baseline) until a coverage-robust fusion (RRF) is wired.
@@ -467,6 +470,20 @@ struct RuntimeTelemetry {
     double latencyMs = 0.0;
     std::size_t finalResultCount = 0;
     std::size_t topWindow = 0;
+    std::size_t preFusionUniqueDocCount = 0;
+    std::size_t postFusionDocCount = 0;
+    std::size_t fusionDroppedDocCount = 0;
+    std::size_t anchoredPreFusionDocCount = 0;
+    std::size_t anchoredFusionDroppedDocCount = 0;
+    std::size_t topTextPreFusionDocCount = 0;
+    std::size_t topTextFusionDroppedDocCount = 0;
+    std::size_t vectorOnlyDocCount = 0;
+    std::size_t vectorOnlyBelowThresholdCount = 0;
+    std::size_t vectorOnlyAboveThresholdCount = 0;
+    std::size_t vectorOnlyNearMissEligibleCount = 0;
+    std::size_t semanticRescueTarget = 0;
+    std::size_t semanticRescueFinalCount = 0;
+    bool adaptiveFusionEnabled = false;
     SearchEngineConfig::NavigationZoomLevel zoomLevel =
         SearchEngineConfig::NavigationZoomLevel::Auto;
     std::map<std::string, RuntimeStageSignal> stages;
@@ -690,7 +707,7 @@ public:
      * downstream layers (zoom, intent, community, mode), guaranteeing that
      * env-var overrides reach the query unchanged.
      */
-    void pinEnvOverrides(bool textPinned, bool vectorPinned, bool kgPinned,
+    void pinEnvOverrides(bool textPinned, bool simeonTextPinned, bool vectorPinned, bool kgPinned,
                          bool similarityThresholdPinned);
 
     /**
@@ -811,6 +828,11 @@ private:
         double ewmaVectorMaxSimilarity = 0.0;
         std::uint64_t vectorStageObservations = 0;
         std::uint64_t vectorStageEmptyStreak = 0;
+        double ewmaFusionDroppedRate = 0.0;
+        double ewmaAnchoredFusionDroppedRate = 0.0;
+        double ewmaTopTextFusionDroppedRate = 0.0;
+        double ewmaVectorOnlyShare = 0.0;
+        double ewmaSemanticRescueRate = 0.0;
         bool lastObservationChanged = false;
         SearchEngineConfig::NavigationZoomLevel lastZoomLevel =
             SearchEngineConfig::NavigationZoomLevel::Auto;

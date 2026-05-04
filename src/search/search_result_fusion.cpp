@@ -76,6 +76,7 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
             scoreScale = 0.60;
             switch (comp.source) {
                 case ComponentResult::Source::Text:
+                case ComponentResult::Source::SimeonText:
                 case ComponentResult::Source::GraphText:
                     scoreScale = 1.00;
                     break;
@@ -102,6 +103,7 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
                     scoreScale = 0.75;
                     break;
                 case ComponentResult::Source::Anchor:
+                case ComponentResult::Source::CorpusAdapter:
                     scoreScale = 0.70;
                     break;
                 case ComponentResult::Source::Unknown:
@@ -128,6 +130,7 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         double pathScore = 0.0;
         double tagScore = 0.0;
         double symbolScore = 0.0;
+        double anchorScore = 0.0;
         double graphTextScore = 0.0;
         double vectorScore = 0.0;
         double graphVectorScore = 0.0;
@@ -159,7 +162,8 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
             acc.snippet = comp.snippet.value();
         }
 
-        if (comp.source == ComponentResult::Source::Text) {
+        if (comp.source == ComponentResult::Source::Text ||
+            comp.source == ComponentResult::Source::SimeonText) {
             acc.bestTextRank = std::min(acc.bestTextRank, comp.rank);
         }
         if (isTextAnchoringComponent(comp.source)) {
@@ -183,6 +187,7 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
             case ComponentResult::Source::Text:
                 acc.keywordScore += contribution;
                 break;
+            case ComponentResult::Source::SimeonText:
             case ComponentResult::Source::GraphText:
                 acc.graphTextScore += contribution;
                 break;
@@ -204,6 +209,9 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
                 acc.graphVectorScore += contribution;
                 break;
             case ComponentResult::Source::Anchor:
+            case ComponentResult::Source::CorpusAdapter:
+                acc.anchorScore += contribution;
+                break;
             case ComponentResult::Source::KnowledgeGraph:
             case ComponentResult::Source::Unknown:
                 break;
@@ -236,6 +244,9 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         }
         if (entry.second.symbolScore > 0.0) {
             r.symbolScore = entry.second.symbolScore;
+        }
+        if (entry.second.anchorScore > 0.0) {
+            r.anchorScore = entry.second.anchorScore;
         }
         if (entry.second.graphTextScore > 0.0) {
             r.graphTextScore = entry.second.graphTextScore;
@@ -335,8 +346,8 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
     };
 
     const auto lexicalAnchorScore = [](const SearchResult& r) {
-        return r.keywordScore.value_or(0.0) + r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) +
-               r.symbolScore.value_or(0.0);
+        return r.keywordScore.value_or(0.0) + r.graphTextScore.value_or(0.0) +
+               r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) + r.symbolScore.value_or(0.0);
     };
 
     const auto isVectorOnlyRescueCandidate =
@@ -499,7 +510,8 @@ std::vector<SearchResult> ResultFusion::fuseConvex(const std::vector<ComponentRe
 std::vector<SearchResult>
 ResultFusion::fuseWeightedLinearZScore(const std::vector<ComponentResult>& results) {
     auto isLexicalLeg = [](ComponentResult::Source s) noexcept {
-        return s == ComponentResult::Source::Text || s == ComponentResult::Source::GraphText;
+        return s == ComponentResult::Source::Text || s == ComponentResult::Source::SimeonText ||
+               s == ComponentResult::Source::GraphText;
     };
     auto isSemanticLeg = [](ComponentResult::Source s) noexcept {
         return s == ComponentResult::Source::Vector || s == ComponentResult::Source::GraphVector ||

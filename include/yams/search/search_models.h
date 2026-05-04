@@ -19,6 +19,7 @@ struct ComponentResult {
     float score = 0.0f;
     enum class Source {
         Text,
+        SimeonText,
         GraphText,
         PathTree,
         KnowledgeGraph,
@@ -29,6 +30,7 @@ struct ComponentResult {
         Metadata,
         Symbol,
         Anchor,
+        CorpusAdapter,
         Unknown
     } source = Source::Unknown;
     size_t rank = 0;
@@ -40,6 +42,8 @@ inline constexpr const char* componentSourceToString(ComponentResult::Source sou
     switch (source) {
         case ComponentResult::Source::Text:
             return "text";
+        case ComponentResult::Source::SimeonText:
+            return "simeon_text";
         case ComponentResult::Source::GraphText:
             return "graph_text";
         case ComponentResult::Source::PathTree:
@@ -60,6 +64,8 @@ inline constexpr const char* componentSourceToString(ComponentResult::Source sou
             return "symbol";
         case ComponentResult::Source::Anchor:
             return "anchor";
+        case ComponentResult::Source::CorpusAdapter:
+            return "corpus_adapter";
         case ComponentResult::Source::Unknown:
             return "unknown";
     }
@@ -71,6 +77,8 @@ inline float componentSourceWeight(const SearchEngineConfig& config,
     switch (source) {
         case ComponentResult::Source::Text:
             return config.textWeight;
+        case ComponentResult::Source::SimeonText:
+            return config.simeonTextWeight;
         case ComponentResult::Source::GraphText:
             return config.graphTextWeight;
         case ComponentResult::Source::PathTree:
@@ -87,6 +95,8 @@ inline float componentSourceWeight(const SearchEngineConfig& config,
             return config.tagWeight;
         case ComponentResult::Source::Metadata:
             return config.metadataWeight;
+        case ComponentResult::Source::CorpusAdapter:
+            return config.corpusAdapterWeight;
         case ComponentResult::Source::Anchor:
         case ComponentResult::Source::Symbol:
         case ComponentResult::Source::Unknown:
@@ -103,11 +113,13 @@ inline constexpr bool isVectorComponent(ComponentResult::Source source) noexcept
 
 inline constexpr bool isTextAnchoringComponent(ComponentResult::Source source) noexcept {
     return source == ComponentResult::Source::Text ||
+           source == ComponentResult::Source::SimeonText ||
            source == ComponentResult::Source::GraphText ||
            source == ComponentResult::Source::PathTree ||
            source == ComponentResult::Source::KnowledgeGraph ||
            source == ComponentResult::Source::Tag || source == ComponentResult::Source::Metadata ||
-           source == ComponentResult::Source::Symbol;
+           source == ComponentResult::Source::Symbol ||
+           source == ComponentResult::Source::CorpusAdapter;
 }
 
 inline double componentSourceScoreInResult(const SearchResult& r,
@@ -120,6 +132,7 @@ inline double componentSourceScoreInResult(const SearchResult& r,
             return r.graphVectorScore.value_or(0.0);
         case ComponentResult::Source::Text:
             return r.keywordScore.value_or(0.0);
+        case ComponentResult::Source::SimeonText:
         case ComponentResult::Source::GraphText:
             return r.graphTextScore.value_or(0.0);
         case ComponentResult::Source::KnowledgeGraph:
@@ -132,6 +145,8 @@ inline double componentSourceScoreInResult(const SearchResult& r,
         case ComponentResult::Source::Symbol:
             return r.symbolScore.value_or(0.0);
         case ComponentResult::Source::Anchor:
+            return r.anchorScore.value_or(0.0);
+        case ComponentResult::Source::CorpusAdapter:
             return r.anchorScore.value_or(0.0);
         case ComponentResult::Source::Unknown:
             return 0.0;

@@ -1,5 +1,6 @@
 #include <yams/wal/wal_entry.h>
 
+#include <array>
 #include <cstring>
 #include <iomanip>
 #include <iterator>
@@ -45,6 +46,32 @@ template <typename T> void appendObjectBytes(std::vector<std::byte>& out, const 
     out.insert(out.end(), bytes.begin(), bytes.end());
 }
 
+std::array<std::byte, yams::wal::WALEntry::Header::size()>
+stableHeaderBytes(yams::wal::WALEntry::Header header) {
+    // Header has natural padding on some targets. Zeroing a copy makes checksum bytes stable
+    // without changing the on-disk layout expected by existing WAL files.
+    yams::wal::WALEntry::Header stable{};
+    stable.magic = header.magic;
+    stable.version = header.version;
+    stable.sequenceNum = header.sequenceNum;
+    stable.timestamp = header.timestamp;
+    stable.transactionId = header.transactionId;
+    stable.operation = header.operation;
+    stable.flags = header.flags;
+    stable.reserved = header.reserved;
+    stable.dataSize = header.dataSize;
+    stable.checksum = header.checksum;
+
+    std::array<std::byte, yams::wal::WALEntry::Header::size()> bytes{};
+    std::memcpy(bytes.data(), &stable, sizeof(stable));
+    return bytes;
+}
+
+void appendHeaderBytes(std::vector<std::byte>& out, const yams::wal::WALEntry::Header& header) {
+    const auto bytes = stableHeaderBytes(header);
+    out.insert(out.end(), bytes.begin(), bytes.end());
+}
+
 template <typename T> std::optional<T> readObject(std::span<const std::byte> in) {
     static_assert(std::is_trivially_copyable_v<T>,
                   "WAL deserialization only supports trivially-copyable POD payloads");
@@ -70,7 +97,7 @@ std::vector<std::byte> WALEntry::serialize() const {
     auto headerCopy = header;
     headerCopy.checksum = 0; // Zero out for calculation
 
-    appendObjectBytes(result, headerCopy);
+    appendHeaderBytes(result, headerCopy);
 
     // Copy data
     result.insert(result.end(), data.begin(), data.end());
@@ -129,7 +156,7 @@ void WALEntry::updateChecksum() {
     std::vector<std::byte> temp;
     temp.reserve(totalSize());
 
-    appendObjectBytes(temp, header);
+    appendHeaderBytes(temp, header);
     temp.insert(temp.end(), data.begin(), data.end());
 
     header.checksum = crc32(temp.data(), temp.size());
@@ -147,12 +174,21 @@ bool WALEntry::verifyChecksum() const {
     std::vector<std::byte> temp;
     temp.reserve(totalSize());
 
-    appendObjectBytes(temp, headerCopy);
+    appendHeaderBytes(temp, headerCopy);
     temp.insert(temp.end(), data.begin(), data.end());
 
     uint32_t calculatedChecksum = crc32(temp.data(), temp.size());
 
-    return savedChecksum == calculatedChecksum;
+    if (savedChecksum == calculatedChecksum) {
+        return true;
+    }
+
+    // Older WAL entries were checksummed over raw Header bytes, including padding.
+    // Keep recovery compatible while all new writes use stable zero-padded bytes.
+    temp.clear();
+    appendObjectBytes(temp, headerCopy);
+    temp.insert(temp.end(), data.begin(), data.end());
+    return savedChecksum == crc32(temp.data(), temp.size());
 }
 
 // StoreBlockData implementation

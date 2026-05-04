@@ -158,6 +158,8 @@ TEST_CASE("detectProfile case-insensitive extension matching", "[search][config]
 TEST_CASE("componentSourceToString covers all sources", "[search][config][catch2]") {
     using S = ComponentResult::Source;
     CHECK(std::string(componentSourceToString(S::Text)) == "text");
+    CHECK(std::string(componentSourceToString(S::SimeonText)) == "simeon_text");
+    CHECK(std::string(componentSourceToString(S::GraphText)) == "graph_text");
     CHECK(std::string(componentSourceToString(S::PathTree)) == "path_tree");
     CHECK(std::string(componentSourceToString(S::KnowledgeGraph)) == "kg");
     CHECK(std::string(componentSourceToString(S::Vector)) == "vector");
@@ -171,6 +173,7 @@ TEST_CASE("componentSourceToString covers all sources", "[search][config][catch2
 TEST_CASE("componentSourceWeight matches config fields", "[search][config][catch2]") {
     SearchEngineConfig cfg;
     cfg.textWeight = 0.41f;
+    cfg.simeonTextWeight = 0.11f;
     cfg.graphTextWeight = 0.12f;
     cfg.pathTreeWeight = 0.09f;
     cfg.kgWeight = 0.07f;
@@ -181,6 +184,8 @@ TEST_CASE("componentSourceWeight matches config fields", "[search][config][catch
     cfg.metadataWeight = 0.03f;
 
     CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Text) == Approx(0.41f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::SimeonText) ==
+          Approx(0.11f));
     CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::GraphText) ==
           Approx(0.12f));
     CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::PathTree) ==
@@ -221,6 +226,8 @@ TEST_CASE("isVectorComponent is true for Vector and EntityVector", "[search][con
 TEST_CASE("isTextAnchoringComponent identifies non-vector components", "[search][config][catch2]") {
     using S = ComponentResult::Source;
     CHECK(isTextAnchoringComponent(S::Text) == true);
+    CHECK(isTextAnchoringComponent(S::SimeonText) == true);
+    CHECK(isTextAnchoringComponent(S::GraphText) == true);
     CHECK(isTextAnchoringComponent(S::PathTree) == true);
     CHECK(isTextAnchoringComponent(S::KnowledgeGraph) == true);
     CHECK(isTextAnchoringComponent(S::Tag) == true);

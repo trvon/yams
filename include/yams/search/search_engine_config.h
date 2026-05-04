@@ -56,6 +56,7 @@ struct SearchEngineConfig {
     }
 
     float textWeight = 0.70f;
+    float simeonTextWeight = 0.15f;
     float graphTextWeight = 0.12f;
     float pathTreeWeight = 0.08f;
     float kgWeight = 0.04f;
@@ -74,6 +75,9 @@ struct SearchEngineConfig {
     float entityVectorWeight = 0.05f;
     float tagWeight = 0.05f;
     float metadataWeight = 0.05f;
+    bool enableCorpusAdapters = true;
+    float corpusAdapterWeight = 0.08f;
+    size_t corpusAdapterMaxResults = 100;
 
     float conceptBoostWeight = 0.10f;
     float conceptMinConfidence = 0.40f;

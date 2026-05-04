@@ -1552,6 +1552,53 @@ TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and i
     }
 }
 
+TEST_CASE("batchInsertContentAndIndex: updates warmed FTS indexed ID cache",
+          "[unit][metadata-repo][batch-content][fts-cache]") {
+    MetadataRepositoryFixture fix;
+
+    std::vector<int64_t> docIds;
+    for (int i = 0; i < 3; ++i) {
+        DocumentInfo doc;
+        doc.sha256Hash = "fts_cache_batch_hash_" + std::to_string(i);
+        doc.fileName = "fts_cache_batch_" + std::to_string(i) + ".txt";
+        doc.fileSize = 100;
+        doc.mimeType = "text/plain";
+        doc.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        doc.modifiedTime = doc.createdTime;
+        auto result = fix.repository_->insertDocument(doc);
+        REQUIRE(result.has_value());
+        docIds.push_back(result.value());
+    }
+
+    auto initialIds = fix.repository_->getAllFts5IndexedDocumentIds();
+    REQUIRE(initialIds.has_value());
+    REQUIRE(initialIds.value().empty());
+
+    std::vector<BatchContentEntry> entries;
+    for (int i = 0; i < 3; ++i) {
+        BatchContentEntry entry;
+        entry.documentId = docIds[static_cast<size_t>(i)];
+        entry.title = "FTS Cache Title " + std::to_string(i);
+        entry.contentText = "FTS cache content " + std::to_string(i);
+        entry.mimeType = "text/plain";
+        entry.extractionMethod = "test";
+        entry.language = "en";
+        entries.push_back(std::move(entry));
+    }
+
+    auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
+    REQUIRE(batchResult.has_value());
+
+    auto indexedIds = fix.repository_->getAllFts5IndexedDocumentIds();
+    REQUIRE(indexedIds.has_value());
+
+    auto actual = indexedIds.value();
+    std::sort(actual.begin(), actual.end());
+    std::sort(docIds.begin(), docIds.end());
+    CHECK(actual == docIds);
+}
+
 TEST_CASE("batchInsertContentAndIndex: already-extracted documents don't double-count",
           "[unit][metadata-repo][batch-content][counters]") {
     MetadataRepositoryFixture fix;

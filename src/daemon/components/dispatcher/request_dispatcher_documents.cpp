@@ -56,6 +56,10 @@ std::atomic<bool> g_forceDownloadServiceSuccessOnce{false};
 std::atomic<int> g_documentsEnqueueFailuresBeforeSuccess{0};
 std::string g_forceListExceptionMessage;
 std::mutex g_forceListExceptionMutex;
+std::optional<std::string> g_forceDownloadServiceFailureMessage;
+std::mutex g_forceDownloadServiceFailureMutex;
+std::optional<bool> g_lastDownloadServiceFollowRedirects;
+std::mutex g_lastDownloadServiceRequestMutex;
 
 void atomicMax(std::atomic<uint64_t>& target, uint64_t value) {
     auto current = target.load(std::memory_order_relaxed);
@@ -855,6 +859,21 @@ void RequestDispatcher::__test_forceDownloadServiceUnavailableOnce() {
 
 void RequestDispatcher::__test_forceDownloadServiceSuccessOnce() {
     g_forceDownloadServiceSuccessOnce.store(true, std::memory_order_release);
+}
+
+void RequestDispatcher::__test_forceDownloadServiceFailureOnce(const std::string& message) {
+    std::lock_guard<std::mutex> lock(g_forceDownloadServiceFailureMutex);
+    g_forceDownloadServiceFailureMessage = message;
+}
+
+void RequestDispatcher::__test_resetDownloadServiceRequestCapture() {
+    std::lock_guard<std::mutex> lock(g_lastDownloadServiceRequestMutex);
+    g_lastDownloadServiceFollowRedirects.reset();
+}
+
+std::optional<bool> RequestDispatcher::__test_lastDownloadServiceFollowRedirects() {
+    std::lock_guard<std::mutex> lock(g_lastDownloadServiceRequestMutex);
+    return g_lastDownloadServiceFollowRedirects;
 }
 
 // Prepare session using app services.
@@ -1717,7 +1736,7 @@ RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
 
                 app::services::DownloadServiceRequest sreq;
                 sreq.url = std::move(requestUrl);
-                sreq.followRedirects = true;
+                sreq.followRedirects = false;
                 sreq.storeOnly = policy.storeOnly;
                 sreq.concurrency = 4;
                 sreq.chunkSizeBytes = 8388608;
@@ -1727,6 +1746,21 @@ RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
                 sreq.shouldCancel = [cancelFlag]() {
                     return cancelFlag && cancelFlag->load(std::memory_order_acquire);
                 };
+
+                {
+                    std::lock_guard<std::mutex> lock(g_lastDownloadServiceRequestMutex);
+                    g_lastDownloadServiceFollowRedirects = sreq.followRedirects;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(g_forceDownloadServiceFailureMutex);
+                    if (g_forceDownloadServiceFailureMessage) {
+                        downloadJobRegistry().fail(dataDir, jobId,
+                                                   *g_forceDownloadServiceFailureMessage);
+                        g_forceDownloadServiceFailureMessage.reset();
+                        return;
+                    }
+                }
 
                 auto sres = downloadService->download(sreq);
                 if (!sres) {

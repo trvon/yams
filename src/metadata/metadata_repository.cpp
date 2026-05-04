@@ -1488,6 +1488,8 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
     // These counters are intentionally maintained without live DB queries on hot paths.
     uint64_t newlyExtracted = 0;
     uint64_t newlyIndexed = 0;
+    std::vector<int64_t> indexedDocIds;
+    indexedDocIds.reserve(entries.size());
 
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         // Begin transaction for batch operation
@@ -1620,6 +1622,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     db.execute("ROLLBACK");
                     return ftsExec.error();
                 }
+                indexedDocIds.push_back(entry.documentId);
             }
 
             bool wasExtracted = entry.priorContentExtracted;
@@ -1691,6 +1694,9 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         }
         if (newlyIndexed > 0) {
             cachedIndexedCount_.fetch_add(newlyIndexed, std::memory_order_relaxed);
+        }
+        for (const auto docId : indexedDocIds) {
+            noteFtsIndexedId(docId);
         }
         YAMS_PLOT("metadata_repo::batch_content_newly_extracted",
                   static_cast<int64_t>(newlyExtracted));

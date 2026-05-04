@@ -54,10 +54,6 @@ void appendLexicalBatch(const std::string& query, QueryIntent queryIntent,
                         ComponentResult::Source source, std::vector<ComponentResult>& results,
                         QueryExpansionStats* expansionStats);
 
-void applySimeonLexicalRescoring(const std::string& query, SimeonLexicalBackend* backend,
-                                 yams::metadata::SearchResults& searchResults,
-                                 std::string* lastSimeonRouteRecipe);
-
 Fts5CandidatePoolStats fetchFts5CandidatePool(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
     SimeonLexicalBackend* backend, std::string* lastSimeonRouteRecipe, const std::string& query,

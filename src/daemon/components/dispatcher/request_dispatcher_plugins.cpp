@@ -348,8 +348,15 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
 
                     const auto abiLoadedPaths = getLoadedPaths(abi);
                     const auto externalLoadedPaths = getLoadedPaths(external);
-                    const bool skipAbi = isAlreadyLoaded(path, abiLoadedPaths);
-                    const bool skipExternal = isAlreadyLoaded(path, externalLoadedPaths);
+                    if (isAlreadyLoaded(path, abiLoadedPaths) ||
+                        isAlreadyLoaded(path, externalLoadedPaths)) {
+                        spdlog::debug("trust add: path {} already loaded, skipping scan",
+                                      path.string());
+                        co_return SuccessResponse{"ok"};
+                    }
+
+                    const bool skipAbi = !abi;
+                    const bool skipExternal = !external;
 
                     if (skipAbi && skipExternal) {
                         spdlog::debug("trust add: path {} already loaded, skipping scan",

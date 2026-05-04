@@ -113,7 +113,8 @@ TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") 
 
     CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto);
     CHECK(params.rrfK == 12);
-    CHECK(params.weights.text.value == Approx(0.60f));
+    CHECK(params.weights.text.value == Approx(0.50f));
+    CHECK(params.weights.simeonText.value == Approx(0.10f));
     CHECK(params.weights.vector.value == Approx(0.35f));
     CHECK(params.weights.entityVector.value == Approx(0.00f));
     CHECK(params.weights.pathTree.value == Approx(0.00f));
@@ -586,10 +587,7 @@ TEST_CASE("TunedParams: weights sum to approximately 1.0", "[unit][search_tuner]
 
     for (auto state : states) {
         auto params = getTunedParams(state);
-        float sum = params.weights.text.value + params.weights.vector.value +
-                    params.weights.entityVector.value + params.weights.pathTree.value +
-                    params.weights.kg.value + params.weights.tag.value +
-                    params.weights.metadata.value;
+        float sum = params.weights.sum();
 
         INFO("State: " << tuningStateToString(state));
         CHECK(sum == Approx(1.0f).margin(0.01f));
@@ -898,9 +896,11 @@ TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
     applyCommunityLayer(TuningState::SCIENTIFIC, TuningState::MIXED_PRECISION, params);
 
     // Weights: 60% toward SCIENTIFIC, 40% current (MIXED_PRECISION)
-    // MIXED_PRECISION text=0.40, SCIENTIFIC text=0.60 → 0.40 + 0.60*(0.60-0.40) = 0.52
-    CHECK(params.weights.text.value == Approx(0.52f).epsilon(0.01));
+    // MIXED_PRECISION text=0.40, SCIENTIFIC text=0.50 -> 0.46; SimeonText gets its own blend.
+    CHECK(params.weights.text.value == Approx(0.46f).epsilon(0.01));
     CHECK(params.weights.text.source == TuningLayer::Community);
+    CHECK(params.weights.simeonText.value == Approx(0.06f).epsilon(0.01));
+    CHECK(params.weights.simeonText.source == TuningLayer::Community);
     // MIXED_PRECISION vector=0.25, SCIENTIFIC vector=0.35 → 0.25 + 0.60*(0.35-0.25) = 0.31
     CHECK(params.weights.vector.value == Approx(0.31f).epsilon(0.01));
 
@@ -1118,6 +1118,140 @@ TEST_CASE("SearchTuner: adaptive runtime tuning stays steady on overlay-backed s
     CHECK(after.graphScoringBudgetMs == before.graphScoringBudgetMs);
     CHECK(after.graphRerankTopN == before.graphRerankTopN);
     CHECK(tuner.adaptiveStateToJson()["last_decision"] == "steady_overlay_stats");
+}
+
+TEST_CASE("SearchTuner: overlay stats still allow fusion pressure adaptation",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.05f;
+    stats.proseRatio = 0.90f;
+    stats.binaryRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.80f;
+    stats.usedOnlineOverlay = true;
+
+    SearchTuner tuner(stats);
+    const auto before = tuner.getParams();
+
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 35.0;
+    telemetry.topWindow = 25;
+    telemetry.adaptiveFusionEnabled = true;
+    telemetry.preFusionUniqueDocCount = 100;
+    telemetry.postFusionDocCount = 60;
+    telemetry.fusionDroppedDocCount = 40;
+    telemetry.anchoredPreFusionDocCount = 50;
+    telemetry.anchoredFusionDroppedDocCount = 12;
+    telemetry.topTextPreFusionDocCount = 12;
+    telemetry.topTextFusionDroppedDocCount = 2;
+
+    for (int i = 0; i < 5; ++i) {
+        tuner.observe(telemetry);
+    }
+
+    const auto after = tuner.getParams();
+    CHECK(after.enableLexicalTieBreak);
+    CHECK(after.lexicalFloorTopN > before.lexicalFloorTopN);
+    CHECK(after.lexicalFloorBoost > before.lexicalFloorBoost);
+    CHECK(tuner.adaptiveStateToJson()["last_decision"].get<std::string>().find(
+              "fusion_lexical_pressure") != std::string::npos);
+}
+
+TEST_CASE("SearchTuner: no-KG fusion pressure enables lexical preservation",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.05f;
+    stats.proseRatio = 0.90f;
+    stats.binaryRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto before = tuner.getParams();
+    REQUIRE(before.weights.kg.value == Approx(0.0f));
+    REQUIRE_FALSE(before.enableLexicalTieBreak);
+    REQUIRE(before.lexicalFloorTopN == 0);
+    REQUIRE(before.lexicalFloorBoost == Approx(0.0f));
+
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 35.0;
+    telemetry.topWindow = 25;
+    telemetry.adaptiveFusionEnabled = true;
+    telemetry.preFusionUniqueDocCount = 100;
+    telemetry.postFusionDocCount = 60;
+    telemetry.fusionDroppedDocCount = 40;
+    telemetry.anchoredPreFusionDocCount = 50;
+    telemetry.anchoredFusionDroppedDocCount = 12;
+    telemetry.topTextPreFusionDocCount = 12;
+    telemetry.topTextFusionDroppedDocCount = 2;
+    telemetry.vectorOnlyDocCount = 30;
+    telemetry.vectorOnlyBelowThresholdCount = 20;
+    telemetry.vectorOnlyAboveThresholdCount = 10;
+
+    for (int i = 0; i < 5; ++i) {
+        tuner.observe(telemetry);
+    }
+
+    const auto after = tuner.getParams();
+    CHECK(after.enableLexicalTieBreak);
+    CHECK(after.lexicalTieBreakEpsilon > before.lexicalTieBreakEpsilon);
+    CHECK(after.lexicalFloorTopN > before.lexicalFloorTopN);
+    CHECK(after.lexicalFloorBoost > before.lexicalFloorBoost);
+    CHECK(after.vectorOnlyPenalty >= 0.85f);
+
+    const auto adaptive = tuner.adaptiveStateToJson();
+    CHECK(adaptive["changed_last_observation"].get<bool>());
+    CHECK(adaptive["last_decision"].get<std::string>().find("fusion_lexical_pressure") !=
+          std::string::npos);
+    CHECK(adaptive["ewma_fusion_dropped_rate"].get<double>() > 0.0);
+    CHECK(adaptive["ewma_anchored_fusion_dropped_rate"].get<double>() > 0.0);
+}
+
+TEST_CASE("SearchTuner: no-KG fusion adaptation stays idle without lexical pressure",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.05f;
+    stats.proseRatio = 0.90f;
+    stats.binaryRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto before = tuner.getParams();
+
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 35.0;
+    telemetry.topWindow = 25;
+    telemetry.adaptiveFusionEnabled = true;
+    telemetry.preFusionUniqueDocCount = 100;
+    telemetry.postFusionDocCount = 96;
+    telemetry.fusionDroppedDocCount = 4;
+    telemetry.anchoredPreFusionDocCount = 50;
+    telemetry.anchoredFusionDroppedDocCount = 1;
+    telemetry.topTextPreFusionDocCount = 12;
+    telemetry.topTextFusionDroppedDocCount = 0;
+
+    for (int i = 0; i < 5; ++i) {
+        tuner.observe(telemetry);
+    }
+
+    const auto after = tuner.getParams();
+    CHECK(after.enableLexicalTieBreak == before.enableLexicalTieBreak);
+    CHECK(after.lexicalFloorTopN == before.lexicalFloorTopN);
+    CHECK(after.lexicalFloorBoost == Approx(before.lexicalFloorBoost));
+    CHECK(tuner.adaptiveStateToJson()["last_decision"] == "steady_no_kg");
 }
 
 // =============================================================================

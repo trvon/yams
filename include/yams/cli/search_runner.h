@@ -36,6 +36,10 @@ struct DaemonSearchOptions {
 
     // Search timeout sent to daemon
     std::chrono::milliseconds timeout{std::chrono::seconds(5)};
+
+    // Preserve CLI retry behavior by default. Benchmarks can disable these to isolate components.
+    bool allowFuzzyRetry{true};
+    bool allowLiteralTextRetry{true};
 };
 
 struct DaemonSearchResult {

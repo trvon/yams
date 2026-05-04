@@ -719,11 +719,21 @@ struct QueryDiagnosticsSummary {
     std::vector<double> turboQuantCandidateSamples;
     std::vector<double> turboQuantPackedCandidatesScoredSamples;
     std::unordered_map<std::string, std::uint64_t> turboQuantSkipReasonCounts;
+    std::vector<double> fusionPreFusionUniqueCountSamples;
+    std::vector<double> fusionPostFusionCountSamples;
     std::vector<double> fusionDroppedCountSamples;
+    std::vector<double> fusionDroppedRateSamples;
+    std::vector<double> anchoredPreFusionCountSamples;
+    std::vector<double> anchoredFusionDroppedCountSamples;
+    std::vector<double> anchoredFusionDroppedRateSamples;
+    std::vector<double> topTextPreFusionCountSamples;
+    std::vector<double> topTextFusionDroppedCountSamples;
+    std::vector<double> topTextFusionDroppedRateSamples;
     std::vector<double> vectorOnlyDocsSamples;
     std::vector<double> vectorOnlyBelowThresholdSamples;
     std::vector<double> vectorOnlyAboveThresholdSamples;
     std::vector<double> vectorOnlyNearMissEligibleSamples;
+    std::uint64_t adaptiveFusionEnabledQueryCount = 0;
     std::vector<double> strongVectorOnlyDocsSamples;
     std::vector<double> strongVectorOnlyScoreEligibleDocsSamples;
     std::vector<double> strongVectorOnlyRankEligibleDocsSamples;
@@ -1327,8 +1337,53 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     if (auto v = parseDoubleStat(searchStats, "semantic_rescue_target")) {
         summary.semanticRescueTargetSamples.push_back(*v);
     }
-    if (auto v = parseDoubleStat(searchStats, "trace_fusion_dropped_count")) {
+    if (auto v = parseDoubleStat(searchStats, "fusion_pre_fusion_unique_count")) {
+        summary.fusionPreFusionUniqueCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "fusion_post_fusion_count")) {
+        summary.fusionPostFusionCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "fusion_dropped_count")) {
         summary.fusionDroppedCountSamples.push_back(*v);
+    } else if (auto v = parseDoubleStat(searchStats, "trace_fusion_dropped_count")) {
+        summary.fusionDroppedCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "fusion_dropped_rate")) {
+        summary.fusionDroppedRateSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "anchored_pre_fusion_count")) {
+        summary.anchoredPreFusionCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "anchored_fusion_dropped_count")) {
+        summary.anchoredFusionDroppedCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "anchored_fusion_dropped_rate")) {
+        summary.anchoredFusionDroppedRateSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "top_text_pre_fusion_count")) {
+        summary.topTextPreFusionCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "top_text_fusion_dropped_count")) {
+        summary.topTextFusionDroppedCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "top_text_fusion_dropped_rate")) {
+        summary.topTextFusionDroppedRateSamples.push_back(*v);
+    }
+    const bool hasDirectPreFusionStats = searchStats.find("vector_only_docs") != searchStats.end();
+    if (auto v = parseDoubleStat(searchStats, "vector_only_docs")) {
+        summary.vectorOnlyDocsSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "vector_only_below_threshold")) {
+        summary.vectorOnlyBelowThresholdSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "vector_only_above_threshold")) {
+        summary.vectorOnlyAboveThresholdSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "vector_only_near_miss_eligible")) {
+        summary.vectorOnlyNearMissEligibleSamples.push_back(*v);
+    }
+    if (parseBoolStat(searchStats, "adaptive_fusion_enabled").value_or(false)) {
+        summary.adaptiveFusionEnabledQueryCount++;
     }
     if (auto v = parseDoubleStat(searchStats, "multi_vector_generated_phrases")) {
         summary.multiVectorGeneratedPhraseSamples.push_back(*v);
@@ -1376,24 +1431,27 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         try {
             auto parsed = json::parse(prefusion->second);
             if (parsed.is_object()) {
-                if (auto it = parsed.find("vector_only_docs"); it != parsed.end()) {
-                    if (it->is_number()) {
-                        summary.vectorOnlyDocsSamples.push_back(it->get<double>());
+                if (!hasDirectPreFusionStats) {
+                    if (auto it = parsed.find("vector_only_docs"); it != parsed.end()) {
+                        if (it->is_number()) {
+                            summary.vectorOnlyDocsSamples.push_back(it->get<double>());
+                        }
                     }
-                }
-                if (auto it = parsed.find("vector_only_below_threshold"); it != parsed.end()) {
-                    if (it->is_number()) {
-                        summary.vectorOnlyBelowThresholdSamples.push_back(it->get<double>());
+                    if (auto it = parsed.find("vector_only_below_threshold"); it != parsed.end()) {
+                        if (it->is_number()) {
+                            summary.vectorOnlyBelowThresholdSamples.push_back(it->get<double>());
+                        }
                     }
-                }
-                if (auto it = parsed.find("vector_only_above_threshold"); it != parsed.end()) {
-                    if (it->is_number()) {
-                        summary.vectorOnlyAboveThresholdSamples.push_back(it->get<double>());
+                    if (auto it = parsed.find("vector_only_above_threshold"); it != parsed.end()) {
+                        if (it->is_number()) {
+                            summary.vectorOnlyAboveThresholdSamples.push_back(it->get<double>());
+                        }
                     }
-                }
-                if (auto it = parsed.find("vector_only_near_miss_eligible"); it != parsed.end()) {
-                    if (it->is_number()) {
-                        summary.vectorOnlyNearMissEligibleSamples.push_back(it->get<double>());
+                    if (auto it = parsed.find("vector_only_near_miss_eligible");
+                        it != parsed.end()) {
+                        if (it->is_number()) {
+                            summary.vectorOnlyNearMissEligibleSamples.push_back(it->get<double>());
+                        }
                     }
                 }
                 if (auto it = parsed.find("strong_vector_only_docs"); it != parsed.end()) {
@@ -1553,6 +1611,11 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
                     "ewma_graph_rerank_latency_ms",
                     "ewma_graph_rerank_skip_rate",
                     "ewma_graph_rerank_contribution_rate",
+                    "ewma_fusion_dropped_rate",
+                    "ewma_anchored_fusion_dropped_rate",
+                    "ewma_top_text_fusion_dropped_rate",
+                    "ewma_vector_only_share",
+                    "ewma_semantic_rescue_rate",
                 };
                 for (const auto& key : kKeys) {
                     if (auto it = parsed.find(key); it != parsed.end() && it->is_number()) {
@@ -1570,8 +1633,9 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
             auto parsed = json::parse(runtimeConfig->second);
             if (parsed.is_object()) {
                 static const std::vector<std::string> kWeightKeys = {
-                    "text_weight", "vector_weight", "entity_vector_weight", "path_tree_weight",
-                    "kg_weight",   "tag_weight",    "metadata_weight",
+                    "text_weight",          "simeon_text_weight", "vector_weight",
+                    "entity_vector_weight", "path_tree_weight",   "kg_weight",
+                    "tag_weight",           "metadata_weight",
                 };
                 for (const auto& key : kWeightKeys) {
                     if (auto it = parsed.find(key); it != parsed.end() && it->is_number()) {
@@ -1644,6 +1708,9 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          static_cast<double>(summary.turboQuantEnabledQueryCount) / queryCount},
         {"turboquant_apply_rate",
          static_cast<double>(summary.turboQuantAppliedQueryCount) / queryCount},
+        {"adaptive_fusion_enabled_query_count", summary.adaptiveFusionEnabledQueryCount},
+        {"adaptive_fusion_enabled_rate",
+         static_cast<double>(summary.adaptiveFusionEnabledQueryCount) / queryCount},
         {"semantic_rescue_nonzero_rate",
          static_cast<double>(summary.semanticRescueNonZeroQueryCount) / queryCount},
         {"miss_missing_pre_fusion_rate",
@@ -1663,7 +1730,20 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"semantic_rescue_rate", summarizeSamples(summary.semanticRescueRateSamples)},
         {"semantic_rescue_final_count", summarizeSamples(summary.semanticRescueFinalCountSamples)},
         {"semantic_rescue_target", summarizeSamples(summary.semanticRescueTargetSamples)},
+        {"fusion_pre_fusion_unique_count",
+         summarizeSamples(summary.fusionPreFusionUniqueCountSamples)},
+        {"fusion_post_fusion_count", summarizeSamples(summary.fusionPostFusionCountSamples)},
         {"fusion_dropped_count", summarizeSamples(summary.fusionDroppedCountSamples)},
+        {"fusion_dropped_rate", summarizeSamples(summary.fusionDroppedRateSamples)},
+        {"anchored_pre_fusion_count", summarizeSamples(summary.anchoredPreFusionCountSamples)},
+        {"anchored_fusion_dropped_count",
+         summarizeSamples(summary.anchoredFusionDroppedCountSamples)},
+        {"anchored_fusion_dropped_rate",
+         summarizeSamples(summary.anchoredFusionDroppedRateSamples)},
+        {"top_text_pre_fusion_count", summarizeSamples(summary.topTextPreFusionCountSamples)},
+        {"top_text_fusion_dropped_count",
+         summarizeSamples(summary.topTextFusionDroppedCountSamples)},
+        {"top_text_fusion_dropped_rate", summarizeSamples(summary.topTextFusionDroppedRateSamples)},
         {"vector_only_docs", summarizeSamples(summary.vectorOnlyDocsSamples)},
         {"vector_only_below_threshold", summarizeSamples(summary.vectorOnlyBelowThresholdSamples)},
         {"vector_only_above_threshold", summarizeSamples(summary.vectorOnlyAboveThresholdSamples)},
@@ -4061,6 +4141,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         }
         opts.timeout = queryTimeout;
         opts.symbolRank = true;
+        opts.allowFuzzyRetry = false;
+        opts.allowLiteralTextRetry = false;
         const bool benchDiagEnabled = []() -> bool {
             if (const char* env = std::getenv("YAMS_BENCH_DIAG"); env && std::string(env) == "1") {
                 return true;
@@ -4300,6 +4382,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                 shadow.limit = opts.limit;
                 shadow.timeout = opts.timeout;
                 shadow.symbolRank = opts.symbolRank;
+                shadow.allowFuzzyRetry = false;
+                shadow.allowLiteralTextRetry = false;
 
                 DebugLogEntry shadowEntry;
                 shadowEntry.query = "__diag_shadow_query__";
@@ -5852,9 +5936,6 @@ struct BenchFixture {
                         // target)
                         bool allStagesDrained =
                             (queuedTotal == 0 && postInflight == 0 && totalInFlight == 0);
-                        bool indexedReady =
-                            indexedPresent ? (indexedCount >= static_cast<uint64_t>(corpusSize))
-                                           : (docCount >= static_cast<uint64_t>(corpusSize));
                         bool extractedReady =
                             extractedPresent
                                 ? (contentExtracted >= static_cast<uint64_t>(corpusSize))
@@ -5863,6 +5944,17 @@ struct BenchFixture {
                             postProcessedPresent
                                 ? (postProcessed >= static_cast<uint64_t>(corpusSize))
                                 : true;
+                        // `documents_indexed` is a search/FTS visibility counter and can lag or
+                        // remain stale under sanitizer/slow asynchronous rebuild runs even after
+                        // the directory ingest and post-ingest pipeline have accepted and processed
+                        // the whole corpus. For benchmark setup, do not block forever on that
+                        // secondary visibility counter once the canonical document total reached
+                        // the requested corpus and extraction/post-processing has completed.
+                        const bool corpusStored = docCount >= static_cast<uint64_t>(corpusSize);
+                        bool indexedReady =
+                            indexedPresent ? (indexedCount >= static_cast<uint64_t>(corpusSize) ||
+                                              (corpusStored && (extractedReady || processedReady)))
+                                           : corpusStored;
                         bool stableAfterDrain = (stableChecks >= 6);
                         if (allStagesDrained && indexedReady &&
                             (extractedReady || processedReady || stableAfterDrain)) {
@@ -6431,7 +6523,9 @@ struct BenchFixture {
                 return false;
             }
 
-            if (!persisted.reusable(benchmarkVectorSearchEngine())) {
+            const auto benchmarkEngine = benchmarkVectorSearchEngine();
+            bool preparedThisRun = false;
+            if (!persisted.reusable(benchmarkEngine)) {
                 const char* modeLabel = warmDataDirPath.empty() ? "cold-run" : "warm-cache";
                 spdlog::info("[Bench] Finalizing {} vector index (vectors={} persisted_nodes={} "
                              "persisted_meta={})",
@@ -6447,14 +6541,19 @@ struct BenchFixture {
                                  vectorDb->getLastError());
                     return false;
                 }
+                preparedThisRun = true;
 
                 persisted = vectorIndexDataDir.empty()
                                 ? PersistedHnswState{}
                                 : inspectPersistedHnswState(vectorIndexDataDir);
-                if (persisted.reusable(benchmarkVectorSearchEngine())) {
+                if (persisted.reusable(benchmarkEngine)) {
                     spdlog::info("[Bench] Vector index finalized in {} ms "
                                  "(persisted_nodes={} persisted_meta={})",
                                  elapsedMs, persisted.nodeRows, persisted.metaRows);
+                } else if (benchmarkEngine == yams::vector::VectorSearchEngine::SimeonPqAdc) {
+                    spdlog::info("[Bench] Vector index finalized in {} ms for {} "
+                                 "(persisted PQ rows not required for this cold-run process)",
+                                 elapsedMs, yams::vector::vectorSearchEngineName(benchmarkEngine));
                 } else {
                     spdlog::warn("[Bench] Vector index finalize completed in {} ms but persisted "
                                  "HNSW is still unusable (persisted_nodes={} persisted_meta={})",
@@ -6462,8 +6561,10 @@ struct BenchFixture {
                 }
             }
 
-            bool ready = persisted.reusable(benchmarkVectorSearchEngine()) ||
-                         vectorDb->hasReusablePersistedSearchIndex();
+            bool ready = persisted.reusable(benchmarkEngine) ||
+                         vectorDb->hasReusablePersistedSearchIndex() ||
+                         (preparedThisRun &&
+                          benchmarkEngine == yams::vector::VectorSearchEngine::SimeonPqAdc);
             updateVectorIndexReadiness(ready);
 
             int readyTimeoutSec = 60;
@@ -7042,6 +7143,8 @@ struct BenchFixture {
                 }
                 opts.timeout = queryTimeout;
                 opts.symbolRank = symbolRank;
+                opts.allowFuzzyRetry = false;
+                opts.allowLiteralTextRetry = false;
 
                 DebugLogEntry sanityEntry;
                 sanityEntry.query = std::move(label);

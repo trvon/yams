@@ -51,6 +51,7 @@ inline void accumulateComponentScore(SearchResult& r, ComponentResult::Source so
         case ComponentResult::Source::Text:
             r.keywordScore = r.keywordScore.value_or(0.0) + contribution;
             break;
+        case ComponentResult::Source::SimeonText:
         case ComponentResult::Source::GraphText:
             r.graphTextScore = r.graphTextScore.value_or(0.0) + contribution;
             break;
@@ -68,6 +69,7 @@ inline void accumulateComponentScore(SearchResult& r, ComponentResult::Source so
             r.symbolScore = r.symbolScore.value_or(0.0) + contribution;
             break;
         case ComponentResult::Source::Anchor:
+        case ComponentResult::Source::CorpusAdapter:
             r.anchorScore = r.anchorScore.value_or(0.0) + contribution;
             break;
         default:
@@ -160,7 +162,8 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
         r.score += contribution;
         accumulateComponentScore(r, comp.source, contribution);
 
-        if (comp.source == ComponentResult::Source::Text) {
+        if (comp.source == ComponentResult::Source::Text ||
+            comp.source == ComponentResult::Source::SimeonText) {
             auto [it, inserted] = bestTextRank.try_emplace(dedupKey, comp.rank);
             if (!inserted) {
                 it->second = std::min(it->second, comp.rank);
@@ -260,8 +263,9 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
         if (hasVector && hasAnchoring && config_.vectorBoostFactor > 0.0f) {
             const double vectorContribution = r.vectorScore.value_or(0.0);
             const double anchorContribution =
-                r.keywordScore.value_or(0.0) + r.pathScore.value_or(0.0) + r.kgScore.value_or(0.0) +
-                r.tagScore.value_or(0.0) + r.symbolScore.value_or(0.0);
+                r.keywordScore.value_or(0.0) + r.graphTextScore.value_or(0.0) +
+                r.pathScore.value_or(0.0) + r.kgScore.value_or(0.0) + r.tagScore.value_or(0.0) +
+                r.symbolScore.value_or(0.0);
 
             if (vectorContribution > 0.0 && anchorContribution > 0.0) {
                 const double agreement = (2.0 * std::min(vectorContribution, anchorContribution)) /
@@ -291,8 +295,8 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
     }
 
     const auto lexicalAnchorScore = [](const SearchResult& r) {
-        return r.keywordScore.value_or(0.0) + r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) +
-               r.symbolScore.value_or(0.0);
+        return r.keywordScore.value_or(0.0) + r.graphTextScore.value_or(0.0) +
+               r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) + r.symbolScore.value_or(0.0);
     };
 
     const auto rawVectorScoreForResult = [&maxVectorRawScore](const std::string& dedupKey) {

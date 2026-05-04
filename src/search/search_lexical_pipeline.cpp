@@ -12,8 +12,17 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 
 namespace yams::search::detail {
+
+void appendLexicalBatchAtRank(const std::string& query, QueryIntent queryIntent,
+                              const SearchEngineConfig& config,
+                              const yams::metadata::SearchResults& searchResults,
+                              float scorePenalty, bool dedupe,
+                              std::unordered_set<std::string>* seenHashes,
+                              ComponentResult::Source source, std::vector<ComponentResult>& results,
+                              QueryExpansionStats* expansionStats, size_t startRank);
 
 void appendLexicalBatch(const std::string& query, QueryIntent queryIntent,
                         const SearchEngineConfig& config,
@@ -21,6 +30,17 @@ void appendLexicalBatch(const std::string& query, QueryIntent queryIntent,
                         bool dedupe, std::unordered_set<std::string>* seenHashes,
                         ComponentResult::Source source, std::vector<ComponentResult>& results,
                         QueryExpansionStats* expansionStats) {
+    appendLexicalBatchAtRank(query, queryIntent, config, searchResults, scorePenalty, dedupe,
+                             seenHashes, source, results, expansionStats, results.size());
+}
+
+void appendLexicalBatchAtRank(const std::string& query, QueryIntent queryIntent,
+                              const SearchEngineConfig& config,
+                              const yams::metadata::SearchResults& searchResults,
+                              float scorePenalty, bool dedupe,
+                              std::unordered_set<std::string>* seenHashes,
+                              ComponentResult::Source source, std::vector<ComponentResult>& results,
+                              QueryExpansionStats* expansionStats, size_t startRank) {
     detail::LexicalScoringInputs inputs;
     inputs.candidates = std::span<const yams::metadata::SearchResult>(searchResults.results.data(),
                                                                       searchResults.results.size());
@@ -31,7 +51,7 @@ void appendLexicalBatch(const std::string& query, QueryIntent queryIntent,
     inputs.bm25NormDivisor = config.bm25NormDivisor;
     inputs.penalty = scorePenalty;
     inputs.sourceTag = source;
-    inputs.startRank = results.size();
+    inputs.startRank = startRank;
     if (source == ComponentResult::Source::GraphText) {
         inputs.admissionMinScore = config.graphTextMinAdmissionScore;
     }
@@ -55,11 +75,12 @@ void appendLexicalBatch(const std::string& query, QueryIntent queryIntent,
     }
 }
 
-void applySimeonLexicalRescoring(const std::string& query, SimeonLexicalBackend* backend,
-                                 yams::metadata::SearchResults& searchResults,
-                                 std::string* lastSimeonRouteRecipe) {
+std::optional<yams::metadata::SearchResults>
+makeSimeonLexicalResults(const std::string& query, SimeonLexicalBackend* backend,
+                         const yams::metadata::SearchResults& searchResults,
+                         std::string* lastSimeonRouteRecipe) {
     if (!backend || !backend->ready() || searchResults.results.empty()) {
-        return;
+        return std::nullopt;
     }
 
     std::vector<std::int64_t> ids;
@@ -72,25 +93,45 @@ void applySimeonLexicalRescoring(const std::string& query, SimeonLexicalBackend*
     if (!decision) {
         spdlog::debug("[simeon-lexical] score failed, keeping FTS5 scores: {}",
                       decision.error().message);
-        return;
+        return std::nullopt;
     }
 
     const auto& values = decision.value().scores;
     if (values.size() != searchResults.results.size()) {
         spdlog::warn("[simeon-lexical] score size mismatch ({} vs {}); keeping FTS5 scores",
                      values.size(), searchResults.results.size());
-        return;
+        return std::nullopt;
     }
     if (lastSimeonRouteRecipe != nullptr) {
         *lastSimeonRouteRecipe = decision.value().recipe_name;
     }
+    auto rescored = searchResults;
     for (size_t i = 0; i < values.size(); ++i) {
-        searchResults.results[i].score = -static_cast<double>(values[i]);
+        rescored.results[i].score = -static_cast<double>(values[i]);
     }
-    std::sort(searchResults.results.begin(), searchResults.results.end(),
+    std::sort(rescored.results.begin(), rescored.results.end(),
               [](const yams::metadata::SearchResult& a, const yams::metadata::SearchResult& b) {
                   return a.score < b.score;
               });
+    return rescored;
+}
+
+void appendSimeonLexicalBatch(const std::string& query, SimeonLexicalBackend* backend,
+                              std::string* lastSimeonRouteRecipe, QueryIntent queryIntent,
+                              const SearchEngineConfig& config,
+                              const yams::metadata::SearchResults& searchResults,
+                              float scorePenalty, std::unordered_set<std::string>& simeonSeenHashes,
+                              std::vector<ComponentResult>& results,
+                              QueryExpansionStats* expansionStats) {
+    auto simeonResults =
+        makeSimeonLexicalResults(query, backend, searchResults, lastSimeonRouteRecipe);
+    if (!simeonResults) {
+        return;
+    }
+    const size_t simeonRankBase = simeonSeenHashes.size();
+    appendLexicalBatchAtRank(query, queryIntent, config, *simeonResults, scorePenalty, true,
+                             &simeonSeenHashes, ComponentResult::Source::SimeonText, results,
+                             expansionStats, simeonRankBase);
 }
 
 Fts5CandidatePoolStats fetchFts5CandidatePool(
@@ -101,6 +142,8 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
     std::unordered_set<std::string>& seenHashes,
     const std::function<std::vector<std::string>(const std::string&, size_t)>& subPhraseGenerator) {
     Fts5CandidatePoolStats stats;
+    std::unordered_set<std::string> simeonSeenHashes;
+    simeonSeenHashes.reserve(limit * 2);
 
     auto fts5Results = metadataRepo->search(query, static_cast<int>(limit), 0);
     stats.baseFtsSucceeded = static_cast<bool>(fts5Results);
@@ -111,9 +154,11 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
 
     if (stats.baseFtsSucceeded) {
         stats.baseFtsHitCount = fts5Results.value().results.size();
-        applySimeonLexicalRescoring(query, backend, fts5Results.value(), lastSimeonRouteRecipe);
         appendLexicalBatch(query, queryIntent, config, fts5Results.value(), 1.0f, true, &seenHashes,
                            ComponentResult::Source::Text, results, expansionStats);
+        appendSimeonLexicalBatch(query, backend, lastSimeonRouteRecipe, queryIntent, config,
+                                 fts5Results.value(), 1.0f, simeonSeenHashes, results,
+                                 expansionStats);
     }
 
     if (config.enableLexicalExpansion && stats.baseFtsHitCount < config.lexicalExpansionMinHits) {
@@ -148,11 +193,12 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
             auto expandedResults = metadataRepo->search(expandedQuery, static_cast<int>(limit), 0);
             if (expandedResults) {
                 const float penalty = std::clamp(config.lexicalExpansionScorePenalty, 0.1f, 1.0f);
-                applySimeonLexicalRescoring(query, backend, expandedResults.value(),
-                                            lastSimeonRouteRecipe);
                 appendLexicalBatch(query, queryIntent, config, expandedResults.value(), penalty,
                                    true, &seenHashes, ComponentResult::Source::Text, results,
                                    expansionStats);
+                appendSimeonLexicalBatch(query, backend, lastSimeonRouteRecipe, queryIntent, config,
+                                         expandedResults.value(), penalty, simeonSeenHashes,
+                                         results, expansionStats);
                 spdlog::debug("queryFullText lexical expansion: base_hits={} expanded_hits={} "
                               "query='{}' expanded='{}'",
                               stats.baseFtsHitCount, results.size(), query, expandedQuery);
@@ -213,11 +259,12 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
                 }
                 const float penalty = std::clamp(config.subPhraseExpansionPenalty, 0.1f, 1.0f);
                 const size_t beforeAppend = results.size();
-                applySimeonLexicalRescoring(query, backend, expandedResults.value(),
-                                            lastSimeonRouteRecipe);
                 appendLexicalBatch(query, queryIntent, config, expandedResults.value(), penalty,
                                    true, &seenHashes, ComponentResult::Source::Text, results,
                                    expansionStats);
+                appendSimeonLexicalBatch(query, backend, lastSimeonRouteRecipe, queryIntent, config,
+                                         expandedResults.value(), penalty, simeonSeenHashes,
+                                         results, expansionStats);
                 if (expansionStats != nullptr) {
                     expansionStats->subPhraseFtsAddedCount =
                         results.size() > beforeAppend ? (results.size() - beforeAppend) : 0;

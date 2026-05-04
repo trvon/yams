@@ -75,6 +75,12 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
     const auto lastBuildCount = lastBuildDocCount_.load();
     const auto growth = currentCount > lastBuildCount ? currentCount - lastBuildCount : 0;
 
+    if (lastBuildCount == 0 && currentCount > 0) {
+        spdlog::info("[SearchComponent] Forcing first populated search rebuild (0 -> {} docs)",
+                     currentCount);
+        return true;
+    }
+
     if (state_.readiness.searchEngineReady.load(std::memory_order_relaxed) && growth > 0) {
         const auto freshness = serviceManager_.getIndexFreshnessSnapshot();
         const bool lexicalOverlayCoversGrowth = freshness.lexicalDeltaPublishedDocs >= growth ||

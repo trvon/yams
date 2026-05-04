@@ -2103,6 +2103,8 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
                             const auto& cfg = engine->getConfig();
                             newParams["rrf_k"] = static_cast<double>(cfg.rrfK);
                             newParams["text_weight"] = static_cast<double>(cfg.textWeight);
+                            newParams["simeon_text_weight"] =
+                                static_cast<double>(cfg.simeonTextWeight);
                             newParams["vector_weight"] = static_cast<double>(cfg.vectorWeight);
                             newParams["entity_vector_weight"] =
                                 static_cast<double>(cfg.entityVectorWeight);
@@ -2132,6 +2134,8 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
                             const auto& p = tuner.getParams();
                             newParams["rrf_k"] = static_cast<double>(p.rrfK);
                             newParams["text_weight"] = static_cast<double>(p.weights.text.value);
+                            newParams["simeon_text_weight"] =
+                                static_cast<double>(p.weights.simeonText.value);
                             newParams["vector_weight"] =
                                 static_cast<double>(p.weights.vector.value);
                             newParams["entity_vector_weight"] =
@@ -2180,6 +2184,8 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
                         const auto& cfg = engine->getConfig();
                         out.searchTuningParams["rrf_k"] = static_cast<double>(cfg.rrfK);
                         out.searchTuningParams["text_weight"] = static_cast<double>(cfg.textWeight);
+                        out.searchTuningParams["simeon_text_weight"] =
+                            static_cast<double>(cfg.simeonTextWeight);
                         out.searchTuningParams["vector_weight"] =
                             static_cast<double>(cfg.vectorWeight);
                         out.searchTuningParams["entity_vector_weight"] =

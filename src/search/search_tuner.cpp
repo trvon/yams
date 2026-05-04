@@ -39,6 +39,16 @@ constexpr float kSimilarityThresholdLowerStep = 0.05f;
 constexpr float kSimilarityThresholdRaiseStep = 0.02f;
 // Margin: only raise threshold when EWMA max-sim is well above current threshold.
 constexpr float kSimilarityThresholdRaiseMargin = 0.20f;
+constexpr double kFusionDroppedPressureThreshold = 0.35;
+constexpr double kAnchoredDroppedPressureThreshold = 0.18;
+constexpr double kTopTextDroppedPressureThreshold = 0.12;
+constexpr std::uint64_t kFusionPressureWarmupObservations = 5;
+constexpr size_t kMaxAdaptiveLexicalFloorTopN = 12;
+constexpr float kMaxAdaptiveLexicalFloorBoost = 0.18f;
+constexpr float kAdaptiveLexicalFloorBoostStep = 0.04f;
+constexpr float kMaxAdaptiveLexicalTieBreakEpsilon = 0.010f;
+constexpr float kAdaptiveLexicalTieBreakEpsilonStep = 0.0025f;
+constexpr float kMinAdaptiveVectorOnlyPenalty = 0.85f;
 
 bool statsAreOverlayBacked(const storage::CorpusStats& stats) {
     return stats.usedOnlineOverlay;
@@ -191,6 +201,7 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
     // Scale down other weights proportionally to make room for KG
     const float reductionFactor = 1.0f - (0.15f * graphRichness);
     params.weights.text.scaleBy(reductionFactor, TuningLayer::Corpus);
+    params.weights.simeonText.scaleBy(reductionFactor, TuningLayer::Corpus);
     params.weights.vector.scaleBy(reductionFactor, TuningLayer::Corpus);
     params.weights.entityVector.scaleBy(reductionFactor, TuningLayer::Corpus);
     params.weights.tag.scaleBy(reductionFactor, TuningLayer::Corpus);
@@ -235,6 +246,70 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
     stateReason += suffix.str();
 }
 
+double rate(std::size_t part, std::size_t total) {
+    return shareOf(static_cast<double>(part), static_cast<double>(total));
+}
+
+bool applyFusionGuardrailAdjustments(TunedParams& candidate, const RuntimeTelemetry& telemetry,
+                                     std::vector<std::string>& reasons) {
+    const double fusionDropRate = rate(telemetry.fusionDroppedDocCount,
+                                       std::max<std::size_t>(telemetry.preFusionUniqueDocCount, 1));
+    const double anchoredDropRate =
+        rate(telemetry.anchoredFusionDroppedDocCount, telemetry.anchoredPreFusionDocCount);
+    const double topTextDropRate =
+        rate(telemetry.topTextFusionDroppedDocCount, telemetry.topTextPreFusionDocCount);
+
+    const bool lexicalPressure = fusionDropRate >= kFusionDroppedPressureThreshold &&
+                                 (anchoredDropRate >= kAnchoredDroppedPressureThreshold ||
+                                  topTextDropRate >= kTopTextDroppedPressureThreshold);
+    if (!lexicalPressure) {
+        return false;
+    }
+
+    bool changed = false;
+
+    if (!candidate.enableLexicalTieBreak) {
+        candidate.enableLexicalTieBreak = true;
+        changed = true;
+    }
+
+    const float nextTieBreakEpsilon =
+        std::min(kMaxAdaptiveLexicalTieBreakEpsilon,
+                 std::max(candidate.lexicalTieBreakEpsilon, kAdaptiveLexicalTieBreakEpsilonStep));
+    if (nextTieBreakEpsilon > candidate.lexicalTieBreakEpsilon + 1e-6f) {
+        candidate.lexicalTieBreakEpsilon = nextTieBreakEpsilon;
+        changed = true;
+    }
+
+    const size_t desiredFloorTopN =
+        candidate.lexicalFloorTopN == 0
+            ? std::min<size_t>(6, kMaxAdaptiveLexicalFloorTopN)
+            : std::min(kMaxAdaptiveLexicalFloorTopN, candidate.lexicalFloorTopN + size_t{2});
+    if (desiredFloorTopN > candidate.lexicalFloorTopN) {
+        candidate.lexicalFloorTopN = desiredFloorTopN;
+        changed = true;
+    }
+
+    const float nextFloorBoost =
+        std::min(kMaxAdaptiveLexicalFloorBoost,
+                 std::max(candidate.lexicalFloorBoost + kAdaptiveLexicalFloorBoostStep,
+                          kAdaptiveLexicalFloorBoostStep));
+    if (nextFloorBoost > candidate.lexicalFloorBoost + 1e-6f) {
+        candidate.lexicalFloorBoost = nextFloorBoost;
+        changed = true;
+    }
+
+    if (candidate.vectorOnlyPenalty < kMinAdaptiveVectorOnlyPenalty) {
+        candidate.vectorOnlyPenalty = kMinAdaptiveVectorOnlyPenalty;
+        changed = true;
+    }
+
+    if (changed) {
+        reasons.push_back("fusion_lexical_pressure");
+    }
+    return changed;
+}
+
 } // namespace
 
 SearchTuner::SearchTuner(const storage::CorpusStats& stats) : SearchTuner(stats, std::nullopt) {}
@@ -263,6 +338,7 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     baseConfig_ = config;
     params_.zoomLevel = config.zoomLevel;
     params_.weights.text.value = config.textWeight;
+    params_.weights.simeonText.value = config.simeonTextWeight;
     params_.weights.vector.value = config.vectorWeight;
     params_.weights.entityVector.value = config.entityVectorWeight;
     params_.weights.pathTree.value = config.pathTreeWeight;
@@ -306,11 +382,14 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     baseParams_ = params_;
 }
 
-void SearchTuner::pinEnvOverrides(bool textPinned, bool vectorPinned, bool kgPinned,
-                                  bool similarityThresholdPinned) {
+void SearchTuner::pinEnvOverrides(bool textPinned, bool simeonTextPinned, bool vectorPinned,
+                                  bool kgPinned, bool similarityThresholdPinned) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (textPinned) {
         params_.weights.text.forceSet(params_.weights.text.value, TuningLayer::Env);
+    }
+    if (simeonTextPinned) {
+        params_.weights.simeonText.forceSet(params_.weights.simeonText.value, TuningLayer::Env);
     }
     if (vectorPinned) {
         params_.weights.vector.forceSet(params_.weights.vector.value, TuningLayer::Env);
@@ -463,16 +542,33 @@ void SearchTuner::observeLocked(const RuntimeTelemetry& telemetry) {
         adaptive_.ewmaGraphRerankContributionRate, graphContributionRate, adaptive_.observations);
     adaptive_.ewmaZoomDepth = ewmaUpdate(
         adaptive_.ewmaZoomDepth, zoomLevelDepth(telemetry.zoomLevel), adaptive_.observations);
+    const double fusionDroppedRate =
+        rate(telemetry.fusionDroppedDocCount, telemetry.preFusionUniqueDocCount);
+    const double anchoredFusionDroppedRate =
+        rate(telemetry.anchoredFusionDroppedDocCount, telemetry.anchoredPreFusionDocCount);
+    const double topTextFusionDroppedRate =
+        rate(telemetry.topTextFusionDroppedDocCount, telemetry.topTextPreFusionDocCount);
+    const double vectorOnlyShare =
+        rate(telemetry.vectorOnlyDocCount, telemetry.preFusionUniqueDocCount);
+    const double semanticRescueRate =
+        rate(telemetry.semanticRescueFinalCount, telemetry.semanticRescueTarget);
+    adaptive_.ewmaFusionDroppedRate =
+        ewmaUpdate(adaptive_.ewmaFusionDroppedRate, fusionDroppedRate, adaptive_.observations);
+    adaptive_.ewmaAnchoredFusionDroppedRate = ewmaUpdate(
+        adaptive_.ewmaAnchoredFusionDroppedRate, anchoredFusionDroppedRate, adaptive_.observations);
+    adaptive_.ewmaTopTextFusionDroppedRate = ewmaUpdate(
+        adaptive_.ewmaTopTextFusionDroppedRate, topTextFusionDroppedRate, adaptive_.observations);
+    adaptive_.ewmaVectorOnlyShare =
+        ewmaUpdate(adaptive_.ewmaVectorOnlyShare, vectorOnlyShare, adaptive_.observations);
+    adaptive_.ewmaSemanticRescueRate =
+        ewmaUpdate(adaptive_.ewmaSemanticRescueRate, semanticRescueRate, adaptive_.observations);
     adaptive_.lastZoomLevel = telemetry.zoomLevel;
     adaptive_
         .zoomLevelCounts[SearchEngineConfig::navigationZoomLevelToString(telemetry.zoomLevel)]++;
 
-    if (!stats_.hasKnowledgeGraph()) {
-        adaptive_.lastDecision = "steady_no_kg";
-        return;
-    }
-
-    if (statsAreOverlayBacked(stats_)) {
+    if (statsAreOverlayBacked(stats_) &&
+        (!telemetry.adaptiveFusionEnabled ||
+         adaptive_.observations < kFusionPressureWarmupObservations)) {
         adaptive_.lastDecision = "steady_overlay_stats";
         return;
     }
@@ -495,6 +591,37 @@ void SearchTuner::observeLocked(const RuntimeTelemetry& telemetry) {
     TunedParams candidate = params_;
     bool changed = false;
     std::vector<std::string> reasons;
+
+    if (telemetry.adaptiveFusionEnabled &&
+        adaptive_.observations >= kFusionPressureWarmupObservations) {
+        changed = applyFusionGuardrailAdjustments(candidate, telemetry, reasons) || changed;
+    }
+
+    if (statsAreOverlayBacked(stats_)) {
+        applyAdaptiveClamp(stats_, candidate);
+        if (changed) {
+            params_ = candidate;
+            adaptive_.lastAdjustmentObservation = adaptive_.observations;
+            adaptive_.lastObservationChanged = true;
+        } else if (reasons.empty()) {
+            reasons.push_back("steady_overlay_stats");
+        }
+        adaptive_.lastDecision = buildAdaptiveDecision(changed, reasons);
+        return;
+    }
+
+    if (!stats_.hasKnowledgeGraph()) {
+        applyAdaptiveClamp(stats_, candidate);
+        if (changed) {
+            params_ = candidate;
+            adaptive_.lastAdjustmentObservation = adaptive_.observations;
+            adaptive_.lastObservationChanged = true;
+        } else if (reasons.empty()) {
+            reasons.push_back("steady_no_kg");
+        }
+        adaptive_.lastDecision = buildAdaptiveDecision(changed, reasons);
+        return;
+    }
 
     const bool kgLatencyPressure =
         adaptive_.ewmaKgLatencyShare > 0.33 && adaptive_.ewmaKgUtility < 0.18;
@@ -639,6 +766,11 @@ nlohmann::json SearchTuner::adaptiveStateToJsonLocked() const {
         {"ewma_vector_max_similarity", adaptive_.ewmaVectorMaxSimilarity},
         {"vector_stage_observations", adaptive_.vectorStageObservations},
         {"vector_stage_empty_streak", adaptive_.vectorStageEmptyStreak},
+        {"ewma_fusion_dropped_rate", adaptive_.ewmaFusionDroppedRate},
+        {"ewma_anchored_fusion_dropped_rate", adaptive_.ewmaAnchoredFusionDroppedRate},
+        {"ewma_top_text_fusion_dropped_rate", adaptive_.ewmaTopTextFusionDroppedRate},
+        {"ewma_vector_only_share", adaptive_.ewmaVectorOnlyShare},
+        {"ewma_semantic_rescue_rate", adaptive_.ewmaSemanticRescueRate},
         {"last_zoom_level",
          SearchEngineConfig::navigationZoomLevelToString(adaptive_.lastZoomLevel)},
         {"zoom_level_counts", zoomLevelCountJson(adaptive_.zoomLevelCounts)},
@@ -774,6 +906,16 @@ Result<void> SearchTuner::loadAdaptiveState(const std::filesystem::path& path) {
         j.value("vector_stage_observations", adaptive_.vectorStageObservations);
     adaptive_.vectorStageEmptyStreak =
         j.value("vector_stage_empty_streak", adaptive_.vectorStageEmptyStreak);
+    adaptive_.ewmaFusionDroppedRate =
+        j.value("ewma_fusion_dropped_rate", adaptive_.ewmaFusionDroppedRate);
+    adaptive_.ewmaAnchoredFusionDroppedRate =
+        j.value("ewma_anchored_fusion_dropped_rate", adaptive_.ewmaAnchoredFusionDroppedRate);
+    adaptive_.ewmaTopTextFusionDroppedRate =
+        j.value("ewma_top_text_fusion_dropped_rate", adaptive_.ewmaTopTextFusionDroppedRate);
+    adaptive_.ewmaVectorOnlyShare =
+        j.value("ewma_vector_only_share", adaptive_.ewmaVectorOnlyShare);
+    adaptive_.ewmaSemanticRescueRate =
+        j.value("ewma_semantic_rescue_rate", adaptive_.ewmaSemanticRescueRate);
     if (j.contains("zoom_level_counts") && j["zoom_level_counts"].is_object()) {
         adaptive_.zoomLevelCounts.clear();
         for (auto it = j["zoom_level_counts"].begin(); it != j["zoom_level_counts"].end(); ++it) {
