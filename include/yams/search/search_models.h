@@ -30,7 +30,6 @@ struct ComponentResult {
         Metadata,
         Symbol,
         Anchor,
-        CorpusAdapter,
         Unknown
     } source = Source::Unknown;
     size_t rank = 0;
@@ -64,8 +63,6 @@ inline constexpr const char* componentSourceToString(ComponentResult::Source sou
             return "symbol";
         case ComponentResult::Source::Anchor:
             return "anchor";
-        case ComponentResult::Source::CorpusAdapter:
-            return "corpus_adapter";
         case ComponentResult::Source::Unknown:
             return "unknown";
     }
@@ -95,8 +92,6 @@ inline float componentSourceWeight(const SearchEngineConfig& config,
             return config.tagWeight;
         case ComponentResult::Source::Metadata:
             return config.metadataWeight;
-        case ComponentResult::Source::CorpusAdapter:
-            return config.corpusAdapterWeight;
         case ComponentResult::Source::Anchor:
         case ComponentResult::Source::Symbol:
         case ComponentResult::Source::Unknown:
@@ -118,8 +113,7 @@ inline constexpr bool isTextAnchoringComponent(ComponentResult::Source source) n
            source == ComponentResult::Source::PathTree ||
            source == ComponentResult::Source::KnowledgeGraph ||
            source == ComponentResult::Source::Tag || source == ComponentResult::Source::Metadata ||
-           source == ComponentResult::Source::Symbol ||
-           source == ComponentResult::Source::CorpusAdapter;
+           source == ComponentResult::Source::Symbol;
 }
 
 inline double componentSourceScoreInResult(const SearchResult& r,
@@ -145,8 +139,6 @@ inline double componentSourceScoreInResult(const SearchResult& r,
         case ComponentResult::Source::Symbol:
             return r.symbolScore.value_or(0.0);
         case ComponentResult::Source::Anchor:
-            return r.anchorScore.value_or(0.0);
-        case ComponentResult::Source::CorpusAdapter:
             return r.anchorScore.value_or(0.0);
         case ComponentResult::Source::Unknown:
             return 0.0;

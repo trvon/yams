@@ -69,7 +69,6 @@ inline void accumulateComponentScore(SearchResult& r, ComponentResult::Source so
             r.symbolScore = r.symbolScore.value_or(0.0) + contribution;
             break;
         case ComponentResult::Source::Anchor:
-        case ComponentResult::Source::CorpusAdapter:
             r.anchorScore = r.anchorScore.value_or(0.0) + contribution;
             break;
         default:

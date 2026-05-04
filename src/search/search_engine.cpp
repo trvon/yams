@@ -368,7 +368,6 @@ collectGraphSeedDocs(const std::vector<ComponentResult>& componentResults, size_
                 sourceBoost = 0.60f;
                 break;
             case ComponentResult::Source::Anchor:
-            case ComponentResult::Source::CorpusAdapter:
                 sourceBoost = 0.70f;
                 break;
             case ComponentResult::Source::Unknown:
@@ -426,6 +425,194 @@ PreFusionSignalMap buildPreFusionSignalMap(const std::vector<ComponentResult>& c
     return signals;
 }
 
+// ── Path-seed helpers (merged from CorpusAdapter) ────────────────────────
+
+std::string lowerCopy(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    for (unsigned char ch : in) {
+        out.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return out;
+}
+
+std::string trimCopy(std::string_view in) {
+    while (!in.empty() && std::isspace(static_cast<unsigned char>(in.front()))) {
+        in.remove_prefix(1);
+    }
+    while (!in.empty() && std::isspace(static_cast<unsigned char>(in.back()))) {
+        in.remove_suffix(1);
+    }
+    return std::string(in);
+}
+
+bool looksStructured(std::string_view query) {
+    return query.find('=') != std::string_view::npos || query.find('/') != std::string_view::npos ||
+           query.find('\\') != std::string_view::npos ||
+           query.find('.') != std::string_view::npos || query.find('#') != std::string_view::npos;
+}
+
+bool isWordChar(unsigned char ch) noexcept {
+    return std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.' || ch == '/' || ch == '\\' ||
+           ch == '#';
+}
+
+const std::unordered_set<std::string_view>& englishStopwords() {
+    static const std::unordered_set<std::string_view> kStopwords = {
+        "a",    "an",   "and", "are",  "as",    "at",    "be",     "by",    "can", "could", "do",
+        "does", "did",  "for", "from", "has",   "have",  "how",    "i",     "in",  "into",  "is",
+        "it",   "lets", "of",  "on",   "or",    "our",   "should", "that",  "the", "their", "this",
+        "to",   "us",   "we",  "what", "where", "which", "with",   "would", "you", "your"};
+    return kStopwords;
+}
+
+bool isStopword(std::string_view token) {
+    return englishStopwords().contains(token);
+}
+
+std::vector<std::string> tokenizeQueryTerms(std::string_view query) {
+    std::vector<std::string> terms;
+    std::size_t pos = 0;
+    while (pos < query.size()) {
+        while (pos < query.size() && !isWordChar(static_cast<unsigned char>(query[pos]))) {
+            ++pos;
+        }
+        const std::size_t start = pos;
+        while (pos < query.size() && isWordChar(static_cast<unsigned char>(query[pos]))) {
+            ++pos;
+        }
+        if (pos > start) {
+            std::string term = lowerCopy(query.substr(start, pos - start));
+            while (!term.empty() &&
+                   (term.front() == '.' || term.front() == '-' || term.front() == '#')) {
+                term.erase(term.begin());
+            }
+            while (!term.empty() &&
+                   (term.back() == '.' || term.back() == '-' || term.back() == '#')) {
+                term.pop_back();
+            }
+            if (term.size() > 1)
+                terms.push_back(std::move(term));
+        }
+    }
+    return terms;
+}
+
+std::vector<std::pair<std::string, std::string>>
+parseMetadataFiltersFromQuery(std::string_view query) {
+    std::vector<std::pair<std::string, std::string>> filters;
+    std::size_t pos = 0;
+    while (pos < query.size()) {
+        while (pos < query.size() && std::isspace(static_cast<unsigned char>(query[pos]))) {
+            ++pos;
+        }
+        const std::size_t keyStart = pos;
+        while (pos < query.size() && query[pos] != '=' &&
+               !std::isspace(static_cast<unsigned char>(query[pos]))) {
+            ++pos;
+        }
+        if (pos >= query.size() || query[pos] != '=' || pos == keyStart) {
+            while (pos < query.size() && !std::isspace(static_cast<unsigned char>(query[pos]))) {
+                ++pos;
+            }
+            continue;
+        }
+        std::string key(query.substr(keyStart, pos - keyStart));
+        ++pos; // '='
+        const std::size_t valueStart = pos;
+        while (pos < query.size() && !std::isspace(static_cast<unsigned char>(query[pos]))) {
+            ++pos;
+        }
+        if (pos > valueStart) {
+            filters.emplace_back(std::move(key),
+                                 std::string(query.substr(valueStart, pos - valueStart)));
+        }
+    }
+    return filters;
+}
+
+struct PathQuerySeed {
+    std::string text;
+    std::string kind;
+    float weight{1.0f};
+};
+
+void addUniquePathSeed(std::vector<PathQuerySeed>& seeds, std::unordered_set<std::string>& seen,
+                       std::string text, std::string kind, float weight) {
+    text = trimCopy(text);
+    if (text.size() < 2)
+        return;
+    std::string key = lowerCopy(text);
+    if (!seen.insert(key).second)
+        return;
+    seeds.push_back(PathQuerySeed{std::move(text), std::move(kind), weight});
+}
+
+std::vector<PathQuerySeed> buildPathSeedsFromQuery(std::string_view query,
+                                                   std::size_t maxSeeds = 8) {
+    std::vector<PathQuerySeed> seeds;
+    std::unordered_set<std::string> seen;
+    seeds.reserve(maxSeeds);
+
+    const std::string whole = trimCopy(query);
+    if ((looksStructured(query) || query.size() <= 64) && !whole.empty()) {
+        addUniquePathSeed(seeds, seen, whole, "whole_query", looksStructured(query) ? 1.0f : 0.82f);
+    }
+
+    for (const auto& term : tokenizeQueryTerms(query)) {
+        if (seeds.size() >= maxSeeds)
+            break;
+        if (term.find('=') != std::string::npos)
+            continue;
+        const bool pathish =
+            term.find('/') != std::string::npos || term.find('\\') != std::string::npos ||
+            term.find('.') != std::string::npos || term.find('_') != std::string::npos ||
+            term.find('-') != std::string::npos || term.find('#') != std::string::npos;
+        if (pathish && term.size() >= 3) {
+            addUniquePathSeed(seeds, seen, term, "structured_token", 0.95f);
+        }
+    }
+
+    std::vector<std::string> contentTerms;
+    for (auto& term : tokenizeQueryTerms(query)) {
+        if (term.find('=') != std::string::npos || term.size() < 3 || isStopword(term))
+            continue;
+        std::size_t start = 0;
+        for (std::size_t i = 0; i <= term.size(); ++i) {
+            if (i == term.size() || term[i] == '/' || term[i] == '\\' || term[i] == '.' ||
+                term[i] == '_' || term[i] == '-') {
+                if (i > start + 2)
+                    contentTerms.push_back(term.substr(start, i - start));
+                start = i + 1;
+            }
+        }
+        contentTerms.push_back(std::move(term));
+    }
+
+    for (const auto& term : contentTerms) {
+        if (seeds.size() >= maxSeeds)
+            break;
+        addUniquePathSeed(seeds, seen, term, "content_term", 0.70f);
+    }
+
+    for (std::size_t i = 0; i < contentTerms.size() && seeds.size() < maxSeeds; ++i) {
+        std::string phrase;
+        for (std::size_t j = i; j < std::min(contentTerms.size(), i + 3) && seeds.size() < maxSeeds;
+             ++j) {
+            if (!phrase.empty())
+                phrase.push_back(' ');
+            phrase += contentTerms[j];
+            if (j > i && phrase.size() <= 48) {
+                addUniquePathSeed(seeds, seen, phrase, "content_phrase", 0.62f);
+            }
+        }
+    }
+
+    return seeds;
+}
+
+// ── End path-seed helpers ────────────────────────────────────────────────
+
 std::string_view::size_type ci_find(std::string_view haystack, std::string_view needle) {
     if (needle.empty()) {
         return 0;
@@ -482,7 +669,6 @@ public:
         if (kgStore_) {
             kgScorer_ = makeSimpleKGScorer(kgStore_);
         }
-        corpusAdapters_.push_back(std::make_shared<YamsNativeCorpusAdapter>());
     }
 
     Result<std::vector<SearchResult>> search(const std::string& query, const SearchParams& params);
@@ -545,15 +731,6 @@ public:
             }
         }
     }
-
-    void addCorpusAdapter(std::shared_ptr<CorpusAdapter> adapter) {
-        if (adapter) {
-            corpusAdapters_.push_back(std::move(adapter));
-        }
-    }
-
-    void clearCorpusAdapters() { corpusAdapters_.clear(); }
-
     std::shared_ptr<SearchTuner> getSearchTuner() const { return tuner_; }
 
     SearchEngine::SimeonLexicalStatus getSimeonLexicalStatus() const {
@@ -594,11 +771,8 @@ private:
 
     Result<std::vector<ComponentResult>> queryTags(const std::vector<std::string>& tags,
                                                    bool matchAll, size_t limit);
-    Result<std::vector<ComponentResult>> queryMetadata(const SearchParams& params, size_t limit);
-    Result<std::vector<ComponentResult>> queryCorpusAdapters(const std::string& query,
-                                                             const SearchParams& params,
-                                                             const SearchEngineConfig& config,
-                                                             size_t limit);
+    Result<std::vector<ComponentResult>> queryMetadata(const std::string& query,
+                                                       const SearchParams& params, size_t limit);
 
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<vector::VectorDatabase> vectorDb_;
@@ -611,7 +785,6 @@ private:
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
     std::shared_ptr<SearchTuner> tuner_;    // Adaptive runtime tuner (optional)
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
-    std::vector<std::shared_ptr<CorpusAdapter>> corpusAdapters_;
     // Recipe label from the last simeon rescore call in this request; empty
     // when rescoring was skipped (backend off, not ready, or empty result set).
     // Surfaced to response.debugStats["simeon_route"] for per-query tracing.
@@ -1246,8 +1419,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         estimatedResults += workingConfig.tagMaxResults;
     if (workingConfig.metadataWeight > 0.0f)
         estimatedResults += workingConfig.metadataMaxResults;
-    if (workingConfig.enableCorpusAdapters && workingConfig.corpusAdapterWeight > 0.0f)
-        estimatedResults += workingConfig.corpusAdapterMaxResults;
     allComponentResults.reserve(estimatedResults);
 
     // Component result collection helper with timing
@@ -1335,7 +1506,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::future<Result<std::vector<ComponentResult>>> entityVectorFuture;
         std::future<Result<std::vector<ComponentResult>>> tagFuture;
         std::future<Result<std::vector<ComponentResult>>> metaFuture;
-        std::future<Result<std::vector<ComponentResult>>> corpusAdapterFuture;
 
         auto schedule = [&]([[maybe_unused]] const char* name, [[maybe_unused]] float weight,
                             [[maybe_unused]] std::atomic<uint64_t>& queryCount,
@@ -1387,28 +1557,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             metaFuture =
                 schedule("metadata", workingConfig.metadataWeight, stats_.metadataQueries,
-                         stats_.avgMetadataTimeMicros, [this, &params, &workingConfig]() {
+                         stats_.avgMetadataTimeMicros, [this, &query, &params, &workingConfig]() {
                              YAMS_ZONE_SCOPED_N("component::metadata");
-                             return queryMetadata(params, workingConfig.metadataMaxResults);
+                             return queryMetadata(query, params, workingConfig.metadataMaxResults);
                          });
-
-            corpusAdapterFuture = schedule(
-                "corpus_adapter",
-                workingConfig.enableCorpusAdapters ? workingConfig.corpusAdapterWeight : 0.0f,
-                stats_.metadataQueries, stats_.avgMetadataTimeMicros,
-                [this, &query, &params, &workingConfig]() {
-                    YAMS_ZONE_SCOPED_N("component::corpus_adapter");
-                    return queryCorpusAdapters(query, params, workingConfig,
-                                               workingConfig.corpusAdapterMaxResults);
-                });
 
             // Collect Tier 1 results
             collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
             collectIf(pathFuture, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
             collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
-            collectIf(corpusAdapterFuture, "corpus_adapter", stats_.metadataQueries,
-                      stats_.avgMetadataTimeMicros);
 
             const bool needTier1Candidates = workingConfig.tieredNarrowVectorSearch;
             std::unordered_set<std::string> tier1Candidates;
@@ -1613,27 +1771,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             metaFuture =
                 schedule("metadata", workingConfig.metadataWeight, stats_.metadataQueries,
-                         stats_.avgMetadataTimeMicros, [this, &params, &workingConfig]() {
+                         stats_.avgMetadataTimeMicros, [this, &query, &params, &workingConfig]() {
                              YAMS_ZONE_SCOPED_N("component::metadata");
-                             return queryMetadata(params, workingConfig.metadataMaxResults);
+                             return queryMetadata(query, params, workingConfig.metadataMaxResults);
                          });
-
-            corpusAdapterFuture = schedule(
-                "corpus_adapter",
-                workingConfig.enableCorpusAdapters ? workingConfig.corpusAdapterWeight : 0.0f,
-                stats_.metadataQueries, stats_.avgMetadataTimeMicros,
-                [this, &query, &params, &workingConfig]() {
-                    YAMS_ZONE_SCOPED_N("component::corpus_adapter");
-                    return queryCorpusAdapters(query, params, workingConfig,
-                                               workingConfig.corpusAdapterMaxResults);
-                });
 
             collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
             collectIf(pathFuture, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
             collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
-            collectIf(corpusAdapterFuture, "corpus_adapter", stats_.metadataQueries,
-                      stats_.avgMetadataTimeMicros);
 
             const auto [budgetLexicalHits, budgetTopTextScore] =
                 deferSemanticStages ? recordSemanticBudgetLexicalEvidence(allComponentResults)
@@ -1749,18 +1895,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 "tag", workingConfig.tagWeight, stats_.tagQueries, stats_.avgTagTimeMicros);
         }
 
-        runSequential([&]() { return queryMetadata(params, workingConfig.metadataMaxResults); },
-                      "metadata", workingConfig.metadataWeight, stats_.metadataQueries,
-                      stats_.avgMetadataTimeMicros);
-
         runSequential(
-            [&]() {
-                return queryCorpusAdapters(query, params, workingConfig,
-                                           workingConfig.corpusAdapterMaxResults);
-            },
-            "corpus_adapter",
-            workingConfig.enableCorpusAdapters ? workingConfig.corpusAdapterWeight : 0.0f,
-            stats_.metadataQueries, stats_.avgMetadataTimeMicros);
+            [&]() { return queryMetadata(query, params, workingConfig.metadataMaxResults); },
+            "metadata", workingConfig.metadataWeight, stats_.metadataQueries,
+            stats_.avgMetadataTimeMicros);
 
         const auto [budgetLexicalHits, budgetTopTextScore] =
             semanticBudgetActive ? recordSemanticBudgetLexicalEvidence(allComponentResults)
@@ -1971,16 +2109,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                             cr.source == ComponentResult::Source::KnowledgeGraph ||
                             cr.source == ComponentResult::Source::Tag ||
                             cr.source == ComponentResult::Source::Metadata ||
-                            cr.source == ComponentResult::Source::Symbol ||
-                            cr.source == ComponentResult::Source::CorpusAdapter) {
+                            cr.source == ComponentResult::Source::Symbol) {
                             graphVectorTextAnchoredHashes.insert(cr.documentHash);
                         }
                         if (cr.source == ComponentResult::Source::Text ||
                             cr.source == ComponentResult::Source::SimeonText ||
                             cr.source == ComponentResult::Source::PathTree ||
                             cr.source == ComponentResult::Source::KnowledgeGraph ||
-                            cr.source == ComponentResult::Source::Symbol ||
-                            cr.source == ComponentResult::Source::CorpusAdapter) {
+                            cr.source == ComponentResult::Source::Symbol) {
                             graphVectorBaselineTextAnchoredHashes.insert(cr.documentHash);
                         }
                     }
@@ -3855,114 +3991,86 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     return response;
 }
 
-Result<std::vector<ComponentResult>>
-SearchEngine::Impl::queryCorpusAdapters(const std::string& query, const SearchParams& params,
-                                        const SearchEngineConfig& config, size_t limit) {
-    std::vector<ComponentResult> merged;
-    if (!metadataRepo_ || corpusAdapters_.empty() || !config.enableCorpusAdapters ||
-        config.corpusAdapterWeight <= 0.0f || limit == 0) {
-        return merged;
-    }
-
-    CorpusAdapterContext context;
-    context.query = query;
-    context.params = params;
-    context.config = &config;
-    context.metadataRepo = metadataRepo_;
-    context.limit = limit;
-
-    merged.reserve(limit);
-    for (const auto& adapter : corpusAdapters_) {
-        if (!adapter || !adapter->supports(context)) {
-            continue;
-        }
-        auto adapterResults = adapter->execute(context);
-        if (!adapterResults) {
-            spdlog::debug("Corpus adapter {} failed: {}", adapter->name(),
-                          adapterResults.error().message);
-            continue;
-        }
-        for (auto& item : adapterResults.value()) {
-            item.source = ComponentResult::Source::CorpusAdapter;
-            if (!item.debugInfo.contains("corpus_adapter")) {
-                item.debugInfo["corpus_adapter"] = adapter->name();
-            }
-            merged.push_back(std::move(item));
-        }
-    }
-
-    std::sort(merged.begin(), merged.end(), [](const ComponentResult& a, const ComponentResult& b) {
-        if (a.score != b.score) {
-            return a.score > b.score;
-        }
-        return a.rank < b.rank;
-    });
-    if (merged.size() > limit) {
-        merged.resize(limit);
-    }
-    for (std::size_t i = 0; i < merged.size(); ++i) {
-        merged[i].rank = i;
-    }
-    return merged;
-}
-
 Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std::string& query,
                                                                        size_t limit) {
     std::vector<ComponentResult> results;
-    results.reserve(limit);
-
-    if (!metadataRepo_) {
+    if (!metadataRepo_)
         return results;
-    }
+
+    const auto pathSeeds = buildPathSeedsFromQuery(query);
+    std::unordered_map<std::string, ComponentResult> byHash;
+    byHash.reserve(limit * 2);
 
     try {
-        yams::metadata::DocumentQueryOptions options;
-        options.containsFragment = query;
-        options.limit = static_cast<int>(limit);
+        for (const auto& seed : pathSeeds) {
+            if (byHash.size() >= limit * 2)
+                break;
 
-        auto docResults = metadataRepo_->queryDocuments(options);
-        if (!docResults) {
-            spdlog::debug("Path tree query failed: {}", docResults.error().message);
-            return results;
-        }
+            yams::metadata::DocumentQueryOptions options;
+            options.containsFragment = seed.text;
+            options.containsUsesFts = true;
+            options.limit = static_cast<int>(std::max<std::size_t>(8, limit / 2));
+            auto docResults = metadataRepo_->queryDocuments(options);
+            if (!docResults)
+                continue;
 
-        // Convert to ComponentResults
-        for (size_t rank = 0; rank < docResults.value().size(); ++rank) {
-            const auto& doc = docResults.value()[rank];
+            const std::string lowerSeed = lowerCopy(seed.text);
+            for (std::size_t rank = 0; rank < docResults.value().size(); ++rank) {
+                const auto& doc = docResults.value()[rank];
+                if (doc.sha256Hash.empty() && doc.filePath.empty())
+                    continue;
 
-            ComponentResult result;
-            result.documentHash = doc.sha256Hash;
-            result.filePath = doc.filePath;
+                ComponentResult item;
+                item.documentHash = doc.sha256Hash;
+                item.filePath = doc.filePath;
+                item.source = ComponentResult::Source::PathTree;
+                item.rank = rank;
+                item.snippet = doc.filePath;
 
-            std::string_view pathView = doc.filePath;
-            std::string_view queryView = query;
+                const std::string lowerPath = lowerCopy(doc.filePath);
+                const auto seedPos = lowerPath.find(lowerSeed);
+                float score = 0.48f * seed.weight;
+                if (seedPos != std::string::npos && !lowerPath.empty()) {
+                    const float position =
+                        1.0f - (static_cast<float>(seedPos) / static_cast<float>(lowerPath.size()));
+                    const float coverage =
+                        static_cast<float>(std::min(lowerSeed.size(), lowerPath.size())) /
+                        static_cast<float>(std::max<std::size_t>(1, lowerPath.size()));
+                    score = std::clamp(seed.weight * (0.56f + position * 0.18f + coverage * 0.26f),
+                                       0.0f, 1.0f);
+                }
+                item.score = score;
+                item.debugInfo["seed"] = seed.text;
+                item.debugInfo["seed_kind"] = seed.kind;
+                item.debugInfo["path"] = doc.filePath;
+                item.debugInfo["path_depth"] = std::to_string(doc.pathDepth);
 
-            size_t pos = ci_find(pathView, queryView);
-
-            if (pos != std::string_view::npos) {
-                float positionScore =
-                    1.0f - (static_cast<float>(pos) / static_cast<float>(pathView.length()));
-                float lengthScore =
-                    static_cast<float>(queryView.length()) / static_cast<float>(pathView.length());
-                result.score = (positionScore * 0.3f + lengthScore * 0.7f);
-            } else {
-                result.score = 0.5f;
+                const std::string& key = doc.sha256Hash.empty() ? doc.filePath : doc.sha256Hash;
+                auto it = byHash.find(key);
+                if (it == byHash.end() || item.score > it->second.score) {
+                    byHash[key] = std::move(item);
+                }
             }
-
-            result.source = ComponentResult::Source::PathTree;
-            result.rank = rank;
-            result.snippet = std::optional<std::string>(doc.filePath);
-            result.debugInfo["path"] = doc.filePath;
-            result.debugInfo["path_depth"] = std::to_string(doc.pathDepth);
-
-            results.push_back(std::move(result));
         }
+
+        results.reserve(std::min(limit, byHash.size()));
+        for (auto& [_, item] : byHash) {
+            results.push_back(std::move(item));
+        }
+        std::sort(results.begin(), results.end(),
+                  [](const ComponentResult& a, const ComponentResult& b) {
+                      if (a.score != b.score)
+                          return a.score > b.score;
+                      return a.rank < b.rank;
+                  });
+        if (results.size() > limit)
+            results.resize(limit);
+        for (std::size_t i = 0; i < results.size(); ++i)
+            results[i].rank = i;
 
         spdlog::debug("Path tree query returned {} results for query: {}", results.size(), query);
-
     } catch (const std::exception& e) {
         spdlog::warn("Path tree query exception: {}", e.what());
-        return results;
     }
 
     return results;
@@ -4335,21 +4443,21 @@ SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAl
     return results;
 }
 
-Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const SearchParams& params,
+Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const std::string& query,
+                                                                       const SearchParams& params,
                                                                        size_t limit) {
     std::vector<ComponentResult> results;
     results.reserve(limit);
 
-    if (!metadataRepo_) {
+    if (!metadataRepo_)
         return results;
-    }
 
-    bool hasFilters = params.mimeType.has_value() || params.extension.has_value() ||
-                      params.modifiedAfter.has_value() || params.modifiedBefore.has_value();
+    const auto queryFilters = parseMetadataFiltersFromQuery(query);
+    bool hasStructFilters = params.mimeType.has_value() || params.extension.has_value() ||
+                            params.modifiedAfter.has_value() || params.modifiedBefore.has_value();
 
-    if (!hasFilters) {
+    if (!hasStructFilters && queryFilters.empty())
         return results;
-    }
 
     try {
         yams::metadata::DocumentQueryOptions options;
@@ -4358,6 +4466,10 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const Sea
         options.modifiedAfter = params.modifiedAfter;
         options.modifiedBefore = params.modifiedBefore;
         options.limit = static_cast<int>(limit);
+
+        for (const auto& kv : queryFilters) {
+            options.metadataFilters.push_back(kv);
+        }
 
         auto docResults = metadataRepo_->queryDocuments(options);
         if (!docResults) {
@@ -4372,7 +4484,6 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const Sea
             result.documentHash = doc.sha256Hash;
             result.filePath = doc.filePath;
 
-            // Score based on how many filters matched (all docs returned match all filters)
             int filterCount = 0;
             if (params.mimeType.has_value())
                 filterCount++;
@@ -4382,26 +4493,26 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const Sea
                 filterCount++;
             if (params.modifiedBefore.has_value())
                 filterCount++;
+            filterCount += static_cast<int>(queryFilters.size());
 
-            result.score = 1.0f; // All returned docs fully match the filters
+            result.score = 1.0f;
             result.source = ComponentResult::Source::Metadata;
             result.rank = rank;
             result.debugInfo["filter_count"] = std::to_string(filterCount);
-            if (params.mimeType.has_value()) {
+            if (params.mimeType.has_value())
                 result.debugInfo["mime_type"] = params.mimeType.value();
-            }
-            if (params.extension.has_value()) {
+            if (params.extension.has_value())
                 result.debugInfo["extension"] = params.extension.value();
+            for (const auto& kv : queryFilters) {
+                result.debugInfo["meta_" + kv.first] = kv.second;
             }
 
             results.push_back(std::move(result));
         }
 
         spdlog::debug("Metadata query returned {} results", results.size());
-
     } catch (const std::exception& e) {
         spdlog::warn("Metadata query exception: {}", e.what());
-        return results;
     }
 
     return results;
@@ -4483,14 +4594,6 @@ void SearchEngine::setConceptExtractor(EntityExtractionFunc extractor) {
 
 void SearchEngine::setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
     pImpl_->setSimeonLexicalBackend(std::move(backend));
-}
-
-void SearchEngine::addCorpusAdapter(std::shared_ptr<CorpusAdapter> adapter) {
-    pImpl_->addCorpusAdapter(std::move(adapter));
-}
-
-void SearchEngine::clearCorpusAdapters() {
-    pImpl_->clearCorpusAdapters();
 }
 
 void SearchEngine::setSearchTuner(std::shared_ptr<SearchTuner> tuner) {

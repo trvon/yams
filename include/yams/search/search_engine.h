@@ -1,7 +1,6 @@
 #pragma once
 
 #include <yams/core/types.h>
-#include <yams/search/corpus_adapter.h>
 #include <yams/search/query_concept_extractor.h>
 #include <yams/search/search_result_fusion.h>
 
@@ -91,8 +90,6 @@ public:
     void setConceptExtractor(EntityExtractionFunc extractor);
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner);
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend);
-    void addCorpusAdapter(std::shared_ptr<CorpusAdapter> adapter);
-    void clearCorpusAdapters();
     std::shared_ptr<SearchTuner> getSearchTuner() const;
     SimeonLexicalStatus getSimeonLexicalStatus() const;
 

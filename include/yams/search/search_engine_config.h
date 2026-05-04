@@ -75,9 +75,6 @@ struct SearchEngineConfig {
     float entityVectorWeight = 0.05f;
     float tagWeight = 0.05f;
     float metadataWeight = 0.05f;
-    bool enableCorpusAdapters = true;
-    float corpusAdapterWeight = 0.08f;
-    size_t corpusAdapterMaxResults = 100;
 
     float conceptBoostWeight = 0.10f;
     float conceptMinConfidence = 0.40f;

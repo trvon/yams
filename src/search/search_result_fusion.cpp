@@ -103,7 +103,6 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
                     scoreScale = 0.75;
                     break;
                 case ComponentResult::Source::Anchor:
-                case ComponentResult::Source::CorpusAdapter:
                     scoreScale = 0.70;
                     break;
                 case ComponentResult::Source::Unknown:
@@ -209,7 +208,6 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
                 acc.graphVectorScore += contribution;
                 break;
             case ComponentResult::Source::Anchor:
-            case ComponentResult::Source::CorpusAdapter:
                 acc.anchorScore += contribution;
                 break;
             case ComponentResult::Source::KnowledgeGraph:
