@@ -133,6 +133,14 @@ Write-Host "Effective stage root: $EffectiveStageDir" -ForegroundColor Cyan
 # Use EffectiveStageDir for WiX (it contains bin/yams.exe)
 $StageDir = $EffectiveStageDir
 
+$tbbDll = Join-Path $StageDir "bin\tbb12.dll"
+$includeTbb = if (Test-Path $tbbDll) { "true" } else { "false" }
+if ($includeTbb -eq "true") {
+    Write-Host "Including TBB runtime DLL: $tbbDll" -ForegroundColor Cyan
+} else {
+    Write-Host "TBB runtime DLL not staged; skipping TBB component." -ForegroundColor Yellow
+}
+
 # Create LICENSE.rtf for WiX installer (WiX requires RTF format)
 $licenseSource = Join-Path $RepoRoot "LICENSE"
 $licenseRtf = Join-Path $StageDir "LICENSE.rtf"
@@ -195,6 +203,7 @@ $wxsPath = Join-Path $ScriptDir "yams.wxs"
     -o $MsiPath `
     -d Version=$MsiVersion `
     -d StageDir=$StageDir `
+    -d IncludeTbb=$includeTbb `
     -ext WixToolset.UI.wixext
 
 if ($LASTEXITCODE -ne 0) {
