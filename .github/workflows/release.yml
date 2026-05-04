@@ -1993,17 +1993,45 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           echo "Checking if release $TAG already exists" >&2
           if command -v gh >/dev/null 2>&1; then
-            if gh release view "$TAG" >/dev/null 2>&1; then
+            if release_json="$(gh release view "$TAG" --json isDraft,url 2>/dev/null)"; then
               echo "exists=true" >> $GITHUB_OUTPUT
+              draft="$(printf '%s' "$release_json" | sed -n 's/.*"isDraft":[[:space:]]*\(true\|false\).*/\1/p')"
+              url="$(printf '%s' "$release_json" | sed -n 's/.*"url":[[:space:]]*"\([^"]*\)".*/\1/p')"
+              echo "draft=${draft:-unknown}" >> $GITHUB_OUTPUT
+              echo "url=${url:-}" >> $GITHUB_OUTPUT
             else
               echo "exists=false" >> $GITHUB_OUTPUT
+              echo "draft=false" >> $GITHUB_OUTPUT
+              echo "url=" >> $GITHUB_OUTPUT
             fi
           else
             echo "gh CLI not installed; skipping existence check" >&2
             echo "exists=unknown" >> $GITHUB_OUTPUT
+            echo "draft=unknown" >> $GITHUB_OUTPUT
+            echo "url=" >> $GITHUB_OUTPUT
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse immutable release asset overwrite
+        if: ${{ github.actor != 'nektos/act' && steps.existing_release.outputs.exists == 'true' && steps.existing_release.outputs.draft != 'true' && steps.asset_check.outputs.file_count != '0' }}
+        shell: bash
+        run: |
+          cat >&2 <<'EOF'
+          ERROR: The GitHub release for this tag is already published.
+
+          This repository uses immutable releases, so published release assets
+          cannot be replaced. The release upload action overwrites by deleting
+          matching assets first, which GitHub rejects for immutable releases.
+
+          Create a new patch release from the fixed commit, or delete/recreate
+          the release and tag only if the published release is intentionally being
+          withdrawn.
+          EOF
+          if [ -n "${{ steps.existing_release.outputs.url }}" ]; then
+            echo "Existing release: ${{ steps.existing_release.outputs.url }}" >&2
+          fi
+          exit 1
 
       - name: Check job completion status
         id: check-status
@@ -2127,7 +2155,7 @@ jobs:
           cat "${{ steps.release-body.outputs.body_file }}"
 
       - name: Create or update GitHub Release (draft, upload assets first)
-        if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' }}
+        if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' && (steps.existing_release.outputs.exists != 'true' || steps.existing_release.outputs.draft == 'true') }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
