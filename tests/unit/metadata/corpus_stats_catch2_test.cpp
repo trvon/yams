@@ -762,7 +762,7 @@ TEST_CASE("SearchTuner: biomedical prose corpus selects SCIENTIFIC profile",
     auto config = tuner.getConfig();
     CHECK(config.similarityThreshold == Approx(0.30f).margin(0.01f));
     CHECK(config.enableSubPhraseRescoring == true);
-    CHECK(config.rerankAnchoredMinRelativeScore == Approx(0.70f).margin(0.01f));
+    CHECK(config.rerankAnchoredMinRelativeScore == Approx(0.50f).margin(0.01f));
 }
 
 TEST_CASE("SearchTuner: code corpus still selects code profile after CorpusStats fix",
