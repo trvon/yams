@@ -17,6 +17,7 @@ RUN set -eux; \
   gcc g++ ninja-build openssl lld llvm clang \
   libc++-dev libc++abi-dev \
   liburing-dev ccache \
+  libomp-18-dev \
   cmake && \
   rm -rf /var/lib/apt/lists/* && break || \
   { echo "Attempt $i failed, retrying after 5s..."; sleep 5; apt-get clean; rm -rf /var/lib/apt/lists/*; }; \

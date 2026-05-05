@@ -188,6 +188,13 @@ jobs:
           fi
           conan remote list
 
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libomp-18-dev
+
       - name: Warm dependencies (${{ inputs.build_type }})
         # Always run on Linux to populate ccache (cache-hit can be true on a tiny
         # restored cache). On macOS/Windows, skip if both caches are already warm.

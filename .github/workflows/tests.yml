@@ -228,7 +228,7 @@ jobs:
           # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
           # is not detected by CMake (module mode will pick this up).
           # Install libbenchmark-dev for Google Benchmark support
-          sudo apt-get install -y --no-install-recommends libboost-all-dev pkg-config libbenchmark-dev xz-utils
+          sudo apt-get install -y --no-install-recommends libboost-all-dev pkg-config libbenchmark-dev xz-utils libomp-18-dev
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python3 -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/bin/python" -m pip install --upgrade pip
