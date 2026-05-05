@@ -92,6 +92,11 @@ public:
         bool router_enabled = false;
         RouterPreset router_preset{};
 
+        // When true, build both SabSmooth and Atire BM25 variants and RRF-fuse
+        // their rankings instead of routing to a single variant. Shown to
+        // improve nDCG@10 by +0.009 on NFCorpus in simeon benchmarks.
+        bool bm25_variants_rrf = false;
+
         // Default-on fragment geometry reranker. Uses the primary BM25 variant
         // as the lexical leg and PHSS-driven fragment propagation as the
         // semantic leg. To keep local/test corpora stable, auto-activation is

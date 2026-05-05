@@ -6,6 +6,7 @@
 #include <simeon/bm25.hpp>
 #include <simeon/concept_mining.hpp>
 #include <simeon/fragment_geometry.hpp>
+#include <simeon/fusion.hpp>
 #include <simeon/pmi.hpp>
 #include <simeon/query_router.hpp>
 #include <simeon/simeon.hpp>
@@ -308,8 +309,8 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         // primary isn't already Atire. Router dispatches between
         // {Atire, SabSmooth}, so the pair is always (Atire, SabSmooth).
         std::unique_ptr<simeon::Bm25Index> atire;
-        const bool build_atire =
-            cfg_.router_enabled && cfg_.variant != SimeonLexicalBackend::Variant::Atire;
+        const bool build_atire = (cfg_.router_enabled || cfg_.bm25_variants_rrf) &&
+                                 cfg_.variant != SimeonLexicalBackend::Variant::Atire;
         if (build_atire) {
             simeon::Bm25Config acfg;
             acfg.variant = simeon::Bm25Variant::Atire;
@@ -595,7 +596,11 @@ SimeonLexicalBackend::score(std::string_view query,
 
     std::vector<float> full(doc_count_, 0.0f);
     std::vector<float> lexical;
-    if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
+    if (cfg_.bm25_variants_rrf && atire_index_) {
+        const simeon::Bm25Index* variants[2] = {index_.get(), atire_index_.get()};
+        simeon::score_bm25_variants_rrf(std::span<const simeon::Bm25Index* const>(variants, 2),
+                                        query, std::span<float>{full});
+    } else if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
         full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
                                                cfg_.fragment_geometry_config);
         lexical.assign(doc_count_, 0.0f);
@@ -659,11 +664,16 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
         return {recipe, chosen};
     };
 
-    std::vector<float> full;
+    std::vector<float> full(doc_count_, 0.0f);
     std::vector<float> lexical;
     const char* recipe_label = variantLabel(cfg_.variant);
 
-    if (fragmentGeometryReady && lexicalRouter != nullptr) {
+    if (cfg_.bm25_variants_rrf && atire_index_) {
+        const simeon::Bm25Index* variants[2] = {index_.get(), atire_index_.get()};
+        simeon::score_bm25_variants_rrf(std::span<const simeon::Bm25Index* const>(variants, 2),
+                                        query, std::span<float>{full});
+        recipe_label = "Bm25VariantsRrf";
+    } else if (fragmentGeometryReady && lexicalRouter != nullptr) {
         const auto features = lexicalRouter->features(query);
         const auto qualityRecipe = lexicalRouter->choose_quality(features);
         if (qualityRecipe == simeon::QualityRecipe::Bm25Only) {
