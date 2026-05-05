@@ -9,5 +9,3 @@ build_type=Release
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Ninja
-tools.cmake.cmaketoolchain:presets_environment={"CC":"ccache gcc","CXX":"ccache g++"}
-tools.build:compiler_executables={"c":"ccache gcc","cpp":"ccache g++"}

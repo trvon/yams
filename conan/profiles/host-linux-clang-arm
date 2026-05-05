@@ -9,8 +9,7 @@ build_type=Release
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Ninja
-tools.cmake.cmaketoolchain:presets_environment={"CC":"ccache clang","CXX":"ccache clang++"}
-tools.build:compiler_executables={"c":"ccache clang","cpp":"ccache clang++"}
+tools.build:compiler_executables={"c":"clang","cpp":"clang++"}
 
 # Notes:
 # - Mirrors host-linux-clang but sets arch=armv8 for aarch64/ARM64 runners.
