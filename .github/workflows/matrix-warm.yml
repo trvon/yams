@@ -189,8 +189,9 @@ jobs:
           conan remote list
 
       - name: Warm dependencies (${{ inputs.build_type }})
-        # Always run conan install to resolve and build dependencies.
-        # Fix 1 wires ccache through Conan profiles so these builds populate ccache.
+        # Always run on Linux to populate ccache (cache-hit can be true on a tiny
+        # restored cache). On macOS/Windows, skip if both caches are already warm.
+        if: runner.os == 'Linux' || steps.cache_conan_warm.outputs.cache-hit != 'true' || steps.cache_ccache_warm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
