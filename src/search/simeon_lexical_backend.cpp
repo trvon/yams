@@ -4,6 +4,7 @@
 
 #include <spdlog/spdlog.h>
 #include <simeon/bm25.hpp>
+#include <simeon/concept_mining.hpp>
 #include <simeon/fragment_geometry.hpp>
 #include <simeon/pmi.hpp>
 #include <simeon/query_router.hpp>
@@ -402,6 +403,44 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         }
         releaseTransientPages("post-bm25-finalize");
 
+        // Concept mining: second pass over the corpus to discover word-bigram
+        // concepts via PMI and blend them into BM25 scores at query time.
+        std::unique_ptr<simeon::ConceptIndex> conceptIdx;
+        if (cfg_.concept_mining_enabled && ids.size() >= 100) {
+            try {
+                const auto cmt0 = std::chrono::steady_clock::now();
+                std::vector<std::string> conceptTexts;
+                conceptTexts.reserve(ids.size());
+                for (auto docId : ids) {
+                    if (stop.stop_requested())
+                        break;
+                    auto contentResult = repo->getContent(docId);
+                    if (contentResult && contentResult.value()) {
+                        conceptTexts.emplace_back(std::move(contentResult.value()->contentText));
+                    } else {
+                        conceptTexts.emplace_back();
+                    }
+                }
+                if (!stop.stop_requested() && conceptTexts.size() == ids.size()) {
+                    std::vector<std::string_view> docViews;
+                    docViews.reserve(conceptTexts.size());
+                    for (const auto& t : conceptTexts)
+                        docViews.emplace_back(t);
+                    conceptIdx = std::make_unique<simeon::ConceptIndex>(
+                        simeon::mine_concepts(*primary, std::span<const std::string_view>(docViews),
+                                              cfg_.concept_config));
+                    const auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - cmt0)
+                                          .count();
+                    spdlog::info("[simeon-lexical] concept mining: {} concepts in {} ms",
+                                 conceptIdx->size(), cmMs);
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("[simeon-lexical] concept mining failed: {}", e.what());
+                conceptIdx.reset();
+            }
+        }
+
         // Router uses the Atire index when available (matches simeon bench
         // convention — df/idf values are BM25-variant-independent, so the
         // choice is cosmetic). Build it whenever the lexical BM25 router or
@@ -528,6 +567,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         atire_index_ = std::move(atire);
         router_ = std::move(router);
         pmi_ = std::move(pmi);
+        concept_index_ = std::move(conceptIdx);
         fragment_encoder_ = std::move(fragmentEncoder);
         doc_frags_ = std::move(docFrags);
         doc_id_to_index_ = std::move(mapping);
@@ -553,7 +593,7 @@ SimeonLexicalBackend::score(std::string_view query,
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
 
-    std::vector<float> full;
+    std::vector<float> full(doc_count_, 0.0f);
     std::vector<float> lexical;
     if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
         full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
@@ -561,8 +601,17 @@ SimeonLexicalBackend::score(std::string_view query,
         lexical.assign(doc_count_, 0.0f);
         index_->score(query, std::span<float>{lexical});
     } else {
-        full.assign(doc_count_, 0.0f);
         index_->score(query, std::span<float>{full});
+    }
+
+    // Blend concept scores when available
+    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+        std::vector<float> conceptScores(doc_count_, 0.0f);
+        concept_index_->score(query, std::span<float>{conceptScores});
+        const float cw = cfg_.concept_config.concept_weight;
+        for (size_t i = 0; i < doc_count_; ++i) {
+            full[i] += cw * conceptScores[i];
+        }
     }
 
     std::vector<float> out;
@@ -644,6 +693,16 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
         full = score_bm25(*chosen);
     } else {
         full = score_bm25(*index_);
+    }
+
+    // Blend concept scores when available
+    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+        std::vector<float> conceptScores(doc_count_, 0.0f);
+        concept_index_->score(query, std::span<float>{conceptScores});
+        const float cw = cfg_.concept_config.concept_weight;
+        for (size_t i = 0; i < doc_count_; ++i) {
+            full[i] += cw * conceptScores[i];
+        }
     }
 
     RescoreDecision decision;

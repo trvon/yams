@@ -4,6 +4,7 @@
 #include <yams/core/types.h>
 
 #include <simeon/fragment_geometry.hpp>
+#include <simeon/concept_mining.hpp>
 
 #include <atomic>
 #include <cstddef>
@@ -110,6 +111,12 @@ public:
         std::uint32_t fragment_build_top_sentences = 6;
         std::uint32_t fragment_build_signature_terms = 8;
         simeon::FragmentGeometryConfig fragment_geometry_config{};
+
+        // PMI-based concept mining: discovers word-bigram concepts from the
+        // corpus at finalize time and blends them into BM25 scores at query
+        // time. Training-free; enabled by default for prose corpora.
+        bool concept_mining_enabled = true;
+        simeon::ConceptConfig concept_config{};
     };
 
     explicit SimeonLexicalBackend(Config cfg);
@@ -176,6 +183,7 @@ private:
     std::unique_ptr<simeon::QueryRouter> router_;    // built only when router_enabled
     std::unique_ptr<simeon::PmiEmbeddings> pmi_;     // built only when fragment geometry is on
     std::unique_ptr<simeon::Encoder> fragment_encoder_;
+    std::unique_ptr<simeon::ConceptIndex> concept_index_;
     std::vector<std::vector<simeon::SemanticFragment>> doc_frags_;
     std::unordered_map<std::int64_t, std::uint32_t> doc_id_to_index_;
     std::size_t doc_count_ = 0;
