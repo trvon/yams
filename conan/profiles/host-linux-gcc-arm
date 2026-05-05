@@ -9,3 +9,4 @@ build_type=Release
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Ninja
+

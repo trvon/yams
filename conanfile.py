@@ -139,7 +139,10 @@ class YamsConan(ConanFile):
             self.requires("re2/20251105")
 
         if self.options.enable_faiss:  # type: ignore
-            self.requires("faiss/1.12.0")
+            if self.settings.os == "Macos" and self.settings.compiler == "apple-clang":
+                self.output.info("Apple Clang lacks OpenMP; faiss disabled on macOS")
+            else:
+                self.requires("faiss/1.12.0")
 
     def build_requirements(self):
         self.tool_requires("pkgconf/2.1.0")
