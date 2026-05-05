@@ -17,13 +17,10 @@ if get_option('enable-faiss')
   if not faiss_dep.found()
     cpp = meson.get_compiler('cpp')
     faiss_lib = cpp.find_library('faiss', required: false)
-    faiss_inc = include_directories('/opt/homebrew/include', is_system: true)
     if faiss_lib.found()
-      omp_inc = include_directories('/opt/homebrew/opt/libomp/include', is_system: true)
       faiss_dep = declare_dependency(
         dependencies: [faiss_lib, cpp.find_library('openblas', required: true),
                        cpp.find_library('omp', required: true)],
-        include_directories: [faiss_inc, omp_inc],
       )
     endif
   endif

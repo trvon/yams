@@ -58,7 +58,7 @@ class YamsConan(ConanFile):
         "build_benchmarks": [True, False],
         "enable_profiling": [True, False],
         "enable_onnx": [True, False],
-        "enable_faiss": [True, False],
+        "enable_faiss": [False, True],
         "enable_symbol_extraction": [True, False],
         "enable_re2": [True, False],
     }
@@ -67,7 +67,6 @@ class YamsConan(ConanFile):
         "build_benchmarks": False,
         "enable_profiling": False,
         "enable_onnx": True,
-        "enable_faiss": True,
         "enable_symbol_extraction": True,
         "enable_re2": True,
     }
@@ -139,10 +138,7 @@ class YamsConan(ConanFile):
             self.requires("re2/20251105")
 
         if self.options.enable_faiss:  # type: ignore
-            if self.settings.os == "Macos" and self.settings.compiler == "apple-clang":
-                self.output.info("Apple Clang lacks OpenMP; faiss disabled on macOS")
-            else:
-                self.requires("faiss/1.12.0")
+            self.requires("faiss/1.12.0")
 
     def build_requirements(self):
         self.tool_requires("pkgconf/2.1.0")
@@ -165,7 +161,30 @@ class YamsConan(ConanFile):
         if self.options.enable_profiling:  # type: ignore
             self.requires("tracy/0.13.1")
 
+    def _has_apple_clang_omp(self):
+        """Check whether Apple Clang + OpenMP can build faiss.
+
+        faiss 1.12.0 validate() hard-rejects apple-clang regardless of
+        libomp availability.  When the upstream recipe relaxes that check
+        this helper can be updated to probe for brew-installed libomp at
+        /opt/homebrew/opt/libomp or /usr/local/opt/libomp.
+        """
+        return False
+
     def configure(self):
+        # Enable faiss on all platforms except Apple Clang macOS where the
+        # upstream recipe rejects apple-clang (no OpenMP support).
+        enable_faiss = True
+        if (self.settings.os == "Macos"  # type: ignore
+                and self.settings.compiler == "apple-clang"):  # type: ignore
+            if not self._has_apple_clang_omp():
+                self.output.info(
+                    "faiss recipe rejects Apple Clang; disabling faiss on macOS. "
+                    "Install with: brew install libomp (requires faiss recipe update)"
+                )
+                enable_faiss = False
+        self.options.enable_faiss = enable_faiss  # type: ignore
+
         # Force new C++11 ABI on Linux (Ubuntu 24.04+ compatibility)
         if self.settings.os == "Linux":  # type: ignore
             if self.settings.compiler in ["gcc", "clang"]:  # type: ignore
