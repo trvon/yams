@@ -274,6 +274,12 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             // "off" remains a hard disable.
             const bool presetOff = bm25Policy.routerPreset && *bm25Policy.routerPreset == "off";
             lexicalCfg.router_enabled = bm25Policy.routerEnabled.value_or(false) && !presetOff;
+
+            // RM3 SAB-smooth — test env: YAMS_SIMEON_RM3=1
+            if (const char* rm3Env = std::getenv("YAMS_SIMEON_RM3")) {
+                lexicalCfg.rm3_enabled = std::string(rm3Env) == "1";
+            }
+
             opts.simeonLexicalConfig = lexicalCfg;
         }
     }

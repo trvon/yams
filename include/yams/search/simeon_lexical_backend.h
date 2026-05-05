@@ -5,6 +5,7 @@
 
 #include <simeon/fragment_geometry.hpp>
 #include <simeon/concept_mining.hpp>
+#include <simeon/prf.hpp>
 
 #include <atomic>
 #include <cstddef>
@@ -120,8 +121,14 @@ public:
         // PMI-based concept mining: discovers word-bigram concepts from the
         // corpus at finalize time and blends them into BM25 scores at query
         // time. Training-free; enabled by default for prose corpora.
-        bool concept_mining_enabled = true;
+        bool concept_mining_enabled = false;
         simeon::ConceptConfig concept_config{};
+
+        // RM3 pseudo-relevance feedback (Lavrenko & Croft 2001).
+        // SAB-smooth + RM3 improves scifact by +0.018 nDCG@10 in simeon
+        // benchmarks. Corpus-sensitive — defaults to off.
+        bool rm3_enabled = false;
+        simeon::PrfConfig rm3_config{};
     };
 
     explicit SimeonLexicalBackend(Config cfg);

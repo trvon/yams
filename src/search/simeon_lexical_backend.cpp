@@ -8,6 +8,7 @@
 #include <simeon/fragment_geometry.hpp>
 #include <simeon/fusion.hpp>
 #include <simeon/pmi.hpp>
+#include <simeon/prf.hpp>
 #include <simeon/query_router.hpp>
 #include <simeon/simeon.hpp>
 
@@ -600,6 +601,8 @@ SimeonLexicalBackend::score(std::string_view query,
         const simeon::Bm25Index* variants[2] = {index_.get(), atire_index_.get()};
         simeon::score_bm25_variants_rrf(std::span<const simeon::Bm25Index* const>(variants, 2),
                                         query, std::span<float>{full});
+    } else if (cfg_.rm3_enabled && index_) {
+        simeon::score_with_prf(*index_, query, std::span<float>{full}, cfg_.rm3_config);
     } else if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
         full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
                                                cfg_.fragment_geometry_config);
@@ -673,6 +676,9 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
         simeon::score_bm25_variants_rrf(std::span<const simeon::Bm25Index* const>(variants, 2),
                                         query, std::span<float>{full});
         recipe_label = "Bm25VariantsRrf";
+    } else if (cfg_.rm3_enabled && index_ && !cfg_.fragment_geometry_enabled) {
+        simeon::score_with_prf(*index_, query, std::span<float>{full}, cfg_.rm3_config);
+        recipe_label = "Bm25Rm3";
     } else if (fragmentGeometryReady && lexicalRouter != nullptr) {
         const auto features = lexicalRouter->features(query);
         const auto qualityRecipe = lexicalRouter->choose_quality(features);
