@@ -1,0 +1,267 @@
+rules:
+  - id: yams.github-actions.cross-workflow-artifact-download
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      Uses a third-party artifact download action across workflows. This may allow artifact
+      poisoning from untrusted sources. Prefer the official actions/download-artifact@v4 with
+      an explicit run-id, github-token, and validation of the source run (conclusion, branch,
+      event). Reject pull_request-triggered runs as artifact sources.
+    metadata:
+      category: security
+      confidence: high
+      precision: high
+      yams_triage: artifact-integrity
+      references:
+        - https://github.com/dawidd6/action-download-artifact
+    pattern-regex: 'uses:\s*dawidd6/action-download-artifact@'
+    paths:
+      include:
+        - /.github/workflows/**/*.yml
+        - /.github/workflows/**/*.yaml
+        - /tools/opengrep/tests/**/*.yml
+        - /tools/opengrep/tests/**/*.yaml
+        - tools/opengrep/tests/**/*.yml
+        - tools/opengrep/tests/**/*.yaml
+      exclude:
+        - /third_party/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.github-actions.mutable-action-ref
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      GitHub Action referenced at a mutable ref (@main or @master). Pinning to a specific
+      version tag (e.g. @v4) prevents supply-chain drift; pinning to a full commit SHA
+      prevents tag-move attacks. Use @v4 or @<sha> instead.
+    metadata:
+      category: security
+      confidence: high
+      precision: medium
+      yams_triage: supply-chain
+    pattern-regex: 'uses:\s*[^\n@ ]+@(main|master)\b'
+    paths:
+      include:
+        - /.github/workflows/**/*.yml
+        - /.github/workflows/**/*.yaml
+        - /tools/opengrep/tests/**/*.yml
+        - /tools/opengrep/tests/**/*.yaml
+        - tools/opengrep/tests/**/*.yml
+        - tools/opengrep/tests/**/*.yaml
+      exclude:
+        - /third_party/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.github-actions.curl-pipe-shell
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      Piped curl-to-shell pattern found in a workflow step. This executes untrusted network
+      content directly. Prefer verifying a checksum against a known-good manifest or using a
+      pinned tool/action instead.
+    metadata:
+      category: security
+      confidence: high
+      precision: high
+      yams_triage: supply-chain
+      cwe: "CWE-494"
+    pattern-regex: 'curl\s+.*\s*\|\s*(?:sudo\s+)?(?:ba)?sh\b'
+    paths:
+      include:
+        - /.github/workflows/**/*.yml
+        - /.github/workflows/**/*.yaml
+        - /tools/opengrep/tests/**/*.yml
+        - /tools/opengrep/tests/**/*.yaml
+        - tools/opengrep/tests/**/*.yml
+        - tools/opengrep/tests/**/*.yaml
+      exclude:
+        - /third_party/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.github-actions.privileged-manual-workflow-no-environment
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      Workflow triggered by workflow_dispatch with elevated permissions (contents: write,
+      id-token: write) but without an environment protection rule. This allows any committer
+      to trigger privileged actions without review. Gate the job behind an environment with
+      required reviewers or a deployment protection rule.
+    metadata:
+      category: security
+      confidence: medium
+      precision: medium
+      yams_triage: access-control
+    patterns:
+      - pattern-inside: |
+          ...
+          on:
+            ...
+            workflow_dispatch:
+              ...
+          permissions:
+            contents: write
+          ...
+      - pattern-inside: |
+          jobs:
+            ...
+      - pattern: |
+          runs-on: ...
+    paths:
+      include:
+        - /.github/workflows/**/*.yml
+        - /.github/workflows/**/*.yaml
+        - /tools/opengrep/tests/**/*.yml
+        - /tools/opengrep/tests/**/*.yaml
+        - tools/opengrep/tests/**/*.yml
+        - tools/opengrep/tests/**/*.yaml
+      exclude:
+        - /third_party/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.github-actions.gh-release-download-raw
+    languages: [yaml]
+    severity: INFO
+    message: >-
+      Downloads release assets via gh release download with --pattern. Ensure the release
+      is from a trusted, verified tag. Consider using gh attestation verify or a checksum
+      manifest produced during the build job to validate asset integrity before use.
+    metadata:
+      category: security
+      confidence: low
+      precision: medium
+      yams_triage: artifact-integrity
+    pattern-regex: 'gh\s+release\s+download\s+.*--pattern'
+    paths:
+      include:
+        - /.github/workflows/**/*.yml
+        - /.github/workflows/**/*.yaml
+        - /tools/opengrep/tests/**/*.yml
+        - /tools/opengrep/tests/**/*.yaml
+        - tools/opengrep/tests/**/*.yml
+        - tools/opengrep/tests/**/*.yaml
+      exclude:
+        - /third_party/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.github-actions.pull-request-target-checkout
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      pull_request_target event with actions/checkout that does not pin ref to the base
+      branch. The default checkout checks out the untrusted PR head, giving script injection
+      access to repository secrets. Always pass ref: ${{ github.event.pull_request.base.sha }}
+      or ref: ${{ github.base_ref }} when using pull_request_target.
+    metadata:
+      category: security
+      confidence: high
+      precision: medium
+      yams_triage: access-control
+      cwe: "CWE-913"
+    patterns:
+      - pattern-inside: |
+          on:
+            ...
+            pull_request_target:
+              ...
+          ...
+      - pattern: |
+          uses: actions/checkout@...
+      - pattern-not: |
+          uses: actions/checkout@...
+          ...
+          ref: ${{ github.event.pull_request.base.sha }}
+      - pattern-not: |
+          uses: actions/checkout@...
+          ...
+          ref: ${{ github.base_ref }}
+    paths:
+      include:
+        - /.github/workflows/**/*.yml
+        - /.github/workflows/**/*.yaml
+        - /tools/opengrep/tests/**/*.yml
+        - /tools/opengrep/tests/**/*.yaml
+        - tools/opengrep/tests/**/*.yml
+        - tools/opengrep/tests/**/*.yaml
+      exclude:
+        - /third_party/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.github-actions.workflow-dispatch-untrusted-input
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      workflow_dispatch input is used raw in a shell run step (e.g. ${{ inputs.X }}).
+      Without sanitization, this is an injection vector. Prefer setting the input to an
+      intermediate environment variable and validate it against a known set of values before
+      use in shell commands. Check for input validation (case/if guard) nearby.
+    metadata:
+      category: security
+      confidence: low
+      precision: low
+      yams_triage: injection
+      cwe: "CWE-20"
+    pattern-regex: '\$\{\{\s*inputs\.'
+    paths:
+      include:
+        - /.github/workflows/**/*.yml
+        - /.github/workflows/**/*.yaml
+        - /tools/opengrep/tests/**/*.yml
+        - /tools/opengrep/tests/**/*.yaml
+        - tools/opengrep/tests/**/*.yml
+        - tools/opengrep/tests/**/*.yaml
+      exclude:
+        - /third_party/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.github-actions.artifact-download-without-source-validation
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      Downloads artifacts from a workflow_dispatch-controlled run_id input without visible
+      source validation. An attacker with write access can supply an arbitrary run_id pointing
+      to poisoned artifacts. Validate the run before downloading (check conclusion=success,
+      reject pull_request-triggered runs, verify the workflow name/event).
+    metadata:
+      category: security
+      confidence: high
+      precision: medium
+      yams_triage: artifact-integrity
+      cwe: "CWE-345"
+    patterns:
+      - pattern-inside: |
+          on:
+            ...
+            workflow_dispatch:
+              ...
+              inputs:
+                ...
+                run_id:
+                  ...
+          ...
+      - pattern: |
+          uses: actions/download-artifact@...
+          ...
+          run-id: ${{ ...
+      - pattern-not: |
+          uses: actions/download-artifact@...
+          ...
+          run-id: ${{ steps.resolve...
+    paths:
+      include:
+        - /.github/workflows/**/*.yml
+        - /.github/workflows/**/*.yaml
+        - /tools/opengrep/tests/**/*.yml
+        - /tools/opengrep/tests/**/*.yaml
+        - tools/opengrep/tests/**/*.yml
+        - tools/opengrep/tests/**/*.yaml
+      exclude:
+        - /third_party/**
+        - /build/**
+        - /build*/**

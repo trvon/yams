@@ -23,26 +23,60 @@ jobs:
           fetch-depth: 1
           submodules: false # Publishing does not require submodule contents
 
-      - name: Download artifacts from specified Release run
-        if: inputs.run_id != ''
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          repo: ${{ github.repository }}
-          run_id: ${{ inputs.run_id }}
-          path: repo-artifacts
-          if_no_artifact_found: warn
+      - name: Validate and resolve artifact source run
+        id: resolve-run
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.run_id }}" ]; then
+            RUN_ID="${{ inputs.run_id }}"
+            echo "Validating provided run_id: $RUN_ID"
+            RUN_INFO=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}" \
+              --jq '{conclusion: .conclusion, head_branch: .head_branch, event: .event}')
+            CONCLUSION=$(echo "$RUN_INFO" | jq -r '.conclusion')
+            BRANCH=$(echo "$RUN_INFO" | jq -r '.head_branch')
+            EVENT=$(echo "$RUN_INFO" | jq -r '.event')
+            if [[ "$CONCLUSION" != "success" ]]; then
+              echo "::error::Run $RUN_ID did not succeed (conclusion=$CONCLUSION)"
+              exit 1
+            fi
+            if [[ "$BRANCH" != "main" ]]; then
+              echo "::warning::Run $RUN_ID is from branch '$BRANCH', not main"
+            fi
+            if [[ "$EVENT" == "pull_request" ]]; then
+              echo "::error::Run $RUN_ID is a pull_request run; refusing artifact from untrusted source"
+              exit 1
+            fi
+            echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          else
+            # Find latest successful release.yml run on main (stable tag push)
+            RUN_ID=$(gh api "repos/${{ github.repository }}/actions/workflows/release.yml/runs?per_page=20&branch=main" \
+              --jq '.workflow_runs[] | select(.conclusion=="success" and (.event=="push" or .event=="workflow_dispatch")) | .id' | head -1)
+            if [ -z "$RUN_ID" ]; then
+              echo "::error::No successful Release workflow run found on main"
+              exit 1
+            fi
+            echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+            echo "Resolved latest successful Release run on main: $RUN_ID"
+          fi
 
-      - name: Download artifacts from latest successful Release run
-        if: inputs.run_id == ''
-        uses: dawidd6/action-download-artifact@v6
+      - name: Download repo artifacts (apt-repo)
+        uses: actions/download-artifact@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          repo: ${{ github.repository }}
-          workflow: release.yml
-          workflow_conclusion: success
-          path: repo-artifacts
-          if_no_artifact_found: warn
+          run-id: ${{ steps.resolve-run.outputs.run_id }}
+          name: apt-repo
+          path: repo-artifacts/apt-repo
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download repo artifacts (yum-repo)
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ steps.resolve-run.outputs.run_id }}
+          name: yum-repo
+          path: repo-artifacts/yum-repo
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Prepare upload set
         id: prep

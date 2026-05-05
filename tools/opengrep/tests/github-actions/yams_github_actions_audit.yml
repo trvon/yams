@@ -1,0 +1,97 @@
+# Test cases for yams.github-actions.* rules
+# Each block demonstrates a match (# ruleid:) or non-match (# ok:)
+
+# -------------------------------------------------------------------
+# yams.github-actions.cross-workflow-artifact-download
+# -------------------------------------------------------------------
+name: ruleid-cross-workflow
+on: workflow_dispatch
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # ruleid: yams.github-actions.cross-workflow-artifact-download
+      - uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_id: ${{ inputs.run_id }}
+---
+name: ok-cross-workflow
+on: workflow_dispatch
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # ok: yams.github-actions.cross-workflow-artifact-download
+      - uses: actions/download-artifact@v4
+        with:
+          name: apt-repo
+          run-id: ${{ steps.resolve.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+# -------------------------------------------------------------------
+# yams.github-actions.mutable-action-ref
+# -------------------------------------------------------------------
+name: ruleid-mutable-ref
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # ruleid: yams.github-actions.mutable-action-ref
+      - uses: jlumbroso/free-disk-space@main
+      # ok: yams.github-actions.mutable-action-ref
+      - uses: actions/checkout@v4
+      # ruleid: yams.github-actions.mutable-action-ref
+      - uses: some-org/some-action@master
+
+# -------------------------------------------------------------------
+# yams.github-actions.curl-pipe-shell
+# -------------------------------------------------------------------
+name: ruleid-curl-pipe
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: bad-install
+        run: |
+          # ruleid: yams.github-actions.curl-pipe-shell
+          curl -fsSL https://example.com/install.sh | bash
+      - name: bad-sudo-install
+        run: |
+          # ruleid: yams.github-actions.curl-pipe-shell
+          curl -fsSL https://example.com/install.sh | sudo bash
+      - name: ok-download-only
+        run: |
+          # ok: yams.github-actions.curl-pipe-shell
+          curl -fsSL https://example.com/install.sh -o /tmp/install.sh && chmod +x /tmp/install.sh && /tmp/install.sh
+      - name: ok-no-pipe
+        run: |
+          # ok: yams.github-actions.curl-pipe-shell
+          curl -LO https://releases.hashicorp.com/terraform/1.0.0/terraform_1.0.0_linux_amd64.zip
+
+# -------------------------------------------------------------------
+# yams.github-actions.gh-release-download-raw
+# -------------------------------------------------------------------
+name: ruleid-gh-release
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          # ruleid: yams.github-actions.gh-release-download-raw
+          gh release download "$TAG" --pattern latest.json --dir .
+      - run: |
+          # ok: yams.github-actions.gh-release-download-raw
+          gh release list --limit 1 --json tagName --jq '.[0].tagName'
+
+# -------------------------------------------------------------------
+# yams.github-actions.workflow-dispatch-untrusted-input
+# Note: Low-precision audit rule that flags any ${{ inputs.* }} usage.
+# It is tested implicitly by scanning real workflow files during audit.
+# Tree-pattern rules (pull-request-target-checkout, privileged-manual,
+# artifact-download-without-source-validation) are validated at the
+# ruleset level but not tested with unit test fixtures due to multi-doc
+# YAML limitations.
