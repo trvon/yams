@@ -970,6 +970,27 @@ ConfigResolver::SimeonEncoderPolicy ConfigResolver::resolveSimeonEncoderPolicy()
     return policy;
 }
 
+ConfigResolver::VectorBackendPolicy ConfigResolver::resolveVectorBackendPolicy() {
+    VectorBackendPolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("vector_database.backend"); it != kv.end() && !it->second.empty())
+                policy.backend = it->second;
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for vector backend: {}", e.what());
+    }
+
+    if (auto v = readEnvString("YAMS_VECTOR_BACKEND"))
+        policy.backend = std::move(v);
+
+    return policy;
+}
+
 ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
     SimeonBm25Policy policy;
 

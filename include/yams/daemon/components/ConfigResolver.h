@@ -121,6 +121,10 @@ public:
         std::optional<std::string> routerPreset;
     };
 
+    struct VectorBackendPolicy {
+        std::optional<std::string> backend; // "sqlite_vec" (default) | "faiss"
+    };
+
     struct RerankerBackendPolicy {
         std::optional<std::string> backend;
     };
@@ -385,6 +389,14 @@ public:
      * - embeddings.simeon.l2_normalize   = bool
      * - embeddings.simeon.pq_bytes       = int (0 = off; reserved for
      *                                          post-encode PQ in storage layer)
+     */
+    static VectorBackendPolicy resolveVectorBackendPolicy();
+
+    /**
+     * @brief Resolve Simeon encoder config from env + config file.
+     *
+     * Reads [embeddings.simeon] section from config.toml, with env
+     * overrides YAMS_SIMEON_NGRAM_MODE, YAMS_SIMEON_NGRAM_MIN, etc.
      */
     static SimeonEncoderPolicy resolveSimeonEncoderPolicy();
 

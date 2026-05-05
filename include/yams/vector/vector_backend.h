@@ -290,12 +290,6 @@ public:
 /**
  * @brief Factory function for creating vector backends
  */
-enum class VectorBackendType {
-    SqliteVec, // sqlite-vec extension (default)
-    LanceDB,   // LanceDB (future)
-    InMemory   // In-memory only (testing)
-};
-
 std::unique_ptr<IVectorBackend>
 createVectorBackend(VectorBackendType type = VectorBackendType::SqliteVec);
 

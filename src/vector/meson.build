@@ -10,6 +10,27 @@ yams_metadata = dependency('yams_metadata', required: false)
 tl_expected_dep = dependency('tl-expected', required: true)
 fs = import('fs')
 
+# FAISS HNSW backend (optional, for online/incremental vector index updates)
+faiss_dep = disabler()
+if get_option('enable-faiss')
+  faiss_dep = dependency('faiss', required: false, method: 'cmake')
+  if not faiss_dep.found()
+    cpp = meson.get_compiler('cpp')
+    faiss_lib = cpp.find_library('faiss', required: false)
+    faiss_inc = include_directories('/opt/homebrew/include', is_system: true)
+    if faiss_lib.found()
+      omp_inc = include_directories('/opt/homebrew/opt/libomp/include', is_system: true)
+      faiss_dep = declare_dependency(
+        dependencies: [faiss_lib, cpp.find_library('openblas', required: true),
+                       cpp.find_library('omp', required: true)],
+        include_directories: [faiss_inc, omp_inc],
+      )
+    endif
+  endif
+endif
+faiss_config = configuration_data()
+faiss_config.set10('YAMS_HAS_FAISS', faiss_dep.found())
+
 # Optional include dirs for third-party headers
 # Note: HNSW implementation now uses sqlite-vec-cpp, hnswlib no longer needed
 
@@ -122,6 +143,10 @@ srcs = [
   'turboquant.cpp',
 ]
 
+if faiss_dep.found()
+  srcs += ['faiss_backend.cpp']
+endif
+
 # Isolate SIMD-heavy sqlite-vec-cpp sources into their own static library so
 # -mavx / -mavx2 / -mfma / -march=armv8.2-a+dotprod do not leak into the rest
 # of yams_vector. This keeps generic TUs buildable on older CPUs while still
@@ -226,6 +251,11 @@ yams_daemon_client = dependency('yams_daemon_client', required: true)
 
 deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, boost_dep, yams_core, yams_metadata, tl_expected_dep, yams_daemon_client]
 
+if faiss_dep.found()
+  deps_vec += [faiss_dep]
+  vector_cppargs += ['-DYAMS_HAS_FAISS=1']
+endif
+
 vector_platform_deps = []
 if host_machine.system() == 'windows'
   vector_platform_deps += [cpp_comp.find_library('dxgi', required: true)]
@@ -241,7 +271,7 @@ sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
 
 yams_vector = static_library('yams_vector',
   srcs,
-  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
+  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc] + (faiss_dep.found() ? [include_directories('/opt/homebrew/include', is_system: true), include_directories('/opt/homebrew/opt/libomp/include', is_system: true)] : []),
   dependencies: deps_vec + vector_platform_deps,
   link_with: [simeon_lib, sqlite_vec_backend_lib] + sqlite_vec_cpp_lib,
   cpp_args: vector_cppargs + simeon_simd_defines,

@@ -119,6 +119,13 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     namespace fs = std::filesystem;
     vector::VectorDatabaseConfig cfg;
     cfg.database_path = (dataDir / "vectors.db").string();
+
+    // Resolve vector backend selection via ConfigResolver (TOML + env).
+    auto backendPolicy = ConfigResolver::resolveVectorBackendPolicy();
+    if (backendPolicy.backend && *backendPolicy.backend == "faiss") {
+        cfg.backend_type = vector::VectorBackendType::Faiss;
+        spdlog::info("[VectorInit] backend=faiss via ConfigResolver");
+    }
     bool exists = fs::exists(cfg.database_path);
     cfg.create_if_missing = true;
 

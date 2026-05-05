@@ -9,6 +9,10 @@
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_utils.h>
 
+#ifdef YAMS_HAS_FAISS
+#include <yams/vector/faiss_backend.h>
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -30,9 +34,14 @@ class VectorDatabase::Impl {
 public:
     explicit Impl(const VectorDatabaseConfig& config)
         : config_(config), initialized_{false}, has_error_(false) {
-        // Create backend based on configuration
-        // For now, always use sqlite-vec for persistence
-        // Mirror TurboQuant settings from VectorDatabaseConfig into SqliteVecBackend config
+        if (config_.backend_type == VectorBackendType::Faiss) {
+            FaissBackendConfig faissConfig;
+            faissConfig.embeddingDim = config_.embedding_dim;
+            backend_ = std::make_unique<FaissBackend>(faissConfig);
+            return;
+        }
+
+        // Default: SqliteVec backend
         SqliteVecBackend::Config backend_config;
         backend_config.embedding_dim = config_.embedding_dim;
         backend_config.enable_turboquant_storage = config_.enable_turboquant_storage;

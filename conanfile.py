@@ -57,19 +57,19 @@ class YamsConan(ConanFile):
         "build_tests": [True, False],
         "build_benchmarks": [True, False],
         "enable_profiling": [True, False],
-        "enable_onnx": [True, False],  # Gate ONNX Runtime and its
-        # transitive graph
-        "enable_symbol_extraction": [True, False],  # Gate symbol extraction
-        # features and deps
-        "enable_re2": [True, False],  # Gate RE2 regex engine for grep
+        "enable_onnx": [True, False],
+        "enable_faiss": [True, False],
+        "enable_symbol_extraction": [True, False],
+        "enable_re2": [True, False],
     }
     default_options = {
         "build_tests": False,
         "build_benchmarks": False,
         "enable_profiling": False,
-        "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
-        "enable_symbol_extraction": True,  # Enabled by default; disable to drop extractors
-        "enable_re2": True,  # RE2 regex engine for grep (10-50x faster than std::regex)
+        "enable_onnx": True,
+        "enable_faiss": True,
+        "enable_symbol_extraction": True,
+        "enable_re2": True,
     }
 
     generators = ("MesonToolchain", "PkgConfigDeps", "CMakeDeps")
@@ -137,6 +137,9 @@ class YamsConan(ConanFile):
         # RE2 regex engine for high-performance grep (optional)
         if self.options.enable_re2:  # type: ignore
             self.requires("re2/20251105")
+
+        if self.options.enable_faiss:  # type: ignore
+            self.requires("faiss/1.12.0")
 
     def build_requirements(self):
         self.tool_requires("pkgconf/2.1.0")
