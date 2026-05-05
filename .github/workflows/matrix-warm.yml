@@ -189,7 +189,8 @@ jobs:
           conan remote list
 
       - name: Warm dependencies (${{ inputs.build_type }})
-        if: steps.cache_conan_warm.outputs.cache-hit != 'true' || steps.cache_ccache_warm.outputs.cache-hit != 'true'
+        # Always run conan install to resolve and build dependencies.
+        # Fix 1 wires ccache through Conan profiles so these builds populate ccache.
         shell: bash
         run: |
           set -euo pipefail
@@ -214,6 +215,42 @@ jobs:
             -o "sqlite3/*:fts5=True" \
             -o "yams/*:enable_onnx=${ONNX}" \
             --build=missing
+
+      - name: Populate ccache with source compilation
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CCACHE_DIR: ~/.cache/ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_COMPRESS: '1'
+          CCACHE_MAXSIZE: 5G
+          CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime,file_macro
+        run: |
+          set -euo pipefail
+          CACHE_BYTES=$(du -sb ~/.cache/ccache 2>/dev/null | cut -f1 || echo 0)
+          CACHE_MB=$((CACHE_BYTES / 1048576))
+          if [ "$CACHE_MB" -gt 100 ]; then
+            echo "ccache already populated: ${CACHE_MB} MB; skipping source compile"
+            exit 0
+          fi
+          echo "ccache=${CACHE_MB} MB (< 100 MB); compiling source to populate cache"
+          ccache -z >/dev/null 2>&1 || true
+          BUILD_DIR="build/warm-${{ inputs.build_type }}"
+          NATIVE_FILE=$(find "$BUILD_DIR" -name conan_meson_native.ini -type f 2>/dev/null | head -1)
+          if [ -z "$NATIVE_FILE" ]; then
+            echo "No Meson native file found in $BUILD_DIR; skipping source compile"
+            exit 0
+          fi
+          echo "Using Conan native file: $NATIVE_FILE"
+          MESON_BUILDTYPE=$( [ "${{ inputs.build_type }}" = "Debug" ] && echo "--buildtype=debug" || echo "--buildtype=release" )
+          if ! meson setup "$BUILD_DIR" --native-file="$NATIVE_FILE" \
+               $MESON_BUILDTYPE --reconfigure 2>&1; then
+            meson setup "$BUILD_DIR" --native-file="$NATIVE_FILE" $MESON_BUILDTYPE 2>&1
+          fi
+          meson compile -C "$BUILD_DIR" -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+          echo
+          echo "=== ccache stats after warm compilation ==="
+          ccache -s | head -8
 
       - name: Warm summary
         shell: bash

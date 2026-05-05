@@ -87,11 +87,4 @@ jobs:
           # ok: yams.github-actions.gh-release-download-raw
           gh release list --limit 1 --json tagName --jq '.[0].tagName'
 
-# -------------------------------------------------------------------
-# yams.github-actions.workflow-dispatch-untrusted-input
-# Note: Low-precision audit rule that flags any ${{ inputs.* }} usage.
-# It is tested implicitly by scanning real workflow files during audit.
-# Tree-pattern rules (pull-request-target-checkout, privileged-manual,
-# artifact-download-without-source-validation) are validated at the
-# ruleset level but not tested with unit test fixtures due to multi-doc
-# YAML limitations.
+

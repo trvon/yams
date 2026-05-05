@@ -187,7 +187,7 @@ jobs:
 
       - name: Free disk space (Linux)
         if: runner.os == 'Linux'
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@54081f13873027a65788a2f0c7ecaca13cb1b26c # v1
         with:
           tool-cache: false      # Keep tools we might need
           android: true          # ~14GB savings

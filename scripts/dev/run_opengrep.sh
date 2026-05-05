@@ -35,6 +35,12 @@ SARIF_OUT="$OUT_DIR/opengrep-yams-${PROFILE//\//-}.sarif"
 TARGETS=("${@:-src include tests}")
 if [[ $# -eq 0 ]]; then
   TARGETS=(src include tests)
+  # When scanning audit or all profiles, also scan .github/workflows for CI security rules
+  case "$PROFILE" in
+    audit|all)
+      TARGETS+=(".github/workflows")
+      ;;
+  esac
 fi
 
 COMMON=(scan

@@ -10,5 +10,5 @@ build_type=Release
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Ninja
-# Guarantee clang is used, not the c++ symlink pointing to gcc
-tools.build:compiler_executables={"c":"clang","cpp":"clang++"}
+tools.cmake.cmaketoolchain:presets_environment={"CC":"ccache clang","CXX":"ccache clang++"}
+tools.build:compiler_executables={"c":"ccache clang","cpp":"ccache clang++"}
