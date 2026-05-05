@@ -16,6 +16,7 @@
 [submodule "plugins/zyp/zpdf"]
 	path = plugins/zyp/zpdf
 	url = https://github.com/trvon/zpdf
+	branch = main
 [submodule "third_party/symspell"]
 	path = third_party/symspell
 	url = https://github.com/trvon/yams-symspell.git

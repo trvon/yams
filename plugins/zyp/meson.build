@@ -19,8 +19,8 @@ if zig_version_result.returncode() != 0
 endif
 
 zig_version = zig_version_result.stdout().strip()
-if not (zig_version.version_compare('>=0.15.0') and zig_version.version_compare('<0.16.0'))
-  warning('Zig @0@ is unsupported by zyp; zpdf requires Zig 0.15.x. Skipping zyp plugin.'.format(zig_version))
+if not zig_version.version_compare('>=0.15.0')
+  warning('Zig @0@ is unsupported by zyp; zpdf requires Zig 0.15+. Skipping zyp plugin.'.format(zig_version))
   subdir_done()
 endif
 

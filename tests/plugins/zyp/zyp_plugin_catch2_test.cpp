@@ -131,14 +131,14 @@ struct ZypPluginTest {
 
     ZypPluginTest() {
 #ifdef __APPLE__
-        const char* paths[] = {"builddir/plugins/zyp/yams_zyp.dylib", "plugins/zyp/yams_zyp.dylib",
-                               nullptr};
+        const char* paths[] = {ZYP_PLUGIN_PATH, "builddir/plugins/zyp/yams_zyp.dylib",
+                               "plugins/zyp/yams_zyp.dylib", nullptr};
 #elif defined(_WIN32)
-        const char* paths[] = {"builddir/plugins/zyp/yams_zyp.dll", "plugins/zyp/yams_zyp.dll",
-                               nullptr};
+        const char* paths[] = {ZYP_PLUGIN_PATH, "builddir/plugins/zyp/yams_zyp.dll",
+                               "plugins/zyp/yams_zyp.dll", nullptr};
 #else
-        const char* paths[] = {"builddir/plugins/zyp/yams_zyp.so", "plugins/zyp/yams_zyp.so",
-                               nullptr};
+        const char* paths[] = {ZYP_PLUGIN_PATH, "builddir/plugins/zyp/yams_zyp.so",
+                               "plugins/zyp/yams_zyp.so", nullptr};
 #endif
 
         for (const char** p = paths; *p; ++p) {
