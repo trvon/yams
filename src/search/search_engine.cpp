@@ -2357,6 +2357,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
+    // Per-query vectorOnlyThreshold relaxation: when a query produces no
+    // anchored/text results at all, lower the threshold so vector-only docs
+    // are not needlessly filtered.  This helps benchmark corpora (SciFact)
+    // where semantic similarity dominates and lexical anchoring is scarce.
+    bool noAnchorThresholdRelaxed = false;
+    if (workingConfig.vectorOnlyThreshold > 0.50f) {
+        bool hasAnyAnchor = false;
+        for (const auto& cr : allComponentResults) {
+            if (isTextAnchoringComponent(cr.source)) {
+                hasAnyAnchor = true;
+                break;
+            }
+        }
+        if (!hasAnyAnchor && !allComponentResults.empty()) {
+            workingConfig.vectorOnlyThreshold = 0.50f;
+            noAnchorThresholdRelaxed = true;
+        }
+    }
+
     ResultFusion fusion(workingConfig);
     {
         YAMS_ZONE_SCOPED_N("fusion::results");
@@ -3670,6 +3689,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["vector_only_near_miss_eligible"] =
         std::to_string(vectorOnlyNearMissEligible);
     response.debugStats["adaptive_fusion_enabled"] = workingConfig.enableAdaptiveFusion ? "1" : "0";
+    response.debugStats["no_anchor_threshold_relaxed"] = noAnchorThresholdRelaxed ? "1" : "0";
 
     if (stageTraceEnabled) {
         const size_t traceTopDefault =

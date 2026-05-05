@@ -2233,25 +2233,29 @@ jobs:
       - name: Publish APT/YUM/latest.json to R2 (stable only)
         if: ${{ steps.meta.outputs.channel == 'stable' && github.actor != 'nektos/act' }}
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] || [ -z "${R2_ACCOUNT_ID:-}" ]; then
-            echo "R2 S3 credentials missing; aborting R2 publish." >&2
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "Cloudflare API token/account missing; aborting R2 publish." >&2
             exit 1
           fi
-          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          WRANGLER_ROOT="${RUNNER_TEMP:-/tmp}/wrangler-cli"
+          WRANGLER_BIN="$WRANGLER_ROOT/node_modules/.bin/wrangler"
+          if [ ! -x "$WRANGLER_BIN" ]; then
+            npm install --prefix "$WRANGLER_ROOT" wrangler@4.69.0 >/dev/null
+          fi
+          "$WRANGLER_BIN" --version >&2
           upload_file() {
             local src="$1"; shift
             local key="$1"; shift
             local ct="application/octet-stream"
             case "$key" in
               *.json) ct="application/json" ;;
+              *.key) ct="text/plain" ;;
               *.txt) ct="text/plain" ;;
               *.xml) ct="application/xml" ;;
               *.gz) ct="application/gzip" ;;
@@ -2260,10 +2264,10 @@ jobs:
               *.asc) ct="application/pgp-signature" ;;
             esac
             echo "-- Upload $key" >&2
-            aws s3 cp "$src" "s3://yams-repository/$key" \
-              --endpoint-url "$ENDPOINT" \
-              --content-type "$ct" \
-              --only-show-errors
+            "$WRANGLER_BIN" r2 object put "yams-repository/$key" \
+              --remote \
+              --file "$src" \
+              --content-type "$ct"
           }
           if [ -n "${GPG_PUBLIC_KEY_B64:-}" ]; then
             echo "$GPG_PUBLIC_KEY_B64" | base64 -d > gpg.key

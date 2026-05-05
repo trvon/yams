@@ -97,12 +97,21 @@ struct TunedParams {
     // Higher values = stronger vector influence in text-anchored results
     // Default 1.0 means full vectorWeight is used; lower values reduce vector impact
     float vectorBoostFactor = 1.0f;
+    float graphTextWeight = 0.12f;
+    float graphVectorWeight = 0.08f;
 
     // Fusion strategy is tracked through the TuningSlot pipeline so that the
     // SearchEngineConfig default is preserved when no profile, mode, or env
     // layer explicitly overrides it. Default mirrors SearchEngineConfig.
     TuningSlot<SearchEngineConfig::FusionStrategy> fusionStrategy{
         SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK, TuningLayer::Default};
+    size_t weightedLinearZScorePoolSize = 500;
+    float weightedLinearZScoreAlpha = 0.75f;
+    bool weightedLinearZScoreUseZScore = true;
+
+    // Pre-fusion result pool sizing
+    size_t vectorMaxResults = 150;
+    float bm25NormDivisor = 25.0f;
 
     // Hybrid precision guardrails (default to SearchEngineConfig defaults)
     float vectorOnlyThreshold = 0.90f;
@@ -110,6 +119,10 @@ struct TunedParams {
     size_t vectorOnlyNearMissReserve = 0;
     float vectorOnlyNearMissSlack = 0.05f;
     float vectorOnlyNearMissPenalty = 0.60f;
+    bool enableStrongVectorOnlyRelief = false;
+    float strongVectorOnlyMinScore = 0.97f;
+    size_t strongVectorOnlyTopRank = 0;
+    float strongVectorOnlyPenalty = 0.95f;
     bool enablePathDedupInFusion = false;
     size_t lexicalFloorTopN = 0;
     float lexicalFloorBoost = 0.0f;
@@ -119,24 +132,57 @@ struct TunedParams {
     float semanticRescueMinVectorScore = 0.0f;
     size_t fusionEvidenceRescueSlots = 0;
     float fusionEvidenceRescueMinScore = 0.0f;
+    bool enableAdaptiveFusion = false;
 
     // Weak-query signal thresholds (drive weak-query vector/entity fanout boost)
     size_t weakQueryMinTextHits = 3;
     float weakQueryMinTopTextScore = 0.30f;
+    bool enableWeakQueryFanoutBoost = true;
+    float weakQueryVectorFanoutMultiplier = 2.0f;
+    float weakQueryEntityVectorFanoutMultiplier = 1.5f;
 
     // Sub-phrase rescoring (always-on score-update pass for prose queries)
     bool enableSubPhraseRescoring = false;
     float subPhraseScoringPenalty = 0.70f;
+    bool enableSubPhraseExpansion = false;
+    size_t subPhraseExpansionMinHits = 5;
+    float subPhraseExpansionPenalty = 0.70f;
+    bool enableLexicalExpansion = false;
+    size_t lexicalExpansionMinHits = 3;
+    float lexicalExpansionScorePenalty = 0.65f;
+    float conceptBoostWeight = 0.10f;
+    float conceptMinConfidence = 0.40f;
+    size_t conceptMaxCount = 6;
+    float conceptMaxBoost = 0.25f;
+    size_t conceptMaxScanResults = 200;
 
     // Cross-reranker controls
     size_t rerankTopK = 5;
     // Minimum relative score (vs. rank-1) for a multi-source doc to count as "competitive
     // anchored evidence" and override the score-gap guard. 0.0 = any doc counts (default).
     float rerankAnchoredMinRelativeScore = 0.0f;
+    bool enableReranking = true;
+    bool rerankReplaceScores = true;
+    size_t fusionCandidateLimit = 0;
+    bool enableMultiVectorQuery = false;
+    size_t multiVectorMaxPhrases = 3;
+    float multiVectorScoreDecay = 0.85f;
 
     // Chunk-to-document vector aggregation
     SearchEngineConfig::ChunkAggregation chunkAggregation =
         SearchEngineConfig::ChunkAggregation::MAX;
+    size_t chunkAggregationTopK = 3;
+    float chunkAggregationWeightDecay = 0.6f;
+    bool enableTieredExecution = true;
+    bool tieredNarrowVectorSearch = false;
+    size_t tieredMinCandidates = 10;
+    size_t textMaxResults = 300;
+    size_t pathTreeMaxResults = 150;
+    size_t entityVectorMaxResults = 100;
+    size_t tagMaxResults = 250;
+    size_t metadataMaxResults = 200;
+    size_t semanticBudgetVectorMaxResults = 32;
+    size_t semanticBudgetEntityVectorMaxResults = 16;
 
     // Graph reranking controls (dynamically adapted by SearchTuner)
     bool enableGraphRerank = false;
@@ -149,6 +195,20 @@ struct TunedParams {
     int graphScoringBudgetMs = 10;
     bool graphEnablePathEnumeration = false;
     bool enableGraphQueryExpansion = false;
+    size_t graphExpansionMinHits = 8;
+    size_t graphExpansionMaxTerms = 8;
+    size_t graphExpansionMaxSeeds = 6;
+    size_t graphExpansionQueryNeighborK = 12;
+    float graphExpansionQueryNeighborMinScore = 0.84f;
+    bool graphVectorRequireCorroboration = true;
+    bool graphVectorRequireTextAnchoring = true;
+    bool graphVectorRequireBaselineTextAnchoring = true;
+    bool enableGraphFusionWindowGuard = false;
+    size_t graphFusionGuardDepthMultiplier = 2;
+    size_t graphMaxAddedInFusionWindow = 0;
+    float graphTextMinAdmissionScore = 0.0010f;
+    float graphExpansionFtsPenalty = 0.78f;
+    float graphExpansionVectorPenalty = 0.82f;
 
     // Per-profile graph signal weights for reranking composition
     float graphEntitySignalWeight = 0.40F;
@@ -156,6 +216,24 @@ struct TunedParams {
     float graphCoverageSignalWeight = 0.20F;
     float graphPathSignalWeight = 0.10F;
     float graphCorroborationFloor = 0.35F;
+    float graphCommunityReferenceSize = 8.0f;
+    float graphCommunityDecayHalfLifeDays = 0.0f;
+    float graphCommunityMinEdgeWeight = 0.0f;
+    bool graphUseQueryConcepts = true;
+    bool graphFallbackToTopSignal = true;
+    size_t graphMaxNeighbors = 16;
+    size_t graphMaxHops = 1;
+    size_t graphMaxPaths = 32;
+    float graphHopDecay = 0.90f;
+    bool enableMetaPathRouting = false;
+    size_t metaPathSeedK = 8;
+    size_t metaPathHopLimit = 16;
+    float metaPathBoostAlpha = 0.3f;
+    float metaPathWeightSem = 1.0f;
+    float metaPathWeightCall = 0.5f;
+    float metaPathWeightDef = 0.5f;
+    float metaPathWeightEntity = 0.3f;
+    float metaPathWeightBlob = 0.2f;
 
     /**
      * @brief Apply tuned parameters to a SearchEngineConfig.
@@ -184,16 +262,61 @@ struct TunedParams {
         config.graphScoringBudgetMs = graphScoringBudgetMs;
         config.graphEnablePathEnumeration = graphEnablePathEnumeration;
         config.enableGraphQueryExpansion = enableGraphQueryExpansion;
+        config.graphExpansionMinHits = graphExpansionMinHits;
+        config.graphExpansionMaxTerms = graphExpansionMaxTerms;
+        config.graphExpansionMaxSeeds = graphExpansionMaxSeeds;
+        config.graphExpansionQueryNeighborK = graphExpansionQueryNeighborK;
+        config.graphExpansionQueryNeighborMinScore = graphExpansionQueryNeighborMinScore;
+        config.graphVectorRequireCorroboration = graphVectorRequireCorroboration;
+        config.graphVectorRequireTextAnchoring = graphVectorRequireTextAnchoring;
+        config.graphVectorRequireBaselineTextAnchoring = graphVectorRequireBaselineTextAnchoring;
+        config.enableGraphFusionWindowGuard = enableGraphFusionWindowGuard;
+        config.graphFusionGuardDepthMultiplier = graphFusionGuardDepthMultiplier;
+        config.graphMaxAddedInFusionWindow = graphMaxAddedInFusionWindow;
+        config.graphTextMinAdmissionScore = graphTextMinAdmissionScore;
+        config.graphExpansionFtsPenalty = graphExpansionFtsPenalty;
+        config.graphExpansionVectorPenalty = graphExpansionVectorPenalty;
         config.graphEntitySignalWeight = graphEntitySignalWeight;
         config.graphStructuralSignalWeight = graphStructuralSignalWeight;
         config.graphCoverageSignalWeight = graphCoverageSignalWeight;
         config.graphPathSignalWeight = graphPathSignalWeight;
         config.graphCorroborationFloor = graphCorroborationFloor;
+        config.graphCommunityReferenceSize = graphCommunityReferenceSize;
+        config.graphCommunityDecayHalfLifeDays = graphCommunityDecayHalfLifeDays;
+        config.graphCommunityMinEdgeWeight = graphCommunityMinEdgeWeight;
+        config.graphUseQueryConcepts = graphUseQueryConcepts;
+        config.graphFallbackToTopSignal = graphFallbackToTopSignal;
+        config.graphMaxNeighbors = graphMaxNeighbors;
+        config.graphMaxHops = graphMaxHops;
+        config.graphMaxPaths = graphMaxPaths;
+        config.graphHopDecay = graphHopDecay;
+        config.enableMetaPathRouting = enableMetaPathRouting;
+        config.metaPathSeedK = metaPathSeedK;
+        config.metaPathHopLimit = metaPathHopLimit;
+        config.metaPathBoostAlpha = metaPathBoostAlpha;
+        config.metaPathWeightSem = metaPathWeightSem;
+        config.metaPathWeightCall = metaPathWeightCall;
+        config.metaPathWeightDef = metaPathWeightDef;
+        config.metaPathWeightEntity = metaPathWeightEntity;
+        config.metaPathWeightBlob = metaPathWeightBlob;
+        config.vectorMaxResults = vectorMaxResults;
+        config.bm25NormDivisor = bm25NormDivisor;
+        config.textMaxResults = textMaxResults;
+        config.pathTreeMaxResults = pathTreeMaxResults;
+        config.entityVectorMaxResults = entityVectorMaxResults;
+        config.tagMaxResults = tagMaxResults;
+        config.metadataMaxResults = metadataMaxResults;
+        config.semanticBudgetVectorMaxResults = semanticBudgetVectorMaxResults;
+        config.semanticBudgetEntityVectorMaxResults = semanticBudgetEntityVectorMaxResults;
         config.vectorOnlyThreshold = vectorOnlyThreshold;
         config.vectorOnlyPenalty = vectorOnlyPenalty;
         config.vectorOnlyNearMissReserve = vectorOnlyNearMissReserve;
         config.vectorOnlyNearMissSlack = vectorOnlyNearMissSlack;
         config.vectorOnlyNearMissPenalty = vectorOnlyNearMissPenalty;
+        config.enableStrongVectorOnlyRelief = enableStrongVectorOnlyRelief;
+        config.strongVectorOnlyMinScore = strongVectorOnlyMinScore;
+        config.strongVectorOnlyTopRank = strongVectorOnlyTopRank;
+        config.strongVectorOnlyPenalty = strongVectorOnlyPenalty;
         config.enablePathDedupInFusion = enablePathDedupInFusion;
         config.lexicalFloorTopN = lexicalFloorTopN;
         config.lexicalFloorBoost = lexicalFloorBoost;
@@ -203,13 +326,44 @@ struct TunedParams {
         config.semanticRescueMinVectorScore = semanticRescueMinVectorScore;
         config.fusionEvidenceRescueSlots = fusionEvidenceRescueSlots;
         config.fusionEvidenceRescueMinScore = fusionEvidenceRescueMinScore;
+        config.enableAdaptiveFusion = enableAdaptiveFusion;
         config.weakQueryMinTextHits = weakQueryMinTextHits;
         config.weakQueryMinTopTextScore = weakQueryMinTopTextScore;
+        config.enableWeakQueryFanoutBoost = enableWeakQueryFanoutBoost;
+        config.weakQueryVectorFanoutMultiplier = weakQueryVectorFanoutMultiplier;
+        config.weakQueryEntityVectorFanoutMultiplier = weakQueryEntityVectorFanoutMultiplier;
         config.enableSubPhraseRescoring = enableSubPhraseRescoring;
         config.subPhraseScoringPenalty = subPhraseScoringPenalty;
+        config.enableSubPhraseExpansion = enableSubPhraseExpansion;
+        config.subPhraseExpansionMinHits = subPhraseExpansionMinHits;
+        config.subPhraseExpansionPenalty = subPhraseExpansionPenalty;
+        config.enableLexicalExpansion = enableLexicalExpansion;
+        config.lexicalExpansionMinHits = lexicalExpansionMinHits;
+        config.lexicalExpansionScorePenalty = lexicalExpansionScorePenalty;
+        config.conceptBoostWeight = conceptBoostWeight;
+        config.conceptMinConfidence = conceptMinConfidence;
+        config.conceptMaxCount = conceptMaxCount;
+        config.conceptMaxBoost = conceptMaxBoost;
+        config.conceptMaxScanResults = conceptMaxScanResults;
         config.rerankTopK = rerankTopK;
         config.rerankAnchoredMinRelativeScore = rerankAnchoredMinRelativeScore;
+        config.enableReranking = enableReranking;
+        config.rerankReplaceScores = rerankReplaceScores;
+        config.fusionCandidateLimit = fusionCandidateLimit;
+        config.enableMultiVectorQuery = enableMultiVectorQuery;
+        config.multiVectorMaxPhrases = multiVectorMaxPhrases;
+        config.multiVectorScoreDecay = multiVectorScoreDecay;
         config.chunkAggregation = chunkAggregation;
+        config.weightedLinearZScorePoolSize = weightedLinearZScorePoolSize;
+        config.weightedLinearZScoreAlpha = weightedLinearZScoreAlpha;
+        config.weightedLinearZScoreUseZScore = weightedLinearZScoreUseZScore;
+        config.graphTextWeight = graphTextWeight;
+        config.graphVectorWeight = graphVectorWeight;
+        config.chunkAggregationTopK = chunkAggregationTopK;
+        config.chunkAggregationWeightDecay = chunkAggregationWeightDecay;
+        config.enableTieredExecution = enableTieredExecution;
+        config.tieredNarrowVectorSearch = tieredNarrowVectorSearch;
+        config.tieredMinCandidates = tieredMinCandidates;
     }
 
     /**
@@ -337,13 +491,22 @@ struct TunedParams {
             // F3b's top-k unfiltered (0.0) regressed on scifact under COMB_MNZ; reverted to
             // 0.30 (E7 baseline) until a coverage-robust fusion (RRF) is wired.
             params.similarityThreshold = TuningSlot<float>(0.30f, TuningLayer::Profile);
-            params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL,
+            params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK,
                                            TuningLayer::Profile);
             // Sub-phrase rescoring re-scores already-retrieved docs via AND-clause
             // sub-phrase queries. This is the only mechanism that helps when base FTS5
             // returns the entire corpus at low scores (expansion gates never fire).
             params.enableSubPhraseRescoring = true;
             params.subPhraseScoringPenalty = 0.70f;
+            params.enableSubPhraseExpansion = true;
+            params.subPhraseExpansionMinHits = 3;
+            params.subPhraseExpansionPenalty = 0.65f;
+            // Strong vector-only relief: prevent high-quality semantic matches
+            // from being dropped by vectorOnlyThreshold when they lack text anchors.
+            params.enableStrongVectorOnlyRelief = true;
+            params.strongVectorOnlyMinScore = 0.78f;
+            params.strongVectorOnlyTopRank = 3;
+            params.strongVectorOnlyPenalty = 0.90f;
             // Rescue high-confidence vector matches that fall below the fusion cutoff.
             // Critical for multi-session conversational data where semantic similarity
             // captures relevance that keyword matching misses.
@@ -351,7 +514,7 @@ struct TunedParams {
             params.semanticRescueMinVectorScore = 0.65f;
             // Widen rerank window to give cross-encoder more candidates to reorder.
             params.rerankTopK = 12;
-            params.rerankAnchoredMinRelativeScore = 0.70f;
+            params.rerankAnchoredMinRelativeScore = 0.50f;
             // Use SUM aggregation for chunk-level vector scores. Multi-chunk documents
             // (e.g., multi-turn chat sessions) benefit from accumulating semantic signal
             // across chunks rather than taking only the single best chunk.

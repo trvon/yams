@@ -915,7 +915,7 @@ TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
     CHECK(params.enableSubPhraseRescoring == true);
 
     // fusionStrategy: adopted from SCIENTIFIC
-    CHECK(params.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
+    CHECK(params.fusionStrategy == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
 
     // chunkAggregation: adopted from SCIENTIFIC
     CHECK(params.chunkAggregation == SearchEngineConfig::ChunkAggregation::SUM);
@@ -923,8 +923,8 @@ TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
     // rerankTopK: lerp(5, 12, 0.60) = round(9.2) = 9
     CHECK(params.rerankTopK == 9);
 
-    // rerankAnchoredMinRelativeScore: lerp(0.0, 0.70, 0.60) = 0.42
-    CHECK(params.rerankAnchoredMinRelativeScore == Approx(0.42f).epsilon(0.01));
+    // rerankAnchoredMinRelativeScore: lerp(0.0, 0.50, 0.60) = 0.30
+    CHECK(params.rerankAnchoredMinRelativeScore == Approx(0.30f).epsilon(0.01));
 
     // similarityThreshold: lerp(0.0, 0.30, 0.60) = 0.18 because MIXED_PRECISION inherits the
     // default unfiltered threshold while SCIENTIFIC overrides to 0.30.
@@ -1254,6 +1254,200 @@ TEST_CASE("SearchTuner: no-KG fusion adaptation stays idle without lexical press
     CHECK(tuner.adaptiveStateToJson()["last_decision"] == "steady_no_kg");
 }
 
+TEST_CASE("SearchTuner: vector-only pressure lowers threshold and increases rescue",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.05f;
+    stats.proseRatio = 0.90f;
+    stats.binaryRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto before = tuner.getParams();
+    REQUIRE(before.vectorOnlyThreshold == Approx(0.90f));
+    REQUIRE(before.semanticRescueSlots.value > 0);
+
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 35.0;
+    telemetry.topWindow = 25;
+    telemetry.adaptiveFusionEnabled = true;
+    telemetry.preFusionUniqueDocCount = 100;
+    telemetry.postFusionDocCount = 60;
+    telemetry.fusionDroppedDocCount = 38;
+    telemetry.vectorOnlyDocCount = 30;
+    telemetry.vectorOnlyBelowThresholdCount = 15;
+    telemetry.vectorOnlyAboveThresholdCount = 15;
+    telemetry.semanticRescueTarget = static_cast<size_t>(before.semanticRescueSlots.value);
+    telemetry.semanticRescueFinalCount = static_cast<size_t>(before.semanticRescueSlots.value);
+
+    for (int i = 0; i < 5; ++i) {
+        tuner.observe(telemetry);
+    }
+
+    const auto after = tuner.getParams();
+    CHECK(after.vectorOnlyThreshold < before.vectorOnlyThreshold);
+    CHECK(after.vectorOnlyThreshold >= Approx(0.65f));
+
+    const auto adaptive = tuner.adaptiveStateToJson();
+    CHECK(adaptive["last_decision"].get<std::string>().find("vector_only_pressure") !=
+          std::string::npos);
+}
+
+TEST_CASE("SearchTuner: vector-only pressure stays idle without sufficient signal",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.05f;
+    stats.proseRatio = 0.90f;
+    stats.binaryRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto before = tuner.getParams();
+
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 35.0;
+    telemetry.topWindow = 25;
+    telemetry.adaptiveFusionEnabled = true;
+    telemetry.preFusionUniqueDocCount = 100;
+    telemetry.postFusionDocCount = 90;
+    telemetry.fusionDroppedDocCount = 10;
+    telemetry.vectorOnlyDocCount = 5;            // low absolute share
+    telemetry.vectorOnlyBelowThresholdCount = 3; // high drop rate but low volume
+    telemetry.vectorOnlyAboveThresholdCount = 2;
+
+    for (int i = 0; i < 5; ++i) {
+        tuner.observe(telemetry);
+    }
+
+    const auto after = tuner.getParams();
+    CHECK(after.vectorOnlyThreshold == Approx(before.vectorOnlyThreshold));
+}
+
+TEST_CASE("SearchTuner: semantic rescue saturation increases slots",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.05f;
+    stats.proseRatio = 0.90f;
+    stats.binaryRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto before = tuner.getParams();
+    REQUIRE(before.semanticRescueSlots.value > 0);
+
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 35.0;
+    telemetry.topWindow = 25;
+    telemetry.adaptiveFusionEnabled = true;
+    telemetry.preFusionUniqueDocCount = 100;
+    telemetry.postFusionDocCount = 60;
+    telemetry.fusionDroppedDocCount = 38;
+    telemetry.vectorOnlyDocCount = 30;
+    telemetry.vectorOnlyBelowThresholdCount = 15;
+    telemetry.vectorOnlyAboveThresholdCount = 15;
+    telemetry.semanticRescueTarget = static_cast<size_t>(before.semanticRescueSlots.value);
+    telemetry.semanticRescueFinalCount = static_cast<size_t>(before.semanticRescueSlots.value);
+
+    for (int i = 0; i < 5; ++i) {
+        tuner.observe(telemetry);
+    }
+
+    const auto after = tuner.getParams();
+    CHECK(after.semanticRescueSlots.value > before.semanticRescueSlots.value);
+    CHECK(after.semanticRescueMinVectorScore < before.semanticRescueMinVectorScore);
+}
+
+TEST_CASE("SearchTuner: result pool resizes when vector dominates and fusion drops high",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.05f;
+    stats.proseRatio = 0.90f;
+    stats.binaryRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto before = tuner.getParams();
+    const size_t originalVecMax = before.vectorMaxResults;
+    const size_t originalTextMax = before.textMaxResults;
+
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.adaptiveFusionEnabled = true;
+    telemetry.latencyMs = 35.0;
+    telemetry.topWindow = 25;
+    telemetry.preFusionUniqueDocCount = 100;
+    telemetry.postFusionDocCount = 60;
+    telemetry.fusionDroppedDocCount = 38;
+    telemetry.vectorOnlyDocCount = 40;
+    telemetry.vectorOnlyBelowThresholdCount = 20;
+    telemetry.vectorOnlyAboveThresholdCount = 20;
+
+    for (int i = 0; i < 5; ++i) {
+        tuner.observe(telemetry);
+    }
+
+    const auto after = tuner.getParams();
+    CHECK(after.vectorMaxResults > originalVecMax);
+    CHECK(after.textMaxResults < originalTextMax);
+
+    const auto adaptive = tuner.adaptiveStateToJson();
+    CHECK(adaptive["last_decision"].get<std::string>().find("result_pool_resize") !=
+          std::string::npos);
+}
+
+TEST_CASE("SearchTuner: result pool stays idle without vector dominance",
+          "[unit][search_tuner][adaptive]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.codeRatio = 0.05f;
+    stats.proseRatio = 0.90f;
+    stats.binaryRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.02f;
+    stats.nativeSymbolDensity = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.80f;
+
+    SearchTuner tuner(stats);
+    const auto before = tuner.getParams();
+
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.adaptiveFusionEnabled = true;
+    telemetry.latencyMs = 35.0;
+    telemetry.topWindow = 25;
+    telemetry.preFusionUniqueDocCount = 100;
+    telemetry.postFusionDocCount = 90;
+    telemetry.fusionDroppedDocCount = 10;
+    telemetry.vectorOnlyDocCount = 10;
+
+    for (int i = 0; i < 5; ++i) {
+        tuner.observe(telemetry);
+    }
+
+    const auto after = tuner.getParams();
+    CHECK(after.vectorMaxResults == before.vectorMaxResults);
+    CHECK(after.textMaxResults == before.textMaxResults);
+}
+
 // =============================================================================
 // Phase 8: SCIENTIFIC size guard removal tests
 // =============================================================================
@@ -1279,7 +1473,7 @@ TEST_CASE("SearchTuner: 940-doc scientific corpus gets SCIENTIFIC state",
     const auto& p = tuner.getParams();
     CHECK(p.semanticRescueSlots.value == 2);
     CHECK(p.enableSubPhraseRescoring == true);
-    CHECK(p.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
+    CHECK(p.fusionStrategy.value == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
 }
 
 TEST_CASE("SearchTuner: 50-doc scientific corpus still gets MINIMAL",

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <random>
@@ -68,6 +69,8 @@ struct DaemonHarnessOptions {
     std::optional<std::filesystem::path> configPath = std::nullopt;
     // Additional trusted plugin search paths (appended to DaemonConfig::trustedPluginPaths)
     std::vector<std::filesystem::path> trustedPluginPaths = {};
+    // Optional test hook to mutate the daemon config before construction.
+    std::function<void(yams::daemon::DaemonConfig&)> configureDaemon;
 };
 
 class DaemonHarness {
@@ -187,6 +190,9 @@ public:
         if (options_.configureModelPool) {
             cfg.modelPoolConfig.lazyLoading = options_.modelPoolLazyLoading;
             cfg.modelPoolConfig.preloadModels = options_.preloadModels;
+        }
+        if (options_.configureDaemon) {
+            options_.configureDaemon(cfg);
         }
         // Pass plugin-specific configurations
         cfg.pluginConfigs = options_.pluginConfigs;

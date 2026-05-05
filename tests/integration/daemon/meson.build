@@ -116,6 +116,15 @@ else
       args: ['Daemon client request execution', '--allow-running-no-tests'],
     )
 
+    test('daemon_socket_download_job_request_execution',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket', 'download-jobs'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client download job request execution', '--allow-running-no-tests'],
+    )
+
     test('daemon_socket_model_request_execution',
       daemon_catch2_exe,
       suite: ['integration', 'daemon', 'catch2', 'socket'],

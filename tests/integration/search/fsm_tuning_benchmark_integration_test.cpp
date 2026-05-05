@@ -317,7 +317,8 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         // Scientific corpus: prose-dominant, flat structure, no tags
         CHECK(tuner.currentState() == TuningState::SCIENTIFIC);
         CHECK(tuner.getRrfK() == 12);
-        CHECK(tuner.getParams().weights.text.value == Approx(0.60f));
+        CHECK(tuner.getParams().weights.text.value == Approx(0.50f));
+        CHECK(tuner.getParams().weights.simeonText.value == Approx(0.10f));
         CHECK(tuner.getParams().weights.vector.value == Approx(0.35f));
         CHECK(tuner.getParams().weights.tag.value == Approx(0.00f));
     }

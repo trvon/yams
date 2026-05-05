@@ -324,9 +324,14 @@ bool waitForCorpusIndexed(std::size_t expectedDocs, std::chrono::milliseconds ti
         const uint64_t postQueued = getCountOrZero(st, "post_ingest_queued");
         const uint64_t postInflight = getCountOrZero(st, "post_ingest_inflight");
 
+        // `documents_indexed` tracks search/FTS visibility and can lag the canonical document
+        // count in overlay-backed search builds. The service benchmarks need a stable, queryable
+        // corpus, not necessarily a fully backfilled FTS counter, so accept the stored document
+        // count once post-ingest is drained.
         const bool countsMet =
             (expectedDocs == 0) || (docsTotal >= static_cast<uint64_t>(expectedDocs) &&
-                                    docsIndexed >= static_cast<uint64_t>(expectedDocs));
+                                    (docsIndexed >= static_cast<uint64_t>(expectedDocs) ||
+                                     (postQueued == 0 && postInflight == 0)));
         const bool postDrained = (postQueued == 0 && postInflight == 0);
 
         if (countsMet && postDrained) {

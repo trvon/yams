@@ -49,6 +49,17 @@ constexpr float kAdaptiveLexicalFloorBoostStep = 0.04f;
 constexpr float kMaxAdaptiveLexicalTieBreakEpsilon = 0.010f;
 constexpr float kAdaptiveLexicalTieBreakEpsilonStep = 0.0025f;
 constexpr float kMinAdaptiveVectorOnlyPenalty = 0.85f;
+// Vector-only pressure thresholds — activate when too many vector-only
+// pre-fusion docs are being dropped by the fusion guardrails and the
+// corpus has a meaningful vector-only presence.
+constexpr double kVectorOnlyPressureShareThreshold = 0.25;
+constexpr double kVectorOnlyPressureDropThreshold = 0.40;
+constexpr double kSemanticRescueSaturationThreshold = 0.80;
+constexpr float kVectorOnlyThresholdLowerStep = 0.05f;
+constexpr float kMinAdaptiveVectorOnlyThreshold = 0.65f;
+constexpr size_t kMaxAdaptiveSemanticRescueSlots = 12;
+constexpr float kSemanticRescueMinScoreLowerStep = 0.05f;
+constexpr float kMinAdaptiveSemanticRescueMinScore = 0.45f;
 
 bool statsAreOverlayBacked(const storage::CorpusStats& stats) {
     return stats.usedOnlineOverlay;
@@ -250,6 +261,131 @@ double rate(std::size_t part, std::size_t total) {
     return shareOf(static_cast<double>(part), static_cast<double>(total));
 }
 
+bool applyVectorOnlyGuardrailAdjustments(TunedParams& candidate, const RuntimeTelemetry& telemetry,
+                                         std::vector<std::string>& reasons) {
+    const double vectorOnlyDropRate =
+        rate(telemetry.vectorOnlyBelowThresholdCount, telemetry.vectorOnlyDocCount);
+    const double vectorOnlyShare =
+        rate(telemetry.vectorOnlyDocCount, telemetry.preFusionUniqueDocCount);
+
+    const bool vectorPressure = vectorOnlyShare >= kVectorOnlyPressureShareThreshold &&
+                                vectorOnlyDropRate >= kVectorOnlyPressureDropThreshold;
+
+    if (!vectorPressure)
+        return false;
+
+    bool changed = false;
+
+    const float nextThreshold =
+        std::max(kMinAdaptiveVectorOnlyThreshold,
+                 candidate.vectorOnlyThreshold - kVectorOnlyThresholdLowerStep);
+    if (nextThreshold + 1e-5f < candidate.vectorOnlyThreshold) {
+        candidate.vectorOnlyThreshold = nextThreshold;
+        changed = true;
+    }
+
+    const double semanticRescueRate =
+        rate(telemetry.semanticRescueFinalCount, telemetry.semanticRescueTarget);
+    if (candidate.semanticRescueSlots.value > 0 &&
+        semanticRescueRate >= kSemanticRescueSaturationThreshold &&
+        candidate.semanticRescueSlots.value < kMaxAdaptiveSemanticRescueSlots) {
+        candidate.semanticRescueSlots.set(candidate.semanticRescueSlots.value + 1,
+                                          TuningLayer::Runtime);
+        changed = true;
+    }
+
+    const float nextMinScore =
+        std::max(kMinAdaptiveSemanticRescueMinScore,
+                 candidate.semanticRescueMinVectorScore - kSemanticRescueMinScoreLowerStep);
+    if (nextMinScore + 1e-6f < candidate.semanticRescueMinVectorScore) {
+        candidate.semanticRescueMinVectorScore = nextMinScore;
+        changed = true;
+    }
+
+    if (changed) {
+        reasons.push_back("vector_only_pressure");
+    }
+    return changed;
+}
+
+constexpr size_t kMinVectorMaxResults = 16;
+constexpr size_t kMaxVectorMaxResults = 500;
+constexpr size_t kVectorMaxResultsStep = 16;
+constexpr size_t kMinTextMaxResults = 50;
+constexpr size_t kMaxTextMaxResults = 500;
+constexpr size_t kTextMaxResultsStep = 25;
+
+bool applyResultPoolAdjustments(TunedParams& candidate, const RuntimeTelemetry& telemetry,
+                                std::vector<std::string>& reasons) {
+    const double fusionDropRate = rate(telemetry.fusionDroppedDocCount,
+                                       std::max<std::size_t>(telemetry.preFusionUniqueDocCount, 1));
+    const double vectorOnlyShare =
+        rate(telemetry.vectorOnlyDocCount, telemetry.preFusionUniqueDocCount);
+
+    const bool vectorDominant = vectorOnlyShare >= 0.30;
+    const bool highDrop = fusionDropRate >= 0.20;
+
+    if (!vectorDominant || !highDrop)
+        return false;
+
+    bool changed = false;
+
+    const size_t nextVectorMax =
+        std::min(kMaxVectorMaxResults, candidate.vectorMaxResults + kVectorMaxResultsStep);
+    if (nextVectorMax > candidate.vectorMaxResults) {
+        candidate.vectorMaxResults = nextVectorMax;
+        changed = true;
+    }
+
+    if (candidate.textMaxResults > kMinTextMaxResults + kTextMaxResultsStep) {
+        candidate.textMaxResults =
+            std::max(kMinTextMaxResults, candidate.textMaxResults - kTextMaxResultsStep);
+        changed = true;
+    }
+
+    if (changed)
+        reasons.push_back("result_pool_resize");
+    return changed;
+}
+
+constexpr size_t kMinRerankTopK = 5;
+constexpr size_t kMaxRerankTopK = 30;
+constexpr size_t kRerankTopKStep = 2;
+constexpr float kRerankAnchoredMinStep = 0.05f;
+constexpr float kMinRerankAnchoredScore = 0.30f;
+
+bool applyRerankerAdjustments(TunedParams& candidate, const RuntimeTelemetry& telemetry,
+                              std::vector<std::string>& reasons) {
+    const double fusionDropRate = rate(telemetry.fusionDroppedDocCount,
+                                       std::max<std::size_t>(telemetry.preFusionUniqueDocCount, 1));
+    const double rerankDropSignal =
+        rate(telemetry.fusionDroppedDocCount - telemetry.anchoredFusionDroppedDocCount,
+             std::max<std::size_t>(telemetry.postFusionDocCount, 1));
+
+    const bool needWiderRerank = fusionDropRate >= 0.25 && rerankDropSignal >= 0.10;
+    if (!needWiderRerank)
+        return false;
+
+    bool changed = false;
+
+    const size_t nextRerankTopK = std::min(kMaxRerankTopK, candidate.rerankTopK + kRerankTopKStep);
+    if (nextRerankTopK > candidate.rerankTopK) {
+        candidate.rerankTopK = nextRerankTopK;
+        changed = true;
+    }
+
+    const float nextAnchoredScore = std::max(
+        kMinRerankAnchoredScore, candidate.rerankAnchoredMinRelativeScore - kRerankAnchoredMinStep);
+    if (nextAnchoredScore + 1e-6f < candidate.rerankAnchoredMinRelativeScore) {
+        candidate.rerankAnchoredMinRelativeScore = nextAnchoredScore;
+        changed = true;
+    }
+
+    if (changed)
+        reasons.push_back("reranker_widen");
+    return changed;
+}
+
 bool applyFusionGuardrailAdjustments(TunedParams& candidate, const RuntimeTelemetry& telemetry,
                                      std::vector<std::string>& reasons) {
     const double fusionDropRate = rate(telemetry.fusionDroppedDocCount,
@@ -263,7 +399,7 @@ bool applyFusionGuardrailAdjustments(TunedParams& candidate, const RuntimeTeleme
                                  (anchoredDropRate >= kAnchoredDroppedPressureThreshold ||
                                   topTextDropRate >= kTopTextDroppedPressureThreshold);
     if (!lexicalPressure) {
-        return false;
+        return applyVectorOnlyGuardrailAdjustments(candidate, telemetry, reasons);
     }
 
     bool changed = false;
@@ -349,11 +485,17 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.vectorBoostFactor = config.vectorBoostFactor;
     params_.rrfK = static_cast<int>(std::lround(config.rrfK));
     params_.fusionStrategy.value = config.fusionStrategy;
+    params_.vectorMaxResults = config.vectorMaxResults;
+    params_.bm25NormDivisor = config.bm25NormDivisor;
     params_.vectorOnlyThreshold = config.vectorOnlyThreshold;
     params_.vectorOnlyPenalty = config.vectorOnlyPenalty;
     params_.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
     params_.vectorOnlyNearMissSlack = config.vectorOnlyNearMissSlack;
     params_.vectorOnlyNearMissPenalty = config.vectorOnlyNearMissPenalty;
+    params_.enableStrongVectorOnlyRelief = config.enableStrongVectorOnlyRelief;
+    params_.strongVectorOnlyMinScore = config.strongVectorOnlyMinScore;
+    params_.strongVectorOnlyTopRank = config.strongVectorOnlyTopRank;
+    params_.strongVectorOnlyPenalty = config.strongVectorOnlyPenalty;
     params_.enablePathDedupInFusion = config.enablePathDedupInFusion;
     params_.lexicalFloorTopN = config.lexicalFloorTopN;
     params_.lexicalFloorBoost = config.lexicalFloorBoost;
@@ -363,8 +505,12 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
     params_.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
     params_.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
+    params_.enableAdaptiveFusion = config.enableAdaptiveFusion;
     params_.weakQueryMinTextHits = config.weakQueryMinTextHits;
     params_.weakQueryMinTopTextScore = config.weakQueryMinTopTextScore;
+    params_.enableWeakQueryFanoutBoost = config.enableWeakQueryFanoutBoost;
+    params_.weakQueryVectorFanoutMultiplier = config.weakQueryVectorFanoutMultiplier;
+    params_.weakQueryEntityVectorFanoutMultiplier = config.weakQueryEntityVectorFanoutMultiplier;
     params_.enableGraphRerank = config.enableGraphRerank;
     params_.graphRerankTopN = config.graphRerankTopN;
     params_.graphRerankWeight = config.graphRerankWeight;
@@ -595,6 +741,11 @@ void SearchTuner::observeLocked(const RuntimeTelemetry& telemetry) {
     if (telemetry.adaptiveFusionEnabled &&
         adaptive_.observations >= kFusionPressureWarmupObservations) {
         changed = applyFusionGuardrailAdjustments(candidate, telemetry, reasons) || changed;
+    }
+
+    if (telemetry.adaptiveFusionEnabled && adaptive_.observations >= kAdaptiveWarmupObservations) {
+        changed = applyResultPoolAdjustments(candidate, telemetry, reasons) || changed;
+        changed = applyRerankerAdjustments(candidate, telemetry, reasons) || changed;
     }
 
     if (statsAreOverlayBacked(stats_)) {
