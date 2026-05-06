@@ -2603,16 +2603,30 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     {
         static std::atomic<bool> gsLogged{false};
         if (!gsLogged.exchange(true, std::memory_order_relaxed)) {
+            // Verify entities are in the KG by querying the store directly.
+            size_t firstDocEntityCount = 0;
+            if (kgScorer_ && !response.results.empty()) {
+                const auto& first = response.results[0];
+                std::string hash = first.document.sha256Hash;
+                if (auto docIdRes = kgStore_->getDocumentIdByHash(hash)) {
+                    auto entities =
+                        kgStore_->getDocEntitiesForDocument(docIdRes.value().value(), 5, 0);
+                    if (entities) {
+                        firstDocEntityCount = entities.value().size();
+                    }
+                }
+            }
             spdlog::info(
                 "[graph_rerank-gate] enable={} kgScorer={} results={} resultSize={} "
                 "shortQueryBudgeted={} corpusWarming={} bypassWarmingGate={} "
-                "lexicalReady={} awaitingDrain={} postIngestInflight={} postIngestQueued={}",
+                "lexicalReady={} awaitingDrain={} postIngestInflight={} postIngestQueued={} "
+                "firstDocEntities={}",
                 workingConfig.enableGraphRerank ? 1 : 0, kgScorer_ ? 1 : 0,
                 !response.results.empty() ? 1 : 0, response.results.size(),
                 shortQueryBudgeted ? 1 : 0, corpusWarming ? 1 : 0,
                 workingConfig.bypassCorpusWarmingGate ? 1 : 0, freshness.lexicalReady ? 1 : 0,
                 freshness.awaitingDrain ? 1 : 0, freshness.postIngestInFlight,
-                freshness.postIngestQueued);
+                freshness.postIngestQueued, firstDocEntityCount);
         }
     }
 
