@@ -5060,6 +5060,7 @@ struct BenchFixture {
         addEnvDefault("YAMS_POST_EMBED_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_EXTRACTION_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
+        addEnvDefault("YAMS_POST_TITLE_CONCURRENT", "1");
 
         // Adaptive sub-batch tuning: the default 15s warning threshold causes premature
         // batch-cap collapse (8→4→1) on machines where ONNX inference is legitimately slow.
@@ -5295,8 +5296,8 @@ struct BenchFixture {
                     };
                     const std::array<Candidate, 3> candidates = {
                         {{localPluginDir, localOnnxPlugin, localGlintPlugin},
-                         {defaultPluginDir, defaultOnnxPlugin, defaultGlintPlugin},
-                         {nosanPluginDir, nosanOnnxPlugin, nosanGlintPlugin}}};
+                         {nosanPluginDir, nosanOnnxPlugin, nosanGlintPlugin},
+                         {defaultPluginDir, defaultOnnxPlugin, defaultGlintPlugin}}};
                     for (const auto& candidate : candidates) {
                         if (!fs::exists(candidate.onnxPlugin)) {
                             continue;
@@ -5403,6 +5404,8 @@ struct BenchFixture {
 
             // Configure Glint plugin with GLiNER model path for NL entity extraction
             if (!glinerModelPath.empty()) {
+                harnessOptions.autoLoadPlugins = true;
+                harnessOptions.pluginDirStrict = false;
                 json glintConfig;
                 glintConfig["model_path"] = glinerModelPath;
                 glintConfig["threshold"] = 0.5; // Default confidence threshold

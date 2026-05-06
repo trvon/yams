@@ -1699,16 +1699,28 @@ FROM vectors WHERE level = ?
                     simeon_pq_indices_.contains(dim)) {
                     continue;
                 }
+                // Attempt to reload the persisted index first: loading the codebooks
+                // from disk clears the dirty flag. This avoids spurious "dirty" errors
+                // when vectors were inserted after the index was built and persisted
+                // (e.g., during a search-engine rebuild that races with PQ finalization).
+                if (loadPersistedSimeonPqDimUnlocked(dim)) {
+                    continue;
+                }
+                // No persisted index exists and the dimension is dirty. Build the PQ
+                // index from scratch using the vectors that are already stored. This
+                // covers cold-run benchmarks where buildIndex() was not called ahead
+                // of prepareSearchIndex().
                 if (simeon_pq_dirty_dims_.contains(dim)) {
-                    return Error{ErrorCode::InvalidState, "Simeon PQ index for dim " +
-                                                              std::to_string(dim) +
-                                                              " is dirty and requires rebuild"};
+                    auto rebuild = rebuildSimeonPqDimUnlocked(dim);
+                    if (!rebuild) {
+                        return Error{ErrorCode::InvalidState,
+                                     std::string("Simeon PQ index for dim ") + std::to_string(dim) +
+                                         " build failed: " + rebuild.error().message};
+                    }
+                    continue;
                 }
-                if (!loadPersistedSimeonPqDimUnlocked(dim)) {
-                    return Error{ErrorCode::NotFound,
-                                 "No reusable persisted Simeon PQ index for dim " +
-                                     std::to_string(dim)};
-                }
+                return Error{ErrorCode::NotFound, "No reusable persisted Simeon PQ index for dim " +
+                                                      std::to_string(dim)};
             }
             return Result<void>{};
         }

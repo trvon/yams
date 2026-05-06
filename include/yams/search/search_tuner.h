@@ -486,6 +486,11 @@ struct TunedParams {
             // WEIGHTED_RECIPROCAL avoids COMB_MNZ's mnzBoost penalty which demotes
             // documents found by only one component.
             params.rrfK = 12; // Low k for better top-rank discrimination
+            // KG entity weighting is disabled by default: queryKnowledgeGraph() FTS5
+            // searches document text for entity labels, which is redundant with the
+            // text component on scientific corpora where queries are short biomedical
+            // claims. The real value is in graph reranking + query expansion, which
+            // require the GLiNER concept extractor to produce query-time entities.
             params.weights.setAll(0.50f, 0.10f, 0.35f, 0.00f, 0.00f, 0.00f, 0.00f, 0.05f,
                                   TuningLayer::Profile);
             // F3b's top-k unfiltered (0.0) regressed on scifact under COMB_MNZ; reverted to
@@ -519,6 +524,12 @@ struct TunedParams {
             // (e.g., multi-turn chat sessions) benefit from accumulating semantic signal
             // across chunks rather than taking only the single best chunk.
             params.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
+            // Graph signal weights: entity-heavy for scientific corpora where
+            // GLiNER entity extraction provides high-quality biomedical NER data.
+            // Graph scoring budget is bumped to 30ms (from default 10) to give
+            // the graph scorer enough time to resolve query concepts against KG
+            // entities — critical for biomedical corpora with ~15 entities/doc.
+            params.graphScoringBudgetMs = 30;
             params.graphEntitySignalWeight = 0.50F;
             params.graphStructuralSignalWeight = 0.15F;
             params.graphCoverageSignalWeight = 0.15F;

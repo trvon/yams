@@ -1605,7 +1605,7 @@ TEST_CASE("TunedParams: toJson includes graph signal fields",
     CHECK(j.at("graph_entity_signal_weight").get<float>() == Approx(0.50f));
     CHECK(j.at("graph_corroboration_floor").get<float>() == Approx(0.25f));
     CHECK(j.at("graph_enable_path_enumeration").get<bool>() == false);
-    CHECK(j.at("enable_graph_query_expansion").get<bool>() == false);
+    CHECK(j.at("enable_graph_query_expansion").get<bool>() == false); // FSM-controlled
     CHECK(j.at("graph_structural_signal_weight").get<float>() == Approx(0.15f));
     CHECK(j.at("graph_coverage_signal_weight").get<float>() == Approx(0.15f));
     CHECK(j.at("graph_path_signal_weight").get<float>() == Approx(0.10f));
