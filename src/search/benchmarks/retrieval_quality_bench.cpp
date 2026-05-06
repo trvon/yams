@@ -5062,6 +5062,11 @@ struct BenchFixture {
         addEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
         addEnvDefault("YAMS_POST_TITLE_CONCURRENT", "1");
 
+        // Benchmark queries should not be gated by freshness/corpus-warming checks.
+        // The benchmark already waits for ingestion, embedding, and lexical readiness
+        // before starting queries.
+        addEnvDefault("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE", "1");
+
         // Adaptive sub-batch tuning: the default 15s warning threshold causes premature
         // batch-cap collapse (8→4→1) on machines where ONNX inference is legitimately slow.
         // Raise to 60s so the adaptive logic only shrinks on true stalls, not normal latency.

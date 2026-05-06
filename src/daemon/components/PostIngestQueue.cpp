@@ -1563,7 +1563,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         auto result = provider->extractEntitiesStreaming(
             content, filePath,
             [this, &totalNodesInserted, &totalEdgesInserted, &totalAliasesInserted, &hash,
-             &snapshotId,
+             &snapshotId, &entityTypeCounts,
              &filePath](ExternalEntityProviderAdapter::EntityResult batch,
                         const ExternalEntityProviderAdapter::ExtractionProgress& progress) -> bool {
                 if (batch.nodes.empty()) {

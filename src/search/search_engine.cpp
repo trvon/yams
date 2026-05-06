@@ -2599,6 +2599,23 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
+    // Diagnostic: log graph reranker gate status once per benchmark run.
+    {
+        static std::atomic<bool> gsLogged{false};
+        if (!gsLogged.exchange(true, std::memory_order_relaxed)) {
+            spdlog::info(
+                "[graph_rerank-gate] enable={} kgScorer={} results={} resultSize={} "
+                "shortQueryBudgeted={} corpusWarming={} bypassWarmingGate={} "
+                "lexicalReady={} awaitingDrain={} postIngestInflight={} postIngestQueued={}",
+                workingConfig.enableGraphRerank ? 1 : 0, kgScorer_ ? 1 : 0,
+                !response.results.empty() ? 1 : 0, response.results.size(),
+                shortQueryBudgeted ? 1 : 0, corpusWarming ? 1 : 0,
+                workingConfig.bypassCorpusWarmingGate ? 1 : 0, freshness.lexicalReady ? 1 : 0,
+                freshness.awaitingDrain ? 1 : 0, freshness.postIngestInFlight,
+                freshness.postIngestQueued);
+        }
+    }
+
     if (workingConfig.enableGraphRerank && kgScorer_ && !response.results.empty()) {
         YAMS_ZONE_SCOPED_N("graph::rerank");
         const auto graphRerankStart = std::chrono::steady_clock::now();
