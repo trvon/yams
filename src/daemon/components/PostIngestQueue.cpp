@@ -1392,10 +1392,15 @@ void PostIngestQueue::dispatchToEntityChannel(
         spdlog::warn("[PostIngestQueue] Entity channel full, dropping job for {}", hash);
         InternalEventBus::instance().incEntityDropped();
     } else {
-        spdlog::info("[PostIngestQueue] Dispatched entity extraction job for {} ({}) ext={}",
-                     filePath, hash.substr(0, 12), extension);
         InternalEventBus::instance().incEntityQueued();
         TuningManager::notifyWakeup();
+
+        // Throttled dispatch logging: per-document is too spammy for 5k+ docs.
+        const auto nth = entityDispatched_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((nth % 1000) == 0 || nth == 1) {
+            spdlog::info("[PIQ-entity] dispatched n={} ext={} file={} hash={}", nth, extension,
+                         filePath, hash.substr(0, 12));
+        }
     }
 }
 
@@ -1502,6 +1507,8 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         size_t totalNodesInserted = 0;
         size_t totalEdgesInserted = 0;
         size_t totalAliasesInserted = 0;
+        // Track entity type distribution for diagnostics.
+        std::unordered_map<std::string, size_t> entityTypeCounts;
         const std::string snapshotId = hash;
 
         // NOTE: Entity embeddings (entity_vectors table) are intentionally NOT generated here.
@@ -1513,8 +1520,8 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         // Use streaming extraction with per-batch KG insertion
         auto result = provider->extractEntitiesStreaming(
             content, filePath,
-            [this, &canonicalKeyToId, &versionKeyToId, &totalNodesInserted, &totalEdgesInserted,
-             &totalAliasesInserted, &hash, &snapshotId,
+            [this, &totalNodesInserted, &totalEdgesInserted, &totalAliasesInserted, &hash,
+             &snapshotId, &entityTypeCounts,
              &filePath](ExternalEntityProviderAdapter::EntityResult batch,
                         const ExternalEntityProviderAdapter::ExtractionProgress& progress) -> bool {
                 if (batch.nodes.empty()) {
@@ -1538,6 +1545,13 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
 
                 for (const auto& node : batch.nodes) {
                     canonicalNodes.push_back(node);
+
+                    if (node.type.has_value() && !node.type->empty()) {
+                        entityTypeCounts[canonicalizeNlEntityType(*node.type,
+                                                                  node.label.value_or(""))] += 1;
+                    } else {
+                        entityTypeCounts["unknown"] += 1;
+                    }
 
                     if (hasSnapshot) {
                         metadata::KGNode versionNode = node;
@@ -1702,10 +1716,17 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         double ms = std::chrono::duration<double, std::milli>(duration).count();
 
         if (result) {
-            spdlog::info("[PostIngestQueue] Entity extraction completed for {} in {:.2f}ms "
-                         "(batches={}, nodes={}, edges={}, aliases={})",
+            // Build entity type summary for diagnostics.
+            std::string typeSummary;
+            for (const auto& [type, count] : entityTypeCounts) {
+                if (!typeSummary.empty())
+                    typeSummary += ", ";
+                typeSummary += type + "=" + std::to_string(count);
+            }
+            spdlog::info("[PIQ-entity] completed {} in {:.2f}ms "
+                         "(batches={}, nodes={}, edges={}, aliases={}, types=[{}])",
                          hash.substr(0, 12), ms, result.value().batchNumber, totalNodesInserted,
-                         totalEdgesInserted, totalAliasesInserted);
+                         totalEdgesInserted, totalAliasesInserted, typeSummary);
         } else {
             // Partial success - some batches may have been ingested
             if (totalNodesInserted > 0) {

@@ -358,6 +358,17 @@ struct TunedParams {
             // (e.g., multi-turn chat sessions) benefit from accumulating semantic signal
             // across chunks rather than taking only the single best chunk.
             params.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
+            // Graph signal weights: entity-heavy for scientific corpora where
+            // GLiNER entity extraction provides high-quality biomedical NER data.
+            // Graph scoring budget is bumped to 30ms (from default 10) to give
+            // the graph scorer enough time to resolve query concepts against KG
+            // entities — critical for biomedical corpora with ~15 entities/doc.
+            params.graphScoringBudgetMs = 30;
+            // Tighter min-signal threshold matches the elevated edge-confidence
+            // floor (0.08) from PostIngestQueue's biomedical-edge filtering.
+            // Pre-Phase-1 edges hovered around 0.05-0.10; post-Phase-1
+            // biomedical edges land at 0.20-0.45.
+            params.graphRerankMinSignal = 0.08F;
             params.graphEntitySignalWeight = 0.50F;
             params.graphStructuralSignalWeight = 0.15F;
             params.graphCoverageSignalWeight = 0.15F;

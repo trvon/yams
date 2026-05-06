@@ -2164,6 +2164,30 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 if (concepts.size() > workingConfig.conceptMaxCount) {
                     concepts.resize(workingConfig.conceptMaxCount);
                 }
+
+                // Diagnostic: log extracted query concepts every 50 queries.
+                {
+                    static std::atomic<uint64_t> qceQueryCount{0};
+                    const auto n = qceQueryCount.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if ((n % 50) == 0 || n == 1) {
+                        std::vector<std::string> conceptDescs;
+                        conceptDescs.reserve(std::min(concepts.size(), size_t{5}));
+                        for (size_t ci = 0; ci < concepts.size() && ci < 5; ++ci) {
+                            conceptDescs.push_back(concepts[ci].type + ":" + concepts[ci].text);
+                        }
+                        std::string detail;
+                        for (const auto& d : conceptDescs) {
+                            if (!detail.empty())
+                                detail += ", ";
+                            detail += d;
+                        }
+                        spdlog::info(
+                            "[concepts] n={} extracted={} filtered={} top=[{}] used_gliner={} "
+                            "elapsed_us={}",
+                            n, extracted.size(), concepts.size(), detail,
+                            conceptResult.value().usedGliner ? 1 : 0, componentTiming["concepts"]);
+                    }
+                }
             }
         } else if (waitIfConfigured && conceptStatus == std::future_status::timeout) {
             timedOut.push_back("concepts");
