@@ -436,6 +436,37 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                                           .count();
                     spdlog::info("[simeon-lexical] concept mining: {} concepts in {} ms",
                                  conceptIdx->size(), cmMs);
+
+                    // Export per-document entities from concept posting lists.
+                    if (conceptIdx && cfg_.entity_callback && !stop.stop_requested()) {
+                        const auto eet0 = std::chrono::steady_clock::now();
+                        size_t totalEntities = 0;
+                        for (size_t di = 0; di < conceptTexts.size(); ++di) {
+                            if (stop.stop_requested())
+                                break;
+                            if (conceptTexts[di].empty())
+                                continue;
+                            const auto docId = ids[di];
+                            conceptIdx->collect_doc_concepts(
+                                conceptTexts[di],
+                                std::function<void(std::uint64_t, float)>(
+                                    [&](std::uint64_t conceptHash, float pmi) {
+                                        auto entry = conceptIdx->find(conceptHash);
+                                        if (!entry)
+                                            return;
+                                        std::string entityText =
+                                            "simeon_concept_" + std::to_string(conceptHash);
+                                        cfg_.entity_callback(docId, std::move(entityText),
+                                                             std::clamp(pmi / 10.0f, 0.2f, 0.8f));
+                                        ++totalEntities;
+                                    }));
+                        }
+                        const auto eeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - eet0)
+                                              .count();
+                        spdlog::info("[simeon-lexical] entity export: {} entities in {} ms",
+                                     totalEntities, eeMs);
+                    }
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("[simeon-lexical] concept mining failed: {}", e.what());

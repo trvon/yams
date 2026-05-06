@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -123,6 +124,15 @@ public:
         // time. Training-free; enabled by default for prose corpora.
         bool concept_mining_enabled = false;
         simeon::ConceptConfig concept_config{};
+
+        // When concept_mining_enabled is true and this callback is set,
+        // the build thread calls fn(docId, entityText, confidence) for
+        // every bigram concept matched in every document. Intended for
+        // populating kg_doc_entities so the graph reranker can match
+        // query concepts against document entities.
+        using EntityCallback =
+            std::function<void(std::int64_t docId, std::string entityText, float confidence)>;
+        EntityCallback entity_callback;
 
         // RM3 pseudo-relevance feedback (Lavrenko & Croft 2001).
         // SAB-smooth + RM3 improves scifact by +0.018 nDCG@10 in simeon
