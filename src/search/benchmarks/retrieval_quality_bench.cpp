@@ -5060,6 +5060,7 @@ struct BenchFixture {
         addEnvDefault("YAMS_POST_EMBED_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_EXTRACTION_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
+        addEnvDefault("YAMS_POST_ENTITY_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_TITLE_CONCURRENT", "1");
 
         // Benchmark queries should not be gated by freshness/corpus-warming checks.
