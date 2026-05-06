@@ -510,10 +510,6 @@ void PostIngestQueue::refreshStageAvailability() {
         std::lock_guard<std::mutex> lock(entityMutex_);
         entityCapable = !entityProviders_.empty();
     }
-    // The title/GLiNER extractor can also serve as a text-based entity
-    // extractor when no binary entity providers match the extension. This
-    // keeps the entity stage active for plain-text corpora (e.g., SciFact).
-    entityCapable = entityCapable || hasTitleExtractor();
     const bool entityActive = entityCapable && !stagePaused_[3].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, entityActive);
 
@@ -1009,8 +1005,7 @@ PostIngestQueue::prepareMetadataEntry(
     }
 
     prepared.shouldDispatchEntity =
-        extensionSupportsEntityProviders(entityProviders, prepared.extension) ||
-        hasTitleExtractor();
+        extensionSupportsEntityProviders(entityProviders, prepared.extension);
 
     // Extract document text
     const bool wantContentBytes = prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity;
@@ -1510,8 +1505,7 @@ void PostIngestQueue::processEntityExtractionBatch(
 void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t docId,
                                                    const std::string& filePath,
                                                    const std::string& extension,
-                                                   std::vector<std::byte>* contentBytes,
-                                                   DeferredKGBatch* sharedKBatch) {
+                                                   std::vector<std::byte>* contentBytes) {
     spdlog::info("[PostIngestQueue] Entity extraction starting for {} ({}) ext={}", filePath,
                  hash.substr(0, 12), extension);
 
@@ -1531,156 +1525,12 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         }
 
         if (!provider) {
-            // Fast token-based entity extraction. If called from the batch
-            // processor (sharedKBatch non-null), aggregate entities into
-            // the shared batch; otherwise create a per-doc WC batch.
-            std::vector<std::byte> content;
-            if (contentBytes) {
-                content = std::move(*contentBytes);
-            } else if (store_) {
-                auto contentResult = store_->retrieveBytes(hash);
-                if (contentResult) {
-                    content = std::move(contentResult.value());
-                } else {
-                    spdlog::warn("[PostIngestQueue] Failed to load content for text entity "
-                                 "extraction: {}",
-                                 hash.substr(0, 12));
-                    return;
-                }
-            } else {
-                spdlog::warn("[PostIngestQueue] No content store for text entity extraction");
-                return;
-            }
-
-            std::string textContent(reinterpret_cast<const char*>(content.data()),
-                                    std::min(content.size(), kMaxGlinerChars));
-            constexpr size_t kMaxFastEntities = 16;
-            std::unordered_map<std::string, float> emptyIdf;
-            auto fastConcepts =
-                search::generateFallbackQueryConcepts(textContent, emptyIdf, kMaxFastEntities);
-
-            if (!fastConcepts.empty()) {
-                spdlog::info("[PIQ-entity] fast extraction for {} ({} bytes, {} concepts)",
-                             hash.substr(0, 12), content.size(), fastConcepts.size());
-
-                const auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
-                size_t hvCount = 0;
-                for (const auto& qc : fastConcepts) {
-                    if (isHighValueGraphType(qc.type))
-                        ++hvCount;
-                }
-                gs_totalEntities_ += fastConcepts.size();
-                gs_highValueEntities_ += hvCount;
-                if ((nth % 100) == 0 || nth == 1) {
-                    spdlog::info(
-                        "[PIQ-graph] doc={}/{} entities={} high_value={} edges=0 primary_topic=0 "
-                        "(cumulative: docs={} entities={} hv={} edges={} primary={})",
-                        hash.substr(0, 12), nth, fastConcepts.size(), hvCount, gs_processed_.load(),
-                        gs_totalEntities_.load(), gs_highValueEntities_.load(),
-                        gs_totalEdges_.load(), gs_totalPrimaryTopicEdges_.load());
-                }
-
-                // Use shared batch if batch processor is batching, else per-doc
-                auto* targetBatch = sharedKBatch;
-                std::unique_ptr<DeferredKGBatch> tempBatch;
-                if (!targetBatch) {
-                    tempBatch = std::make_unique<DeferredKGBatch>();
-                    targetBatch = tempBatch.get();
-                }
-                targetBatch->sourceFile = filePath;
-
-                std::string docNodeKey;
-                if (!hash.empty()) {
-                    docNodeKey = "doc:" + hash;
-                    metadata::KGNode docNode;
-                    docNode.nodeKey = docNodeKey;
-                    docNode.label = common::sanitizeUtf8(filePath);
-                    docNode.type = "document";
-                    nlohmann::json docProps;
-                    docProps["hash"] = hash;
-                    docProps["path"] = common::sanitizeUtf8(filePath);
-                    docNode.properties = docProps.dump();
-                    targetBatch->nodes.push_back(std::move(docNode));
-                }
-
-                std::string fileNodeKey;
-                if (!filePath.empty()) {
-                    fileNodeKey = makePathFileNodeKey(filePath);
-                    metadata::KGNode fileNode;
-                    fileNode.nodeKey = fileNodeKey;
-                    fileNode.label = common::sanitizeUtf8(filePath);
-                    fileNode.type = "file";
-                    nlohmann::json fileProps;
-                    fileProps["path"] = common::sanitizeUtf8(filePath);
-                    fileNode.properties = fileProps.dump();
-                    targetBatch->nodes.push_back(std::move(fileNode));
-                }
-
-                std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
-
-                for (const auto& qc : fastConcepts) {
-                    std::string normText = normalizeEntityTextForKey(qc.text);
-                    if (normText.size() < 2)
-                        continue;
-                    std::string normType = canonicalizeNlEntityType(qc.type, qc.text);
-                    std::string nodeKey = "fast_entity:" + normType + ":" + normText;
-
-                    metadata::KGNode entityNode;
-                    entityNode.nodeKey = nodeKey;
-                    entityNode.label = qc.text;
-                    entityNode.type = normType;
-                    nlohmann::json entProps;
-                    entProps["entity_text"] = qc.text;
-                    entProps["entity_type"] = normType;
-                    entProps["confidence"] = qc.confidence;
-                    entProps["source"] = "fast_token";
-                    entityNode.properties = entProps.dump();
-                    targetBatch->nodes.push_back(std::move(entityNode));
-
-                    for (const auto& aliasVariant :
-                         buildNlAliasVariants(qc.text, normType, qc.confidence)) {
-                        metadata::KGAlias alias;
-                        alias.alias = aliasVariant.text;
-                        alias.source =
-                            std::string("fast_token.") + aliasVariant.sourceTag + "|" + nodeKey;
-                        alias.confidence = aliasVariant.confidence;
-                        targetBatch->aliases.push_back(std::move(alias));
-                    }
-
-                    if (!targetNodeKey.empty()) {
-                        DeferredEdge edge;
-                        edge.srcNodeKey = nodeKey;
-                        edge.dstNodeKey = targetNodeKey;
-                        edge.relation = "mentioned_in";
-                        edge.weight = qc.confidence;
-                        nlohmann::json edgeProps;
-                        edgeProps["source"] = "fast_token";
-                        edgeProps["confidence"] = qc.confidence;
-                        edgeProps["entity_type"] = normType;
-                        edge.properties = edgeProps.dump();
-                        targetBatch->deferredEdges.push_back(std::move(edge));
-                    }
-
-                    DeferredDocEntity docEnt;
-                    docEnt.documentId = docId;
-                    docEnt.entityText = qc.text;
-                    docEnt.nodeKey = nodeKey;
-                    docEnt.startOffset = static_cast<int64_t>(qc.startOffset);
-                    docEnt.endOffset = static_cast<int64_t>(qc.endOffset);
-                    docEnt.confidence = qc.confidence;
-                    docEnt.extractor = "fast_token";
-                    targetBatch->deferredDocEntities.push_back(std::move(docEnt));
-                }
-
-                if (!sharedKBatch && writeCoordinator_) {
-                    auto source = "PostIngestQueue::fastEntity/" + hash.substr(0, 12);
-                    auto wb =
-                        makeWriteBatchFromDeferredKGBatch(std::move(tempBatch), std::move(source));
-                    writeCoordinator_->enqueue(std::move(wb));
-                }
-            }
-
-            InternalEventBus::instance().incEntityConsumed();
+            // Text-based entity extraction would require GLiNER (260ms/doc,
+            // generates empty results for 99% of documents) or fast-token
+            // mining (equally empty). Neither approach produces useful doc
+            // entities for general-purpose retrieval. Dropping the job
+            // avoids saturating the entity poller and WriteCoordinator.
+            InternalEventBus::instance().incEntityDropped();
             return;
         }
 

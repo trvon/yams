@@ -13,6 +13,7 @@
 #include <yams/search/lexical_scoring.h>
 #include <yams/search/meta_path_router.h>
 #include <yams/search/query_expansion.h>
+#include <yams/search/concept_resolver.h>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
@@ -1118,18 +1119,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             executor_);
     }
 
-    // One-shot: log which concept backend is active.
-    {
-        static std::atomic<bool> s_conceptLogged{false};
-        if (!s_conceptLogged.exchange(true, std::memory_order_relaxed)) {
-            spdlog::info("[concept-backend] backend={} int={} gliner_available={}",
-                         SearchEngineConfig::conceptExtractionBackendToString(
-                             workingConfig.conceptExtractionBackend),
-                         static_cast<int>(workingConfig.conceptExtractionBackend),
-                         conceptExtractor_ ? 1 : 0);
-        }
-    }
-
     // Helper to await embedding result when needed (called before vector search)
     auto awaitEmbedding = [&]() {
         launchEmbeddingIfNeeded();
@@ -1246,104 +1235,55 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         };
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
-        if (conceptsMaterialized || !conceptFuture.valid()) {
+        if (conceptsMaterialized) {
             return;
         }
 
-        std::future_status conceptStatus = std::future_status::deferred;
-        if (waitIfConfigured) {
-            if (workingConfig.componentTimeout.count() > 0) {
-                conceptStatus = conceptFuture.wait_for(workingConfig.componentTimeout);
+        if (conceptFuture.valid()) {
+            std::future_status conceptStatus = std::future_status::deferred;
+            if (waitIfConfigured) {
+                if (workingConfig.componentTimeout.count() > 0) {
+                    conceptStatus = conceptFuture.wait_for(workingConfig.componentTimeout);
+                } else {
+                    conceptFuture.wait();
+                    conceptStatus = std::future_status::ready;
+                }
             } else {
-                conceptFuture.wait();
-                conceptStatus = std::future_status::ready;
+                conceptStatus = conceptFuture.wait_for(std::chrono::seconds(0));
+            }
+
+            if (conceptStatus == std::future_status::ready) {
+                auto conceptEnd = std::chrono::steady_clock::now();
+                componentTiming["concepts"] =
+                    std::chrono::duration_cast<std::chrono::microseconds>(conceptEnd - conceptStart)
+                        .count();
+                auto conceptResult = conceptFuture.get();
+                conceptsMaterialized = true;
+                if (conceptResult) {
+                    const auto& extracted = conceptResult.value().concepts;
+                    concepts.reserve(extracted.size());
+                    for (const auto& conceptItem : extracted) {
+                        if (conceptItem.confidence >= workingConfig.conceptMinConfidence) {
+                            concepts.push_back(conceptItem);
+                        }
+                    }
+                    if (concepts.size() > workingConfig.conceptMaxCount) {
+                        concepts.resize(workingConfig.conceptMaxCount);
+                    }
+                }
+            } else if (waitIfConfigured && conceptStatus == std::future_status::timeout) {
+                timedOut.push_back("concepts");
+                conceptsMaterialized = true;
+                traceCollector.markStageTimeout("concepts");
             }
         } else {
-            conceptStatus = conceptFuture.wait_for(std::chrono::seconds(0));
-        }
-
-        if (conceptStatus == std::future_status::ready) {
-            auto conceptEnd = std::chrono::steady_clock::now();
-            componentTiming["concepts"] =
-                std::chrono::duration_cast<std::chrono::microseconds>(conceptEnd - conceptStart)
-                    .count();
-            auto conceptResult = conceptFuture.get();
+            // Concept backend is Fallback — no GLiNER future. Mark as
+            // materialized so the fallback enrichment below runs.
             conceptsMaterialized = true;
-            if (conceptResult) {
-                const auto& extracted = conceptResult.value().concepts;
-                concepts.reserve(extracted.size());
-                for (const auto& conceptItem : extracted) {
-                    if (conceptItem.confidence >= workingConfig.conceptMinConfidence) {
-                        concepts.push_back(conceptItem);
-                    }
-                }
-                if (concepts.size() > workingConfig.conceptMaxCount) {
-                    concepts.resize(workingConfig.conceptMaxCount);
-                }
-
-                // Diagnostic: log extracted query concepts every 50 queries.
-                {
-                    static std::atomic<uint64_t> qceQueryCount{0};
-                    const auto n = qceQueryCount.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if ((n % 50) == 0 || n == 1) {
-                        std::vector<std::string> conceptDescs;
-                        conceptDescs.reserve(std::min(concepts.size(), size_t{5}));
-                        for (size_t ci = 0; ci < concepts.size() && ci < 5; ++ci) {
-                            conceptDescs.push_back(concepts[ci].type + ":" + concepts[ci].text);
-                        }
-                        std::string detail;
-                        for (const auto& d : conceptDescs) {
-                            if (!detail.empty())
-                                detail += ", ";
-                            detail += d;
-                        }
-                        spdlog::info(
-                            "[concepts] n={} extracted={} filtered={} top=[{}] used_gliner={} "
-                            "elapsed_us={}",
-                            n, extracted.size(), concepts.size(), detail,
-                            conceptResult.value().usedGliner ? 1 : 0, componentTiming["concepts"]);
-                    }
-                }
-            }
-        } else if (waitIfConfigured && conceptStatus == std::future_status::timeout) {
-            timedOut.push_back("concepts");
-            conceptsMaterialized = true;
-            traceCollector.markStageTimeout("concepts");
         }
 
         if (conceptsMaterialized && concepts.size() < workingConfig.conceptMaxCount) {
-            auto idfByToken = detail::lookupQueryTermIdf(metadataRepo_, query);
-            auto fallbackConcepts =
-                generateFallbackQueryConcepts(query, idfByToken, workingConfig.conceptMaxCount);
-            if (!fallbackConcepts.empty()) {
-                std::unordered_set<std::string> seenConceptKeys;
-                seenConceptKeys.reserve(concepts.size() + fallbackConcepts.size());
-                for (const auto& existingConcept : concepts) {
-                    std::string key = normalizeEntityTextForKey(existingConcept.text);
-                    key.push_back('|');
-                    key.append(existingConcept.type);
-                    seenConceptKeys.insert(std::move(key));
-                }
-
-                const size_t beforeFallback = concepts.size();
-                for (auto& fallbackConcept : fallbackConcepts) {
-                    if (concepts.size() >= workingConfig.conceptMaxCount) {
-                        break;
-                    }
-                    std::string key = normalizeEntityTextForKey(fallbackConcept.text);
-                    key.push_back('|');
-                    key.append(fallbackConcept.type);
-                    if (!seenConceptKeys.insert(std::move(key)).second) {
-                        continue;
-                    }
-                    concepts.push_back(std::move(fallbackConcept));
-                }
-
-                if (concepts.size() > beforeFallback) {
-                    spdlog::debug("concepts: added {} fallback query concepts for '{}'",
-                                  concepts.size() - beforeFallback, query.substr(0, 60));
-                }
-            }
+            enrichWithFallbackConcepts(query, concepts, workingConfig.conceptMaxCount);
         }
 
         if (conceptsMaterialized) {
