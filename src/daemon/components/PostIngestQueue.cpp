@@ -33,6 +33,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/search/query_text_utils.h>
+#include <yams/search/query_expansion.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -1527,18 +1528,11 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
             // No binary provider supports this extension. Fall back to the GLiNER
             // title/entity extractor for text-based entity extraction. This covers
             // plain-text files (.txt, .md, .rst) where the binary entity providers
-            // (Ghidra, Glint RPC) don't apply but NL entity extraction via GLiNER
-            // still produces valuable biomedical entities.
-            auto titleExtractor = getTitleExtractor();
-            if (!titleExtractor) {
-                spdlog::debug("[PostIngestQueue] No title extractor for text entity fallback {}",
-                              hash.substr(0, 12));
-                return;
-            }
+            // (Ghidra, Glint RPC) don't apply. Use fast token-based concept
+            // generation (sub-phrase mining + IDF-weighted token salience, ~1ms/doc)
+            // instead of GLiNER inference (~260ms/doc).
 
-            // Load text content and delegate to the title extraction stage, which
-            // handles GLiNER inference + KG storage. Pass empty strings for
-            // fallbackTitle/language/mimeType since this is pure entity extraction.
+            // Load text content
             std::vector<std::byte> content;
             if (contentBytes) {
                 content = std::move(*contentBytes);
@@ -1559,10 +1553,146 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
 
             std::string textContent(reinterpret_cast<const char*>(content.data()),
                                     std::min(content.size(), kMaxGlinerChars));
-            spdlog::info("[PIQ-entity] text fallback for {} ({} bytes, ext={})", hash.substr(0, 12),
-                         content.size(), extension);
-            processTitleExtractionStage(hash, docId, textContent, /*fallbackTitle=*/"", filePath,
-                                        /*language=*/"", /*mimeType=*/"text/plain");
+
+            // Generate entity candidates via fast token-based concept mining.
+            // No GLiNER inference — same function used for query-time concept fallback.
+            // Empty IDF map since we don't have corpus-level IDF at extraction time.
+            constexpr size_t kMaxFastEntities = 16;
+            std::unordered_map<std::string, float> emptyIdf;
+            auto fastConcepts =
+                search::generateFallbackQueryConcepts(textContent, emptyIdf, kMaxFastEntities);
+
+            if (fastConcepts.empty()) {
+                spdlog::debug("[PostIngestQueue] No fast entities generated for {}",
+                              hash.substr(0, 12));
+                InternalEventBus::instance().incEntityConsumed();
+                return;
+            }
+
+            spdlog::info("[PIQ-entity] fast extraction for {} ({} bytes, {} concepts)",
+                         hash.substr(0, 12), content.size(), fastConcepts.size());
+
+            // Build entity statistics for diagnostics
+            {
+                const auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
+                size_t hvCount = 0;
+                for (const auto& qc : fastConcepts) {
+                    if (isHighValueGraphType(qc.type))
+                        ++hvCount;
+                }
+                gs_totalEntities_ += fastConcepts.size();
+                gs_highValueEntities_ += hvCount;
+                if ((nth % 100) == 0 || nth == 1) {
+                    spdlog::info(
+                        "[PIQ-graph] doc={}/{} entities={} high_value={} edges=0 primary_topic=0 "
+                        "(cumulative: docs={} entities={} hv={} edges={} primary={})",
+                        hash.substr(0, 12), nth, fastConcepts.size(), hvCount, gs_processed_.load(),
+                        gs_totalEntities_.load(), gs_highValueEntities_.load(),
+                        gs_totalEdges_.load(), gs_totalPrimaryTopicEdges_.load());
+                }
+            }
+
+            // Store entities in KG with full node/alias/edge/doc-entity scaffolding
+            // so the graph scorer can resolve query concepts to document entities.
+            if (writeCoordinator_) {
+                auto batch = std::make_unique<DeferredKGBatch>();
+                batch->sourceFile = filePath;
+
+                // Build document context node (required for entity→document edges)
+                std::string docNodeKey;
+                if (!hash.empty()) {
+                    docNodeKey = "doc:" + hash;
+                    metadata::KGNode docNode;
+                    docNode.nodeKey = docNodeKey;
+                    docNode.label = common::sanitizeUtf8(filePath);
+                    docNode.type = "document";
+                    nlohmann::json docProps;
+                    docProps["hash"] = hash;
+                    docProps["path"] = common::sanitizeUtf8(filePath);
+                    docNode.properties = docProps.dump();
+                    batch->nodes.push_back(std::move(docNode));
+                }
+
+                // Build file context node
+                std::string fileNodeKey;
+                if (!filePath.empty()) {
+                    fileNodeKey = makePathFileNodeKey(filePath);
+                    metadata::KGNode fileNode;
+                    fileNode.nodeKey = fileNodeKey;
+                    fileNode.label = common::sanitizeUtf8(filePath);
+                    fileNode.type = "file";
+                    nlohmann::json fileProps;
+                    fileProps["path"] = common::sanitizeUtf8(filePath);
+                    fileNode.properties = fileProps.dump();
+                    batch->nodes.push_back(std::move(fileNode));
+                }
+
+                std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
+
+                for (const auto& qc : fastConcepts) {
+                    std::string normText = normalizeEntityTextForKey(qc.text);
+                    if (normText.size() < 2)
+                        continue;
+                    std::string normType = canonicalizeNlEntityType(qc.type, qc.text);
+                    std::string nodeKey = "fast_entity:" + normType + ":" + normText;
+
+                    // Upsert entity node
+                    metadata::KGNode entityNode;
+                    entityNode.nodeKey = nodeKey;
+                    entityNode.label = qc.text;
+                    entityNode.type = normType;
+                    nlohmann::json entProps;
+                    entProps["entity_text"] = qc.text;
+                    entProps["entity_type"] = normType;
+                    entProps["confidence"] = qc.confidence;
+                    entProps["source"] = "fast_token";
+                    entityNode.properties = entProps.dump();
+                    batch->nodes.push_back(std::move(entityNode));
+
+                    // Aliases for query-time resolution
+                    for (const auto& aliasVariant :
+                         buildNlAliasVariants(qc.text, normType, qc.confidence)) {
+                        metadata::KGAlias alias;
+                        alias.alias = aliasVariant.text;
+                        alias.source =
+                            std::string("fast_token.") + aliasVariant.sourceTag + "|" + nodeKey;
+                        alias.confidence = aliasVariant.confidence;
+                        batch->aliases.push_back(std::move(alias));
+                    }
+
+                    // Entity→document edge
+                    if (!targetNodeKey.empty()) {
+                        DeferredEdge edge;
+                        edge.srcNodeKey = nodeKey;
+                        edge.dstNodeKey = targetNodeKey;
+                        edge.relation = "mentioned_in";
+                        edge.weight = qc.confidence;
+
+                        nlohmann::json edgeProps;
+                        edgeProps["source"] = "fast_token";
+                        edgeProps["confidence"] = qc.confidence;
+                        edgeProps["entity_type"] = normType;
+                        edge.properties = edgeProps.dump();
+                        batch->deferredEdges.push_back(std::move(edge));
+                    }
+
+                    // Doc entity reference (for getDocEntitiesForDocument queries)
+                    DeferredDocEntity docEnt;
+                    docEnt.documentId = docId;
+                    docEnt.entityText = qc.text;
+                    docEnt.nodeKey = nodeKey;
+                    docEnt.startOffset = static_cast<int64_t>(qc.startOffset);
+                    docEnt.endOffset = static_cast<int64_t>(qc.endOffset);
+                    docEnt.confidence = qc.confidence;
+                    docEnt.extractor = "fast_token";
+                    batch->deferredDocEntities.push_back(std::move(docEnt));
+                }
+                auto source = "PostIngestQueue::fastEntity/" + hash.substr(0, 12);
+                auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch), std::move(source));
+                writeCoordinator_->enqueue(std::move(wb));
+            }
+
+            InternalEventBus::instance().incEntityConsumed();
             return;
         }
 
