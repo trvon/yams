@@ -614,6 +614,13 @@ private:
 
     // Backpressure metrics
     std::atomic<std::uint64_t> backpressureRejects_{0};
+
+    // Graph-construction diagnostics (for tracing entity extraction → edge creation)
+    std::atomic<std::uint64_t> gs_processed_{0};
+    std::atomic<std::uint64_t> gs_totalEntities_{0};
+    std::atomic<std::uint64_t> gs_highValueEntities_{0};
+    std::atomic<std::uint64_t> gs_totalEdges_{0};
+    std::atomic<std::uint64_t> gs_totalPrimaryTopicEdges_{0};
 };
 
 } // namespace yams::daemon

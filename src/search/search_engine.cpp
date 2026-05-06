@@ -2893,6 +2893,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             traceCollector.markStageResult("graph_rerank", {}, componentTiming["graph_rerank"],
                                            true);
         }
+
+        // Diagnostic: log graph reranker activity periodically so we can trace
+        // whether the KG entities are producing useful signal at query time.
+        {
+            static std::atomic<uint64_t> grQueryCount{0};
+            const auto n = grQueryCount.fetch_add(1, std::memory_order_relaxed) + 1;
+            if ((n % 50) == 0 || n == 1) {
+                spdlog::info("[graph_rerank] n={} window={} matched={} applied={} concepts={} "
+                             "skipped={} failed={} budget_ms={} elapsed_us={}",
+                             n, rerankWindow, graphMatchedCandidates, graphRerankApplied ? 1 : 0,
+                             graphQueryConceptCount, skipped.size(), failed.size(),
+                             workingConfig.graphScoringBudgetMs, componentTiming["graph_rerank"]);
+            }
+        }
     }
 
     if (stageTraceEnabled) {

@@ -2295,8 +2295,24 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
             // Add bounded co-mention edges among strongest entities to enrich local graph
             // structure without exploding edge count.
-            constexpr std::size_t kMaxCoMentionEntities = 12;
-            constexpr std::size_t kMaxCoMentionEdges = 36;
+            //
+            // Edge-creation policy:
+            // 1. Only create edges where at least one entity is a high-value biomedical type
+            //    (protein, gene, disease, drug, etc.). Skipping generic-NL-only pairs
+            //    (person/organization/location) dramatically reduces noise — the graph
+            //    reranker's composite score is dominated by entity entity-signal-weight,
+            //    and injecting low-relevance edges dilutes it.
+            // 2. Tighten edge weight scaling so that high-confidence biomedical co-occurrences
+            //    stand out against the noise floor. The confidence floor for a biomedical pair
+            //    is raised to 0.20 (from 0.10), and the per-edge weight floor for
+            //    non-biomedical pairs is 0.08. The base multiplier goes from 0.50→0.65 and
+            //    title-overlap boost from 0.75→0.85, so weights land in [0.08, 0.45] range
+            //    instead of the previous [0.05, 0.35].
+            // 3. Tighter edge budget: top-8 entities (was 12), max 16 edges (was 36). With
+            //    ~15 entities per SciFact doc this still covers the most important pairs while
+            //    cutting the total edge count by over 50%.
+            constexpr std::size_t kMaxCoMentionEntities = 8;
+            constexpr std::size_t kMaxCoMentionEdges = 16;
             const std::size_t entityLimit = std::min(entityRefs.size(), kMaxCoMentionEntities);
             std::size_t coMentionEdgeCount = 0;
             for (std::size_t i = 0; i < entityLimit; ++i) {
@@ -2305,17 +2321,24 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                         break;
                     }
 
+                    // Skip edges where neither entity is a high-value biomedical type.
+                    // Generic NL types (person, organization, location) offer no useful
+                    // graph signal for scientific retrieval and only add noise.
+                    if (!entityRefs[i].highValue && !entityRefs[j].highValue) {
+                        continue;
+                    }
+
                     DeferredEdge coEdge;
                     coEdge.srcNodeKey = entityRefs[i].nodeKey;
                     coEdge.dstNodeKey = entityRefs[j].nodeKey;
                     coEdge.relation = coOccurrenceRelation(entityRefs[i].type, entityRefs[j].type);
-                    const float confidenceFloor =
-                        (entityRefs[i].highValue && entityRefs[j].highValue) ? 0.10f : 0.05f;
+                    const bool bothHighValue = entityRefs[i].highValue && entityRefs[j].highValue;
+                    const float confidenceFloor = bothHighValue ? 0.20f : 0.08f;
                     coEdge.weight = std::max(
                         confidenceFloor,
                         std::min(entityRefs[i].confidence, entityRefs[j].confidence) *
-                            ((entityRefs[i].titleOverlap || entityRefs[j].titleOverlap) ? 0.75f
-                                                                                        : 0.5f));
+                            ((entityRefs[i].titleOverlap || entityRefs[j].titleOverlap) ? 0.85f
+                                                                                        : 0.65f));
 
                     nlohmann::json edgeProps;
                     edgeProps["source"] = "gliner";
@@ -2348,6 +2371,30 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 }
                 if (coMentionEdgeCount >= kMaxCoMentionEdges) {
                     break;
+                }
+            }
+
+            // Diagnostic: log graph-construction statistics every 100 documents
+            // so we can trace entity extraction → edge creation → KG population.
+            {
+                const auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
+                gs_totalEntities_ += nlEntities.size();
+                gs_highValueEntities_ += static_cast<size_t>(
+                    std::count_if(entityRefs.begin(), entityRefs.end(),
+                                  [](const EntityRef& r) { return r.highValue; }));
+                gs_totalEdges_ += coMentionEdgeCount;
+                gs_totalPrimaryTopicEdges_ += primaryTopicCount;
+                if ((nth % 100) == 0 || nth == 1) {
+                    spdlog::info(
+                        "[PIQ-graph] doc={}/{} entities={} high_value={} edges={} primary_topic={} "
+                        "(cumulative: docs={} entities={} hv={} edges={} primary={})",
+                        hash.substr(0, 12), nth, nlEntities.size(),
+                        static_cast<size_t>(
+                            std::count_if(entityRefs.begin(), entityRefs.end(),
+                                          [](const EntityRef& r) { return r.highValue; })),
+                        coMentionEdgeCount, primaryTopicCount, gs_processed_.load(),
+                        gs_totalEntities_.load(), gs_highValueEntities_.load(),
+                        gs_totalEdges_.load(), gs_totalPrimaryTopicEdges_.load());
                 }
             }
 
