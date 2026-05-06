@@ -1106,7 +1106,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<GraphExpansionTerm> docSeedGraphTerms;
     bool graphExpansionMaterialized = false;
     size_t graphQueryNeighborSeedDocCount = 0;
-    if (conceptExtractor_ && !params.semanticOnly) {
+    if (conceptExtractor_ && !params.semanticOnly &&
+        workingConfig.conceptExtractionBackend ==
+            SearchEngineConfig::ConceptExtractionBackend::GlinerWithFallback) {
         conceptStart = std::chrono::steady_clock::now();
         conceptFuture = postWork(
             [this, &query]() {
@@ -1114,6 +1116,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 return conceptExtractor_(query, {});
             },
             executor_);
+    }
+
+    // One-shot: log which concept backend is active.
+    {
+        static std::atomic<bool> s_conceptLogged{false};
+        if (!s_conceptLogged.exchange(true, std::memory_order_relaxed)) {
+            spdlog::info("[concept-backend] backend={} int={} gliner_available={}",
+                         SearchEngineConfig::conceptExtractionBackendToString(
+                             workingConfig.conceptExtractionBackend),
+                         static_cast<int>(workingConfig.conceptExtractionBackend),
+                         conceptExtractor_ ? 1 : 0);
+        }
     }
 
     // Helper to await embedding result when needed (called before vector search)

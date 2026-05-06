@@ -121,6 +121,8 @@ TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") 
     CHECK(params.weights.kg.value == Approx(0.00f));
     CHECK(params.weights.tag.value == Approx(0.00f));
     CHECK(params.weights.metadata.value == Approx(0.05f));
+    CHECK(params.conceptExtractionBackend ==
+          SearchEngineConfig::ConceptExtractionBackend::Fallback);
 }
 
 TEST_CASE("TunedParams: MIXED parameters", "[unit][search_tuner][params]") {
