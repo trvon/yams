@@ -5,7 +5,6 @@
 FROM ubuntu:24.04 AS deps
 # FROM debian:trixie-slim AS deps
 ARG DEBIAN_FRONTEND=noninteractive
-ARG ZIG_VERSION=0.15.2
 RUN set -eux; \
   for i in 1 2 3; do \
   apt-get update && \
@@ -17,23 +16,15 @@ RUN set -eux; \
   gcc g++ ninja-build openssl lld llvm clang \
   libc++-dev libc++abi-dev \
   liburing-dev ccache \
-  gfortran libomp-18-dev \
+  gfortran libomp-18-dev wget \
+  libopenblas-dev \
   cmake && \
   rm -rf /var/lib/apt/lists/* && break || \
   { echo "Attempt $i failed, retrying after 5s..."; sleep 5; apt-get clean; rm -rf /var/lib/apt/lists/*; }; \
   done
 
-# Install Rust toolchain for libsql build (pinned version to avoid cross-device link issues)
-ENV RUSTUP_HOME=/usr/local/rustup \
-  CARGO_HOME=/usr/local/cargo \
-  PATH=/usr/local/cargo/bin:$PATH
-RUN set -eux; \
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.83.0 --profile minimal && \
-  rustup set auto-self-update disable && \
-  rustc --version && cargo --version
-
-# Install Zig 0.15.x for zyp PDF plugin.
-# zpdf is not Zig 0.16-compatible yet, so fail fast if this pin is overridden.
+# Install Zig 0.15.2 for zyp PDF plugin (wget -c resumes partial downloads)
+ARG ZIG_VERSION=0.15.2
 RUN set -eux; \
   ARCH=$(uname -m); \
   case "$ARCH" in \
@@ -43,14 +34,25 @@ RUN set -eux; \
   esac; \
   case "${ZIG_VERSION}" in \
   0.15.*) ;; \
-  *) echo "Unsupported Zig version ${ZIG_VERSION}; zpdf requires Zig 0.15.x"; exit 1 ;; \
+  *) echo "Unsupported Zig version ${ZIG_VERSION}"; exit 1 ;; \
   esac; \
-  curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
+  wget -q --show-progress --tries=20 --retry-connrefused -c \
+    "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" \
+    -O /tmp/zig.tar.xz && \
   tar -xJf /tmp/zig.tar.xz -C /opt && \
   mv /opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION} /opt/zig && \
   ln -sf /opt/zig/zig /usr/local/bin/zig && \
   rm /tmp/zig.tar.xz && \
   zig version
+
+# Install Rust toolchain for libsql build (pinned version to avoid cross-device link issues)
+ENV RUSTUP_HOME=/usr/local/rustup \
+  CARGO_HOME=/usr/local/cargo \
+  PATH=/usr/local/cargo/bin:$PATH
+RUN set -eux; \
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.83.0 --profile minimal && \
+  rustup set auto-self-update disable && \
+  rustc --version && cargo --version
 
 RUN python3 -m venv /opt/venv \
   && /opt/venv/bin/pip install --upgrade pip \
@@ -99,6 +101,7 @@ RUN --mount=type=cache,target=/root/.conan2 \
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
   export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false"; \
+  export YAMS_DISABLE_FAISS=1; \
   sed -i 's/\r$//' setup.sh && chmod +x setup.sh && \
   for attempt in 1 2 3; do \
   echo "=== Build attempt $attempt ==="; \
