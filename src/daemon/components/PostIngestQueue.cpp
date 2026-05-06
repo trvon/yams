@@ -509,6 +509,10 @@ void PostIngestQueue::refreshStageAvailability() {
         std::lock_guard<std::mutex> lock(entityMutex_);
         entityCapable = !entityProviders_.empty();
     }
+    // The title/GLiNER extractor can also serve as a text-based entity
+    // extractor when no binary entity providers match the extension. This
+    // keeps the entity stage active for plain-text corpora (e.g., SciFact).
+    entityCapable = entityCapable || hasTitleExtractor();
     const bool entityActive = entityCapable && !stagePaused_[3].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, entityActive);
 
@@ -1004,7 +1008,8 @@ PostIngestQueue::prepareMetadataEntry(
     }
 
     prepared.shouldDispatchEntity =
-        extensionSupportsEntityProviders(entityProviders, prepared.extension);
+        extensionSupportsEntityProviders(entityProviders, prepared.extension) ||
+        hasTitleExtractor();
 
     // Extract document text
     const bool wantContentBytes = prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity;
@@ -1496,7 +1501,7 @@ void PostIngestQueue::processEntityExtractionBatch(
     }
 }
 
-void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t /*docId*/,
+void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t docId,
                                                    const std::string& filePath,
                                                    const std::string& extension,
                                                    std::vector<std::byte>* contentBytes) {
@@ -1519,7 +1524,45 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         }
 
         if (!provider) {
-            spdlog::warn("[PostIngestQueue] No entity provider for extension {}", extension);
+            // No binary provider supports this extension. Fall back to the GLiNER
+            // title/entity extractor for text-based entity extraction. This covers
+            // plain-text files (.txt, .md, .rst) where the binary entity providers
+            // (Ghidra, Glint RPC) don't apply but NL entity extraction via GLiNER
+            // still produces valuable biomedical entities.
+            auto titleExtractor = getTitleExtractor();
+            if (!titleExtractor) {
+                spdlog::debug("[PostIngestQueue] No title extractor for text entity fallback {}",
+                              hash.substr(0, 12));
+                return;
+            }
+
+            // Load text content and delegate to the title extraction stage, which
+            // handles GLiNER inference + KG storage. Pass empty strings for
+            // fallbackTitle/language/mimeType since this is pure entity extraction.
+            std::vector<std::byte> content;
+            if (contentBytes) {
+                content = std::move(*contentBytes);
+            } else if (store_) {
+                auto contentResult = store_->retrieveBytes(hash);
+                if (contentResult) {
+                    content = std::move(contentResult.value());
+                } else {
+                    spdlog::warn("[PostIngestQueue] Failed to load content for text entity "
+                                 "extraction: {}",
+                                 hash.substr(0, 12));
+                    return;
+                }
+            } else {
+                spdlog::warn("[PostIngestQueue] No content store for text entity extraction");
+                return;
+            }
+
+            std::string textContent(reinterpret_cast<const char*>(content.data()),
+                                    std::min(content.size(), kMaxGlinerChars));
+            spdlog::info("[PIQ-entity] text fallback for {} ({} bytes, ext={})", hash.substr(0, 12),
+                         content.size(), extension);
+            processTitleExtractionStage(hash, docId, textContent, /*fallbackTitle=*/"", filePath,
+                                        /*language=*/"", /*mimeType=*/"text/plain");
             return;
         }
 
@@ -1863,10 +1906,36 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
         // NL types for knowledge graph population
         static const std::vector<std::string> kCombinedEntityTypes = {
             // Title-related types
-            "title", "heading", "function", "class", "method", "module", "file", "symbol",
+            "title",
+            "heading",
+            "function",
+            "class",
+            "method",
+            "module",
+            "file",
+            "symbol",
             // NL entity types (from Glint plugin defaults)
-            "person", "organization", "location", "date", "event", "product", "technology",
-            "concept"};
+            "person",
+            "organization",
+            "location",
+            "date",
+            "event",
+            "product",
+            "technology",
+            "concept",
+            // Biomedical entity types for scientific text
+            "protein",
+            "gene",
+            "cell",
+            "disease",
+            "chemical",
+            "drug",
+            "pathway",
+            "biological_process",
+            "biomarker",
+            "anatomy",
+            "organism",
+        };
 
         // Title type set for filtering
         static const std::unordered_set<std::string> kTitleTypes = {
