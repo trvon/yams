@@ -49,11 +49,13 @@ jobs:
             conan_host_profile: ${{ inputs.conan_profile_linux }}
             conan_arch: x86_64
             needs_rosetta: false
+            timeout: 60
           - suffix: linux-arm64
             runs_on: ubuntu-24.04-arm
             conan_host_profile: ${{ inputs.conan_profile_linux }}
             conan_arch: armv8
             needs_rosetta: false
+            timeout: 60
           - suffix: macos-arm64
             runs_on: macos-15
             conan_host_profile: ${{ inputs.conan_profile_macos }}
@@ -193,7 +195,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libomp-18-dev
+          sudo apt-get install -y --no-install-recommends libomp-18-dev ccache
 
       - name: Warm dependencies (${{ inputs.build_type }})
         # Always run on Linux to populate ccache (cache-hit can be true on a tiny
@@ -226,6 +228,7 @@ jobs:
 
       - name: Populate ccache with source compilation
         if: runner.os == 'Linux'
+        continue-on-error: true
         shell: bash
         env:
           CCACHE_DIR: ~/.cache/ccache
