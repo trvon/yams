@@ -1500,6 +1500,20 @@ void PostIngestQueue::processEntityExtractionBatch(
         processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
                                      job.contentBytes.get());
     }
+
+    // Flush write coordinator every 128 entity batches so the async writer
+    // loop (capped at 8 batches/iteration) can keep up with the 5K+ entity
+    // writes. Without periodic flush, entities remain in the WC queue when
+    // benchmark queries start.
+    static std::atomic<size_t> s_batchCount{0};
+    const auto n = s_batchCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n % 128 == 0 && writeCoordinator_) {
+        auto result = writeCoordinator_->flush(std::chrono::milliseconds(500));
+        if (!result) {
+            spdlog::debug("[PostIngestQueue] WC periodic flush failed (n={}): {}", n,
+                          result.error().message);
+        }
+    }
 }
 
 void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t docId,
@@ -1598,7 +1612,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 auto batch = std::make_unique<DeferredKGBatch>();
                 batch->sourceFile = filePath;
 
-                // Build document context node (required for entity→document edges)
+                // Build document context node
                 std::string docNodeKey;
                 if (!hash.empty()) {
                     docNodeKey = "doc:" + hash;
@@ -1613,7 +1627,6 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     batch->nodes.push_back(std::move(docNode));
                 }
 
-                // Build file context node
                 std::string fileNodeKey;
                 if (!filePath.empty()) {
                     fileNodeKey = makePathFileNodeKey(filePath);
@@ -1636,7 +1649,6 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     std::string normType = canonicalizeNlEntityType(qc.type, qc.text);
                     std::string nodeKey = "fast_entity:" + normType + ":" + normText;
 
-                    // Upsert entity node
                     metadata::KGNode entityNode;
                     entityNode.nodeKey = nodeKey;
                     entityNode.label = qc.text;
@@ -1649,7 +1661,6 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     entityNode.properties = entProps.dump();
                     batch->nodes.push_back(std::move(entityNode));
 
-                    // Aliases for query-time resolution
                     for (const auto& aliasVariant :
                          buildNlAliasVariants(qc.text, normType, qc.confidence)) {
                         metadata::KGAlias alias;
@@ -1660,14 +1671,12 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                         batch->aliases.push_back(std::move(alias));
                     }
 
-                    // Entity→document edge
                     if (!targetNodeKey.empty()) {
                         DeferredEdge edge;
                         edge.srcNodeKey = nodeKey;
                         edge.dstNodeKey = targetNodeKey;
                         edge.relation = "mentioned_in";
                         edge.weight = qc.confidence;
-
                         nlohmann::json edgeProps;
                         edgeProps["source"] = "fast_token";
                         edgeProps["confidence"] = qc.confidence;
@@ -1676,7 +1685,6 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                         batch->deferredEdges.push_back(std::move(edge));
                     }
 
-                    // Doc entity reference (for getDocEntitiesForDocument queries)
                     DeferredDocEntity docEnt;
                     docEnt.documentId = docId;
                     docEnt.entityText = qc.text;
