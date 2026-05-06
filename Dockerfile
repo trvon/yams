@@ -45,7 +45,8 @@ RUN set -eux; \
   0.15.*) ;; \
   *) echo "Unsupported Zig version ${ZIG_VERSION}; zpdf requires Zig 0.15.x"; exit 1 ;; \
   esac; \
-  curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
+  curl --retry 5 --retry-max-time 300 --retry-all-errors -fsSL \
+    "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
   tar -xJf /tmp/zig.tar.xz -C /opt && \
   mv /opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION} /opt/zig && \
   ln -sf /opt/zig/zig /usr/local/bin/zig && \
