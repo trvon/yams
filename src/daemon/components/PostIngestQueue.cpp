@@ -1497,41 +1497,13 @@ void PostIngestQueue::processEntityExtractionBatch(
         return;
     }
 
-    // Accumulate fast-text-entity writes across all jobs in this batch
-    // into ONE DeferredKGBatch. The WC writer loop processes at most 8
-    // batches/iteration; 5K+ per-doc batches outlast the benchmark's
-    // post-ingest drain, leaving firstDocEntities=0.
-    DeferredKGBatch sharedBatch;
-    size_t sharedDocCount = 0;
-
+    // Process all entity jobs. Fast-text entities are accumulated into the
+    // shared batch by the stage function and written directly to the KG via
+    // the metadata repository (bypassing the WriteCoordinator, whose writer
+    // loop cap of 8 batches/iteration cannot keep up with 5K+ small writes).
     for (auto& job : jobs) {
         processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
-                                     job.contentBytes.get(), &sharedBatch);
-    }
-
-    // Enqueue the accumulated batch (may be empty if all jobs were binary).
-    if (writeCoordinator_) {
-        auto source = "PostIngestQueue::fastEntity/accum/" + std::to_string(jobs.size()) + "_jobs";
-        auto wb = makeWriteBatchFromDeferredKGBatch(
-            std::make_unique<DeferredKGBatch>(std::move(sharedBatch)), std::move(source));
-        writeCoordinator_->enqueue(std::move(wb));
-    }
-
-    // Flush the WriteCoordinator once when all in-flight work across all
-    // stages reaches zero — this means the final entity batch was enqueued.
-    // Single-shot: only the first thread that sees totalInFlight==0 flushs.
-    static std::atomic<bool> s_finalFlushDone{false};
-    if (!s_finalFlushDone.load(std::memory_order_relaxed) && totalInFlight() == 0) {
-        if (writeCoordinator_) {
-            s_finalFlushDone.store(true, std::memory_order_relaxed);
-            spdlog::info("[PostIngestQueue] Final WC flush starting (all stages idle)...");
-            auto result = writeCoordinator_->flush(std::chrono::seconds(15));
-            if (!result) {
-                spdlog::warn("[PostIngestQueue] Final WC flush failed: {}", result.error().message);
-            } else {
-                spdlog::info("[PostIngestQueue] Final WC flush succeeded");
-            }
-        }
+                                     job.contentBytes.get());
     }
 }
 
