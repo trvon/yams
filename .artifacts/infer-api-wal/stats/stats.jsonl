@@ -1,0 +1,10 @@
+{"int":{"is_main_process":1,"pid":84802,"time":1777679560,"value":1},"normal":{"command":"run","event":"time.run_prologue","hostname":"neutron.local","infer_commit":"27a0725654"},"tags":{}}
+{"int":{"is_main_process":1,"pid":84802,"time":1777679560},"normal":{"command":"run","event":"msg.internal_error","hostname":"neutron.local","infer_commit":"27a0725654","message":"Subprocess 0: died after receiving signal number -10\n"},"tags":{}}
+{"int":{"is_main_process":1,"pid":87708,"time":1777679567,"value":0},"normal":{"command":"report","event":"count.reports_unfiltered","hostname":"neutron.local","infer_commit":"27a0725654"},"tags":{}}
+{"int":{"is_main_process":1,"pid":87708,"time":1777679567,"value":0},"normal":{"command":"report","event":"count.report_gc_stats.minor_words","hostname":"neutron.local","infer_commit":"27a0725654"},"tags":{}}
+{"int":{"is_main_process":1,"pid":87708,"time":1777679567,"value":0},"normal":{"command":"report","event":"count.report_gc_stats.promoted_words","hostname":"neutron.local","infer_commit":"27a0725654"},"tags":{}}
+{"int":{"is_main_process":1,"pid":87708,"time":1777679567,"value":0},"normal":{"command":"report","event":"count.report_gc_stats.major_words","hostname":"neutron.local","infer_commit":"27a0725654"},"tags":{}}
+{"int":{"is_main_process":1,"pid":87708,"time":1777679567,"value":0},"normal":{"command":"report","event":"count.report_gc_stats.minor_collections","hostname":"neutron.local","infer_commit":"27a0725654"},"tags":{}}
+{"int":{"is_main_process":1,"pid":87708,"time":1777679567,"value":0},"normal":{"command":"report","event":"count.report_gc_stats.major_collections","hostname":"neutron.local","infer_commit":"27a0725654"},"tags":{}}
+{"int":{"is_main_process":1,"pid":87708,"time":1777679567,"value":0},"normal":{"command":"report","event":"count.report_gc_stats.compactions","hostname":"neutron.local","infer_commit":"27a0725654"},"tags":{}}
+{"int":{"is_main_process":1,"pid":87708,"time":1777679567,"value":5167468},"normal":{"command":"report","event":"count.report_gc_stats.top_heap_words","hostname":"neutron.local","infer_commit":"27a0725654"},"tags":{}}

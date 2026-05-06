@@ -1,0 +1,616 @@
+{
+  "embedding_phase_timings": {},
+  "post_ingest_batch_metrics": {
+    "embed_docs_emitted": 0,
+    "embed_hash_only_docs_emitted": 0,
+    "embed_jobs_emitted": 0,
+    "embed_prepared_docs_emitted": 0,
+    "extraction_batches": 0,
+    "extraction_failures": 0,
+    "extraction_successes": 0,
+    "extraction_tasks": 0
+  },
+  "post_ingest_phase_timings": {},
+  "queues": {
+    "dropped_batches": 0,
+    "max_embed_jobs": 0,
+    "max_fts5_jobs": 0,
+    "max_post_ingest": 0,
+    "max_store_document_tasks": 0,
+    "sample_count": 583,
+    "samples_head": [
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397776249
+      },
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397776354
+      },
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397776459
+      },
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397776559
+      },
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397776662
+      }
+    ],
+    "samples_tail": [
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397835771
+      },
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397835874
+      },
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397835975
+      },
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397836078
+      },
+      {
+        "counters": {
+          "embed": {
+            "consumed": 0,
+            "dropped": 0,
+            "hash_only_docs_queued": 0,
+            "prepared_chunks_queued": 0,
+            "prepared_docs_queued": 0,
+            "queued": 0
+          },
+          "entity": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "fts5": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "kg": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "post": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "symbol": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          },
+          "title": {
+            "consumed": 0,
+            "dropped": 0,
+            "queued": 0
+          }
+        },
+        "enrichment_depths": {
+          "entity_jobs": 0,
+          "kg_jobs": 0,
+          "symbol_jobs": 0,
+          "title_jobs": 0
+        },
+        "queue_depths": {
+          "embed_jobs": 0,
+          "fts5_jobs": 0,
+          "post_ingest": 0,
+          "store_document_tasks": 484
+        },
+        "timestamp_ms": 1397836179
+      }
+    ]
+  },
+  "stages": {
+    "embedding_generation": {
+      "count": 0,
+      "duration_ms": 0,
+      "failures": 0,
+      "name": ""
+    },
+    "fts5_extraction": {
+      "count": 0,
+      "duration_ms": 0,
+      "failures": 0,
+      "name": ""
+    },
+    "kg_extraction": {
+      "count": 0,
+      "duration_ms": 0,
+      "failures": 0,
+      "name": ""
+    },
+    "metadata_storage": {
+      "count": 500,
+      "duration_ms": 570,
+      "failures": 0,
+      "name": "metadata_storage"
+    }
+  },
+  "test_config": {
+    "corpus_size": 500,
+    "doc_size": 1500,
+    "embedding_backend": "simeon",
+    "embedding_model": "simeon-default",
+    "poll_interval_ms": 100,
+    "simeon_recipe": "fwht_4096_1024",
+    "timestamp": "2026-04-30T03:00:56Z"
+  },
+  "throughput_docs_per_sec": 8.250688932525867,
+  "total_duration_ms": 60601,
+  "work_coordinator": {
+    "thread_count": 0
+  }
+}

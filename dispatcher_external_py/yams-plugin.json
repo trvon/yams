@@ -1,0 +1,11 @@
+{
+  "name": "dispatcher_external_plugin",
+  "version": "1.0.0",
+  "interfaces": ["content_extractor_v1"],
+  "entry": {
+    "fallback_cmd": ["/usr/bin/env", "python3", "-u", "${plugin_dir}/plugin.py"],
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    }
+  }
+}

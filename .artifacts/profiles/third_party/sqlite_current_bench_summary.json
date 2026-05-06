@@ -1,0 +1,52 @@
+[
+  {
+    "name": "sqlite_profile_distance_current",
+    "status": "ok",
+    "duration_sec": 20.239,
+    "user_cpu_sec": 19.904,
+    "sys_cpu_sec": 0.161,
+    "cmd": [
+      ".artifacts/build/sqlite-vec-cpp-profile/benchmarks/distance_benchmark"
+    ]
+  },
+  {
+    "name": "sqlite_profile_batch_distance_current",
+    "status": "ok",
+    "duration_sec": 9.084,
+    "user_cpu_sec": 8.839,
+    "sys_cpu_sec": 0.079,
+    "cmd": [
+      ".artifacts/build/sqlite-vec-cpp-profile/benchmarks/batch_distance_benchmark"
+    ]
+  },
+  {
+    "name": "sqlite_profile_quantized_current",
+    "status": "ok",
+    "duration_sec": 28.764,
+    "user_cpu_sec": 28.402,
+    "sys_cpu_sec": 0.184,
+    "cmd": [
+      ".artifacts/build/sqlite-vec-cpp-profile/benchmarks/quantized_search_benchmark"
+    ]
+  },
+  {
+    "name": "sqlite_profile_hnsw_current",
+    "status": "timeout",
+    "duration_sec": 120.006,
+    "user_cpu_sec": 118.152,
+    "sys_cpu_sec": 1.151,
+    "cmd": [
+      ".artifacts/build/sqlite-vec-cpp-profile/benchmarks/hnsw_benchmark"
+    ]
+  },
+  {
+    "name": "sqlite_profile_vec0_current",
+    "status": "ok",
+    "duration_sec": 0.702,
+    "user_cpu_sec": 5.657,
+    "sys_cpu_sec": 0.082,
+    "cmd": [
+      ".artifacts/build/sqlite-vec-cpp-profile/benchmarks/vec0_ann_benchmark"
+    ]
+  }
+]
