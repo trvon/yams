@@ -35,10 +35,13 @@ public:
     explicit Impl(const VectorDatabaseConfig& config)
         : config_(config), initialized_{false}, has_error_(false) {
         if (config_.backend_type == VectorBackendType::Faiss) {
+#ifdef YAMS_HAS_FAISS
             FaissBackendConfig faissConfig;
             faissConfig.embeddingDim = config_.embedding_dim;
             backend_ = std::make_unique<FaissBackend>(faissConfig);
             return;
+#endif
+            // Fall through to SqliteVec when faiss not built
         }
 
         // Default: SqliteVec backend
