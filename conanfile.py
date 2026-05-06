@@ -188,23 +188,28 @@ class YamsConan(ConanFile):
         return False
 
     def configure(self):
-        # Enable faiss unless OpenMP is unavailable for the current compiler.
-        # Apple Clang is always rejected by the faiss recipe regardless of
-        # libomp availability; all other compilers need a working OpenMP.
-        enable_faiss = True
-        compiler = str(self.settings.compiler)
-        if compiler == "apple-clang":  # type: ignore
-            enable_faiss = False
-            self.output.info(
-                "faiss recipe rejects Apple Clang; disabling faiss on macOS"
-            )
-        elif not self._has_openmp():
-            enable_faiss = False
-            self.output.info(
-                "OpenMP not found for compiler=" + compiler +
-                "; disabling faiss. Install libomp-dev (Linux) or brew libomp (macOS)."
-            )
-        self.options.enable_faiss = enable_faiss  # type: ignore
+        # Allow explicit disable via env (e.g. Docker ARM64 openblas compat).
+        import os
+        if os.environ.get("YAMS_DISABLE_FAISS", "") != "1":
+            # Enable faiss unless OpenMP is unavailable for the current compiler.
+            # Apple Clang is always rejected by the faiss recipe regardless of
+            # libomp availability; all other compilers need a working OpenMP.
+            enable_faiss = True
+            compiler = str(self.settings.compiler)
+            if compiler == "apple-clang":  # type: ignore
+                enable_faiss = False
+                self.output.info(
+                    "faiss recipe rejects Apple Clang; disabling faiss on macOS"
+                )
+            elif not self._has_openmp():
+                enable_faiss = False
+                self.output.info(
+                    "OpenMP not found for compiler=" + compiler +
+                    "; disabling faiss. Install libomp-dev (Linux) or brew libomp (macOS)."
+                )
+            self.options.enable_faiss = enable_faiss  # type: ignore
+        else:
+            self.options.enable_faiss = False  # type: ignore
 
         # Force new C++11 ABI on Linux (Ubuntu 24.04+ compatibility)
         if self.settings.os == "Linux":  # type: ignore
