@@ -47,6 +47,7 @@ class IModelProvider;
 class WorkCoordinator;
 class GraphComponent;
 class WriteCoordinator;
+struct DeferredKGBatch;
 
 // Simple LRU cache for metadata lookups
 // Template parameters: Key type, Value type
@@ -432,7 +433,8 @@ private:
                                  std::shared_ptr<std::vector<std::byte>> contentBytes);
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension,
-                                      std::vector<std::byte>* contentBytes);
+                                      std::vector<std::byte>* contentBytes,
+                                      DeferredKGBatch* sharedKBatch = nullptr);
     void dispatchToTitleChannel(const std::string& hash, int64_t docId,
                                 const std::string& textSnippet, const std::string& fallbackTitle,
                                 const std::string& filePath, const std::string& language,

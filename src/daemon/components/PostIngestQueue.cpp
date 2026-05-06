@@ -1496,22 +1496,41 @@ void PostIngestQueue::processEntityExtractionBatch(
     if (jobs.empty()) {
         return;
     }
+
+    // Accumulate fast-text-entity writes across all jobs in this batch
+    // into ONE DeferredKGBatch. The WC writer loop processes at most 8
+    // batches/iteration; 5K+ per-doc batches outlast the benchmark's
+    // post-ingest drain, leaving firstDocEntities=0.
+    DeferredKGBatch sharedBatch;
+    size_t sharedDocCount = 0;
+
     for (auto& job : jobs) {
         processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
-                                     job.contentBytes.get());
+                                     job.contentBytes.get(), &sharedBatch);
     }
 
-    // Flush write coordinator every 128 entity batches so the async writer
-    // loop (capped at 8 batches/iteration) can keep up with the 5K+ entity
-    // writes. Without periodic flush, entities remain in the WC queue when
-    // benchmark queries start.
-    static std::atomic<size_t> s_batchCount{0};
-    const auto n = s_batchCount.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n % 128 == 0 && writeCoordinator_) {
-        auto result = writeCoordinator_->flush(std::chrono::milliseconds(500));
-        if (!result) {
-            spdlog::debug("[PostIngestQueue] WC periodic flush failed (n={}): {}", n,
-                          result.error().message);
+    // Enqueue the accumulated batch (may be empty if all jobs were binary).
+    if (writeCoordinator_) {
+        auto source = "PostIngestQueue::fastEntity/accum/" + std::to_string(jobs.size()) + "_jobs";
+        auto wb = makeWriteBatchFromDeferredKGBatch(
+            std::make_unique<DeferredKGBatch>(std::move(sharedBatch)), std::move(source));
+        writeCoordinator_->enqueue(std::move(wb));
+    }
+
+    // Flush the WriteCoordinator once when all in-flight work across all
+    // stages reaches zero — this means the final entity batch was enqueued.
+    // Single-shot: only the first thread that sees totalInFlight==0 flushs.
+    static std::atomic<bool> s_finalFlushDone{false};
+    if (!s_finalFlushDone.load(std::memory_order_relaxed) && totalInFlight() == 0) {
+        if (writeCoordinator_) {
+            s_finalFlushDone.store(true, std::memory_order_relaxed);
+            spdlog::info("[PostIngestQueue] Final WC flush starting (all stages idle)...");
+            auto result = writeCoordinator_->flush(std::chrono::seconds(15));
+            if (!result) {
+                spdlog::warn("[PostIngestQueue] Final WC flush failed: {}", result.error().message);
+            } else {
+                spdlog::info("[PostIngestQueue] Final WC flush succeeded");
+            }
         }
     }
 }
@@ -1519,7 +1538,8 @@ void PostIngestQueue::processEntityExtractionBatch(
 void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t docId,
                                                    const std::string& filePath,
                                                    const std::string& extension,
-                                                   std::vector<std::byte>* contentBytes) {
+                                                   std::vector<std::byte>* contentBytes,
+                                                   DeferredKGBatch* sharedKBatch) {
     spdlog::info("[PostIngestQueue] Entity extraction starting for {} ({}) ext={}", filePath,
                  hash.substr(0, 12), extension);
 
@@ -1539,14 +1559,9 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         }
 
         if (!provider) {
-            // No binary provider supports this extension. Fall back to the GLiNER
-            // title/entity extractor for text-based entity extraction. This covers
-            // plain-text files (.txt, .md, .rst) where the binary entity providers
-            // (Ghidra, Glint RPC) don't apply. Use fast token-based concept
-            // generation (sub-phrase mining + IDF-weighted token salience, ~1ms/doc)
-            // instead of GLiNER inference (~260ms/doc).
-
-            // Load text content
+            // Fast token-based entity extraction. If called from the batch
+            // processor (sharedKBatch non-null), aggregate entities into
+            // the shared batch; otherwise create a per-doc WC batch.
             std::vector<std::byte> content;
             if (contentBytes) {
                 content = std::move(*contentBytes);
@@ -1567,27 +1582,15 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
 
             std::string textContent(reinterpret_cast<const char*>(content.data()),
                                     std::min(content.size(), kMaxGlinerChars));
-
-            // Generate entity candidates via fast token-based concept mining.
-            // No GLiNER inference — same function used for query-time concept fallback.
-            // Empty IDF map since we don't have corpus-level IDF at extraction time.
             constexpr size_t kMaxFastEntities = 16;
             std::unordered_map<std::string, float> emptyIdf;
             auto fastConcepts =
                 search::generateFallbackQueryConcepts(textContent, emptyIdf, kMaxFastEntities);
 
-            if (fastConcepts.empty()) {
-                spdlog::debug("[PostIngestQueue] No fast entities generated for {}",
-                              hash.substr(0, 12));
-                InternalEventBus::instance().incEntityConsumed();
-                return;
-            }
+            if (!fastConcepts.empty()) {
+                spdlog::info("[PIQ-entity] fast extraction for {} ({} bytes, {} concepts)",
+                             hash.substr(0, 12), content.size(), fastConcepts.size());
 
-            spdlog::info("[PIQ-entity] fast extraction for {} ({} bytes, {} concepts)",
-                         hash.substr(0, 12), content.size(), fastConcepts.size());
-
-            // Build entity statistics for diagnostics
-            {
                 const auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
                 size_t hvCount = 0;
                 for (const auto& qc : fastConcepts) {
@@ -1604,15 +1607,16 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                         gs_totalEntities_.load(), gs_highValueEntities_.load(),
                         gs_totalEdges_.load(), gs_totalPrimaryTopicEdges_.load());
                 }
-            }
 
-            // Store entities in KG with full node/alias/edge/doc-entity scaffolding
-            // so the graph scorer can resolve query concepts to document entities.
-            if (writeCoordinator_) {
-                auto batch = std::make_unique<DeferredKGBatch>();
-                batch->sourceFile = filePath;
+                // Use shared batch if batch processor is batching, else per-doc
+                auto* targetBatch = sharedKBatch;
+                std::unique_ptr<DeferredKGBatch> tempBatch;
+                if (!targetBatch) {
+                    tempBatch = std::make_unique<DeferredKGBatch>();
+                    targetBatch = tempBatch.get();
+                }
+                targetBatch->sourceFile = filePath;
 
-                // Build document context node
                 std::string docNodeKey;
                 if (!hash.empty()) {
                     docNodeKey = "doc:" + hash;
@@ -1624,7 +1628,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     docProps["hash"] = hash;
                     docProps["path"] = common::sanitizeUtf8(filePath);
                     docNode.properties = docProps.dump();
-                    batch->nodes.push_back(std::move(docNode));
+                    targetBatch->nodes.push_back(std::move(docNode));
                 }
 
                 std::string fileNodeKey;
@@ -1637,7 +1641,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     nlohmann::json fileProps;
                     fileProps["path"] = common::sanitizeUtf8(filePath);
                     fileNode.properties = fileProps.dump();
-                    batch->nodes.push_back(std::move(fileNode));
+                    targetBatch->nodes.push_back(std::move(fileNode));
                 }
 
                 std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
@@ -1659,7 +1663,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     entProps["confidence"] = qc.confidence;
                     entProps["source"] = "fast_token";
                     entityNode.properties = entProps.dump();
-                    batch->nodes.push_back(std::move(entityNode));
+                    targetBatch->nodes.push_back(std::move(entityNode));
 
                     for (const auto& aliasVariant :
                          buildNlAliasVariants(qc.text, normType, qc.confidence)) {
@@ -1668,7 +1672,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                         alias.source =
                             std::string("fast_token.") + aliasVariant.sourceTag + "|" + nodeKey;
                         alias.confidence = aliasVariant.confidence;
-                        batch->aliases.push_back(std::move(alias));
+                        targetBatch->aliases.push_back(std::move(alias));
                     }
 
                     if (!targetNodeKey.empty()) {
@@ -1682,7 +1686,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                         edgeProps["confidence"] = qc.confidence;
                         edgeProps["entity_type"] = normType;
                         edge.properties = edgeProps.dump();
-                        batch->deferredEdges.push_back(std::move(edge));
+                        targetBatch->deferredEdges.push_back(std::move(edge));
                     }
 
                     DeferredDocEntity docEnt;
@@ -1693,11 +1697,15 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     docEnt.endOffset = static_cast<int64_t>(qc.endOffset);
                     docEnt.confidence = qc.confidence;
                     docEnt.extractor = "fast_token";
-                    batch->deferredDocEntities.push_back(std::move(docEnt));
+                    targetBatch->deferredDocEntities.push_back(std::move(docEnt));
                 }
-                auto source = "PostIngestQueue::fastEntity/" + hash.substr(0, 12);
-                auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch), std::move(source));
-                writeCoordinator_->enqueue(std::move(wb));
+
+                if (!sharedKBatch && writeCoordinator_) {
+                    auto source = "PostIngestQueue::fastEntity/" + hash.substr(0, 12);
+                    auto wb =
+                        makeWriteBatchFromDeferredKGBatch(std::move(tempBatch), std::move(source));
+                    writeCoordinator_->enqueue(std::move(wb));
+                }
             }
 
             InternalEventBus::instance().incEntityConsumed();
