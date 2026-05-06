@@ -33,7 +33,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/search/query_text_utils.h>
-#include <yams/search/query_expansion.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -1004,6 +1003,10 @@ PostIngestQueue::prepareMetadataEntry(
         prepared.symbolLanguage = symIt->second;
     }
 
+    // Entity extraction via binary provider (Ghidra, Zyp). For text-based
+    // documents, the title extraction stage already runs GLiNER which
+    // produces NL entities and stores them in the KG — no need to dispatch
+    // a separate entity extraction job for the same text.
     prepared.shouldDispatchEntity =
         extensionSupportsEntityProviders(entityProviders, prepared.extension);
 
@@ -1525,11 +1528,10 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         }
 
         if (!provider) {
-            // Text-based entity extraction would require GLiNER (260ms/doc,
-            // generates empty results for 99% of documents) or fast-token
-            // mining (equally empty). Neither approach produces useful doc
-            // entities for general-purpose retrieval. Dropping the job
-            // avoids saturating the entity poller and WriteCoordinator.
+            // No binary provider matches this extension. Text-based entity
+            // extraction is handled by the title extraction stage (GLiNER),
+            // which produces NL entities → KG during title processing.
+            // Avoid dispatching duplicate GLiNER work via the entity poller.
             InternalEventBus::instance().incEntityDropped();
             return;
         }
